@@ -1,0 +1,73 @@
+{
+  "cases" : [
+    {
+      "bucket" : 256,
+      "ciphertextLength" : 276,
+      "paddedLength" : 260,
+      "plaintextLength" : 0
+    },
+    {
+      "bucket" : 256,
+      "ciphertextLength" : 276,
+      "paddedLength" : 260,
+      "plaintextLength" : 1
+    },
+    {
+      "bucket" : 256,
+      "ciphertextLength" : 276,
+      "paddedLength" : 260,
+      "plaintextLength" : 255
+    },
+    {
+      "bucket" : 256,
+      "ciphertextLength" : 276,
+      "paddedLength" : 260,
+      "plaintextLength" : 256
+    },
+    {
+      "bucket" : 1024,
+      "ciphertextLength" : 1044,
+      "paddedLength" : 1028,
+      "plaintextLength" : 257
+    },
+    {
+      "bucket" : 1024,
+      "ciphertextLength" : 1044,
+      "paddedLength" : 1028,
+      "plaintextLength" : 1023
+    },
+    {
+      "bucket" : 1024,
+      "ciphertextLength" : 1044,
+      "paddedLength" : 1028,
+      "plaintextLength" : 1024
+    },
+    {
+      "bucket" : 4096,
+      "ciphertextLength" : 4116,
+      "paddedLength" : 4100,
+      "plaintextLength" : 4095
+    },
+    {
+      "bucket" : 16384,
+      "ciphertextLength" : 16404,
+      "paddedLength" : 16388,
+      "plaintextLength" : 16384
+    },
+    {
+      "bucket" : 65536,
+      "ciphertextLength" : 65556,
+      "paddedLength" : 65540,
+      "plaintextLength" : 65535
+    },
+    {
+      "bucket" : 65536,
+      "ciphertextLength" : 65556,
+      "paddedLength" : 65540,
+      "plaintextLength" : 65536
+    },
+    {
+      "plaintextLength" : 65537
+    }
+  ]
+}

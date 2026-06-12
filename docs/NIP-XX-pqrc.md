@@ -1,0 +1,277 @@
+# NIP-XX — PQRC: Post-Quantum Ratcheted Conversations over Nostr
+
+`draft` `optional`
+
+**Status note.** The original handoff package referenced this document but did
+not contain it. This file was authored alongside the v1 reference
+implementation to be the normative wire format, derived from
+`SPEC.md` (protocol law) and the field-name contract in `CLAUDE.md`
+(`spk`, `pqpk`, `otp`, `otp_pq`, `lrp`, `dh`, `pn`, `n`, `pq`, `ptr`).
+Where this NIP fills a gap the SPEC leaves open, the decision is also recorded
+in `docs/DEVIATIONS.md` tagged `[upstream-NIP]`. The frozen vectors in
+`TestVectors/` are the byte-level contract for a second client.
+
+## 1. Overview
+
+PQRC carries post-quantum, double-ratcheted 1:1 messages as NIP-59 gift-wrapped
+events. Event kinds:
+
+| kind  | meaning                              | signed by                |
+|-------|--------------------------------------|--------------------------|
+| 10420 | identity binding (replaceable)       | Nostr key (secp256k1)    |
+| 10421 | prekey bundle (replaceable)          | Nostr key                |
+| 10050 | DM relay list (replaceable)          | Nostr key                |
+| 1420  | rumor (NEVER published, unsigned)    | — (unsigned)             |
+| 13    | seal                                 | sender's Nostr key       |
+| 1059  | gift wrap                            | fresh one-time key       |
+| 22242 | NIP-42 AUTH                          | client's Nostr key       |
+
+A PQRC user holds **two long-term keypairs**: a secp256k1 Nostr key (BIP-340,
+for events) and an Ed25519 PQRC identity key (for protocol signatures). Nostr
+events cannot be signed by Ed25519 keys, so SPEC §3.3's "signed by identity
+key" is realized as the two-directional binding below.
+
+All binary values are base64 in JSON bodies and lowercase hex in tags, as shown.
+
+## 2. Domain-separated signature contexts (Ed25519, identity or agent key)
+
+| context string        | message                                                        |
+|-----------------------|----------------------------------------------------------------|
+| `pqrc-binding-v1`     | ‖ nostr_pubkey(32) ‖ identity_pub(32) ‖ agent_pub(32)          |
+| `pqrc-prekey-v1`      | ‖ label(utf8: `ik_dh`/`spk`/`pqpk`/`lrp`) ‖ key bytes          |
+| `pqrc-ai-window-v1`   | ‖ active_until(i64be) ‖ enabled_by(32) [‖ thread_id(utf8)]     |
+| `pqrc-agent-msg-v1`   | ‖ ratchet ciphertext                                           |
+
+## 3. kind 10420 — identity binding
+
+```json
+{
+  "kind": 10420,
+  "pubkey": "<nostr_pubkey_hex>",
+  "tags": [
+    ["pqrc_version", "1"],
+    ["identity_key", "<ed25519_identity_pub_hex>"],
+    ["agent_key", "<ed25519_agent_pub_hex>"],
+    ["binding_sig", "<base64 ed25519 sig, context pqrc-binding-v1>"],
+    ["pqrc_capabilities", "pqxdh", "double-ratchet", "ml-kem-768"]
+  ],
+  "content": ""
+}
+```
+
+Verification is bidirectional and all-or-nothing (no key from an unverified
+binding may be used):
+1. outer BIP-340 signature verifies under `pubkey` (Nostr key asserts the PQRC keys);
+2. `binding_sig` verifies under `identity_key` over the `pqrc-binding-v1`
+   context (identity key asserts the Nostr + agent keys).
+
+The agent key is derived per SPEC §3.2; third parties cannot recompute the
+derivation (it requires the identity private key) and rely on the binding.
+
+## 4. kind 10421 — prekey bundle
+
+`content` is a JSON object (structured keys with per-key signatures fit JSON
+better than flat tags; `[upstream-NIP]`):
+
+```jsonc
+{
+  "pqrc_version": "1",
+  "ik":    "<base64 ed25519 identity pub>",        // binds bundle to identity
+  "ik_dh": { "key": "<base64 X25519>", "sig": "<base64>" },  // identity-DH key
+  "spk":   { "key": "<base64 X25519>", "sig": "<base64>" },  // signed prekey
+  "pqpk":  { "key": "<base64 ML-KEM-768 ek>", "sig": "<base64>" },
+  "otp":    ["<base64 X25519>", ...],              // one-time, unsigned
+  "otp_pq": ["<base64 ML-KEM-768 ek>", ...],       // one-time PQ, unsigned
+  "lrp":   { "key": "<base64 X25519>", "sig": "<base64>" }   // last-resort, OPTIONAL
+}
+```
+
+`ik_dh` exists because Ed25519→X25519 conversion is not exposed by CryptoKit
+and reimplementing it would violate SPEC §2 (no custom primitives); the
+dedicated X25519 identity-DH key is signed by the identity key instead.
+Signatures use the `pqrc-prekey-v1` context. One-time prekeys are covered by
+the outer event signature only (Signal pattern).
+
+## 5. Handshake (PQXDH, suite `hybrid-v1`)
+
+Initiation computes (SPEC §4.2):
+
+```
+dh1 = X25519(ik_dh_A, spk_B)
+dh2 = X25519(ek_A,   spk_B)
+dh3 = X25519(ek_A,   otp_B)        # or lrp_B (flagged) or omitted
+ss  = ML-KEM-768.Encaps(otp_pq_B or pqpk_B)
+SK  = HKDF-SHA256(dh1‖dh2‖[dh3]‖ss, salt="pqrc-v1-handshake",
+                  info="pqrc-root-key"‖ik_A‖ik_B, 32)
+```
+
+The handshake rumor (`type: "handshake"`) carries message #0 piggybacked (D10):
+
+```jsonc
+{
+  "suite": "hybrid-v1",
+  "ik":     "<base64>",   // initiator identity pub
+  "ik_dh":  "<base64>",   // initiator identity-DH pub
+  "ek":     "<base64>",   // initiator ephemeral pub
+  "kem_ct": "<base64>",   // ML-KEM-768 ciphertext
+  "kem_pk": "<base64>",   // initiator's fresh ML-KEM pub (for responder rekeys)
+  "spk_used":    "<base64 sha256 of spk>",   // D4
+  "otp_used":    "<base64 sha256>" | null,
+  "otp_pq_used": "<base64 sha256>" | null,
+  "lrp_used":    false
+}
+```
+
+**Rekey-target invariant:** the initiator's first PQ rekey MUST target the KEM
+key actually consumed by the handshake (`otp_pq` when present, else `pqpk`).
+
+The responder's signed prekey doubles as their initial ratchet public key; the
+initiator derives the first sending chain from `DH(dhs_A, spk_B)` per the
+Signal Double Ratchet initialization.
+
+## 6. Ratchet header and PQ rekey
+
+Ratchet header (inside the rumor, field `ratchet_header`):
+
+```jsonc
+{
+  "dh": "<base64 sender ratchet pub>",
+  "pn": 0,            // previous chain length
+  "n":  7,            // message number in chain
+  "pq": {             // present ONLY on a rekey message
+    "ct":  "<base64 ML-KEM-768 ciphertext>",
+    "pk":  "<base64 sender's fresh ML-KEM pub>",   // inline rotation (PQ3)
+    "ctr": 1,                                      // sender's rekey counter
+    "tgt": "<base64 sha256 of the receiver KEM pub targeted>"
+  }
+}
+```
+
+KDFs (all vetted constructions; SPEC §2):
+- `KDF_RK(rk, dh) = HKDF-SHA256(ikm=dh, salt=rk, info="pqrc-v1-ratchet-root", 64) → (rk', ck)`
+- `KDF_CK(ck): mk = HMAC-SHA256(ck, 0x01); ck' = HMAC-SHA256(ck, 0x02)`
+- message key → AES-256-GCM key+nonce: `HKDF-SHA256(mk, salt="pqrc-v1-msg", info="pqrc-msgkeys", 44) → key(32)‖nonce(12)`.
+  The nonce is derived, never transmitted; each mk is used exactly once.
+
+**Rekey cadence**: each party counts every message sent *or* received since its
+last rekey; the send that reaches `PQ_REKEY_INTERVAL = 50` carries `pq`.
+
+**Rekey application** (normative; refines SPEC §6.2 for bidirectional safety):
+1. *Immediately*, the fresh shared secret refreshes the ACTIVE chain:
+   `ck' = HKDF-SHA256(ck‖ss, salt="pqrc-v1-rekey", info="pqrc-pq-rekey-chain"‖ctr_u32be, 32)` —
+   sender refreshes its sending chain before encrypting the rekey message;
+   receiver refreshes the matching receiving chain at exactly that `(dh, n)`
+   position (after deriving any skipped keys below `n`, which belong to the
+   pre-rekey chain).
+2. *Deferred*, the same `ss` folds into the root key at the next DH ratchet
+   boundary, at the SAME root-chain position on both sides:
+   `rk' = HKDF-SHA256(rk‖ss, salt="pqrc-v1-rekey", info="pqrc-pq-rekey-root", 32)`.
+   The rekey *sender* applies its pending fold(s) between the recv-half and
+   send-half of its next DH ratchet step (i.e. immediately before creating its
+   next chain); the *receiver* applies the peer's pending fold(s) immediately
+   before the recv-half of that new chain. Folding eagerly instead would
+   desynchronize the root chain whenever a rekey crosses concurrent traffic.
+3. Receivers retain a bounded history (8) of their own recent KEM private keys
+   and select by `tgt`; rekeys may cross several of the receiver's own
+   rotations in flight. `pk` replaces the peer's current KEM key unless a
+   higher `ctr` was already applied.
+
+Out-of-order messages that depend on an unprocessed rekey fail AEAD cleanly
+and MUST be retried after the rekey message arrives (bounded retry queue).
+
+`MAX_SKIP = 1000`; skipped message keys are cached bounded and deleted on use.
+
+## 7. Rumor content (`kind` 1420, unsigned)
+
+```jsonc
+{
+  "pqrc_version": "1",
+  "type": "message" | "handshake" | "group_create" | "thread_create" | "ai_invite",
+  "participant_type": "human" | "agent",
+  "sender_role": "identity" | "agent",
+  "ratchet_header": { ... },        // §6
+  "ciphertext": "<base64>",         // AES-256-GCM(padded plaintext), ct‖tag
+  "ptr": {                          // OPTIONAL, >64 KB content (SPEC §11)
+    "blossom_url": "...", "decryption_key": "<base64>", "sha256": "<hex>",
+    "size_bytes": 0, "mirror_urls": []
+  },
+  "ai_window": { "type": "ai_active", "active_until": 0,
+                 "enabled_by": "<base64 identity pub>", "sig": "<base64>" },
+  "handshake": { ... },             // §5, type == "handshake" only
+  "agent_sig": "<base64>"           // §8, REQUIRED iff participant_type=="agent"
+}
+```
+
+Unknown fields MUST be ignored, never fatal (SPEC §12). The rumor event's
+`pubkey` MUST equal the seal's `pubkey`; mismatch is rejected.
+
+**Padding**: plaintext is `u32be(len) ‖ plaintext ‖ 0x00…` to the smallest
+bucket of {256, 1024, 4096, 16384, 65536} ≥ len. The 4-byte prefix sits outside
+the bucket size, so ciphertext length = bucket + 20 and plaintext of exactly
+65536 bytes remains inlineable. Larger content MUST use `ptr` or chunking.
+
+**AEAD AD** = `"1"(utf8) ‖ participant_type(utf8) ‖ n(u32be) ‖ created_at_fuzzed(i64be)`.
+The fuzzed timestamp is drawn once per message — uniform in
+[now − 172800, now], never the future — and reused as `created_at` on BOTH the
+seal and the wrap.
+
+**Decrypted body** (inside `ciphertext`): `{"text", "sent_at", "group": {"id"},
+"thread": {"id"}, "group_create", "thread_create", "ai_invite", "is_context"}` —
+true send time and all routing live inside the encryption.
+
+## 8. Agent authenticity (`agent_sig`)
+
+Agent keys are Ed25519 and cannot sign Nostr events; agent authorship is
+proven inside the encryption instead: a rumor with
+`participant_type: "agent"` MUST carry `agent_sig`, an Ed25519 signature by the
+sender's bound agent key (kind 10420) over `"pqrc-agent-msg-v1" ‖ ciphertext`.
+Recipients MUST reject as a protocol violation:
+- `participant_type: "agent"` without a valid `agent_sig`;
+- `participant_type: "human"` WITH an `agent_sig` (the SPEC §13.4 forgery case);
+- `sender_role` inconsistent with `participant_type`.
+The AD additionally binds `participant_type` into the AEAD, so a relay cannot
+flip the label without breaking decryption.
+
+## 9. Seal and gift wrap encryption (`pqrc-seal-v1`)
+
+NIP-44 v2 requires raw (unauthenticated) ChaCha20, which CryptoKit does not
+expose; reimplementing it would violate SPEC §2. pqrc-seal-v1 keeps the NIP-44
+shape with vetted parts `[upstream-NIP]`:
+
+```
+shared   = x-coordinate (32 bytes) of secp256k1 ECDH(priv, lift_even(pub_xonly))
+convkey  = HKDF-SHA256(shared, salt="pqrc-seal-v1", info="conversation-key", 32)
+payload  = base64( 0x01 ‖ nonce(12) ‖ ChaCha20-Poly1305(plaintext) ‖ tag(16) )
+```
+
+Only the x-coordinate enters HKDF (lifting x-only keys can negate the shared
+point between directions; x is invariant). Seal: conversation key between the
+sender's real key and the recipient. Wrap: between a FRESH one-time key and the
+recipient. `created_at` on seal and wrap = the fuzzed timestamp from §7. The
+wrap's only tag is `["p", recipient]`. Interop with NIP-44 clients is deferred.
+
+## 10. Relays
+
+Receive relays are advertised via kind 10050 (`["relay", url]` tags). Anchor
+relays MUST serve kind-1059 events only to the NIP-42-authenticated, p-tagged
+recipient and SHOULD set `max_content_length ≥ 1 MB`. Replaceable kinds keep
+only the newest event per (kind, pubkey).
+
+## 11. Group and thread extensions (inside the encrypted body only)
+
+- `group_create`: `{"group_id", "name", "members": [identity_hex...],
+  "conversation_type": "group", "revision"}` — pairwise fan-out (D1), roster
+  tracked per asserter, revisions monotonic.
+- `thread_create`: `{"thread_id", "title", "anchor_message_id", "created_by"}`.
+- `ai_invite`: thread-scoped ai_window analogue, signed with the
+  `pqrc-ai-window-v1` context INCLUDING the thread id (signatures do not
+  transfer between threads).
+
+Nothing in these structures is visible to relays.
+
+## 12. Second-client checklist
+
+Reproduce `TestVectors/*.json` byte-for-byte: agent_derivation, binding_10420,
+pqxdh_handshake (responder path), ratchet_chain (full 40-message replay),
+pq_rekey (receiver replay across the boundary), padding, giftwrap
+(deterministic re-wrap given seeds).

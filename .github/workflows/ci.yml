@@ -1,0 +1,87 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# TEST-PLAN §12. Runner label must point at an image hosting Xcode 26.
+jobs:
+  packages:
+    name: swift test (${{ matrix.package }})
+    runs-on: macos-26
+    strategy:
+      fail-fast: false
+      matrix:
+        package: [PQRCCore, PQRCNostr, PQRCAgent]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Select Xcode 26
+        run: sudo xcode-select -s /Applications/Xcode_26.app
+      - name: Cache SPM
+        uses: actions/cache@v4
+        with:
+          path: |
+            Packages/${{ matrix.package }}/.build
+            ~/Library/Caches/org.swift.swiftpm
+          key: spm-${{ matrix.package }}-${{ hashFiles('Packages/**/Package.swift') }}
+      - name: Test
+        run: swift test --package-path Packages/${{ matrix.package }}
+
+  app:
+    name: xcodebuild test (app + UI + accessibility)
+    runs-on: macos-26
+    needs: packages
+    steps:
+      - uses: actions/checkout@v4
+      - name: Select Xcode 26
+        run: sudo xcode-select -s /Applications/Xcode_26.app
+      - name: Test (unit + UI). Security-tagged failures fail the build, no retries.
+        run: |
+          xcodebuild test \
+            -project App/PQRC.xcodeproj \
+            -scheme PQRC \
+            -destination 'platform=iOS Simulator,name=iPhone 17 Pro' \
+            -skipPackagePluginValidation \
+            -retry-tests-on-failure -test-iterations 2 \
+            -resultBundlePath TestResults.xcresult
+      - name: Upload result bundle
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: xcresult
+          path: TestResults.xcresult
+
+  perf:
+    name: performance (non-blocking, baseline artifact)
+    runs-on: macos-26
+    needs: app
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - name: Select Xcode 26
+        run: sudo xcode-select -s /Applications/Xcode_26.app
+      - name: Restore perf baselines
+        uses: actions/cache@v4
+        with:
+          path: App/PQRC.xcodeproj/xcshareddata/xcbaselines
+          key: perf-baselines-${{ github.ref_name }}
+          restore-keys: perf-baselines-
+      - name: Run performance suites
+        run: |
+          xcodebuild test \
+            -project App/PQRC.xcodeproj \
+            -scheme PQRC \
+            -destination 'platform=iOS Simulator,name=iPhone 17 Pro' \
+            -skipPackagePluginValidation \
+            -only-testing:PQRCTests/PerformancePipelineTests \
+            -only-testing:PQRCUITests/PerformanceUITests \
+            -resultBundlePath PerfResults.xcresult
+      - name: Upload perf artifact (first run records the baseline)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: perf-results
+          path: |
+            PerfResults.xcresult
+            App/PQRC.xcodeproj/xcshareddata/xcbaselines

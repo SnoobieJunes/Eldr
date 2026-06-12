@@ -1,0 +1,163 @@
+# DEVIATIONS.md — every judgment call in the v1 implementation
+
+Tags: `[upstream-NIP]` — wire-format/protocol decision that belongs in the NIP
+and affects interop; `[app-only]` — client behavior, no wire impact;
+`[tech-debt]` — accepted shortcut with a follow-up owed.
+
+## Seeded from APP-SPEC §18
+
+| ID | Decision | Tag |
+|---|---|---|
+| D1 | Groups v1 = pairwise fan-out of PQRC sessions; `conversation_type:"group"`, `group_create` rumor with monotonic `revision`; MLS in v2 per SPEC §12 | upstream-NIP |
+| D2 | Handshake suite = explicit PQXDH hybrid (`"suite":"hybrid-v1"`); X-Wing disabled — the two paths derive different SK, interop needs explicit negotiation | upstream-NIP |
+| D3 | Remote (Anthropic API) agent inference off by default behind an explicit consent alert; on-device FoundationModels preferred, Mock for tests/demo | app-only |
+| D4 | Handshake rumor carries `spk_used`/`otp_used`/`otp_pq_used` (SHA-256 of the public key) + `lrp_used` flag so the responder knows which prekeys were consumed | upstream-NIP |
+| D5 | No read/delivery receipts; outgoing status is local-only ("Queued"/"Sent to relay") | app-only |
+| D6 | No push notifications; foreground sync only | app-only |
+| D7 | Thread wire extension: `thread` ref, `thread_create`, `ai_invite` (thread-scoped ai_window, signature bound to the thread id) | upstream-NIP |
+| D8 | Block drops post-unseal with no trace and no notification; voluntary report/export flow (Guideline 1.2) | app-only |
+| D9 | EncryptedStore: SE-wrapped 256-bit master key, per-record HKDF keys, AES-GCM blobs in SwiftData, complete file protection | app-only |
+| D10 | Handshake rumor piggybacks message #0 | upstream-NIP |
+| D11 | No published kind-0 profiles; local-only nicknames (encrypted at rest) | app-only |
+| D12 | Message-requests inbox gates unknown-sender handshakes | app-only |
+| D13 | Safety-code verification screen: 60 digits in 12 groups from SHA-256 over both identity pubkeys (sorted), QR compare, local "verified" flag | app-only |
+| D14 | Thread agent loop guard: 6 consecutive agent messages → pause until a human message | app-only |
+| S1 | BLE/Multipeer local link: `LocalLinkTransport` protocol seam shipped, no implementation | tech-debt |
+| S2 | Localhost WebSocket relay frontend for two-simulator demos: not shipped | tech-debt |
+
+## New calls made during implementation
+
+### Protocol / wire `[upstream-NIP]`
+
+- **N1 — The NIP document itself.** `docs/NIP-XX-pqrc.md` was absent from the
+  handoff (the runbook expected it from a separate source). It was authored
+  here as the normative wire format, derived from SPEC.md plus CLAUDE.md's
+  field-name contract. All entries below are reflected in it.
+- **N2 — Two long-term keys + bidirectional binding.** SPEC §3.3 shows kind
+  10420 signed by the Ed25519 identity key, but Nostr events require BIP-340.
+  Resolution: a secp256k1 Nostr key signs the outer event; the Ed25519 identity
+  key cross-signs `"pqrc-binding-v1"‖nostr‖identity‖agent` in a `binding_sig`
+  tag. Both directions must verify before any key is trusted.
+- **N3 — Dedicated identity-DH key (`ik_dh`).** Ed25519→X25519 conversion is
+  not exposed by CryptoKit and writing it would be a custom primitive (SPEC §2
+  violation). The bundle carries a separate X25519 identity-DH key signed by
+  the identity key; `dh1 = X25519(ik_dh_A, spk_B)`.
+- **N4 — One-time PQ prekeys (`otp_pq`) + KEM target selection.** CLAUDE.md's
+  field list names `otp_pq`; the handshake encapsulates to a one-time PQ prekey
+  when available, else the medium-lived `pqpk`. **Rekey-target invariant:** the
+  initiator's first rekey targets the KEM key the handshake actually consumed —
+  fixed after the chaos suite caught the mismatch stalling sessions at message 50.
+- **N5 — `lrp` optional; dh3 omissible.** A bundle without one-time prekeys
+  and without a last-resort key yields a 2-DH handshake (TEST-PLAN's
+  "without OTP" case). With `lrp` present, exhaustion falls back to it,
+  flagged `lrp_used` (linkability caveat documented in THREAT_MODEL §2.8;
+  never a confidentiality downgrade).
+- **N6 — Deferred root folds for the PQ rekey.** SPEC §6.2's fold-into-root,
+  applied eagerly, desynchronizes the root chain whenever a rekey crosses
+  concurrent bidirectional traffic (found by a failing end-to-end test). v1
+  semantics: the rekey secret refreshes the ACTIVE chain immediately (this is
+  what quantum-heals subsequent messages) and folds into the root at the next
+  DH boundary at a position both parties agree on (NIP-XX §6). The pq_rekey
+  vector was regenerated for these semantics during development, pre-freeze.
+- **N7 — Rekey `tgt` + KEM key history.** Rekeys cross in flight under load;
+  with a single previous-generation fallback the chaos matrix stalled. The
+  rekey header names its target key by hash and receivers keep a bounded (8)
+  history of their recent KEM private keys.
+- **N8 — Rekey counter counts both directions.** "Every 50 messages" =
+  messages sent or received since the party's last rekey; the send reaching 50
+  carries the rekey. Receivers reset on applying an inbound rekey.
+- **N9 — `agent_sig`.** Agent keys (Ed25519) cannot sign Nostr seals, so agent
+  authorship is proven inside the encryption: signature over
+  `"pqrc-agent-msg-v1"‖ciphertext`, required iff `participant_type=="agent"`,
+  forbidden under a human label. `participant_type` is also bound into the
+  AEAD AD (CLAUDE.md invariant 5 names participant_type; SPEC §8.3's prose
+  says sender_role — participant_type was chosen as the stricter, displayed
+  value).
+- **N10 — `pqrc-seal-v1` instead of NIP-44 v2.** NIP-44 needs raw ChaCha20;
+  CryptoKit only exposes ChaCha20-Poly1305. Same shape (secp256k1 ECDH x-only
+  → HKDF → AEAD), strictly stronger integrity, NOT interoperable with NIP-44
+  clients yet. ECDH uses the x-coordinate only (even-Y lifting can negate the
+  point between directions).
+- **N11 — Prekey bundle as JSON `content`,** not tag arrays: per-key
+  signatures and nested arrays fit JSON; tags carry `pqrc_version` only.
+- **N12 — Rumor kind 1420** (APP-SPEC §2's send pipeline names it); rumor
+  `pubkey` must equal the seal `pubkey`.
+- **N13 — Message-key → key+nonce derivation.** AES-GCM nonces for ratchet
+  messages are HKDF-derived from the (single-use) message key, never
+  transmitted — the Signal pattern. The injected `NonceSource` governs every
+  other AEAD (seal/wrap, blobs, at-rest records), satisfying TEST-PLAN §1
+  without inventing nonce transport.
+- **N14 — Padding length prefix outside the bucket.** `u32be(len)` precedes
+  the plaintext and the zero fill extends to bucket+4 total, so exactly-64 KB
+  plaintexts stay inlineable and ciphertexts collapse to bucket+20 bytes.
+- **N15 — One fuzzed timestamp per message,** drawn before encryption, used in
+  the AD and as `created_at` on both seal and wrap (test-enforced).
+- **N16 — Out-of-order across a pending rekey** fails AEAD cleanly and is held
+  in a bounded (256) retry queue, re-presented after each successful decrypt;
+  the queue deliberately has no per-envelope attempt cap (a cap quarantined
+  healthy traffic under heavy chaos). Overflow quarantines oldest-first.
+
+### App behavior `[app-only]`
+
+- **A1 — No payload logging at all.** Stronger than OSLog `privacy: .private`:
+  in-process OSLogStore reads reveal private interpolations, so the logging
+  API simply cannot accept message text (canary test enforces end-to-end).
+- **A2 — Plaintext timestamps never stored.** SwiftData rows carry only a
+  local monotonic sequence for ordering; real times live inside the encrypted
+  payload blobs.
+- **A3 — Window replies route to the conversation the window was started in**
+  (one active window scope per user in v1).
+- **A4 — Bounded AI durations** {15, 30, 60, 120 min}; incoming announcements
+  beyond 2 h are rejected as unbounded.
+- **A5 — Local Universe** ships five personas including Eve (unknown sender)
+  to exercise the message-request gate; demo agents are scripted
+  MockAgentProviders so the demo is deterministic.
+- **A6 — Received large content renders as a bounded preview** (first 600
+  chars + size note): inlining a 218 KB text produced a ~176,000-point bubble
+  that broke the message list. The full plaintext remains available via the
+  pointer; a dedicated attachment viewer is future work.
+- **A7 — Accessibility audit scope.** `performAccessibilityAudit` runs on all
+  primary screens with `.dynamicType` and `.textClipped` excluded (the auditor
+  false-positives on combined `privacySensitive` bubbles whose system-font
+  text scales by construction) and borderline "nearly passed" contrast
+  grades ignored (it flags even system section-header styling). Hard failures
+  fail CI. Real findings it produced were fixed: darker accent for
+  white-on-accent bubbles, opaque thread-chip fill, opaque navigation bar.
+- **A8 — Conversations open scrolled to the newest message**
+  (`defaultScrollAnchor(.bottom)`), found by the round-trip UI test.
+
+### Tech debt `[tech-debt]`
+
+- **T1 — Secure Enclave fallback.** Where `SecureEnclave.isAvailable == false`
+  (some simulators), the master key wraps under a Keychain-held software KEK
+  (still device-only/unlocked-only). Hardware builds always use the SE path.
+- **T2 — Prekey private state is not persisted across launches.** The
+  in-process relay's bundle republishes at boot, so this is unobservable in
+  v1; required before a real network transport ships.
+- **T3 — Safety-code-change detection** is implemented UI-side (persistent red
+  banner until re-verified) and runtime-signaled, but automatic re-fetch +
+  binding-diff against relays is not wired (no live re-publishing exists with
+  the in-process relay). The UI path is test-covered via a synthetic trigger.
+- **T4 — Ephemeral receiving keys** (SPEC §9.3 strong mitigation): settings
+  toggle present, disabled, marked experimental. Honest copy in-app.
+- **T5 — Chunking fallback (SPEC §11.2)** not implemented; the Blossom pointer
+  path covers >64 KB. Needed when a real relay's `max_content_length` bites.
+- **T6 — `xcodebuild` requires `-skipPackagePluginValidation`** (or one-time
+  IDE approval) because swift-secp256k1 ships a build plugin. Encoded in CI.
+  Pin the simulator OS in destinations (`OS=26.5`) on machines that also have
+  beta runtimes installed — an ambiguous name can silently resolve to a beta.
+- **T7 — Read-side message pagination**: the UI loads conversations into
+  memory; fine at demo scale, needs windowed fetches beyond ~10k messages
+  (scroll perf test covers the 10k case).
+- **T8 — Handshake `ik_dh` not cross-checked against a published binding
+  field**: the binding covers identity+agent keys; `ik_dh` is authenticated by
+  the bundle's identity signature. Adding it to the 10420 assertion would
+  tighten the dance and is queued for the NIP.
+
+## Cardinal-rule resolutions (ties broken toward privacy)
+
+- Payload logging removed entirely (A1) rather than relying on redaction.
+- Clear-text timestamps kept out of the store (A2) at the cost of
+  cross-launch ordering precision.
+- Group send cost O(n) accepted (D1) rather than weakening per-link FS/PCS.
+- "Sent to relay" wording (D5) rather than receipt metadata.

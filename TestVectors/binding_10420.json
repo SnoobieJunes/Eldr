@@ -1,0 +1,75 @@
+{
+  "cases" : [
+    {
+      "agentPubkey" : "ccf6e600cdc1da05e15333a892158cc04c91fa5e0a7e2b7ec6f8c80fb66d7328",
+      "crossSignature" : "0c6e2246fc5f9c1a2ecf85d314a48613c5c8a66703e99ec2331f43ae3083f784b593afe3e50b752aad4c021fb241dddf5c52b085c771632f350d8f611afe3308",
+      "expectValid" : true,
+      "identityPubkey" : "ed3234b276d4ceda57d59bad14fbaf5a773c0f318c999de3a60d53c5a5b34c05",
+      "name" : "valid",
+      "nostrPubkey" : "0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f",
+      "outerSignatureValid" : true,
+      "version" : "1"
+    },
+    {
+      "agentPubkey" : "ccf6e600cdc1da05e15333a892158cc04c91fa5e0a7e2b7ec6f8c80fb66d7328",
+      "crossSignature" : "f36e2246fc5f9c1a2ecf85d314a48613c5c8a66703e99ec2331f43ae3083f784b593afe3e50b752aad4c021fb241dddf5c52b085c771632f350d8f611afe3308",
+      "expectValid" : false,
+      "identityPubkey" : "ed3234b276d4ceda57d59bad14fbaf5a773c0f318c999de3a60d53c5a5b34c05",
+      "name" : "bad_cross_sig",
+      "nostrPubkey" : "0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f",
+      "outerSignatureValid" : true,
+      "version" : "1"
+    },
+    {
+      "agentPubkey" : "ccf6e600cdc1da05e15333a892158cc04c91fa5e0a7e2b7ec6f8c80fb66d7328",
+      "crossSignature" : "0c6e2246fc5f9c1a2ecf85d314a48613c5c8a66703e99ec2331f43ae3083f784b593afe3e50b752aad4c021fb241dddf5c52b085c771632f350d8f611afe3308",
+      "expectValid" : false,
+      "identityPubkey" : "ed3234b276d4ceda57d59bad14fbaf5a773c0f318c999de3a60d53c5a5b34c05",
+      "name" : "bad_outer_sig",
+      "nostrPubkey" : "0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f",
+      "outerSignatureValid" : false,
+      "version" : "1"
+    },
+    {
+      "agentPubkey" : "ed3234b276d4ceda57d59bad14fbaf5a773c0f318c999de3a60d53c5a5b34c05",
+      "crossSignature" : "0c6e2246fc5f9c1a2ecf85d314a48613c5c8a66703e99ec2331f43ae3083f784b593afe3e50b752aad4c021fb241dddf5c52b085c771632f350d8f611afe3308",
+      "expectValid" : false,
+      "identityPubkey" : "ccf6e600cdc1da05e15333a892158cc04c91fa5e0a7e2b7ec6f8c80fb66d7328",
+      "name" : "swapped_keys",
+      "nostrPubkey" : "0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f",
+      "outerSignatureValid" : true,
+      "version" : "1"
+    },
+    {
+      "agentPubkey" : "ccf6e600cdc1da05e15333a892158cc04c91fa5e0a7e2b7ec6f8c80fb66d7328",
+      "crossSignature" : "0c6e2246fc5f9c1a2ecf85d314a48613c5c8a66703e99ec2331f43ae3083f784b593afe3e50b752aad4c021fb241dddf5c52b085c771632f350d8f611afe3308",
+      "expectValid" : false,
+      "identityPubkey" : "ed3234b276d4ceda57d59bad14fbaf5a773c0f318c999de3a60d53c5a5b34c05",
+      "name" : "wrong_version",
+      "nostrPubkey" : "0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f",
+      "outerSignatureValid" : true,
+      "version" : "0"
+    },
+    {
+      "agentPubkey" : "",
+      "crossSignature" : "0c6e2246fc5f9c1a2ecf85d314a48613c5c8a66703e99ec2331f43ae3083f784b593afe3e50b752aad4c021fb241dddf5c52b085c771632f350d8f611afe3308",
+      "expectValid" : false,
+      "identityPubkey" : "ed3234b276d4ceda57d59bad14fbaf5a773c0f318c999de3a60d53c5a5b34c05",
+      "name" : "missing_tag",
+      "nostrPubkey" : "0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f",
+      "outerSignatureValid" : true,
+      "version" : "1"
+    },
+    {
+      "agentPubkey" : "ff47230a37568cdd1ffb18925aa700d140885f313a1ce6cfd6a309a076e77ac6",
+      "crossSignature" : "0c6e2246fc5f9c1a2ecf85d314a48613c5c8a66703e99ec2331f43ae3083f784b593afe3e50b752aad4c021fb241dddf5c52b085c771632f350d8f611afe3308",
+      "expectValid" : false,
+      "identityPubkey" : "ed3234b276d4ceda57d59bad14fbaf5a773c0f318c999de3a60d53c5a5b34c05",
+      "name" : "agent_key_mismatch",
+      "nostrPubkey" : "0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f",
+      "outerSignatureValid" : true,
+      "version" : "1"
+    }
+  ],
+  "identitySeed" : "d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4"
+}
