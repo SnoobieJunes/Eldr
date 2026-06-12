@@ -5,7 +5,10 @@ let package = Package(
     name: "PQRCNostr",
     platforms: [.iOS(.v26), .macOS(.v26)],
     products: [
-        .library(name: "PQRCNostr", targets: ["PQRCNostr"])
+        .library(name: "PQRCNostr", targets: ["PQRCNostr"]),
+        // S2: localhost NIP-01/NIP-42 WebSocket relay for demos and the
+        // gated loopback conformance tests (`swift run pqrc-relay`).
+        .executable(name: "pqrc-relay", targets: ["pqrc-relay"]),
     ],
     dependencies: [
         .package(path: "../PQRCCore"),
@@ -22,6 +25,11 @@ let package = Package(
                 .product(name: "Crypto", package: "swift-crypto"),
                 .product(name: "P256K", package: "swift-secp256k1"),
             ],
+            swiftSettings: [.swiftLanguageMode(.v6)]
+        ),
+        .executableTarget(
+            name: "pqrc-relay",
+            dependencies: ["PQRCNostr"],
             swiftSettings: [.swiftLanguageMode(.v6)]
         ),
         .testTarget(

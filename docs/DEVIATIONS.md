@@ -22,8 +22,8 @@ and affects interop; `[app-only]` — client behavior, no wire impact;
 | D12 | Message-requests inbox gates unknown-sender handshakes | app-only |
 | D13 | Safety-code verification screen: 60 digits in 12 groups from SHA-256 over both identity pubkeys (sorted), QR compare, local "verified" flag | app-only |
 | D14 | Thread agent loop guard: 6 consecutive agent messages → pause until a human message | app-only |
-| S1 | BLE/Multipeer local link: `LocalLinkTransport` protocol seam shipped, no implementation | tech-debt |
-| S2 | Localhost WebSocket relay frontend for two-simulator demos: not shipped | tech-debt |
+| S1 | ~~BLE/Multipeer local link: seam only~~ → **Implemented** (2026-06-12): `MultipeerLinkTransport` over MultipeerConnectivity, seal-frame wire format, automatic relay fallback. See N17–N20, A9. | upstream-NIP |
+| S2 | ~~Localhost WebSocket relay frontend: not shipped~~ → **Implemented** (2026-06-12): `pqrc-relay` executable (NWListener WS over `LocalRelaySimulator`) + `NostrWebSocketTransport` client. See A10, T9–T10. | app-only |
 
 ## New calls made during implementation
 
@@ -96,6 +96,30 @@ and affects interop; `[app-only]` — client behavior, no wire impact;
   in a bounded (256) retry queue, re-presented after each successful decrypt;
   the queue deliberately has no per-envelope attempt cap (a cap quarantined
   healthy traffic under heavy chaos). Overflow quarantines oldest-first.
+- **N17 — Local-link frame = the kind-13 seal, not a bare rumor.** SPEC §10
+  says only the gift wrap is unnecessary on a point-to-point link. The seal is
+  kept because MultipeerConnectivity's encryption authenticates nobody
+  (anonymous DTLS, MITM-able): the seal supplies sender authenticity and keeps
+  rumor metadata (`participant_type`, ratchet header) confidential against a
+  link MITM, reusing the already-vetted `GiftWrap`/`SealCipher` path. The
+  seal's `created_at` doubles as the fuzzed AD timestamp, so the local wire
+  needs no extra fields. Local dedupe key: `local:<seal-id>`.
+- **N18 — Local-link hello: challenge-response signed by the identity key.**
+  Routing (identity → radio peer) is established by signing the peer's fresh
+  32-byte challenge under domain `"pqrc-local-hello-v1"`. One proof attempt
+  per connection (the challenge is consumed). A forged claim cannot attract a
+  victim's traffic — sends to unproven identities fall back to the relay
+  path. Confidentiality never depends on the hello (the seal is encrypted to
+  the verified contact's key from the 10420 binding, not to hello claims).
+- **N19 — Multipeer discovery is anonymous.** Random 16-hex `MCPeerID`, nil
+  `discoveryInfo`, service type `pqrc-local`. A local observer learns
+  co-presence of *a* PQRC user, never which one (THREAT_MODEL §2.9). Invite
+  tie-break: lexicographically smaller display name invites; invitations are
+  auto-accepted (safe per N18 — unproven peers get no traffic).
+- **N20 — `LocalLinkTransport` seam re-typed** from
+  `send(RumorContent, to:)` to `send(seal: NostrEvent, to peerIdentity:)`:
+  the rumor alone cannot carry the AD timestamp or sender authenticity (N17).
+  The seam had no implementations, so this is not a breaking change.
 
 ### App behavior `[app-only]`
 
@@ -125,6 +149,18 @@ and affects interop; `[app-only]` — client behavior, no wire impact;
   white-on-accent bubbles, opaque thread-chip fill, opaque navigation bar.
 - **A8 — Conversations open scrolled to the newest message**
   (`defaultScrollAnchor(.bottom)`), found by the round-trip UI test.
+- **A9 — Local link is local-first.** When a verified peer is co-present, the
+  seal goes over the radio and NOTHING is published to any relay (the
+  privacy-maximizing order per SPEC §0 — a local message is invisible to all
+  relay observers). Any local-link failure falls back to gift-wrap + relay
+  silently and automatically (SPEC §10). App exposure is Debug-only
+  (`enableLocalLink` in `bootSingle`; Info-Debug.plist carries the
+  local-network strings, Release carries none — TESTFLIGHT-GUIDE §A6).
+- **A10 — Single-persona relay selection.** `bootSingle` resolves its relay
+  from `PQRC_RELAY_URL` (env) → `relayURL` (UserDefaults) → the deployed
+  anchor relay default; the literal value `local` forces the in-process
+  simulator. UI tests always run the Local Universe and never touch the
+  network.
 
 ### Tech debt `[tech-debt]`
 
@@ -153,6 +189,21 @@ and affects interop; `[app-only]` — client behavior, no wire impact;
   field**: the binding covers identity+agent keys; `ik_dh` is authenticated by
   the bundle's identity signature. Adding it to the 10420 assertion would
   tighten the dance and is queued for the NIP.
+- **T9 — Loopback/deployed-relay tests are opt-in.** The WebSocket transport
+  and `pqrc-relay` server are proven by the TEST-PLAN §7 conformance suite,
+  but those runs open (loopback) sockets, so they are gated behind
+  `PQRC_LOOPBACK_TESTS=1` / `PQRC_RELAY_URL=…` to honor the "no unit test
+  touches the network" rule in the default run. CI should add a gated job.
+- **T10 — `pqrc-relay` is in-memory dev tooling.** No persistence, no rate
+  limiting, localhost-oriented. The production anchor relay remains
+  AUTH-gated strfry/khatru (SPEC §9.1, §15); the deployed-relay conformance
+  test is the acceptance gate for that deployment (it FAILS on a vanilla
+  public relay that serves kind-1059 to everyone — by design).
+- **T11 — `MultipeerNearbyLink` is verified on hardware, not in unit tests.**
+  Everything above the `NearbyLink` seam runs against `LocalLinkSimulator`;
+  the MC adapter itself needs real radios (SETUP-GUIDE §6 device checklist).
+  MC's 8-peer session cap is fine for 1:1 + small groups; revisit for v2 MLS
+  groups.
 
 ## Cardinal-rule resolutions (ties broken toward privacy)
 
