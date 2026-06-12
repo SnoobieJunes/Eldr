@@ -65,6 +65,12 @@ public actor PQRCMessenger {
     private var sessions: [String: PQRCSession] = [:]  // peer identity hex -> session
     private var processedWrapIDs: Set<String> = []
     private var pendingRetry: [GiftWrap.Unwrapped] = []
+    /// Unknown-sender envelopes held for the message-request gate (D12), keyed
+    /// by sender Nostr pubkey hex, so accepting a request can replay the held
+    /// handshake. Bounded both ways (≤32 senders × ≤16 envelopes, oldest
+    /// evicted) so a spray of strangers cannot grow memory.
+    private var pendingRequests: [String: [GiftWrap.Unwrapped]] = [:]
+    private var pendingRequestOrder: [String] = []
     private var pumpTasks: [Task<Void, Never>] = []
 
     // Output
@@ -147,6 +153,29 @@ public actor PQRCMessenger {
 
     public func addContact(_ contact: VerifiedContact) {
         contactsByNostrPub[contact.nostrPubkeyHex] = contact
+    }
+
+    // MARK: - Message requests (D12)
+
+    /// Accepts a pending request: fetches and fully verifies the sender's
+    /// 10420/10421 (both binding directions + every prekey signature), adds
+    /// the contact, then replays every held envelope through the normal
+    /// pipeline (handshake → session → message). Returns the verified contact.
+    public func acceptRequest(senderNostrPubkeyHex: String) async throws -> VerifiedContact {
+        let (contact, _) = try await fetchVerifiedPeer(nostrPubkeyHex: senderNostrPubkeyHex)
+        let held = pendingRequests.removeValue(forKey: senderNostrPubkeyHex) ?? []
+        pendingRequestOrder.removeAll { $0 == senderNostrPubkeyHex }
+        for unwrapped in held {
+            await processUnwrapped(unwrapped)
+        }
+        return contact
+    }
+
+    /// Declines a pending request: held envelopes are dropped. The sender is
+    /// NOT blocked (a later request may be accepted); use `setBlocked` for that.
+    public func declineRequest(senderNostrPubkeyHex: String) {
+        pendingRequests.removeValue(forKey: senderNostrPubkeyHex)
+        pendingRequestOrder.removeAll { $0 == senderNostrPubkeyHex }
     }
 
     /// Attaches the local-first transport (SPEC §10). Must be called before
@@ -349,8 +378,10 @@ public actor PQRCMessenger {
 
     private func processUnwrapped(_ unwrapped: GiftWrap.Unwrapped) async {
         guard let contact = contactsByNostrPub[unwrapped.senderNostrPubkey] else {
-            // Unknown sender: message-request gate (D12). Nothing renders as a
-            // conversation until the user accepts.
+            // Unknown sender: message-request gate (D12). The envelope is held
+            // (bounded) so accepting the request can replay it; nothing renders
+            // as a conversation until the user accepts.
+            holdForRequest(unwrapped)
             eventContinuation?.yield(
                 .messageRequest(
                     senderNostrPubkeyHex: unwrapped.senderNostrPubkey,
@@ -468,6 +499,24 @@ public actor PQRCMessenger {
         _ rumor: RumorContent, contact: VerifiedContact
     ) -> Bool {
         Self.validateParticipantAuthenticity(rumor, agentPubkey: contact.binding.agentPubkey)
+    }
+
+    /// Holds an unknown-sender envelope for the message-request gate, bounded
+    /// at 32 senders × 16 envelopes (oldest sender / oldest envelope evicted).
+    private func holdForRequest(_ unwrapped: GiftWrap.Unwrapped) {
+        let sender = unwrapped.senderNostrPubkey
+        if pendingRequests[sender] == nil {
+            if pendingRequestOrder.count >= 32, let evicted = pendingRequestOrder.first {
+                pendingRequestOrder.removeFirst()
+                pendingRequests.removeValue(forKey: evicted)
+            }
+            pendingRequestOrder.append(sender)
+            pendingRequests[sender] = []
+        }
+        pendingRequests[sender]?.append(unwrapped)
+        if let count = pendingRequests[sender]?.count, count > 16 {
+            pendingRequests[sender]?.removeFirst()
+        }
     }
 
     private func holdForRetry(_ unwrapped: GiftWrap.Unwrapped) {

@@ -11,6 +11,9 @@ struct PQRCApp: App {
         WindowGroup {
             RootView()
                 .environment(session)
+                .onOpenURL { url in
+                    session.handleDeepLink(url)
+                }
         }
     }
 }
@@ -30,6 +33,10 @@ final class AppSession {
     var bootError: String?
     /// Set when the user opens the demo from Settings or launch args.
     var demoRunning = false
+    /// npub from a scanned `pqrc:add?npub=…` QR. MainView observes this and
+    /// opens New Conversation prefilled — so a camera scan lands in the app
+    /// instead of a web search.
+    var pendingNpub: String?
 
     init() {
         let arguments = ProcessInfo.processInfo.arguments
@@ -43,6 +50,20 @@ final class AppSession {
             !arguments.contains("--reset")
         {
             Task { await bootSingle() }
+        }
+    }
+
+    /// Handles `pqrc:add?npub=npub1…` from a scanned QR code. The system
+    /// Camera opens this app (the `pqrc` URL scheme is registered in
+    /// Info.plist) instead of falling through to a web search. We only accept
+    /// a well-formed `npub1…` value; everything else is ignored.
+    func handleDeepLink(_ url: URL) {
+        guard url.scheme == "pqrc" else { return }
+        let components = URLComponents(url: url, resolvingAgainstBaseURL: false)
+        if let npub = components?.queryItems?.first(where: { $0.name == "npub" })?.value,
+            npub.hasPrefix("npub1")
+        {
+            pendingNpub = npub
         }
     }
 
@@ -85,10 +106,23 @@ final class AppSession {
     /// UI tests are unaffected either way — they boot the Local Universe.
     static let defaultRelayURL = "wss://relay.lerants.com"
 
-    private func makeRelayTransport() async -> any RelayTransport {
-        let configured = ProcessInfo.processInfo.environment["PQRC_RELAY_URL"]
+    /// The relay the single-persona session uses, resolved once:
+    /// `PQRC_RELAY_URL` env → `relayURL` UserDefaults → the deployed default.
+    /// The literal value `local` means the in-process simulator.
+    static var resolvedRelayURL: String {
+        ProcessInfo.processInfo.environment["PQRC_RELAY_URL"]
             ?? UserDefaults.standard.string(forKey: "relayURL")
-            ?? Self.defaultRelayURL
+            ?? defaultRelayURL
+    }
+
+    /// What we publish in the kind-10050 relay list (what peers use to reach
+    /// us). `local` maps to the placeholder scheme.
+    static var announceRelayURLs: [String] {
+        resolvedRelayURL == "local" ? ["local://relay"] : [resolvedRelayURL]
+    }
+
+    private func makeRelayTransport() async -> any RelayTransport {
+        let configured = Self.resolvedRelayURL
         if configured != "local", let url = URL(string: configured),
             url.scheme == "ws" || url.scheme == "wss"
         {
@@ -103,25 +137,23 @@ final class AppSession {
         let provider: any AgentProvider =
             FoundationModelsAgentProvider.isAvailable
             ? FoundationModelsAgentProvider() : MockAgentProvider()
-        // S1 Multipeer local link: Debug builds only (TESTFLIGHT-GUIDE §A6 —
-        // Release ships without local-network permissions or Bonjour usage).
-        #if DEBUG
-            let localLinkEnabled = true
-        #else
-            let localLinkEnabled = false
-        #endif
+        // Local-network (MultipeerConnectivity) delivery is OFF by default in
+        // every build: it advertises a Bonjour service — a privacy surface —
+        // so per SPEC §0 (privacy first) it stays disabled rather than
+        // auto-enabling in debug builds. The S1 transport stays implemented and
+        // exercised by the package tests; nothing in the app auto-enables it.
         let runtime = PersonaRuntime(
             displayName: UserDefaults.standard.string(forKey: "displayName") ?? "Me",
             transports: [transport],
             blobStore: blossom,
             provider: provider,
             keychainService: "chat.pqrc.keys",
-            enableLocalLink: localLinkEnabled)
+            enableLocalLink: false)
         let model = AppModel(
             runtime: runtime,
             personaName: UserDefaults.standard.string(forKey: "displayName") ?? "Me")
         do {
-            try await model.start(inMemoryStore: false)
+            try await model.start(inMemoryStore: false, relayURLs: Self.announceRelayURLs)
             mode = .single(model)
         } catch {
             bootError = String(describing: error)

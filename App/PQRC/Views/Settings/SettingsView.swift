@@ -21,16 +21,25 @@ struct SettingsView: View {
                             .font(.caption.monospaced())
                             .textSelection(.enabled)
                             .accessibilityIdentifier("my-npub")
-                        QRView(content: model.myNpub)
+                        // Encodes the `pqrc:` deep link, not a bare npub, so
+                        // scanning it with the system Camera opens THIS app on
+                        // New Conversation instead of a web search.
+                        QRView(content: "pqrc:add?npub=\(model.myNpub)")
                             .frame(width: 160, height: 160)
                             .accessibilityLabel("QR code of your address")
+                        ShareLink(item: "pqrc:add?npub=\(model.myNpub)") {
+                            Label("Share my address", systemImage: "square.and.arrow.up")
+                                .font(.callout)
+                        }
                     }
                     LabeledContent("Key export", value: "Not possible — by design")
                         .foregroundStyle(.secondary)
                 }
-                Section("Relays") {
-                    LabeledContent("local://relay", value: "AUTH ✓")
-                    Text("v1 runs against the built-in local relay. The real Nostr network arrives behind the same transport seam.")
+                Section("Relay") {
+                    LabeledContent("Server", value: AppSession.resolvedRelayURL)
+                        .font(.callout)
+                        .accessibilityIdentifier("relay-url")
+                    Text("Messages are gift-wrapped before they reach the relay: the server only ever sees that an encrypted envelope exists for a recipient — never the sender or the content. Override with the `relayURL` setting or the `PQRC_RELAY_URL` launch variable; `local` uses the built-in offline relay.")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }

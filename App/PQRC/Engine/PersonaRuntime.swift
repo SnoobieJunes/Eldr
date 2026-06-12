@@ -88,7 +88,9 @@ actor PersonaRuntime {
 
     /// Creates or restores the identity and starts everything.
     /// First launch generates keys (SPEC §3.1) and publishes 10420/10421/10050.
-    func bootstrap(inMemoryStore: Bool, storeURL: URL? = nil) async throws -> AsyncStream<RuntimeEvent> {
+    func bootstrap(
+        inMemoryStore: Bool, storeURL: URL? = nil, relayURLs: [String] = ["local://relay"]
+    ) async throws -> AsyncStream<RuntimeEvent> {
         // Keys: load from Keychain or generate.
         if let seed = keychain.loadIfPresent(account: "identity-seed") {
             identity = try PQRCIdentity(seed: seed)
@@ -147,7 +149,7 @@ actor PersonaRuntime {
             try await link.start()
         }
 
-        try await messenger.announce(relayURLs: ["local://relay"])
+        try await messenger.announce(relayURLs: relayURLs)
         let messengerEvents = try await messenger.start()
         let (stream, continuation) = AsyncStream.makeStream(of: RuntimeEvent.self)
         eventContinuation = continuation
@@ -230,6 +232,23 @@ actor PersonaRuntime {
 
     func setBlocked(_ identityHex: String, blocked: Bool) async {
         await messenger.setBlocked(identityHex, blocked: blocked)
+    }
+
+    // MARK: - Message requests (D12)
+
+    /// Accepts a pending request: the messenger fetches + verifies the
+    /// sender's binding (both directions), registers the contact, and replays
+    /// the held handshake so message #0 materializes. Returns the new
+    /// conversation id so the UI can navigate into it.
+    func acceptMessageRequest(senderNostrPubkeyHex: String) async throws -> String {
+        let contact = try await messenger.acceptRequest(senderNostrPubkeyHex: senderNostrPubkeyHex)
+        contacts[contact.identityHex] = (contact, "Contact \(String(contact.identityHex.prefix(8)))")
+        eventContinuation?.yield(.conversationChanged(contact.identityHex))
+        return contact.identityHex
+    }
+
+    func declineMessageRequest(senderNostrPubkeyHex: String) async {
+        await messenger.declineRequest(senderNostrPubkeyHex: senderNostrPubkeyHex)
     }
 
     // MARK: - Sending

@@ -55,8 +55,11 @@ final class AppModel {
         self.personaName = personaName
     }
 
-    func start(inMemoryStore: Bool, storeURL: URL? = nil) async throws {
-        let events = try await runtime.bootstrap(inMemoryStore: inMemoryStore, storeURL: storeURL)
+    func start(
+        inMemoryStore: Bool, storeURL: URL? = nil, relayURLs: [String] = ["local://relay"]
+    ) async throws {
+        let events = try await runtime.bootstrap(
+            inMemoryStore: inMemoryStore, storeURL: storeURL, relayURLs: relayURLs)
         myNpub = await runtime.npub
         myIdentityHex = await runtime.identityHex
         prekeyCount = await runtime.oneTimePrekeyCount()
@@ -183,6 +186,26 @@ final class AppModel {
 
     func block(_ identityHex: String) async {
         await runtime.setBlocked(identityHex, blocked: true)
+    }
+
+    /// Accepts a message request: the held handshake replays, the conversation
+    /// materializes, and the request row clears. Returns the conversation id so
+    /// the caller can navigate into it.
+    func acceptRequest(_ senderNostrPubkeyHex: String) async -> String? {
+        guard
+            let conversationID = try? await runtime.acceptMessageRequest(
+                senderNostrPubkeyHex: senderNostrPubkeyHex)
+        else { return nil }
+        messageRequests.removeAll { $0 == senderNostrPubkeyHex }
+        await refreshConversationRow(
+            conversationID,
+            lastMessage: messagesByConversation[conversationID]?.last { $0.threadID == nil })
+        return conversationID
+    }
+
+    func declineRequest(_ senderNostrPubkeyHex: String) async {
+        await runtime.declineMessageRequest(senderNostrPubkeyHex: senderNostrPubkeyHex)
+        messageRequests.removeAll { $0 == senderNostrPubkeyHex }
     }
 
     func messages(for conversationID: String) -> [StoredMessage] {

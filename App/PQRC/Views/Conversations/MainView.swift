@@ -6,20 +6,24 @@ struct MainView: View {
     @Bindable var model: AppModel
     /// Local Universe persona switcher, shown above the list (demo/debug only).
     var personaSwitcher: PersonaSwitcher?
+    @Environment(AppSession.self) private var session
     @State private var showNewChat = false
     @State private var showNewGroup = false
     @State private var showSettings = false
+    /// npub from a scanned QR deep link, prefilled into New Conversation.
+    @State private var deepLinkNpub: String?
+    /// Navigation path so an accepted message request can push its conversation.
+    @State private var path: [String] = []
 
     var body: some View {
-        NavigationStack {
+        NavigationStack(path: $path) {
             List {
                 if !model.messageRequests.isEmpty {
                     Section("Message Requests") {
                         ForEach(model.messageRequests, id: \.self) { sender in
-                            Label(
-                                "Request from \(String(sender.prefix(12)))…",
-                                systemImage: "envelope.badge")
-                            .accessibilityLabel("Pending message request")
+                            MessageRequestRow(model: model, sender: sender) { conversationID in
+                                path.append(conversationID)
+                            }
                         }
                     }
                 }
@@ -71,7 +75,8 @@ struct MainView: View {
                 }
             }
             .sheet(isPresented: $showNewChat) {
-                NewChatView(model: model)
+                NewChatView(model: model, prefilledNpub: deepLinkNpub ?? "")
+                    .onDisappear { deepLinkNpub = nil }
             }
             .sheet(isPresented: $showNewGroup) {
                 NewGroupView(model: model)
@@ -79,7 +84,60 @@ struct MainView: View {
             .sheet(isPresented: $showSettings) {
                 SettingsView(model: model)
             }
+            .onChange(of: session.pendingNpub) { _, npub in
+                // A scanned QR (pqrc:add?npub=…) lands here: open New
+                // Conversation prefilled with the address.
+                guard let npub else { return }
+                deepLinkNpub = npub
+                session.pendingNpub = nil
+                showNewChat = true
+            }
         }
+    }
+}
+
+/// A pending message request. The sender is shown by key prefix (identity is
+/// only *proven* once Accept fetches and verifies their 10420 binding —
+/// D12). Accept verifies + replays the held handshake and opens the
+/// conversation; Decline drops the held envelope without blocking.
+struct MessageRequestRow: View {
+    @Bindable var model: AppModel
+    let sender: String
+    let onAccepted: (String) -> Void
+    @State private var working = false
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Label("Request from \(String(sender.prefix(12)))…", systemImage: "envelope.badge")
+                .accessibilityLabel("Pending message request")
+            HStack(spacing: 12) {
+                Button {
+                    working = true
+                    Task {
+                        if let conversationID = await model.acceptRequest(sender) {
+                            onAccepted(conversationID)
+                        }
+                        working = false
+                    }
+                } label: {
+                    Label("Accept", systemImage: "checkmark")
+                        .font(.body.weight(.semibold))
+                }
+                .buttonStyle(.borderedProminent)
+                .disabled(working)
+                .accessibilityIdentifier("accept-request")
+                Button(role: .destructive) {
+                    Task { await model.declineRequest(sender) }
+                } label: {
+                    Text("Decline").font(.body.weight(.semibold))
+                }
+                .buttonStyle(.bordered)
+                .tint(Color.red.mix(with: .black, by: 0.35))
+                .disabled(working)
+                .accessibilityIdentifier("decline-request")
+            }
+        }
+        .padding(.vertical, 4)
     }
 }
 
@@ -159,6 +217,8 @@ import PQRCNostr
 /// on hardware; paste is the simulator path).
 struct NewChatView: View {
     @Bindable var model: AppModel
+    /// Prefilled from a scanned `pqrc:add?npub=…` QR deep link.
+    var prefilledNpub: String = ""
     @Environment(\.dismiss) private var dismiss
     @State private var npub = ""
     @State private var firstMessage = ""
@@ -172,6 +232,9 @@ struct NewChatView: View {
                         .autocorrectionDisabled()
                         .textInputAutocapitalization(.never)
                         .accessibilityIdentifier("new-chat-npub")
+                        .onAppear {
+                            if npub.isEmpty, !prefilledNpub.isEmpty { npub = prefilledNpub }
+                        }
                 }
                 Section("First message") {
                     TextField("Say hi", text: $firstMessage)
