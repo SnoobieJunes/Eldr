@@ -68,8 +68,12 @@ receiving; joiners see no history. MLS in v2 addresses membership agreement.
 ### 2.7 Local relay in v1
 v1 ships with an in-process relay simulator; no traffic leaves the device, so
 network threats are moot in the shipped configuration. The moment a real
-relay/anchor goes live, §2.1–2.2 fully apply, and the operator's IP/retention
-policy must be decided and published (TESTFLIGHT-GUIDE §D).
+relay/anchor goes live — including the S2 `NostrWebSocketTransport` pointing
+at a deployed relay such as `wss://relay.lerants.com` or a localhost
+`pqrc-relay` — §2.1–2.2 fully apply, and the operator's IP/retention policy
+must be decided and published (TESTFLIGHT-GUIDE §D). The TEST-PLAN §7
+conformance suite (`swapPoint_deployedRelayConformance`) verifies a deployed
+relay enforces the AUTH-gated kind-1059 rule before it carries real traffic.
 
 ### 2.8 Prekey state lifetime
 One-time prekeys regenerate per app launch in v1 (the in-process relay's
@@ -77,6 +81,26 @@ bundle is republished at boot), so cross-launch prekey exhaustion is not yet
 exercised. Last-resort fallback semantics (unlinkability caveat: two sessions
 initiated against the same `lrp` are linkable as such by the recipient only)
 are implemented and tested.
+
+### 2.9 Local link (Multipeer) co-presence is observable
+The S1 local-first transport (SPEC §10, Debug builds only) advertises an
+anonymous Bonjour service (`_pqrc-local`, random per-process peer name, no
+identity in discovery). What a nearby observer still learns:
+
+- **Co-presence**: *someone* within radio range runs PQRC. They cannot learn
+  who — identities are only proven peer-to-peer via a signed challenge
+  (DEVIATIONS N18), and message frames are seals (encrypted to the recipient,
+  signed by the sender), so an active MITM on the link reads nothing and
+  forges nothing (DEVIATIONS N17).
+- **Traffic existence and timing** on the link, as with any radio. Padding
+  buckets still mask plaintext sizes.
+- What the local path REMOVES: a locally delivered message is never published
+  to any relay — no `p` tag, no envelope, nothing for §2.2's global passive
+  observer to collect. Co-present conversations are strictly more private
+  against network observers, traded for this section's radio observability.
+- MultipeerConnectivity's own link encryption (`.required`) runs between
+  anonymous peers and is treated as a transport nicety, not a security
+  boundary; every guarantee comes from the seal + ratchet layers above it.
 
 ## 3. Endpoint compromise
 

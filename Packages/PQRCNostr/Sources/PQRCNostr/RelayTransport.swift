@@ -58,11 +58,39 @@ public protocol RelayTransport: Sendable {
     func authenticate(keypair: NostrKeypair, randomSource: any RandomSource) async throws
 }
 
-/// Local-link transport seam (SPEC §10; stretch goal S1). The payload path is
-/// transport-agnostic from day one even though BLE/Multipeer ships later.
+/// Local-link transport seam (SPEC §10; stretch goal S1, implemented by
+/// `MultipeerLinkTransport` over MultipeerConnectivity).
+///
+/// The unit shipped is the kind-13 SEAL event — the same rumor + seal layers
+/// as the relay path, minus the outer kind-1059 gift wrap. SPEC §10: on a
+/// point-to-point link there is no relay to hide the sender from, so the wrap
+/// adds nothing; the seal stays because it carries sender authenticity and
+/// keeps rumor metadata confidential even against a man-in-the-middle on the
+/// radio link (MultipeerConnectivity's own encryption authenticates nobody).
+/// See docs/DEVIATIONS.md S1 for why this seam ships seals, not bare rumors.
 public protocol LocalLinkTransport: Sendable {
-    func send(_ rumor: RumorContent, to peerIdentity: Data) async throws
-    func incoming() async -> AsyncStream<(rumor: RumorContent, from: Data)>
+    /// Delivers one seal to the co-present peer that proved ownership of
+    /// `peerIdentity` (the Ed25519 PQRC identity pubkey, raw 32 bytes).
+    /// MUST throw `LocalLinkError.peerNotReachable` when that peer is not
+    /// currently connected-and-verified — the messenger uses that signal to
+    /// fall back to relay delivery automatically (SPEC §10).
+    func send(_ seal: NostrEvent, to peerIdentity: Data) async throws
+    /// Single-consumer stream of seals received from verified peers. The
+    /// messenger unseals and feeds them through the same receive pipeline as
+    /// relay-delivered envelopes.
+    func incoming() async -> AsyncStream<NostrEvent>
+}
+
+/// Typed errors for the local-link path (CLAUDE.md conventions: typed errors,
+/// no stringly failures).
+public enum LocalLinkError: Error, Equatable, Sendable {
+    /// No connected, identity-verified peer for the requested identity —
+    /// the caller should fall back to relay delivery.
+    case peerNotReachable
+    /// The transport was asked to operate before `start()` / after `stop()`.
+    case linkNotStarted
+    /// A link payload could not be encoded/decoded.
+    case malformedPayload
 }
 
 /// Content-addressed blob storage seam (SPEC §11): production Blossom later,

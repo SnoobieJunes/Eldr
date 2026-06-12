@@ -76,18 +76,47 @@ final class AppSession {
         }
     }
 
+    /// Relay for the single-persona session, resolved in priority order:
+    /// 1. `PQRC_RELAY_URL` env var (Xcode scheme) or `relayURL` UserDefaults —
+    ///    any ws:// or wss:// relay, e.g. `ws://127.0.0.1:7777` for a local
+    ///    `swift run pqrc-relay`. The literal value `local` forces the
+    ///    in-process simulator.
+    /// 2. Default: the deployed anchor relay.
+    /// UI tests are unaffected either way — they boot the Local Universe.
+    static let defaultRelayURL = "wss://relay.lerants.com"
+
+    private func makeRelayTransport() async -> any RelayTransport {
+        let configured = ProcessInfo.processInfo.environment["PQRC_RELAY_URL"]
+            ?? UserDefaults.standard.string(forKey: "relayURL")
+            ?? Self.defaultRelayURL
+        if configured != "local", let url = URL(string: configured),
+            url.scheme == "ws" || url.scheme == "wss"
+        {
+            return await NostrWebSocketTransport(url: url).connect()
+        }
+        return await LocalRelaySimulator(url: "local://relay").connect()
+    }
+
     func bootSingle() async {
-        let relay = LocalRelaySimulator(url: "local://relay")
+        let transport = await makeRelayTransport()
         let blossom = LocalBlossomSimulator()
         let provider: any AgentProvider =
             FoundationModelsAgentProvider.isAvailable
             ? FoundationModelsAgentProvider() : MockAgentProvider()
+        // S1 Multipeer local link: Debug builds only (TESTFLIGHT-GUIDE §A6 —
+        // Release ships without local-network permissions or Bonjour usage).
+        #if DEBUG
+            let localLinkEnabled = true
+        #else
+            let localLinkEnabled = false
+        #endif
         let runtime = PersonaRuntime(
             displayName: UserDefaults.standard.string(forKey: "displayName") ?? "Me",
-            transports: [await relay.connect()],
+            transports: [transport],
             blobStore: blossom,
             provider: provider,
-            keychainService: "chat.pqrc.keys")
+            keychainService: "chat.pqrc.keys",
+            enableLocalLink: localLinkEnabled)
         let model = AppModel(
             runtime: runtime,
             personaName: UserDefaults.standard.string(forKey: "displayName") ?? "Me")

@@ -1,0 +1,34 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<!-- Merged with the generated Info.plist (GENERATE_INFOPLIST_FILE stays YES).
+
+     CFBundleURLTypes: the pqrc: scheme. The Settings QR encodes
+     `pqrc:add?npub=…`, so scanning it with the system Camera opens this app
+     on New Conversation instead of a web browser.
+
+     NSLocalNetworkUsageDescription / NSBonjourServices: the S1 Multipeer
+     local link (SPEC §10). User-toggleable (Settings → Nearby, default ON in
+     Debug, OFF in Release); the radios — and therefore the permission
+     prompt — only start when the toggle is on. -->
+<dict>
+	<key>CFBundleURLTypes</key>
+	<array>
+		<dict>
+			<key>CFBundleURLName</key>
+			<string>chat.pqrc.link</string>
+			<key>CFBundleURLSchemes</key>
+			<array>
+				<string>pqrc</string>
+			</array>
+		</dict>
+	</array>
+	<key>NSLocalNetworkUsageDescription</key>
+	<string>PQRC delivers end-to-end encrypted messages directly to nearby contacts when you are in the same room, with no server involved.</string>
+	<key>NSBonjourServices</key>
+	<array>
+		<string>_pqrc-local._tcp</string>
+		<string>_pqrc-local._udp</string>
+	</array>
+</dict>
+</plist>

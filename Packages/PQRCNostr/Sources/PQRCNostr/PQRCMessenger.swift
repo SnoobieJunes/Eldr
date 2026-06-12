@@ -52,6 +52,10 @@ public actor PQRCMessenger {
     private let randomSource: any RandomSource
     private let nonceSource: any NonceSource
     private var transports: [any RelayTransport]
+    /// SPEC §10 local-first path. When set, every outgoing message tries the
+    /// local link first and falls back to relay delivery automatically; set
+    /// before `start()` so the receive pump covers it.
+    private var localLink: (any LocalLinkTransport)?
     /// Blocklist check applied post-unseal (D8): the relay cannot filter by
     /// sender (the sender is hidden by design), so we drop on-device.
     private var blockedIdentityHexes: Set<String> = []
@@ -145,6 +149,12 @@ public actor PQRCMessenger {
         contactsByNostrPub[contact.nostrPubkeyHex] = contact
     }
 
+    /// Attaches the local-first transport (SPEC §10). Must be called before
+    /// `start()` — the local receive pump is wired up there.
+    public func setLocalLink(_ link: any LocalLinkTransport) {
+        localLink = link
+    }
+
     public func setBlocked(_ identityHex: String, blocked: Bool) {
         if blocked {
             blockedIdentityHexes.insert(identityHex)
@@ -170,7 +180,7 @@ public actor PQRCMessenger {
         let outgoing = try await session.encrypt(
             body: firstMessage, type: .handshake, participantType: .human,
             handshake: initiation.message)
-        try await wrapAndPublish(outgoing, to: contact)
+        try await deliver(outgoing, to: contact)
     }
 
     // MARK: - Send
@@ -196,7 +206,7 @@ public actor PQRCMessenger {
             rumor.agentSig = try agentKey.signature(for: message)
             outgoing = OutgoingMessage(rumor: rumor, fuzzedTimestamp: outgoing.fuzzedTimestamp)
         }
-        try await wrapAndPublish(outgoing, to: contact)
+        try await deliver(outgoing, to: contact)
     }
 
     /// Group fan-out (APP-SPEC §7, D1): the same body, encrypted once per
@@ -208,6 +218,34 @@ public actor PQRCMessenger {
         for member in memberIdentityHexes where member != identityHex {
             try await send(body, to: member, participantType: participantType)
         }
+    }
+
+    /// SPEC §10 routing: co-present peers get the seal directly over the local
+    /// link (no relay, no internet, nothing for any relay to observe — also
+    /// the privacy-maximizing order per SPEC §0); everyone else gets the full
+    /// gift wrap via relays. Fallback is automatic and silent: ANY local-link
+    /// failure (peer out of range, link down, send raced a disconnect) falls
+    /// through to relay delivery, so a message is never lost to co-presence
+    /// guesswork. The local attempt re-seals nothing on failure — the relay
+    /// path builds its own envelope from the same `OutgoingMessage`, keeping
+    /// the one-fuzzed-timestamp-per-message invariant (APP-SPEC §2) intact.
+    private func deliver(_ outgoing: OutgoingMessage, to contact: VerifiedContact) async throws {
+        if let localLink {
+            do {
+                let seal = try GiftWrap.seal(
+                    rumor: outgoing.rumor,
+                    sender: nostrKeypair,
+                    recipientNostrPubkey: contact.nostrPubkeyHex,
+                    fuzzedTimestamp: outgoing.fuzzedTimestamp,
+                    randomSource: randomSource,
+                    nonceSource: nonceSource)
+                try await localLink.send(seal, to: contact.binding.identityPubkey)
+                return
+            } catch {
+                // Not co-present (or the radio failed mid-send): relay path.
+            }
+        }
+        try await wrapAndPublish(outgoing, to: contact)
     }
 
     private func wrapAndPublish(_ outgoing: OutgoingMessage, to contact: VerifiedContact) async throws {
@@ -262,6 +300,19 @@ public actor PQRCMessenger {
             }
             pumpTasks.append(task)
         }
+        if let localLink {
+            // Local link pump: seals arrive without a wrap (SPEC §10) but join
+            // the exact same pipeline right after the unwrap step, so dedupe,
+            // blocklist, agent-integrity and retry behavior are identical on
+            // both paths.
+            let seals = await localLink.incoming()
+            let task = Task { [weak self] in
+                for await seal in seals {
+                    await self?.handleIncomingSeal(seal)
+                }
+            }
+            pumpTasks.append(task)
+        }
         return stream
     }
 
@@ -279,6 +330,20 @@ public actor PQRCMessenger {
             return  // not for us / malformed: ignore silently (opaque to relays anyway)
         }
         processedWrapIDs.insert(event.id)
+        await processUnwrapped(unwrapped)
+    }
+
+    /// Local-link receive entry point. `GiftWrap.unseal` performs the same
+    /// verification chain as `unwrap` minus the wrap layer, and keys dedupe by
+    /// a `local:`-prefixed seal id, so a replayed seal — whether re-sent on
+    /// the radio or relayed later by an attacker — is processed at most once
+    /// (with the ratchet's one-time message keys as the backstop beneath).
+    private func handleIncomingSeal(_ seal: NostrEvent) async {
+        guard let unwrapped = try? GiftWrap.unseal(seal, recipient: nostrKeypair) else {
+            return  // not for us / tampered: drop silently, same as relay path
+        }
+        guard !processedWrapIDs.contains(unwrapped.wrapEventID) else { return }
+        processedWrapIDs.insert(unwrapped.wrapEventID)
         await processUnwrapped(unwrapped)
     }
 

@@ -103,12 +103,42 @@ enum TransportConformance {
 
 @Suite("Transport swap point", .tags(.transport))
 struct ConformanceSuiteTests {
+    /// Always-on, network-free: the simulator must keep passing the contract.
     @Test func swapPoint_transportConformanceSuite() async throws {
-        // Against the simulator today; against the real network client at swap
-        // time — same suite, zero changes above the protocol.
         let relay = LocalRelaySimulator()
         try await TransportConformance.run {
             await relay.connect()
+        }
+    }
+
+    /// The REAL swap gate: `NostrWebSocketTransport` against an in-process
+    /// `pqrc-relay` (`NostrRelayServer`) over 127.0.0.1. Touches a loopback
+    /// socket, so it is opt-in per the CLAUDE.md "no unit test touches the
+    /// network" rule:
+    ///   PQRC_LOOPBACK_TESTS=1 swift test --package-path Packages/PQRCNostr
+    @Test(.enabled(if: ProcessInfo.processInfo.environment["PQRC_LOOPBACK_TESTS"] == "1"))
+    func swapPoint_webSocketLoopbackConformance() async throws {
+        let relay = LocalRelaySimulator(url: "ws://127.0.0.1:0")
+        let server = NostrRelayServer(relay: relay, port: 0)  // ephemeral port
+        let port = try await server.start()
+        defer { Task { await server.stop() } }
+        let url = URL(string: "ws://127.0.0.1:\(port)")!
+        try await TransportConformance.run {
+            await NostrWebSocketTransport(url: url).connect()
+        }
+    }
+
+    /// Acceptance gate against a deployed relay (e.g. wss://relay.lerants.com).
+    /// Requires the relay to implement NIP-42 AUTH with anchor-relay kind-1059
+    /// gating (SPEC §9.1) — a vanilla public relay will fail step 4, and that
+    /// failure is the point of the gate. Opt-in:
+    ///   PQRC_RELAY_URL=wss://relay.lerants.com swift test --package-path Packages/PQRCNostr
+    @Test(.enabled(if: ProcessInfo.processInfo.environment["PQRC_RELAY_URL"] != nil))
+    func swapPoint_deployedRelayConformance() async throws {
+        let relayURL = try #require(
+            URL(string: ProcessInfo.processInfo.environment["PQRC_RELAY_URL"] ?? ""))
+        try await TransportConformance.run {
+            await NostrWebSocketTransport(url: relayURL).connect()
         }
     }
 }

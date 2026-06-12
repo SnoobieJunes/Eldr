@@ -34,6 +34,11 @@ actor PersonaRuntime {
     private let nonceSource: any NonceSource
     private let transports: [any RelayTransport]
     private let blobStore: any BlobStore
+    /// SPEC §10 / S1: when enabled, co-present peers exchange seals directly
+    /// over MultipeerConnectivity, with automatic relay fallback. Debug-only
+    /// at the app layer (TESTFLIGHT-GUIDE §A6).
+    private let enableLocalLink: Bool
+    private var localLink: MultipeerLinkTransport?
 
     private var store: SwiftDataMessageStore!
     private var crypter: EncryptedStore!
@@ -58,7 +63,8 @@ actor PersonaRuntime {
         clock: any Clock = SystemClock(),
         randomSource: any RandomSource = SystemRandomSource(),
         nonceSource: any NonceSource = SystemNonceSource(),
-        keychainService: String
+        keychainService: String,
+        enableLocalLink: Bool = false
     ) {
         self.displayName = displayName
         self.transports = transports
@@ -68,6 +74,7 @@ actor PersonaRuntime {
         self.randomSource = randomSource
         self.nonceSource = nonceSource
         self.keychain = KeychainStore(service: keychainService)
+        self.enableLocalLink = enableLocalLink
     }
 
     var identityHex: String { identity.publicKeyData.hexString }
@@ -127,6 +134,19 @@ actor PersonaRuntime {
             randomSource: randomSource, nonceSource: nonceSource)
         engine = AgentEngine(myIdentity: identity, clock: clock, sink: RuntimeSink(runtime: self))
 
+        // S1 local-first transport: constructed here because the hello proof
+        // needs the (just-loaded) identity key, started before the messenger
+        // so its receive pump catches every early connection.
+        if enableLocalLink {
+            let link = MultipeerLinkTransport(
+                identity: identity,
+                link: MultipeerNearbyLink(randomSource: randomSource),
+                randomSource: randomSource)
+            localLink = link
+            await messenger.setLocalLink(link)
+            try await link.start()
+        }
+
         try await messenger.announce(relayURLs: ["local://relay"])
         let messengerEvents = try await messenger.start()
         let (stream, continuation) = AsyncStream.makeStream(of: RuntimeEvent.self)
@@ -141,6 +161,7 @@ actor PersonaRuntime {
 
     func shutdown() async {
         pumpTask?.cancel()
+        await localLink?.stop()
         await messenger?.stop()
         eventContinuation?.finish()
     }

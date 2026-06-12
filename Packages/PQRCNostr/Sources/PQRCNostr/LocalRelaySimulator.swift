@@ -146,6 +146,25 @@ public actor LocalRelaySimulator {
         }
     }
 
+    /// Subscribe with the backlog/live boundary made explicit, for frontends
+    /// that must emit a NIP-01 EOSE marker between the two (`NostrRelayServer`).
+    /// Atomic inside the actor: events published after this call land in
+    /// `live`, never duplicated into nor missing from `backlog`.
+    func handleSubscribeSplit(
+        filters: [NostrFilter], authedPubkey: String?
+    ) -> (backlog: [NostrEvent], live: AsyncThrowingStream<NostrEvent, Error>) {
+        let (stream, continuation) = AsyncThrowingStream<NostrEvent, Error>.makeStream()
+        let subscriber = Subscriber(
+            id: UUID(), filters: filters, authedPubkey: authedPubkey,
+            continuation: continuation)
+        let backlog = events.filter { visible($0, to: subscriber) }
+        subscribers.append(subscriber)
+        continuation.onTermination = { _ in
+            Task { await self.removeSubscriber(subscriber.id) }
+        }
+        return (backlog, stream)
+    }
+
     private func removeSubscriber(_ id: UUID) {
         subscribers.removeAll { $0.id == id }
     }
