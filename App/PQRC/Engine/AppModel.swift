@@ -24,6 +24,13 @@ struct ThreadVM: Identifiable, Hashable {
     var messageCount: Int
 }
 
+/// A nearby (binding-verified, relay-free) peer for the New Conversation list.
+struct NearbyVM: Identifiable, Hashable {
+    var id: String { identityHex }
+    let identityHex: String
+    let name: String
+}
+
 /// Main-actor view state for one persona, fed by its `PersonaRuntime`.
 @MainActor
 @Observable
@@ -48,6 +55,12 @@ final class AppModel {
     var safetyCodeChangedFor: Set<String> = []
     var prekeyCount = 0
     var contactNames: [String: String] = [:]
+    /// Nearby peers discovered over the local link (SPEC §10) — startable with
+    /// no relay. Populated only when the Nearby setting is on.
+    var nearbyContacts: [NearbyVM] = []
+    /// Whether the Nearby (local-link) path is active; set at start. Drives the
+    /// relay-free "Nearby" section in New Conversation.
+    var localLinkEnabled = false
 
     private var pumpTask: Task<Void, Never>?
 
@@ -66,6 +79,7 @@ final class AppModel {
         myIdentityHex = await runtime.identityHex
         prekeyCount = await runtime.oneTimePrekeyCount()
         contactNames[myIdentityHex] = personaName
+        localLinkEnabled = await runtime.isLocalLinkEnabled
         await restorePersistedUI()
         onboarded = true
         pumpTask = Task { [weak self] in
@@ -140,6 +154,10 @@ final class AppModel {
             }
         case .safetyCodeChanged(let identityHex):
             safetyCodeChangedFor.insert(identityHex)
+        case .nearbyDiscovered:
+            nearbyContacts = await runtime.nearbyList().map {
+                NearbyVM(identityHex: $0.identityHex, name: $0.name)
+            }
         }
     }
 
@@ -269,6 +287,19 @@ final class AppModel {
     func declineRequest(_ senderNostrPubkeyHex: String) async {
         await runtime.declineMessageRequest(senderNostrPubkeyHex: senderNostrPubkeyHex)
         messageRequests.removeAll { $0 == senderNostrPubkeyHex }
+    }
+
+    /// Starts a relay-free conversation with a discovered nearby peer.
+    func startNearby(_ identityHex: String, firstMessage: String) async -> String? {
+        guard
+            let conversationID = try? await runtime.startNearbyConversation(
+                identityHex: identityHex, firstMessage: firstMessage.isEmpty ? "👋" : firstMessage)
+        else { return nil }
+        nearbyContacts.removeAll { $0.identityHex == identityHex }
+        await refreshConversationRow(
+            conversationID,
+            lastMessage: messagesByConversation[conversationID]?.last { $0.threadID == nil })
+        return conversationID
     }
 
     func renameContact(_ identityHex: String, nickname: String?) async {

@@ -16,6 +16,9 @@ enum RuntimeEvent: Sendable {
     case threadCreated(conversationID: String, threadID: String, title: String)
     case loopGuardChanged(threadID: String, paused: Bool)
     case safetyCodeChanged(identityHex: String)
+    /// A co-present peer was discovered + binding-verified over the local link
+    /// (SPEC §10, Nearby setting) — startable with no relay.
+    case nearbyDiscovered(identityHex: String)
 }
 
 /// One local persona: identity + messenger + agent engine + encrypted store.
@@ -48,6 +51,10 @@ actor PersonaRuntime {
     /// restored at bootstrap so contacts survive relaunch.
     private(set) var verifiedContacts: [String: VerifiedContact] = [:]
     private(set) var contactRecords: [String: ContactRecord] = [:]
+    /// Nearby peers discovered + binding-verified over the local link (SPEC §10),
+    /// identity hex -> display name. Not yet contacts — the user starts the
+    /// conversation, which establishes a session with no relay.
+    private var nearbyContactNames: [String: String] = [:]
     /// Open-inbox window: unknown senders are auto-accepted until this time
     /// (Settings → Reachability). nil/past = normal message-request gate.
     private var openInboxUntil: Int64?
@@ -422,6 +429,37 @@ actor PersonaRuntime {
         await messenger.declineRequest(senderNostrPubkeyHex: senderNostrPubkeyHex)
     }
 
+    // MARK: - Nearby (relay-free establishment, SPEC §10)
+
+    var isLocalLinkEnabled: Bool { enableLocalLink }
+
+    /// Discovered co-present peers not yet in your contacts (identity hex + name).
+    func nearbyList() -> [(identityHex: String, name: String)] {
+        nearbyContactNames
+            .filter { verifiedContacts[$0.key] == nil }
+            .map { ($0.key, $0.value) }
+            .sorted { $0.name < $1.name }
+    }
+
+    /// Starts a conversation with a nearby peer using the bundle verified over
+    /// the local link — NO relay. Identity-of-human is confirmed afterwards via
+    /// the safety code, exactly as on the relay path.
+    func startNearbyConversation(identityHex: String, firstMessage: String) async throws -> String {
+        let body = MessageBody(text: firstMessage, sentAt: clock.now(), alias: myAlias)
+        let contact = try await messenger.establishWithNearby(
+            identityHex: identityHex, firstMessage: body)
+        await registerContact(contact)
+        await persistSession(contact.identityHex)
+        nearbyContactNames[identityHex] = nil
+        let message = StoredMessage(
+            id: UUID().uuidString, conversationID: contact.identityHex,
+            senderIdentity: self.identityHex, participantType: .human, text: firstMessage,
+            sentAt: clock.now(), localStatus: "sent")
+        try await store.save(message)
+        eventContinuation?.yield(.messageAdded(message))
+        return contact.identityHex
+    }
+
     /// Open-inbox window: messages from anyone are auto-accepted until
     /// `until` (nil disables). Survives relaunch; the privacy trade is the
     /// user's explicit, time-bounded choice (THREAT_MODEL note).
@@ -692,6 +730,13 @@ actor PersonaRuntime {
             eventContinuation?.yield(.messageAdded(row))
         case .quarantined(_, let reason):
             Log.engine.info("envelope quarantined: \(reason, privacy: .public)")
+        case .nearbyContact(let identityHex, _):
+            // Binding-verified co-present peer (SPEC §10). Surface it; nothing
+            // is established until the user starts a conversation.
+            if nearbyContactNames[identityHex] == nil {
+                nearbyContactNames[identityHex] = "Nearby · \(String(identityHex.prefix(8)))"
+                eventContinuation?.yield(.nearbyDiscovered(identityHex: identityHex))
+            }
         }
     }
 

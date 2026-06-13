@@ -303,12 +303,40 @@ struct NewChatView: View {
                                 npub: npub, firstMessage: firstMessage.isEmpty ? "👋" : firstMessage)
                             dismiss()
                         } catch {
-                            self.error = "Couldn't verify this contact's PQRC setup. They may not have published keys yet."
+                            self.error = "Couldn't reach this contact's keys. Either the relay is unreachable, or they haven't published their PQRC keys to it yet. If you're together in person, use Nearby below — no server needed."
                         }
                     }
                 }
                 .disabled(npub.isEmpty)
                 .accessibilityIdentifier("new-chat-start")
+
+                // Relay-free path: peers verified directly over the local link
+                // (SPEC §10). Only shown when the Nearby setting is on.
+                if model.localLinkEnabled {
+                    Section {
+                        if model.nearbyContacts.isEmpty {
+                            Text("No one nearby yet. Both devices need Nearby on, foregrounded, and within Wi-Fi/Bluetooth range.")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                        ForEach(model.nearbyContacts) { peer in
+                            Button {
+                                Task {
+                                    if (await model.startNearby(peer.identityHex, firstMessage: firstMessage)) != nil {
+                                        dismiss()
+                                    }
+                                }
+                            } label: {
+                                Label(peer.name, systemImage: "wave.3.right")
+                            }
+                            .accessibilityIdentifier("nearby-\(peer.name)")
+                        }
+                    } header: {
+                        Text("Nearby · no server")
+                    } footer: {
+                        Text("Keys are exchanged and verified directly between your devices. Confirm the 60-digit safety code in person afterwards.")
+                    }
+                }
             }
             .navigationTitle("New Conversation")
             .toolbar {

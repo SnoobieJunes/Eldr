@@ -39,6 +39,10 @@ public enum MessengerEvent: Sendable {
     case messageRequest(senderNostrPubkeyHex: String, wrapEventID: String)
     /// Out-of-order beyond MAX_SKIP or otherwise quarantined (APP-SPEC §13).
     case quarantined(wrapEventID: String, reason: String)
+    /// A co-present peer discovered over the local link, binding-verified both
+    /// directions (SPEC §10, Nearby setting). The app can start a conversation
+    /// with no relay; identity-of-human is still confirmed via the safety code.
+    case nearbyContact(identityHex: String, nostrPubkeyHex: String)
 }
 
 /// The client engine: send pipeline (encrypt → wrap → outbox → publish) and
@@ -76,6 +80,10 @@ public actor PQRCMessenger {
     /// envelopes each (oldest evicted first).
     private var pendingRequests: [String: [GiftWrap.Unwrapped]] = [:]
     private var pendingRequestOrder: [String] = []
+    /// Nearby peers discovered + binding-verified over the local link (SPEC §10),
+    /// keyed by identity hex, with their prekey bundle — lets us establish or
+    /// accept a session with NO relay.
+    private var nearbyBundles: [String: (contact: VerifiedContact, bundle: PrekeyBundle)] = [:]
     private var pumpTasks: [Task<Void, Never>] = []
 
     // Output
@@ -112,6 +120,15 @@ public actor PQRCMessenger {
     /// Publishes the kind 10420 binding, 10421 bundle and 10050 relay list.
     /// `maxAttempts` bounds the per-event retry: callers that publish at boot
     /// pass a small value so a down relay logs a few lines instead of flooding.
+    /// Builds our signed kind-10420 binding event (used for relay announce and
+    /// for the relay-free Nearby bundle exchange).
+    private func buildBindingEvent() throws -> NostrEvent {
+        let binding = try IdentityBinding.make(
+            identity: identity, nostrPubkey: Data(hexString: nostrKeypair.publicKeyHex) ?? Data())
+        return try PQRCEvents.bindingEvent(
+            binding: binding, signer: nostrKeypair, createdAt: clock.now(), randomSource: randomSource)
+    }
+
     public func announce(relayURLs: [String], maxAttempts: Int = 60) async throws {
         let now = clock.now()
         let binding = try IdentityBinding.make(
@@ -187,7 +204,17 @@ public actor PQRCMessenger {
     /// envelope through the normal pipeline (handshake → session → message).
     /// Returns the verified contact so the caller can persist it.
     public func acceptRequest(senderNostrPubkeyHex: String) async throws -> VerifiedContact {
-        let (contact, _) = try await fetchVerifiedPeer(nostrPubkeyHex: senderNostrPubkeyHex)
+        let contact: VerifiedContact
+        if let nearby = nearbyBundles.values.first(where: {
+            $0.contact.nostrPubkeyHex == senderNostrPubkeyHex
+        }) {
+            // Relay-free: this peer's binding was already verified both
+            // directions over the local link (SPEC §10).
+            contact = nearby.contact
+            contactsByNostrPub[contact.nostrPubkeyHex] = contact
+        } else {
+            (contact, _) = try await fetchVerifiedPeer(nostrPubkeyHex: senderNostrPubkeyHex)
+        }
         let held = pendingRequests.removeValue(forKey: senderNostrPubkeyHex) ?? []
         pendingRequestOrder.removeAll { $0 == senderNostrPubkeyHex }
         for unwrapped in held {
@@ -201,6 +228,40 @@ public actor PQRCMessenger {
     public func declineRequest(senderNostrPubkeyHex: String) {
         pendingRequests.removeValue(forKey: senderNostrPubkeyHex)
         pendingRequestOrder.removeAll { $0 == senderNostrPubkeyHex }
+    }
+
+    // MARK: - Nearby (relay-free, SPEC §10)
+
+    /// A nearby peer's binding verified both directions over the local link.
+    /// Stored (not auto-added as a contact) and surfaced so the user can choose
+    /// to start a conversation; nothing is established until they do.
+    private func handleDiscovered(_ peer: DiscoveredContact) async {
+        // Already a contact — nothing to surface (the seal path handles them).
+        guard contactsByNostrPub[peer.contact.nostrPubkeyHex] == nil else { return }
+        nearbyBundles[peer.contact.identityHex] = (peer.contact, peer.bundle)
+        eventContinuation?.yield(
+            .nearbyContact(
+                identityHex: peer.contact.identityHex,
+                nostrPubkeyHex: peer.contact.nostrPubkeyHex))
+    }
+
+    /// Identity hexes of currently-discovered nearby peers.
+    public func nearbyIdentities() -> [String] { Array(nearbyBundles.keys) }
+
+    /// Starts a session with a nearby peer using the bundle we verified over
+    /// the local link — NO relay. The handshake is delivered over the link
+    /// (deliver() prefers it; it only falls back to a relay if the peer walked
+    /// out of range mid-send).
+    public func establishWithNearby(
+        identityHex: String, firstMessage: MessageBody
+    ) async throws -> VerifiedContact {
+        guard let nearby = nearbyBundles[identityHex] else {
+            throw PQRCError.sessionNotEstablished
+        }
+        contactsByNostrPub[nearby.contact.nostrPubkeyHex] = nearby.contact
+        try await establishSession(
+            with: nearby.contact, bundle: nearby.bundle, firstMessage: firstMessage)
+        return nearby.contact
     }
 
     /// Attaches the local-first transport (SPEC §10). Must be called before
@@ -370,6 +431,22 @@ public actor PQRCMessenger {
             pumpTasks.append(task)
         }
         if let localLink {
+            // Advertise our signed binding + prekey bundle so co-present peers
+            // can verify and add us with no relay (SPEC §10, Nearby setting).
+            if let bindingEvent = try? buildBindingEvent(),
+                let ownBundle = try? await prekeyManager.publicBundle()
+            {
+                await localLink.advertiseOwnBundle(
+                    bindingEvent: bindingEvent, prekeyBundle: ownBundle)
+            }
+            // Discovered nearby peers (binding-verified) → surface to the app.
+            let discovered = await localLink.discoveredContacts()
+            let discoveredTask = Task { [weak self] in
+                for await peer in discovered {
+                    await self?.handleDiscovered(peer)
+                }
+            }
+            pumpTasks.append(discoveredTask)
             // Local link pump: seals arrive without a wrap (SPEC §10) but join
             // the exact same pipeline right after the unwrap step, so dedupe,
             // blocklist, agent-integrity and retry behavior are identical on

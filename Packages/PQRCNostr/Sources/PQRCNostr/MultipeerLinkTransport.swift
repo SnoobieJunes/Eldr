@@ -50,6 +50,10 @@ struct LinkPayload: Codable, Sendable {
         case helloProof = "hello_proof"
         /// A kind-13 seal event (the actual message traffic).
         case seal
+        /// Our signed kind-10420 binding + prekey bundle, so a co-present peer
+        /// can verify and add us with no relay (SPEC §10). Sent only after the
+        /// hello proof, i.e. to a peer that proved its own identity.
+        case bundle
     }
 
     var kind: Kind
@@ -61,6 +65,8 @@ struct LinkPayload: Codable, Sendable {
     var sig: Data?
     /// `seal`: the seal event, JSON-encoded with the standard event codec.
     var seal: Data?
+    /// `bundle`: JSON-encoded `BundleAnnouncement`.
+    var bundle: Data?
 
     /// Domain-separated proof message: prevents a hello proof from being
     /// confused with any other PQRC signature ("pqrc-agent-msg-v1",
@@ -68,6 +74,20 @@ struct LinkPayload: Codable, Sendable {
     /// challenge, so captured proofs cannot be replayed to impersonate a peer.
     static func helloProofMessage(identity: Data, challenge: Data) -> Data {
         Data("pqrc-local-hello-v1".utf8) + identity + challenge
+    }
+}
+
+/// The contents of a `.bundle` payload: a peer's signed kind-10420 binding
+/// event plus its prekey bundle. Both are signature-self-verifying, so a
+/// receiver can establish trust offline (no relay) exactly as it would from
+/// relay-fetched copies.
+struct BundleAnnouncement: Codable, Sendable {
+    let bindingEvent: NostrEvent
+    let prekeyBundle: PrekeyBundle
+
+    enum CodingKeys: String, CodingKey {
+        case bindingEvent = "binding_event"
+        case prekeyBundle = "prekey_bundle"
     }
 }
 
@@ -111,6 +131,16 @@ public actor MultipeerLinkTransport: LocalLinkTransport {
     private let sealStream: AsyncStream<NostrEvent>
     private let sealContinuation: AsyncStream<NostrEvent>.Continuation
 
+    /// Our own signed binding + prekey bundle to advertise to co-present peers
+    /// (set by the messenger when the Nearby setting is on). nil = don't
+    /// advertise; we still receive others' bundles.
+    private var ownBundleBlob: Data?
+    /// Stream of binding-verified nearby peers handed to the messenger.
+    private let discoveredStream: AsyncStream<DiscoveredContact>
+    private let discoveredContinuation: AsyncStream<DiscoveredContact>.Continuation
+    /// Identities we've already surfaced this session — one discovery per peer.
+    private var discoveredIdentityHexes: Set<String> = []
+
     /// Payloads rejected by verification/decoding, for test introspection —
     /// the values are never logged (CLAUDE.md invariant 12).
     public private(set) var droppedPayloadCount = 0
@@ -120,6 +150,8 @@ public actor MultipeerLinkTransport: LocalLinkTransport {
         self.link = link
         self.randomSource = randomSource
         (self.sealStream, self.sealContinuation) = AsyncStream.makeStream(of: NostrEvent.self)
+        (self.discoveredStream, self.discoveredContinuation) =
+            AsyncStream.makeStream(of: DiscoveredContact.self)
     }
 
     // MARK: Lifecycle
@@ -147,7 +179,9 @@ public actor MultipeerLinkTransport: LocalLinkTransport {
         issuedChallenges.removeAll()
         peerByIdentityHex.removeAll()
         identityHexByPeer.removeAll()
+        discoveredIdentityHexes.removeAll()
         sealContinuation.finish()
+        discoveredContinuation.finish()
     }
 
     // MARK: LocalLinkTransport
@@ -174,6 +208,21 @@ public actor MultipeerLinkTransport: LocalLinkTransport {
 
     public func incoming() async -> AsyncStream<NostrEvent> {
         sealStream
+    }
+
+    public func advertiseOwnBundle(bindingEvent: NostrEvent, prekeyBundle: PrekeyBundle) async {
+        let announcement = BundleAnnouncement(bindingEvent: bindingEvent, prekeyBundle: prekeyBundle)
+        ownBundleBlob = try? WireJSON.encoder().encode(announcement)
+        // Push to any peer already verified (they connected before we had our
+        // bundle ready); new peers get it right after their hello proof.
+        guard let blob = ownBundleBlob else { return }
+        for peer in peerByIdentityHex.values {
+            await sendPayload(LinkPayload(kind: .bundle, bundle: blob), to: peer)
+        }
+    }
+
+    public func discoveredContacts() async -> AsyncStream<DiscoveredContact> {
+        discoveredStream
     }
 
     /// Identities of currently connected-and-proven peers (presence UI, tests).
@@ -247,6 +296,40 @@ public actor MultipeerLinkTransport: LocalLinkTransport {
             }
             peerByIdentityHex[claimed.hexString] = peer
             identityHexByPeer[peer] = claimed.hexString
+            // The peer just proved its identity; if we're advertising (Nearby
+            // on), hand it our signed binding + bundle so it can add us with
+            // no relay. Symmetric — it does the same for us.
+            if let blob = ownBundleBlob {
+                await sendPayload(LinkPayload(kind: .bundle, bundle: blob), to: peer)
+            }
+        case .bundle:
+            // A co-present peer's signed binding + prekey bundle. Accept only
+            // from a hello-proven peer, then verify the binding in BOTH
+            // directions and every prekey signature — identical to the relay
+            // path (the relay was never a trust anchor). One discovery per
+            // identity per session.
+            guard let claimedHex = identityHexByPeer[peer],
+                let blob = payload.bundle,
+                let announcement = try? WireJSON.decoder().decode(BundleAnnouncement.self, from: blob),
+                let (verified, raw) = try? PQRCEvents.verifyBindingEventWithRaw(announcement.bindingEvent),
+                // The binding's identity MUST match the identity this peer proved
+                // over the hello — otherwise a proven peer could hand us someone
+                // else's binding.
+                verified.identityPubkey.hexString == claimedHex,
+                // Every prekey must be signed by that binding-verified identity
+                // key (same check the relay path runs via verifyPrekeyBundleEvent).
+                (try? announcement.prekeyBundle.verifySignatures(
+                    identityPubkey: verified.identityPubkey)) != nil
+            else {
+                droppedPayloadCount += 1
+                return
+            }
+            guard !discoveredIdentityHexes.contains(claimedHex) else { return }
+            discoveredIdentityHexes.insert(claimedHex)
+            discoveredContinuation.yield(
+                DiscoveredContact(
+                    contact: VerifiedContact(binding: verified, raw: raw),
+                    bundle: announcement.prekeyBundle))
         case .seal:
             // Seals are accepted only from peers that completed the hello
             // proof — everyone else is noise on a public radio. The seal's own

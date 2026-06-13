@@ -325,17 +325,95 @@ struct LocalLinkTests {
             bundle: try await bob.persona.prekeyManager.publicBundle(),
             firstMessage: MessageBody(text: "you don't know me", sentAt: 0))
 
+        // Wait specifically for the request (Bob may also surface a
+        // .nearbyContact for Carol now that bundles are exchanged — that's
+        // expected; the request is what this test asserts).
         var waited = 0
-        while await bob.inbox.all().isEmpty && waited < 3_000 {
-            try? await Task.sleep(for: .milliseconds(10))
-            waited += 10
-        }
-        let events = await bob.inbox.all()
-        let isRequest = events.contains {
-            if case .messageRequest = $0 { return true }
-            return false
+        var isRequest = false
+        while waited < 3_000 && !isRequest {
+            isRequest = await bob.inbox.all().contains {
+                if case .messageRequest = $0 { return true }
+                return false
+            }
+            if !isRequest {
+                try? await Task.sleep(for: .milliseconds(10))
+                waited += 10
+            }
         }
         #expect(isRequest, "unknown local sender must gate through message requests")
         #expect(await bob.inbox.messages().isEmpty)
+    }
+
+    // MARK: - Relay-free discovery + establishment (SPEC §10, Nearby)
+
+    /// Two strangers (no shared contact, NO relay transport at all) become
+    /// co-present, exchange + verify each other's signed binding + prekey
+    /// bundle over the local link, and establish a working session — proving a
+    /// conversation can be set up with zero server involvement.
+    @Test func nearby_discoverVerifyAndEstablish_withNoRelay() async throws {
+        let hub = LocalLinkSimulator()
+        let clock = FixedClock(now: 1_753_000_000)
+        var personas: [Persona] = []
+        var inboxes: [EventCollector] = []
+        for (name, seedByte, seed) in [("alice", "a1", 911), ("bob", "b2", 912)] {
+            // transports: [] — there is literally no relay; anything that works
+            // MUST have gone over the local link.
+            let persona = try await Persona.make(
+                name: name, seedByte: seedByte, seed: UInt64(seed),
+                transports: [], clock: clock)
+            let link = MultipeerLinkTransport(
+                identity: persona.identity,
+                link: await hub.makeLink(name: name),
+                randomSource: SeededRandomSource(seed: UInt64(seed + 50)))
+            await persona.messenger.setLocalLink(link)
+            try await link.start()
+            let inbox = EventCollector()
+            await inbox.attach(try await persona.messenger.start())
+            personas.append(persona)
+            inboxes.append(inbox)
+        }
+        let (alice, bob) = (personas[0], personas[1])
+        let bobInbox = inboxes[1]
+
+        // Discovery: each binding-verifies the other over the link (invariant 7).
+        func waitNearby(_ m: PQRCMessenger, _ identityHex: String) async -> Bool {
+            var waited = 0
+            while waited < 5_000 {
+                if await m.nearbyIdentities().contains(identityHex) { return true }
+                try? await Task.sleep(for: .milliseconds(10))
+                waited += 10
+            }
+            return false
+        }
+        #expect(await waitNearby(alice.messenger, bob.identityHex), "Alice should discover Bob")
+        #expect(await waitNearby(bob.messenger, alice.identityHex), "Bob should discover Alice")
+
+        // Alice starts a conversation with nearby Bob — bundle came from the
+        // link, handshake goes over the link, no relay exists to fall back to.
+        _ = try await alice.messenger.establishWithNearby(
+            identityHex: bob.identityHex,
+            firstMessage: MessageBody(text: "hi over the air, no server", sentAt: 1))
+
+        // Bob holds Alice's handshake as a request (she's not yet his contact);
+        // accepting uses the link-verified bundle — still no relay.
+        var sawRequest = false
+        var waited = 0
+        while waited < 5_000 && !sawRequest {
+            sawRequest = await bobInbox.all().contains {
+                if case .messageRequest(let sender, _) = $0 {
+                    return sender == alice.nostrKeypair.publicKeyHex
+                }
+                return false
+            }
+            if !sawRequest { try? await Task.sleep(for: .milliseconds(10)); waited += 10 }
+        }
+        #expect(sawRequest, "Alice's nearby handshake should arrive as a request")
+
+        let accepted = try await bob.messenger.acceptRequest(
+            senderNostrPubkeyHex: alice.nostrKeypair.publicKeyHex)
+        #expect(accepted.identityHex == alice.identityHex)
+        let got = await bobInbox.waitForMessages(1)
+        #expect(got.contains { $0.body.text == "hi over the air, no server" },
+            "message #0 must decrypt — full session established with no relay")
     }
 }

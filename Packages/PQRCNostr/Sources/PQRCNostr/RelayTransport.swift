@@ -79,6 +79,37 @@ public protocol LocalLinkTransport: Sendable {
     /// messenger unseals and feeds them through the same receive pipeline as
     /// relay-delivered envelopes.
     func incoming() async -> AsyncStream<NostrEvent>
+
+    /// Advertise our own signed kind-10420 binding + prekey bundle to
+    /// co-present peers, so they can verify and add us WITHOUT a relay
+    /// (SPEC §10, gated by the app's Nearby setting). Both are
+    /// signature-self-verifying, so the relay was never a trust anchor.
+    func advertiseOwnBundle(bindingEvent: NostrEvent, prekeyBundle: PrekeyBundle) async
+
+    /// Co-present peers whose binding verified in BOTH directions (invariant 7),
+    /// paired with their prekey bundle — ready to establish a session with no
+    /// relay. Identity-of-human is still confirmed out-of-band via the safety
+    /// code, exactly as on the relay path.
+    func discoveredContacts() async -> AsyncStream<DiscoveredContact>
+}
+
+/// A nearby peer discovered over the local link, already binding-verified.
+public struct DiscoveredContact: Sendable {
+    public let contact: VerifiedContact
+    public let bundle: PrekeyBundle
+    public init(contact: VerifiedContact, bundle: PrekeyBundle) {
+        self.contact = contact
+        self.bundle = bundle
+    }
+}
+
+/// Default no-ops so a conformer that doesn't support nearby discovery (or a
+/// test double) need not implement the bundle-exchange surface.
+extension LocalLinkTransport {
+    public func advertiseOwnBundle(bindingEvent: NostrEvent, prekeyBundle: PrekeyBundle) async {}
+    public func discoveredContacts() async -> AsyncStream<DiscoveredContact> {
+        AsyncStream { $0.finish() }
+    }
 }
 
 /// Typed errors for the local-link path (CLAUDE.md conventions: typed errors,
