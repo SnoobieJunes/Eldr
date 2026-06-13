@@ -222,6 +222,14 @@ and affects interop; `[app-only]` — client behavior, no wire impact;
   (review M6; downgraded from `.complete`, which made the DB unreadable while
   the device was locked and caused open/write failures on real hardware — the
   envelope encryption under the SE-wrapped key is the actual at-rest guarantee).
+- **A16 — Export-compliance declaration** (2026-06-13): the app honestly
+  declares `ITSAppUsesNonExemptEncryption = YES` (E2EE is not an exempt case),
+  set ONCE as a build setting on the app target (Debug + Release) — NOT also in
+  the custom `Info.plist`, since a duplicate fails archive validation (commit
+  `a723557`). It qualifies for the EAR §740.17(b)(1) mass-market exemption
+  because every primitive is standard/published (SPEC §2). The compliance code
+  key is deliberately omitted until Apple issues one. Submission answers and
+  the annual BIS self-classification filing are in `docs/EXPORT-COMPLIANCE.md`.
 
 ### Tech debt `[tech-debt]`
 
