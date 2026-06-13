@@ -148,6 +148,9 @@ struct ConversationView: View {
                 .padding(.vertical, 8)
             }
             .accessibilityIdentifier("message-list")
+            // Hard bottom edge near the composer — soft-blur zones fail the
+            // contrast audit (see ThreadView).
+            .scrollEdgeEffectStyle(.hard, for: .bottom)
             // Conversations open at the latest message (iMessage behavior).
             .defaultScrollAnchor(.bottom)
             .onChange(of: model.messages(for: conversationID).count) {
@@ -162,9 +165,14 @@ struct ConversationView: View {
         VStack(spacing: 6) {
             if let paste = largePaste {
                 // The chip: the field never visibly chokes on a 200 KB paste.
+                // Copy is honest about the two paths (review L1): only > 64 KB
+                // takes the encrypted-attachment pointer; 16–64 KB still goes
+                // inline, padded to a size bucket like any other message.
                 HStack {
                     Label(
-                        "Large text · \(paste.utf8.count / 1024) KB · sends as encrypted attachment",
+                        paste.utf8.count > 65536
+                            ? "Large text · \(paste.utf8.count / 1024) KB · sends as encrypted attachment"
+                            : "Large text · \(paste.utf8.count / 1024) KB · sends padded inline",
                         systemImage: "doc.zipper")
                     .font(.caption)
                     .lineLimit(1)
@@ -177,13 +185,17 @@ struct ConversationView: View {
                     .accessibilityLabel("Remove large text attachment")
                 }
                 .padding(8)
-                .background(.thinMaterial, in: RoundedRectangle(cornerRadius: 10))
+                .background(.thinMaterial, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
                 .accessibilityIdentifier("large-paste-chip")
             }
             HStack(alignment: .bottom, spacing: 8) {
                 TextField("Message", text: $draftText, axis: .vertical)
                     .lineLimit(1...5)
-                    .textFieldStyle(.roundedBorder)
+                    .padding(.horizontal, 14)
+                    .padding(.vertical, 8)
+                    .background(
+                        Color(.secondarySystemBackground),
+                        in: RoundedRectangle(cornerRadius: 20, style: .continuous))
                     .accessibilityIdentifier("composer-field")
                     .onChange(of: draftText) { _, newValue in
                         // > 16 KB collapses into the chip (APP-SPEC §6.3).
@@ -199,7 +211,8 @@ struct ConversationView: View {
                     Task { await model.send(outgoing, conversationID: conversationID) }
                 } label: {
                     Image(systemName: "arrow.up.circle.fill")
-                        .font(.title2)
+                        .font(.title)
+                        .symbolRenderingMode(.hierarchical)
                 }
                 .frame(minWidth: 44, minHeight: 44)
                 .disabled(draftText.isEmpty && largePaste == nil)

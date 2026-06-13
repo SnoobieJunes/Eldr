@@ -13,26 +13,14 @@ import SwiftData
 @Model
 final class ContactModel {
     @Attribute(.unique) var identityHex: String
-    var nostrPubkeyHex: String
-    var agentPubkeyHex: String
-    var crossSignatureB64: String
-    /// Encrypted local-only nickname (D11 — no published profiles).
-    var encryptedNickname: Data
-    var verified: Bool
-    var blocked: Bool
+    /// Encrypted `ContactRecord` JSON (binding, nicknames, flags). The whole
+    /// record is one sealed blob: nothing about a contact except the opaque
+    /// row key is visible at rest (D11 — no published profiles).
+    var encryptedPayload: Data = Data()
 
-    init(
-        identityHex: String, nostrPubkeyHex: String, agentPubkeyHex: String,
-        crossSignatureB64: String, encryptedNickname: Data, verified: Bool = false,
-        blocked: Bool = false
-    ) {
+    init(identityHex: String, encryptedPayload: Data) {
         self.identityHex = identityHex
-        self.nostrPubkeyHex = nostrPubkeyHex
-        self.agentPubkeyHex = agentPubkeyHex
-        self.crossSignatureB64 = crossSignatureB64
-        self.encryptedNickname = encryptedNickname
-        self.verified = verified
-        self.blocked = blocked
+        self.encryptedPayload = encryptedPayload
     }
 }
 
@@ -124,6 +112,30 @@ struct ThreadMeta: Codable, Sendable {
     var title: String
     var createdBy: String
     var anchorMessageID: String?
+}
+
+/// Everything the app knows about a verified contact, sealed as one blob.
+/// The binding is re-verified through `BindingVerifier.verify` on every
+/// restore — invariant 7's only-path-to-trusted-keys survives persistence.
+struct ContactRecord: Codable, Sendable {
+    var binding: IdentityBinding
+    /// User-set local rename; takes precedence over everything (D11).
+    var localNickname: String?
+    /// Alias the peer chose for themselves, received over the encrypted
+    /// channel (only established contacts ever see it).
+    var peerAlias: String?
+    var verified: Bool
+    var blocked: Bool
+    /// Session-restore fidelity: the lrp unlinkability caveat sticks.
+    var usedLastResortPrekey: Bool
+
+    var identityHex: String { binding.identityPubkey.hexString }
+
+    /// Display-name resolution, one rule everywhere:
+    /// local rename > peer's self-chosen alias > truncated key.
+    var displayName: String {
+        localNickname ?? peerAlias ?? "Contact \(String(identityHex.prefix(8)))"
+    }
 }
 
 // MARK: - SwiftData-backed MessageStore
@@ -233,6 +245,132 @@ actor SwiftDataMessageStore: MessageStore {
         try modelContext.save()
     }
 
+    func sessions() throws -> [(peerIdentityHex: String, snapshot: RatchetSnapshot)] {
+        let crypter = try requireCrypter()
+        return try modelContext.fetch(FetchDescriptor<SessionRecordModel>()).compactMap { model in
+            guard
+                let plain = try? crypter.open(
+                    model.encryptedSnapshot, recordID: "session-\(model.peerIdentityHex)"),
+                let snapshot = try? JSONDecoder().decode(RatchetSnapshot.self, from: plain)
+            else { return nil }
+            return (model.peerIdentityHex, snapshot)
+        }
+    }
+
+    // MARK: Contact persistence
+
+    func saveContact(_ record: ContactRecord) throws {
+        let crypter = try requireCrypter()
+        let identityHex = record.identityHex
+        let blob = try crypter.seal(
+            try JSONEncoder().encode(record), recordID: "contact-\(identityHex)")
+        let descriptor = FetchDescriptor<ContactModel>(
+            predicate: #Predicate { $0.identityHex == identityHex })
+        if let existing = try modelContext.fetch(descriptor).first {
+            existing.encryptedPayload = blob
+        } else {
+            modelContext.insert(ContactModel(identityHex: identityHex, encryptedPayload: blob))
+        }
+        try modelContext.save()
+    }
+
+    func contacts() throws -> [ContactRecord] {
+        let crypter = try requireCrypter()
+        return try modelContext.fetch(FetchDescriptor<ContactModel>()).compactMap { model in
+            guard
+                let plain = try? crypter.open(
+                    model.encryptedPayload, recordID: "contact-\(model.identityHex)")
+            else { return nil }
+            return try? JSONDecoder().decode(ContactRecord.self, from: plain)
+        }
+    }
+
+    // MARK: Conversation / thread metadata persistence
+
+    func saveConversationMeta(id: String, type: String, meta: ConversationMeta) throws {
+        let crypter = try requireCrypter()
+        let blob = try crypter.seal(try JSONEncoder().encode(meta), recordID: "conv-\(id)")
+        let descriptor = FetchDescriptor<ConversationModel>(
+            predicate: #Predicate { $0.id == id })
+        if let existing = try modelContext.fetch(descriptor).first {
+            existing.encryptedMeta = blob
+            existing.type = type
+        } else {
+            modelContext.insert(ConversationModel(id: id, type: type, encryptedMeta: blob))
+        }
+        try modelContext.save()
+    }
+
+    func conversationMetas() throws -> [(id: String, type: String, meta: ConversationMeta, pinned: Bool)] {
+        let crypter = try requireCrypter()
+        return try modelContext.fetch(FetchDescriptor<ConversationModel>()).compactMap { model in
+            guard
+                let plain = try? crypter.open(model.encryptedMeta, recordID: "conv-\(model.id)"),
+                let meta = try? JSONDecoder().decode(ConversationMeta.self, from: plain)
+            else { return nil }
+            return (model.id, model.type, meta, model.pinned)
+        }
+    }
+
+    func setPinned(conversationID: String, pinned: Bool) throws {
+        let descriptor = FetchDescriptor<ConversationModel>(
+            predicate: #Predicate { $0.id == conversationID })
+        guard let model = try modelContext.fetch(descriptor).first else { return }
+        model.pinned = pinned
+        try modelContext.save()
+    }
+
+    func saveThreadMeta(threadID: String, conversationID: String, meta: ThreadMeta) throws {
+        let crypter = try requireCrypter()
+        let blob = try crypter.seal(try JSONEncoder().encode(meta), recordID: "thread-\(threadID)")
+        let descriptor = FetchDescriptor<ThreadRecordModel>(
+            predicate: #Predicate { $0.id == threadID })
+        if let existing = try modelContext.fetch(descriptor).first {
+            existing.encryptedMeta = blob
+        } else {
+            modelContext.insert(
+                ThreadRecordModel(id: threadID, conversationID: conversationID, encryptedMeta: blob))
+        }
+        try modelContext.save()
+    }
+
+    func threadMetas() throws -> [(threadID: String, conversationID: String, meta: ThreadMeta)] {
+        let crypter = try requireCrypter()
+        return try modelContext.fetch(FetchDescriptor<ThreadRecordModel>()).compactMap { model in
+            guard
+                let plain = try? crypter.open(model.encryptedMeta, recordID: "thread-\(model.id)"),
+                let meta = try? JSONDecoder().decode(ThreadMeta.self, from: plain)
+            else { return nil }
+            return (model.id, model.conversationID, meta)
+        }
+    }
+
+    /// Distinct conversation ids that have at least one stored message.
+    func conversationIDsWithMessages() throws -> [String] {
+        var seen: Set<String> = []
+        var ordered: [String] = []
+        let descriptor = FetchDescriptor<MessageModel>(sortBy: [SortDescriptor(\.localSeq)])
+        for model in try modelContext.fetch(descriptor) where !seen.contains(model.conversationID) {
+            seen.insert(model.conversationID)
+            ordered.append(model.conversationID)
+        }
+        return ordered
+    }
+
+    // MARK: Processed-envelope dedupe (replay survival across relaunch)
+
+    /// Without this, a relaunch would re-receive every stored relay envelope:
+    /// the ratchet rejects them (keys deleted — FS working as designed), but
+    /// they'd churn the retry queue and surface as quarantine noise.
+    func markProcessed(eventID: String) throws {
+        modelContext.insert(ProcessedEventModel(eventID: eventID))
+        try modelContext.save()
+    }
+
+    func processedEventIDs() throws -> Set<String> {
+        Set(try modelContext.fetch(FetchDescriptor<ProcessedEventModel>()).map(\.eventID))
+    }
+
     static func makeContainer(inMemory: Bool, url: URL? = nil) throws -> ModelContainer {
         let schema = Schema([
             ContactModel.self, ConversationModel.self, MessageModel.self,
@@ -246,6 +384,17 @@ actor SwiftDataMessageStore: MessageStore {
         } else {
             configuration = ModelConfiguration(schema: schema)
         }
-        return try ModelContainer(for: schema, configurations: [configuration])
+        let container = try ModelContainer(for: schema, configurations: [configuration])
+        if !inMemory {
+            // Defense-in-depth claimed by APP-SPEC §3 / THREAT_MODEL (review
+            // M6): complete file protection on the store files, on top of the
+            // envelope encryption that already covers every sensitive field.
+            for fileURL in container.configurations.map(\.url) {
+                try? FileManager.default.setAttributes(
+                    [.protectionKey: FileProtectionType.complete],
+                    ofItemAtPath: fileURL.path)
+            }
+        }
+        return container
     }
 }

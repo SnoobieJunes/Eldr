@@ -11,8 +11,8 @@ struct OnboardingView: View {
     var body: some View {
         NavigationStack {
             ScrollView {
-                VStack(alignment: .leading, spacing: 24) {
-                    VStack(alignment: .leading, spacing: 8) {
+                VStack(alignment: .leading, spacing: 16) {
+                    OnboardingCard {
                         Label("Private by construction", systemImage: "lock.shield")
                             .font(.headline)
                         Text(
@@ -21,7 +21,7 @@ struct OnboardingView: View {
                         .font(.subheadline)
                         .foregroundStyle(.secondary)
                     }
-                    VStack(alignment: .leading, spacing: 8) {
+                    OnboardingCard {
                         Label("AI, transparently", systemImage: "sparkles")
                             .font(.headline)
                         Text(
@@ -30,7 +30,7 @@ struct OnboardingView: View {
                         .font(.subheadline)
                         .foregroundStyle(.secondary)
                     }
-                    VStack(alignment: .leading, spacing: 8) {
+                    OnboardingCard {
                         Text("Your name (only stored on this device)")
                             .font(.headline)
                         TextField("Display name", text: $displayName)
@@ -38,7 +38,7 @@ struct OnboardingView: View {
                             .accessibilityIdentifier("onboarding-name")
                     }
                     // The unskippable warning (recovery is a non-goal, SPEC §0).
-                    VStack(alignment: .leading, spacing: 8) {
+                    OnboardingCard {
                         Label("No recovery — by design", systemImage: "exclamationmark.triangle.fill")
                             .font(.headline)
                             .foregroundStyle(.orange)
@@ -65,6 +65,7 @@ struct OnboardingView: View {
                         }
                     }
                     .buttonStyle(.borderedProminent)
+                    .controlSize(.large)
                     .disabled(!acknowledgedLoss || creating)
                     .accessibilityIdentifier("onboarding-create")
                 }
@@ -72,5 +73,22 @@ struct OnboardingView: View {
             }
             .navigationTitle("Welcome to PQRC")
         }
+    }
+}
+
+/// Grouped-inset style explainer card (iOS 26 look without translucency —
+/// secondary text over materials fails the contrast audit).
+private struct OnboardingCard<Content: View>: View {
+    @ViewBuilder let content: Content
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            content
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(16)
+        .background(
+            Color(.secondarySystemGroupedBackground),
+            in: RoundedRectangle(cornerRadius: 16, style: .continuous))
     }
 }

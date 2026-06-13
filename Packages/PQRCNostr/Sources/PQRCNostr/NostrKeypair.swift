@@ -33,14 +33,14 @@ public struct NostrKeypair: Sendable {
 
     public init(randomSource: any RandomSource) throws {
         // Rejection-sample until the scalar is valid for the curve (overwhelmingly first try).
-        var candidate = randomSource.bytes(32)
-        var key = try? P256K.Schnorr.PrivateKey(dataRepresentation: candidate)
-        while key == nil {
-            candidate = randomSource.bytes(32)
-            key = try? P256K.Schnorr.PrivateKey(dataRepresentation: candidate)
+        while true {
+            let candidate = randomSource.bytes(32)
+            if let key = try? P256K.Schnorr.PrivateKey(dataRepresentation: candidate) {
+                self.privateKeyData = candidate
+                self.publicKeyHex = Data(key.xonly.bytes).hexString
+                return
+            }
         }
-        self.privateKeyData = candidate
-        self.publicKeyHex = Data(key!.xonly.bytes).hexString
     }
 
     public var npub: String { Bech32.npub(publicKeyHex) }

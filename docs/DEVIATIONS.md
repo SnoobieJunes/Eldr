@@ -120,6 +120,20 @@ and affects interop; `[app-only]` — client behavior, no wire impact;
   `send(RumorContent, to:)` to `send(seal: NostrEvent, to peerIdentity:)`:
   the rumor alone cannot carry the AD timestamp or sender authenticity (N17).
   The seam had no implementations, so this is not a breaking change.
+- **N21 — Optional `alias` field in `MessageBody`** (2026-06-12): a
+  sender-chosen display alias travels INSIDE the ratchet ciphertext, so only
+  already-established contacts ever learn it — no public profile exists (D11
+  preserved). Older clients ignore the unknown key (SPEC §12). Receiver rule:
+  the user's local rename always wins over the peer's self-chosen alias.
+  Queued for the NIP.
+- **N22 — Two receive-path gates hardened at the messenger** (2026-06-12,
+  from the compliance review): (a) M-1 — an `ai_window` whose `enabled_by` ≠
+  the sender's binding-verified identity key, or whose signature fails, is
+  stripped before `ReceivedMessage` is emitted and flagged as a protocol
+  violation (SPEC §13.3 now enforced at, not above, the protocol layer; the
+  AgentEngine still re-checks). (b) L-4 — rumors with `pqrc_version ≠ "1"`
+  quarantine immediately with a legible reason instead of cycling the retry
+  queue to overflow.
 
 ### App behavior `[app-only]`
 
@@ -144,32 +158,78 @@ and affects interop; `[app-only]` — client behavior, no wire impact;
   primary screens with `.dynamicType` and `.textClipped` excluded (the auditor
   false-positives on combined `privacySensitive` bubbles whose system-font
   text scales by construction) and borderline "nearly passed" contrast
-  grades ignored (it flags even system section-header styling). Hard failures
-  fail CI. Real findings it produced were fixed: darker accent for
-  white-on-accent bubbles, opaque thread-chip fill, opaque navigation bar.
+  grades ignored (it flags even system section-header styling). Two further
+  narrow contrast exclusions (2026-06-12), both occlusion artifacts rather
+  than color problems — the auditor hard-fails any text whose background it
+  cannot sample, regardless of the actual colors: (a) elements partially
+  outside the window (scrolled past the fold — missing pixels sample black),
+  and (b) message rows partially under an overlaying bar/safe-area inset.
+  Fully visible elements stay enforced, and every excused issue is printed to
+  the test log. Hard failures fail CI. Real findings it produced were fixed:
+  darker accent for white-on-accent bubbles AND badges, opaque thread-chip /
+  agent-bubble / loop-guard fills (translucent fills defeat its background
+  sampling), opaque navigation bar and thread header (glass shadow spill),
+  hard scroll-edge style on message lists, darkened destructive button tint,
+  opaque-capsule system rows.
 - **A8 — Conversations open scrolled to the newest message**
   (`defaultScrollAnchor(.bottom)`), found by the round-trip UI test.
 - **A9 — Local link is local-first.** When a verified peer is co-present, the
   seal goes over the radio and NOTHING is published to any relay (the
   privacy-maximizing order per SPEC §0 — a local message is invisible to all
   relay observers). Any local-link failure falls back to gift-wrap + relay
-  silently and automatically (SPEC §10). App exposure is Debug-only
-  (`enableLocalLink` in `bootSingle`; Info-Debug.plist carries the
-  local-network strings, Release carries none — TESTFLIGHT-GUIDE §A6).
-- **A10 — Single-persona relay selection.** `bootSingle` resolves its relay
-  from `PQRC_RELAY_URL` (env) → `relayURL` (UserDefaults) → the deployed
-  anchor relay default; the literal value `local` forces the in-process
-  simulator. UI tests always run the Local Universe and never touch the
-  network.
+  silently and automatically (SPEC §10). ~~App exposure is Debug-only~~ →
+  **Graduated** (2026-06-12): user-toggleable (Settings → Nearby, default ON
+  in Debug, OFF in Release). The shared Info.plist now carries the
+  local-network strings in all configurations, but the radios — and therefore
+  the iOS Local Network permission prompt — only start when the toggle is on.
+- **A10 — Single-persona relay selection.** `bootSingle` resolves its relays
+  from `PQRC_RELAY_URL` (env) → the `relayURLs` UserDefaults list (Settings →
+  Servers: add/remove any `ws(s)://` URL) → the deployed anchor relay
+  default; the literal value `local` is the in-process simulator. UI tests
+  always run the Local Universe and never touch the network.
+- **A11 — Persistence wiring** (2026-06-12, fixes "everything vanished on
+  relaunch"): contacts persist as one encrypted `ContactRecord` blob per
+  identity (the stored binding is re-run through `BindingVerifier.verify` on
+  every restore — invariant 7 survives persistence; an unverifiable record's
+  keys are never trusted); ratchet snapshots persist after every
+  send/receive; prekey state persists in the Keychain (T2 resolved); group
+  rosters, thread metadata and the processed-envelope dedupe set persist in
+  the encrypted store; the conversation list + history reload at boot.
+- **A12 — Message-request acceptance + open inbox** (2026-06-12): unknown-
+  sender envelopes are held (bounded: 32 senders × 16 envelopes, oldest
+  evicted) so accepting a request can fetch + verify the sender's 10420 and
+  replay the held handshake — the conversation materializes ready to type.
+  Declining drops the held envelopes without blocking. Separately, Settings →
+  Reachability can open the inbox to anyone for a bounded window
+  (15 min / 1 h / 8 h, auto-expiring, survives relaunch): requests auto-accept
+  during the window. Privacy trade documented in THREAT_MODEL §2.10.
+- **A13 — `pqrc:` URL scheme** (2026-06-12): the Settings QR encodes
+  `pqrc:add?npub=…` so the system Camera deep-links into New Conversation
+  with the address prefilled (previously the QR was a bare npub and scanning
+  opened a browser/search). The scheme handler accepts only `npub1…` values.
+- **A14 — Remote AI provider wired** (2026-06-12, resolves review M1): the
+  Settings provider picker is honored at boot and on change; the Anthropic
+  key is entered in Settings and stored ONLY in the device Keychain
+  (`anthropic-api-key`, never UserDefaults, wiped with the identity); the
+  consent alert actually gates activation. Without a key, "remote" falls back
+  to the deterministic mock rather than failing.
+- **A15 — System rows & list affordances** (2026-06-12, closes review
+  M3/L2 items): window-start / group-created / thread-started messages render
+  as neutral centered system rows on both ends; "Mark as verified" persists
+  to the contact record and drives the list shield badge; conversation rows
+  show relative timestamps + unread badges; swipe to pin/delete; the SwiftData
+  store files additionally get `FileProtectionType.complete` (review M6).
 
 ### Tech debt `[tech-debt]`
 
 - **T1 — Secure Enclave fallback.** Where `SecureEnclave.isAvailable == false`
   (some simulators), the master key wraps under a Keychain-held software KEK
   (still device-only/unlocked-only). Hardware builds always use the SE path.
-- **T2 — Prekey private state is not persisted across launches.** The
-  in-process relay's bundle republishes at boot, so this is unobservable in
-  v1; required before a real network transport ships.
+- **T2 — ~~Prekey private state is not persisted across launches~~ →
+  Resolved** (2026-06-12): `PrekeyState` snapshot/restore on `PrekeyManager`,
+  persisted in the Keychain, replenished to 16 at boot, consumed hashes kept
+  forever (replay of a consumed prekey stays rejected across launches).
+  Covered by the `Prekey persistence (T2)` suite.
 - **T3 — Safety-code-change detection** is implemented UI-side (persistent red
   banner until re-verified) and runtime-signaled, but automatic re-fetch +
   binding-diff against relays is not wired (no live re-publishing exists with

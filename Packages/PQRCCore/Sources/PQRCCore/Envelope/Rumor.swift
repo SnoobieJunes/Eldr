@@ -231,6 +231,11 @@ public struct MessageBody: Codable, Equatable, Sendable {
     public var aiInvite: AIInvite?
     /// "Context:"-prefixed agent contributions render with a folder glyph (APP-SPEC §8).
     public var isContext: Bool?
+    /// Sender-chosen display alias, shared only inside the encrypted channel —
+    /// so only already-established contacts ever see it (no public profile,
+    /// D11 preserved). Optional and ignored by older clients (SPEC §12).
+    /// Recorded in DEVIATIONS as an upstream-NIP candidate.
+    public var alias: String?
 
     enum CodingKeys: String, CodingKey {
         case text
@@ -241,13 +246,14 @@ public struct MessageBody: Codable, Equatable, Sendable {
         case threadCreate = "thread_create"
         case aiInvite = "ai_invite"
         case isContext = "is_context"
+        case alias
     }
 
     public init(
         text: String, sentAt: Int64,
         group: RumorContent.GroupRef? = nil, thread: RumorContent.ThreadRef? = nil,
         groupCreate: GroupCreate? = nil, threadCreate: ThreadCreate? = nil,
-        aiInvite: AIInvite? = nil, isContext: Bool? = nil
+        aiInvite: AIInvite? = nil, isContext: Bool? = nil, alias: String? = nil
     ) {
         self.text = text
         self.sentAt = sentAt
@@ -257,6 +263,7 @@ public struct MessageBody: Codable, Equatable, Sendable {
         self.threadCreate = threadCreate
         self.aiInvite = aiInvite
         self.isContext = isContext
+        self.alias = alias
     }
 }
 

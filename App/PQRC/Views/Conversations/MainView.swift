@@ -10,9 +10,7 @@ struct MainView: View {
     @State private var showNewChat = false
     @State private var showNewGroup = false
     @State private var showSettings = false
-    /// npub from a scanned QR deep link, prefilled into New Conversation.
     @State private var deepLinkNpub: String?
-    /// Navigation path so an accepted message request can push its conversation.
     @State private var path: [String] = []
 
     var body: some View {
@@ -33,6 +31,23 @@ struct MainView: View {
                             ConversationRow(conversation: conversation)
                         }
                         .accessibilityIdentifier("conversation-\(conversation.title)")
+                        .swipeActions(edge: .leading) {
+                            Button {
+                                Task { await model.togglePinned(conversation.id) }
+                            } label: {
+                                Label(
+                                    conversation.pinned ? "Unpin" : "Pin",
+                                    systemImage: conversation.pinned ? "pin.slash" : "pin")
+                            }
+                            .tint(.orange)
+                        }
+                        .swipeActions(edge: .trailing) {
+                            Button(role: .destructive) {
+                                Task { await model.deleteConversation(conversation.id) }
+                            } label: {
+                                Label("Delete", systemImage: "trash")
+                            }
+                        }
                     }
                 } header: {
                     if model.conversations.isEmpty {
@@ -48,6 +63,7 @@ struct MainView: View {
             .navigationTitle("PQRC")
             .navigationDestination(for: String.self) { conversationID in
                 ConversationView(model: model, conversationID: conversationID)
+                    .onAppear { model.markRead(conversationID) }
             }
             .toolbar {
                 ToolbarItem(placement: .topBarLeading) {
@@ -85,8 +101,8 @@ struct MainView: View {
                 SettingsView(model: model)
             }
             .onChange(of: session.pendingNpub) { _, npub in
-                // A scanned QR (pqrc:add?npub=…) lands here: open New
-                // Conversation prefilled with the address.
+                // QR deep link (pqrc:add?npub=…): open New Conversation
+                // prefilled with the scanned address.
                 guard let npub else { return }
                 deepLinkNpub = npub
                 session.pendingNpub = nil
@@ -96,10 +112,9 @@ struct MainView: View {
     }
 }
 
-/// A pending message request. The sender is shown by key prefix (identity is
-/// only *proven* once Accept fetches and verifies their 10420 binding —
-/// D12). Accept verifies + replays the held handshake and opens the
-/// conversation; Decline drops the held envelope without blocking.
+/// A pending request: explains who is asking (by key — identity is only
+/// proven after accept fetches + verifies their binding) and offers
+/// Accept / Decline. Accepting opens the conversation ready to type.
 struct MessageRequestRow: View {
     @Bindable var model: AppModel
     let sender: String
@@ -108,8 +123,10 @@ struct MessageRequestRow: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
-            Label("Request from \(String(sender.prefix(12)))…", systemImage: "envelope.badge")
-                .accessibilityLabel("Pending message request")
+            Label(
+                "Request from \(String(sender.prefix(12)))…",
+                systemImage: "envelope.badge")
+            .accessibilityLabel("Pending message request")
             HStack(spacing: 12) {
                 Button {
                     working = true
@@ -120,6 +137,8 @@ struct MessageRequestRow: View {
                         working = false
                     }
                 } label: {
+                    // Semibold body: keeps white-on-accent above the audit's
+                    // large-text contrast threshold (A7).
                     Label("Accept", systemImage: "checkmark")
                         .font(.body.weight(.semibold))
                 }
@@ -129,9 +148,12 @@ struct MessageRequestRow: View {
                 Button(role: .destructive) {
                     Task { await model.declineRequest(sender) }
                 } label: {
-                    Text("Decline").font(.body.weight(.semibold))
+                    Text("Decline")
+                        .font(.body.weight(.semibold))
                 }
                 .buttonStyle(.bordered)
+                // Darkened red: plain system red on the bordered fill is
+                // ~3.5:1 and fails the contrast audit (A7).
                 .tint(Color.red.mix(with: .black, by: 0.35))
                 .disabled(working)
                 .accessibilityIdentifier("decline-request")
@@ -158,6 +180,12 @@ struct ConversationRow: View {
                             .foregroundStyle(.green)
                             .accessibilityLabel("Verified contact")
                     }
+                    if conversation.pinned {
+                        Image(systemName: "pin.fill")
+                            .font(.caption2)
+                            .foregroundStyle(.orange)
+                            .accessibilityLabel("Pinned")
+                    }
                     if conversation.isGroup {
                         Text("\(conversation.memberCount)")
                             .font(.caption2)
@@ -165,14 +193,38 @@ struct ConversationRow: View {
                             .padding(.vertical, 2)
                             .background(.quaternary, in: Capsule())
                     }
+                    Spacer()
+                    if conversation.lastActivity > 0 {
+                        Text(
+                            Date(timeIntervalSince1970: TimeInterval(conversation.lastActivity)),
+                            format: .relative(presentation: .named))
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                    }
                 }
-                Text(conversation.lastMessage)
-                    .font(.subheadline)
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
+                HStack(alignment: .top) {
+                    Text(conversation.lastMessage)
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                    Spacer()
+                    if conversation.unread > 0 {
+                        // Darkened accent: white small text on plain system
+                        // accent is ~3.5:1 and fails the contrast audit (A7).
+                        Text("\(conversation.unread)")
+                            .font(.caption.weight(.bold))
+                            .foregroundStyle(.white)
+                            .padding(.horizontal, 7)
+                            .padding(.vertical, 2)
+                            .background(
+                                Color.accentColor.mix(with: .black, by: 0.35), in: Capsule())
+                            .accessibilityLabel("\(conversation.unread) unread messages")
+                    }
+                }
             }
         }
         .frame(minHeight: 44)
+        .privacySensitive()
     }
 }
 
@@ -213,11 +265,10 @@ struct IdenticonView: View {
 
 import PQRCNostr
 
-/// New 1:1 conversation: paste an npub (QR scan requests camera just-in-time
-/// on hardware; paste is the simulator path).
+/// New 1:1 conversation: paste an npub, or arrive prefilled from a scanned
+/// `pqrc:add?npub=…` QR (the system Camera deep-links into the app).
 struct NewChatView: View {
     @Bindable var model: AppModel
-    /// Prefilled from a scanned `pqrc:add?npub=…` QR deep link.
     var prefilledNpub: String = ""
     @Environment(\.dismiss) private var dismiss
     @State private var npub = ""
@@ -233,7 +284,9 @@ struct NewChatView: View {
                         .textInputAutocapitalization(.never)
                         .accessibilityIdentifier("new-chat-npub")
                         .onAppear {
-                            if npub.isEmpty, !prefilledNpub.isEmpty { npub = prefilledNpub }
+                            if npub.isEmpty, !prefilledNpub.isEmpty {
+                                npub = prefilledNpub
+                            }
                         }
                 }
                 Section("First message") {

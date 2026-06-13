@@ -43,8 +43,17 @@ actor PersonaRuntime {
     private var store: SwiftDataMessageStore!
     private var crypter: EncryptedStore!
 
-    /// Contacts by identity hex with display names.
-    private(set) var contacts: [String: (contact: VerifiedContact, nickname: String)] = [:]
+    /// Verified contacts by identity hex. The parallel `contactRecords` map
+    /// carries nicknames/aliases/flags and is persisted encrypted — both are
+    /// restored at bootstrap so contacts survive relaunch.
+    private(set) var verifiedContacts: [String: VerifiedContact] = [:]
+    private(set) var contactRecords: [String: ContactRecord] = [:]
+    /// Open-inbox window: unknown senders are auto-accepted until this time
+    /// (Settings → Reachability). nil/past = normal message-request gate.
+    private var openInboxUntil: Int64?
+    /// My self-chosen alias — travels only inside established encrypted
+    /// sessions, so only connected contacts ever learn it.
+    private var myAlias: String?
     /// 1:1 conversation id == peer identity hex; groups use the group UUID.
     private var groupRosters: [String: GroupRoster] = [:]
     private var threadConversations: [String: String] = [:]  // threadID -> conversationID
@@ -89,7 +98,8 @@ actor PersonaRuntime {
     /// Creates or restores the identity and starts everything.
     /// First launch generates keys (SPEC §3.1) and publishes 10420/10421/10050.
     func bootstrap(
-        inMemoryStore: Bool, storeURL: URL? = nil, relayURLs: [String] = ["local://relay"]
+        inMemoryStore: Bool, storeURL: URL? = nil,
+        relayURLs: [String] = ["local://relay"]
     ) async throws -> AsyncStream<RuntimeEvent> {
         // Keys: load from Keychain or generate.
         if let seed = keychain.loadIfPresent(account: "identity-seed") {
@@ -128,13 +138,69 @@ actor PersonaRuntime {
         store = SwiftDataMessageStore(modelContainer: container)
         await store.configure(crypter: crypter)
 
-        let prekeyManager = try PrekeyManager(
-            identity: identity, randomSource: randomSource, oneTimeCount: 16)
+        // Prekey state (T2): restore from the Keychain so handshakes addressed
+        // to a previously published bundle still resolve after relaunch, then
+        // top the one-time pools back up before republishing.
+        let prekeyManager: PrekeyManager
+        if let stateBlob = keychain.loadIfPresent(account: "prekey-state"),
+            let state = try? JSONDecoder().decode(PrekeyState.self, from: stateBlob)
+        {
+            prekeyManager = try PrekeyManager(
+                identity: identity, randomSource: randomSource, state: state)
+        } else {
+            prekeyManager = try PrekeyManager(
+                identity: identity, randomSource: randomSource, oneTimeCount: 16)
+        }
+        _ = try await prekeyManager.replenish(to: 16)
+        try keychain.save(
+            JSONEncoder().encode(await prekeyManager.snapshot()), account: "prekey-state")
+
         messenger = try PQRCMessenger(
             identity: identity, nostrKeypair: nostrKeypair, prekeyManager: prekeyManager,
             identityDH: identityDH, transports: transports, clock: clock,
             randomSource: randomSource, nonceSource: nonceSource)
         engine = AgentEngine(myIdentity: identity, clock: clock, sink: RuntimeSink(runtime: self))
+
+        // Restore persisted state: contacts (bindings re-verified — invariant 7
+        // survives persistence), ratchet sessions, group rosters, threads, and
+        // the processed-envelope set (so relay replays don't re-process).
+        if let aliasData = keychain.loadIfPresent(account: "my-alias") {
+            myAlias = String(decoding: aliasData, as: UTF8.self)
+        }
+        if let untilData = keychain.loadIfPresent(account: "open-inbox-until"),
+            let until = Int64(String(decoding: untilData, as: UTF8.self)), until > clock.now()
+        {
+            openInboxUntil = until
+        }
+        for record in (try? await store.contacts()) ?? [] {
+            guard
+                let verified = try? BindingVerifier.verify(record.binding, outerSignatureValid: true)
+            else { continue }  // tampered store record: never trust its keys
+            let contact = VerifiedContact(binding: verified)
+            verifiedContacts[contact.identityHex] = contact
+            contactRecords[contact.identityHex] = record
+            await messenger.addContact(contact)
+            if record.blocked {
+                await messenger.setBlocked(contact.identityHex, blocked: true)
+            }
+        }
+        for (peerIdentityHex, snapshot) in (try? await store.sessions()) ?? [] {
+            guard let contact = verifiedContacts[peerIdentityHex] else { continue }
+            try? await messenger.restoreSession(
+                with: contact, snapshot: snapshot,
+                usedLastResortPrekey: contactRecords[peerIdentityHex]?.usedLastResortPrekey ?? false)
+        }
+        for (id, type, meta, _) in (try? await store.conversationMetas()) ?? [] where type == "group" {
+            let create = GroupCreate(
+                groupID: meta.groupID ?? id, name: meta.name,
+                members: meta.memberIdentityHexes, revision: meta.rosterRevision)
+            groupRosters[id] = GroupRoster(create: create, assertedBy: meta.rosterAssertedBy ?? identityHex)
+        }
+        for (threadID, conversationID, meta) in (try? await store.threadMetas()) ?? [] {
+            threadConversations[threadID] = conversationID
+            threadTitles[threadID] = meta.title
+        }
+        await messenger.seedProcessedWrapIDs((try? await store.processedEventIDs()) ?? [])
 
         // S1 local-first transport: constructed here because the hello proof
         // needs the (just-loaded) identity key, started before the messenger
@@ -149,7 +215,14 @@ actor PersonaRuntime {
             try await link.start()
         }
 
-        try await messenger.announce(relayURLs: relayURLs)
+        // Publishing your identity (10420/10421/10050) is best-effort and
+        // runs in the background: generating keys is local and must not block
+        // on — or fail because of — relay availability. Bounded attempts so a
+        // down relay logs a few lines, not a flood; it republishes on next
+        // launch or via Settings → Republish.
+        let publishURLs = relayURLs
+        let messengerRef = messenger!
+        Task { try? await messengerRef.announce(relayURLs: publishURLs, maxAttempts: 4) }
         let messengerEvents = try await messenger.start()
         let (stream, continuation) = AsyncStream.makeStream(of: RuntimeEvent.self)
         eventContinuation = continuation
@@ -162,6 +235,14 @@ actor PersonaRuntime {
     }
 
     func shutdown() async {
+        // Final persistence sweep: any in-flight ratchet/prekey state lands
+        // before the pumps die.
+        if messenger != nil {
+            for peer in verifiedContacts.keys {
+                await persistSession(peer)
+            }
+            await persistPrekeyState()
+        }
         pumpTask?.cancel()
         await localLink?.stop()
         await messenger?.stop()
@@ -177,14 +258,58 @@ actor PersonaRuntime {
 
     // MARK: - Contacts & sessions
 
+    /// Registers a verified contact in memory + messenger and persists the
+    /// encrypted record. Single funnel for every way a contact can appear.
+    /// The record stores the raw binding so restore can re-run
+    /// `BindingVerifier.verify` — a record without one (shouldn't happen) is
+    /// kept in memory but not persisted, never persisted unverifiable.
+    private func registerContact(
+        _ contact: VerifiedContact, localNickname: String? = nil
+    ) async {
+        verifiedContacts[contact.identityHex] = contact
+        if var record = contactRecords[contact.identityHex] {
+            if let localNickname { record.localNickname = localNickname }
+            contactRecords[contact.identityHex] = record
+        } else if let raw = contact.raw {
+            contactRecords[contact.identityHex] = ContactRecord(
+                binding: raw, localNickname: localNickname, peerAlias: nil,
+                verified: false, blocked: false, usedLastResortPrekey: false)
+        }
+        await messenger.addContact(contact)
+        persistContact(contact.identityHex)
+    }
+
+    private func persistContact(_ identityHex: String) {
+        guard let record = contactRecords[identityHex] else { return }
+        let store = store
+        Task { try? await store?.saveContact(record) }
+    }
+
+    /// Persists the ratchet snapshot for one peer (after every send/receive
+    /// that advances the ratchet — FS means old state is worthless, so the
+    /// latest snapshot is the only one that matters).
+    private func persistSession(_ peerIdentityHex: String) async {
+        guard let snapshot = await messenger.sessionSnapshot(peerIdentityHex: peerIdentityHex)
+        else { return }
+        try? await store.saveSession(peerIdentityHex: peerIdentityHex, snapshot: snapshot)
+    }
+
+    private func persistPrekeyState() async {
+        if let blob = try? JSONEncoder().encode(await messenger.prekeyManager.snapshot()) {
+            try? keychain.save(blob, account: "prekey-state")
+        }
+    }
+
     func addVerifiedPeer(_ runtimePeer: PersonaRuntime) async throws {
         let binding = try IdentityBinding.make(
             identity: await runtimePeer.identity,
             nostrPubkey: hexToData(await runtimePeer.nostrKeypair.publicKeyHex))
-        let contact = VerifiedContact(
-            binding: try BindingVerifier.verify(binding, outerSignatureValid: true))
-        contacts[contact.identityHex] = (contact, await runtimePeer.displayName)
-        await messenger.addContact(contact)
+        let verified = try BindingVerifier.verify(binding, outerSignatureValid: true)
+        let contact = VerifiedContact(binding: verified)
+        contactRecords[contact.identityHex] = ContactRecord(
+            binding: binding, localNickname: await runtimePeer.displayName,
+            peerAlias: nil, verified: false, blocked: false, usedLastResortPrekey: false)
+        await registerContact(contact)
     }
 
     /// New chat by npub: fetch 10420/10421 from relays, verify BOTH directions,
@@ -194,9 +319,11 @@ actor PersonaRuntime {
             throw PQRCError.handshakeMalformed
         }
         let (contact, bundle) = try await messenger.fetchVerifiedPeer(nostrPubkeyHex: nostrHex)
-        contacts[contact.identityHex] = (contact, "Contact \(String(contact.identityHex.prefix(8)))")
-        let body = MessageBody(text: firstMessage, sentAt: clock.now())
+        await registerContact(contact)
+        // First message carries my alias so the peer sees a name, not a key.
+        let body = MessageBody(text: firstMessage, sentAt: clock.now(), alias: myAlias)
         try await messenger.establishSession(with: contact, bundle: bundle, firstMessage: body)
+        await persistSession(contact.identityHex)
         let message = StoredMessage(
             id: UUID().uuidString, conversationID: contact.identityHex,
             senderIdentity: identityHex, participantType: .human, text: firstMessage,
@@ -209,11 +336,14 @@ actor PersonaRuntime {
     /// Direct establishment between Local Universe personas (no QR scan).
     func establishWith(_ peer: PersonaRuntime, firstMessage: String) async throws {
         let peerIdentityHex = await peer.identityHex
-        guard let (contact, _) = contacts[peerIdentityHex] else { throw PQRCError.sessionNotEstablished }
+        guard let contact = verifiedContacts[peerIdentityHex] else {
+            throw PQRCError.sessionNotEstablished
+        }
         let bundle = try await peer.publicBundle()
         try bundle.verifySignatures(identityPubkey: contact.binding.identityPubkey)
-        let body = MessageBody(text: firstMessage, sentAt: clock.now())
+        let body = MessageBody(text: firstMessage, sentAt: clock.now(), alias: myAlias)
         try await messenger.establishSession(with: contact, bundle: bundle, firstMessage: body)
+        await persistSession(peerIdentityHex)
         let message = StoredMessage(
             id: UUID().uuidString, conversationID: peerIdentityHex,
             senderIdentity: identityHex, participantType: .human, text: firstMessage,
@@ -232,23 +362,88 @@ actor PersonaRuntime {
 
     func setBlocked(_ identityHex: String, blocked: Bool) async {
         await messenger.setBlocked(identityHex, blocked: blocked)
+        contactRecords[identityHex]?.blocked = blocked
+        persistContact(identityHex)
     }
 
-    // MARK: - Message requests (D12)
+    /// D13: "Mark as verified" — persisted so the shield badge survives
+    /// relaunch, and clears any pending safety-code-change warning.
+    func setVerified(_ identityHex: String, verified: Bool) async {
+        contactRecords[identityHex]?.verified = verified
+        persistContact(identityHex)
+        eventContinuation?.yield(.conversationChanged(identityHex))
+    }
+
+    /// Local rename: takes precedence over the peer's self-chosen alias (D11 —
+    /// your address book is yours; nothing is published).
+    func renameContact(_ identityHex: String, nickname: String?) async {
+        contactRecords[identityHex]?.localNickname =
+            (nickname?.isEmpty ?? true) ? nil : nickname
+        persistContact(identityHex)
+        eventContinuation?.yield(.conversationChanged(identityHex))
+    }
+
+    /// Sets my alias and broadcasts it to every connected contact over the
+    /// existing encrypted sessions (an empty-text control message — never a
+    /// public profile; only established contacts learn the name).
+    func setMyAlias(_ alias: String?) async {
+        myAlias = (alias?.isEmpty ?? true) ? nil : alias
+        if let myAlias {
+            try? keychain.save(Data(myAlias.utf8), account: "my-alias")
+        } else {
+            keychain.delete(account: "my-alias")
+        }
+        guard let myAlias else { return }
+        let body = MessageBody(text: "", sentAt: clock.now(), alias: myAlias)
+        for peer in verifiedContacts.keys {
+            guard await messenger.hasSession(peerIdentityHex: peer) else { continue }
+            try? await messenger.send(body, to: peer, participantType: .human)
+            await persistSession(peer)
+        }
+    }
+
+    var currentAlias: String? { myAlias }
+
+    // MARK: - Message requests (D12) & open inbox
 
     /// Accepts a pending request: the messenger fetches + verifies the
-    /// sender's binding (both directions), registers the contact, and replays
-    /// the held handshake so message #0 materializes. Returns the new
-    /// conversation id so the UI can navigate into it.
+    /// sender's binding, replays held envelopes (handshake → message #0), and
+    /// the contact is persisted. Returns the new conversation id.
     func acceptMessageRequest(senderNostrPubkeyHex: String) async throws -> String {
         let contact = try await messenger.acceptRequest(senderNostrPubkeyHex: senderNostrPubkeyHex)
-        contacts[contact.identityHex] = (contact, "Contact \(String(contact.identityHex.prefix(8)))")
+        await registerContact(contact)
+        await persistSession(contact.identityHex)
+        await persistPrekeyState()
         eventContinuation?.yield(.conversationChanged(contact.identityHex))
         return contact.identityHex
     }
 
     func declineMessageRequest(senderNostrPubkeyHex: String) async {
         await messenger.declineRequest(senderNostrPubkeyHex: senderNostrPubkeyHex)
+    }
+
+    /// Open-inbox window: messages from anyone are auto-accepted until
+    /// `until` (nil disables). Survives relaunch; the privacy trade is the
+    /// user's explicit, time-bounded choice (THREAT_MODEL note).
+    func setOpenInbox(until: Int64?) {
+        openInboxUntil = until
+        if let until {
+            try? keychain.save(Data(String(until).utf8), account: "open-inbox-until")
+        } else {
+            keychain.delete(account: "open-inbox-until")
+        }
+    }
+
+    func openInboxActiveUntil() -> Int64? {
+        guard let openInboxUntil, openInboxUntil > clock.now() else { return nil }
+        return openInboxUntil
+    }
+
+    /// Replenishes one-time prekeys and republishes 10420/10421/10050.
+    func republishBundle(relayURLs: [String]) async throws {
+        _ = try await messenger.prekeyManager.replenish(to: 16)
+        await persistPrekeyState()
+        try await messenger.announce(relayURLs: relayURLs)
     }
 
     // MARK: - Sending
@@ -259,7 +454,8 @@ actor PersonaRuntime {
         _ text: String, conversationID: String, participantType: ParticipantType = .human,
         threadID: String? = nil, isContext: Bool = false,
         aiWindow: AIWindowAnnouncement? = nil, aiInvite: AIInvite? = nil,
-        threadCreate: ThreadCreate? = nil, groupCreate: GroupCreate? = nil
+        threadCreate: ThreadCreate? = nil, groupCreate: GroupCreate? = nil,
+        asSystemRow: Bool = false
     ) async throws {
         let recipients = recipientsFor(conversationID: conversationID)
         guard !recipients.isEmpty else { throw PQRCError.sessionNotEstablished }
@@ -269,7 +465,10 @@ actor PersonaRuntime {
             group: groupRosters[conversationID].map { _ in RumorContent.GroupRef(id: conversationID) },
             thread: threadID.map { RumorContent.ThreadRef(id: $0) },
             groupCreate: groupCreate, threadCreate: threadCreate, aiInvite: aiInvite,
-            isContext: isContext ? true : nil)
+            isContext: isContext ? true : nil,
+            // Self-chosen alias rides along inside the ciphertext so every
+            // connected peer stays current (and ONLY connected peers — D11).
+            alias: participantType == .human ? myAlias : nil)
 
         var pointer: ContentPointer?
         if text.utf8.count > PQRCConstants.inlineSizeLimit {
@@ -284,13 +483,14 @@ actor PersonaRuntime {
             try await messenger.send(
                 body, to: recipient, participantType: participantType,
                 contentPointer: pointer, aiWindow: aiWindow)
+            await persistSession(recipient)
         }
 
         let message = StoredMessage(
             id: UUID().uuidString, conversationID: conversationID,
             senderIdentity: identityHex, participantType: participantType,
             text: body.text, sentAt: body.sentAt, threadID: threadID,
-            isContext: isContext, localStatus: "sent")
+            isContext: isContext, localStatus: asSystemRow ? "system" : "sent")
         try await store.save(message)
         if let threadID {
             await engine.recordThreadMessage(threadID: threadID, participantType: participantType)
@@ -303,9 +503,9 @@ actor PersonaRuntime {
 
     private func recipientsFor(conversationID: String) -> [String] {
         if let roster = groupRosters[conversationID] {
-            return roster.members.filter { $0 != identityHex && contacts[$0] != nil }
+            return roster.members.filter { $0 != identityHex && verifiedContacts[$0] != nil }
         }
-        return contacts[conversationID] != nil ? [conversationID] : []
+        return verifiedContacts[conversationID] != nil ? [conversationID] : []
     }
 
     // MARK: - Groups (D1)
@@ -315,10 +515,33 @@ actor PersonaRuntime {
         let members = [identityHex] + memberIdentityHexes
         let create = GroupCreate(groupID: groupID, name: name, members: members, revision: 1)
         groupRosters[groupID] = GroupRoster(create: create, assertedBy: identityHex)
+        persistRoster(groupID)
         try await sendMessage(
-            "created the group \"\(name)\"", conversationID: groupID, groupCreate: create)
+            "created the group \"\(name)\"", conversationID: groupID, groupCreate: create,
+            asSystemRow: true)
         eventContinuation?.yield(.conversationChanged(groupID))
         return groupID
+    }
+
+    private func persistRoster(_ groupID: String) {
+        guard let roster = groupRosters[groupID] else { return }
+        let meta = ConversationMeta(
+            name: roster.name, memberIdentityHexes: roster.members,
+            rosterAssertedBy: roster.assertedBy, rosterRevision: roster.revision,
+            groupID: roster.groupID)
+        let store = store
+        Task { try? await store?.saveConversationMeta(id: groupID, type: "group", meta: meta) }
+    }
+
+    private func persistThread(_ threadID: String) {
+        guard let conversationID = threadConversations[threadID] else { return }
+        let meta = ThreadMeta(
+            title: threadTitles[threadID] ?? "Thread", createdBy: identityHex, anchorMessageID: nil)
+        let store = store
+        Task {
+            try? await store?.saveThreadMeta(
+                threadID: threadID, conversationID: conversationID, meta: meta)
+        }
     }
 
     func groupRoster(_ groupID: String) -> GroupRoster? {
@@ -332,8 +555,9 @@ actor PersonaRuntime {
         var updated = roster
         _ = updated.apply(create, assertedBy: identityHex)
         groupRosters[groupID] = updated
+        persistRoster(groupID)
         // Announce to the union of old and new members so removed members learn.
-        let union = Set(roster.members + members).filter { $0 != identityHex && contacts[$0] != nil }
+        let union = Set(roster.members + members).filter { $0 != identityHex && verifiedContacts[$0] != nil }
         let body = MessageBody(
             text: "updated the group", sentAt: clock.now(),
             group: RumorContent.GroupRef(id: groupID), groupCreate: create)
@@ -349,11 +573,12 @@ actor PersonaRuntime {
         let threadID = UUID().uuidString
         threadConversations[threadID] = conversationID
         threadTitles[threadID] = title
+        persistThread(threadID)
         let create = ThreadCreate(
             threadID: threadID, title: title, anchorMessageID: nil, createdBy: identityHex)
         try await sendMessage(
             "started the thread \"\(title)\"", conversationID: conversationID,
-            threadID: threadID, threadCreate: create)
+            threadID: threadID, threadCreate: create, asSystemRow: true)
         eventContinuation?.yield(
             .threadCreated(conversationID: conversationID, threadID: threadID, title: title))
         return threadID
@@ -368,7 +593,8 @@ actor PersonaRuntime {
         let announcement = try await engine.startMyWindow(durationSeconds: durationSeconds)
         myWindowConversationID = conversationID
         try await sendMessage(
-            "enabled always-on AI", conversationID: conversationID, aiWindow: announcement)
+            "enabled always-on AI", conversationID: conversationID, aiWindow: announcement,
+            asSystemRow: true)
         eventContinuation?.yield(
             .aiWindowChanged(
                 conversationID: conversationID, identityHex: identityHex,
@@ -407,7 +633,7 @@ actor PersonaRuntime {
             TranscriptEntry(
                 senderIdentityHex: message.senderIdentity,
                 senderDisplayName: message.senderIdentity == identityHex
-                    ? displayName : (contacts[message.senderIdentity]?.nickname ?? "Contact"),
+                    ? displayName : (contactRecords[message.senderIdentity]?.displayName ?? "Contact"),
                 participantType: message.participantType,
                 text: message.text,
                 isContext: message.isContext)
@@ -446,6 +672,13 @@ actor PersonaRuntime {
         case .message(let received):
             await handleReceived(received)
         case .messageRequest(let sender, _):
+            // Open-inbox window: the user opted into being reachable by
+            // anyone for a bounded time — auto-accept instead of gating.
+            if let until = openInboxUntil, until > clock.now() {
+                if (try? await acceptMessageRequest(senderNostrPubkeyHex: sender)) != nil {
+                    return
+                }
+            }
             eventContinuation?.yield(.messageRequest(senderNostrPubkeyHex: sender))
         case .protocolViolation(let sender, let reason, _):
             // Red system row (SPEC §13.4) — persisted so it renders in place.
@@ -467,6 +700,29 @@ actor PersonaRuntime {
         var conversationID = senderHex
         let body = received.body
 
+        // The ratchet advanced and an envelope was consumed: both survive
+        // relaunch (FS makes the old snapshot worthless; the relay will
+        // replay this envelope to every fresh subscription).
+        await persistSession(senderHex)
+        await persistPrekeyState()
+        let dedupeStore = store
+        let wrapEventID = received.wrapEventID
+        Task { try? await dedupeStore?.markProcessed(eventID: wrapEventID) }
+
+        // Peer self-chosen alias (D11-preserving: arrived over the encrypted
+        // session, visible only to us). Local rename still wins.
+        if let alias = body.alias, contactRecords[senderHex]?.peerAlias != alias {
+            contactRecords[senderHex]?.peerAlias = alias
+            persistContact(senderHex)
+            eventContinuation?.yield(.conversationChanged(senderHex))
+        }
+        // Alias-only control message: nothing to render, nothing to store.
+        if body.text.isEmpty, body.alias != nil, body.groupCreate == nil,
+            body.threadCreate == nil, body.aiInvite == nil, received.aiWindow == nil
+        {
+            return
+        }
+
         // Group routing/roster (D1).
         if let create = body.groupCreate {
             var roster = groupRosters[create.groupID]
@@ -474,6 +730,7 @@ actor PersonaRuntime {
             _ = roster.apply(create, assertedBy: senderHex)
             groupRosters[create.groupID] = roster
             conversationID = create.groupID
+            persistRoster(create.groupID)
             eventContinuation?.yield(.conversationChanged(create.groupID))
         } else if let group = body.group {
             conversationID = group.id
@@ -483,6 +740,7 @@ actor PersonaRuntime {
         if let create = body.threadCreate {
             threadConversations[create.threadID] = conversationID
             threadTitles[create.threadID] = create.title
+            persistThread(create.threadID)
             eventContinuation?.yield(
                 .threadCreated(
                     conversationID: conversationID, threadID: create.threadID, title: create.title))
@@ -523,11 +781,14 @@ actor PersonaRuntime {
             }
         }
 
+        // Control messages render as neutral system rows, not bubbles.
+        let isSystemRow =
+            received.aiWindow != nil || body.groupCreate != nil || body.threadCreate != nil
         let message = StoredMessage(
             id: UUID().uuidString, conversationID: conversationID,
             senderIdentity: senderHex, participantType: received.participantType,
             text: text, sentAt: body.sentAt, threadID: body.thread?.id,
-            isContext: body.isContext ?? false, localStatus: "received")
+            isContext: body.isContext ?? false, localStatus: isSystemRow ? "system" : "received")
         try? await store.save(message)
         eventContinuation?.yield(.messageAdded(message))
 
@@ -562,13 +823,44 @@ actor PersonaRuntime {
         return (conversation, threadTitles[threadID] ?? "Thread")
     }
 
+    /// UI-restore seeds: every conversation with stored messages, and every
+    /// known thread — the data behind the relaunch fix.
+    func persistedConversationIDs() async -> [String] {
+        (try? await store.conversationIDsWithMessages()) ?? []
+    }
+
+    func setPinned(_ conversationID: String, pinned: Bool) async {
+        try? await store.setPinned(conversationID: conversationID, pinned: pinned)
+    }
+
+    /// Deletes a conversation's local history (messages + meta). The contact
+    /// and session survive — deleting history is not unfriending.
+    func deleteConversation(_ conversationID: String) async {
+        try? await store.deleteConversation(conversationID)
+    }
+
+    func allThreads() -> [(threadID: String, conversationID: String, title: String)] {
+        threadConversations.map { ($0.key, $0.value, threadTitles[$0.key] ?? "Thread") }
+    }
+
     func contactName(_ identityHex: String) -> String {
-        identityHex == self.identityHex ? displayName : (contacts[identityHex]?.nickname ?? "Contact")
+        identityHex == self.identityHex
+            ? (myAlias ?? displayName)
+            : (contactRecords[identityHex]?.displayName ?? "Contact")
+    }
+
+    func contactInfo(_ identityHex: String) -> (name: String, verified: Bool, blocked: Bool) {
+        let record = contactRecords[identityHex]
+        return (contactName(identityHex), record?.verified ?? false, record?.blocked ?? false)
+    }
+
+    func allContactRecords() -> [ContactRecord] {
+        contactRecords.values.sorted { $0.displayName < $1.displayName }
     }
 
     /// 60-digit safety code in 12 groups (APP-SPEC §6.4, D13).
     func safetyCode(with peerIdentityHex: String) -> String {
-        guard let (contact, _) = contacts[peerIdentityHex] else { return "" }
+        guard let contact = verifiedContacts[peerIdentityHex] else { return "" }
         let keys = [identity.publicKeyData, contact.binding.identityPubkey]
             .sorted { $0.hexString < $1.hexString }
         var digest = sha256(keys[0] + keys[1])

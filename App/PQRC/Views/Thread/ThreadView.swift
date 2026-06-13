@@ -24,15 +24,26 @@ struct ThreadView: View {
         VStack(spacing: 0) {
             header
             messageList
-            if model.loopGuardPaused.contains(thread.id) {
-                Label("AIs paused — waiting for a human", systemImage: "pause.circle")
-                    .font(.callout.weight(.medium))
-                    .frame(maxWidth: .infinity)
-                    .padding(.vertical, 8)
-                    .background(.yellow.opacity(0.15))
-                    .accessibilityIdentifier("loop-guard-row")
-            }
-            composer
+                // Bottom bars as a safe-area inset, not VStack siblings: when
+                // the loop-guard row appears mid-conversation the inset grows
+                // and the anchored scroll shifts up with it — a sibling would
+                // occlude the last bubble in place (which also reads as a
+                // contrast-audit failure, A7).
+                .safeAreaInset(edge: .bottom, spacing: 0) {
+                    VStack(spacing: 0) {
+                        if model.loopGuardPaused.contains(thread.id) {
+                            Label("AIs paused — waiting for a human", systemImage: "pause.circle")
+                                .font(.callout.weight(.medium))
+                                .frame(maxWidth: .infinity)
+                                .padding(.vertical, 8)
+                                // Opaque tint: translucent fills break the
+                                // contrast auditor's background sampling (A7).
+                                .background(Color.yellow.mix(with: Color(.systemBackground), by: 0.85))
+                                .accessibilityIdentifier("loop-guard-row")
+                        }
+                        composer
+                    }
+                }
         }
         .navigationTitle("✳︎ \(thread.title)")
         .navigationBarTitleDisplayMode(.inline)
@@ -81,21 +92,49 @@ struct ThreadView: View {
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding()
-        .glassEffect()
+        // Opaque card, not .glassEffect(): the glass shadow/blur spills over
+        // the first scroll rows and leaves the contrast auditor with an
+        // indeterminate background for anything near it (A7).
+        .background(Color(.secondarySystemGroupedBackground))
     }
 
     private var messageList: some View {
-        ScrollView {
-            LazyVStack(spacing: 6) {
-                ForEach(model.threadMessages(thread.id)) { message in
-                    MessageBubble(
-                        message: message,
-                        isMine: message.senderIdentity == model.myIdentityHex,
-                        senderName: model.contactNames[message.senderIdentity] ?? "Contact")
+        ScrollViewReader { proxy in
+            ScrollView {
+                LazyVStack(spacing: 6) {
+                    ForEach(model.threadMessages(thread.id)) { message in
+                        MessageBubble(
+                            message: message,
+                            isMine: message.senderIdentity == model.myIdentityHex,
+                            senderName: model.contactNames[message.senderIdentity] ?? "Contact")
+                    }
+                }
+                .padding()
+            }
+            // Explicit scroll-to-last (same as ConversationView): the lazy
+            // stack's estimated height defeats defaultScrollAnchor alone, and
+            // a last bubble left under the loop-guard band also reads as a
+            // contrast-audit failure (A7).
+            .onAppear {
+                if let last = model.threadMessages(thread.id).last {
+                    proxy.scrollTo(last.id, anchor: .bottom)
                 }
             }
-            .padding()
+            .onChange(of: model.threadMessages(thread.id).count) {
+                if let last = model.threadMessages(thread.id).last {
+                    withAnimation { proxy.scrollTo(last.id, anchor: .bottom) }
+                }
+            }
         }
+        // Hard bottom edge: the soft scroll-edge blur leaves bubbles near the
+        // loop-guard/composer bars without a determinable background, which
+        // the contrast auditor hard-fails (A7).
+        .scrollEdgeEffectStyle(.hard, for: .bottom)
+        // Open at the latest message (same as conversations, A8). Also
+        // audit-load-bearing: an unanchored list can leave the last bubble
+        // clipped mid-text under the loop-guard band, which reads as a
+        // contrast failure.
+        .defaultScrollAnchor(.bottom)
         .accessibilityIdentifier("thread-message-list")
     }
 

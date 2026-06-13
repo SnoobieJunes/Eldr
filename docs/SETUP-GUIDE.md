@@ -130,10 +130,12 @@ PQRC traffic through a relay that flunks the gate.
 
 ### 5.2 Interactive: the app against `pqrc-relay`
 
-The single-persona app resolves its relay in this order
-(`PQRC_RELAY_URL` env → `relayURL` UserDefaults → default
-`wss://relay.lerants.com`; the literal value `local` forces the in-process
-simulator):
+The single-persona app resolves its relays in this order
+(`PQRC_RELAY_URL` env → the `relayURLs` list managed in **Settings →
+Servers** (add/remove any `ws://`/`wss://` URL in-app, then "Apply &
+reconnect") → default `wss://relay.lerants.com`; the literal value `local`
+is the in-process simulator). For ad-hoc testing you can skip the env var
+entirely and just add `ws://127.0.0.1:7777` in Settings:
 
 1. Start the relay: `swift run --package-path Packages/PQRCNostr pqrc-relay`.
 2. In Xcode: Product → Scheme → Edit Scheme… → Run → Arguments → Environment
@@ -160,10 +162,14 @@ TestFlight/Release builds expect `wss://`).
 - `MultipeerLinkTransport` (routing, signed hellos, seal frames, fallback) —
   fully unit-tested against `LocalLinkSimulator`; nothing to set up.
 - `MultipeerNearbyLink` (the thin MC radio adapter) — needs real devices.
-- App wiring is **Debug-only**: `bootSingle` enables the local link in Debug
-  builds; `App/Info-Debug.plist` carries `NSLocalNetworkUsageDescription` and
-  `NSBonjourServices` (`_pqrc-local._tcp/_udp`). Release builds contain
-  neither the activation nor the permission strings.
+- App wiring is **user-toggleable**: Settings → Nearby (default ON in Debug,
+  OFF in Release). The shared `App/Info.plist` carries
+  `NSLocalNetworkUsageDescription` and `NSBonjourServices`
+  (`_pqrc-local._tcp/_udp`); the radios — and the Local Network permission
+  prompt — only start when the toggle is on (DEVIATIONS A9).
+- Pairing is automatic for verified contacts: discovery is anonymous Bonjour,
+  identities are proven per-connection by a signed challenge, and only
+  contacts whose 10420 binding you've verified ever receive traffic.
 
 ### 6.2 Automated proof (runs in every `swift test`)
 

@@ -10,9 +10,13 @@ import Testing
 
 @testable import PQRC
 
-/// TEST-PLAN §9: security & privacy regression. Tagged `.security` — CI fails
-/// the build on any failure here regardless of retry policy.
-@Suite("Security & privacy regression (TEST-PLAN §9)", .serialized)
+extension Tag {
+    @Tag static var security: Tag
+}
+
+/// TEST-PLAN §9: security & privacy regression. Tagged `.security` — CI runs
+/// this suite in a dedicated, retry-free job (any failure fails the build).
+@Suite("Security & privacy regression (TEST-PLAN §9)", .serialized, .tags(.security))
 struct SecuritySuiteTests {
     static let canary = "CANARY-7f3a-the-plaintext-that-must-never-touch-disk"
 

@@ -1,6 +1,34 @@
 import Crypto
 import Foundation
 
+/// Codable prekey-state snapshot (T2). Private halves are keyed by the same
+/// SHA-256-of-public-key hashes the wire uses (`otp_used` / `otp_pq_used`),
+/// so a restored manager resolves handshakes addressed to any previously
+/// published bundle. Contains live secrets — Keychain or `EncryptedStore`
+/// storage only, never plaintext at rest.
+public struct PrekeyState: Codable, Sendable {
+    public let ikDH: Data
+    public let spk: Data
+    public let pqpkSeed: Data
+    public let otps: [Data: Data]
+    public let otpPQSeeds: [Data: Data]
+    public let lrp: Data
+    public let consumed: Set<Data>
+
+    public init(
+        ikDH: Data, spk: Data, pqpkSeed: Data, otps: [Data: Data],
+        otpPQSeeds: [Data: Data], lrp: Data, consumed: Set<Data>
+    ) {
+        self.ikDH = ikDH
+        self.spk = spk
+        self.pqpkSeed = pqpkSeed
+        self.otps = otps
+        self.otpPQSeeds = otpPQSeeds
+        self.lrp = lrp
+        self.consumed = consumed
+    }
+}
+
 /// Owns prekey private halves: generation, consumption, deletion (actor —
 /// CLAUDE.md: actors own all mutable session state).
 ///
@@ -46,6 +74,63 @@ public actor PrekeyManager {
         }
         self.otpPrivate = otps
         self.otpPQPrivate = otpPQs
+    }
+
+    /// Restore from a persisted snapshot (T2): a handshake addressed to a
+    /// bundle published before the last relaunch must still resolve its
+    /// one-time prekey, or offline-initiated sessions break across launches.
+    public init(identity: PQRCIdentity, randomSource: RandomSource, state: PrekeyState) throws {
+        self.identity = identity
+        self.randomSource = randomSource
+        self.ikDHPrivate = try Curve25519.KeyAgreement.PrivateKey(rawRepresentation: state.ikDH)
+        self.spkPrivate = try Curve25519.KeyAgreement.PrivateKey(rawRepresentation: state.spk)
+        self.pqpkPrivate = try MLKEM768.PrivateKey(seedRepresentation: state.pqpkSeed, publicKey: nil)
+        self.lrpPrivate = try Curve25519.KeyAgreement.PrivateKey(rawRepresentation: state.lrp)
+        var otps: [Data: Curve25519.KeyAgreement.PrivateKey] = [:]
+        for (hash, raw) in state.otps {
+            otps[hash] = try Curve25519.KeyAgreement.PrivateKey(rawRepresentation: raw)
+        }
+        var otpPQs: [Data: MLKEM768.PrivateKey] = [:]
+        for (hash, seed) in state.otpPQSeeds {
+            otpPQs[hash] = try MLKEM768.PrivateKey(seedRepresentation: seed, publicKey: nil)
+        }
+        self.otpPrivate = otps
+        self.otpPQPrivate = otpPQs
+        self.consumedOTPHashes = state.consumed
+    }
+
+    /// Snapshot for persistence. Contains live private halves — it MUST only
+    /// ever be stored in the Keychain or through `EncryptedStore` (SPEC §3.4);
+    /// the at-rest canary test enforces no plaintext leakage.
+    public func snapshot() -> PrekeyState {
+        PrekeyState(
+            ikDH: ikDHPrivate.rawRepresentation,
+            spk: spkPrivate.rawRepresentation,
+            pqpkSeed: pqpkPrivate.seedRepresentation,
+            otps: otpPrivate.mapValues(\.rawRepresentation),
+            otpPQSeeds: otpPQPrivate.mapValues(\.seedRepresentation),
+            lrp: lrpPrivate.rawRepresentation,
+            consumed: consumedOTPHashes
+        )
+    }
+
+    /// Tops the one-time pools back up to `target`. Returns true if any key
+    /// was generated (caller should re-snapshot and republish the bundle).
+    /// Replenishment never touches consumed hashes: a replayed handshake
+    /// against an old, consumed prekey stays rejected forever.
+    public func replenish(to target: Int) throws -> Bool {
+        var generated = false
+        while otpPrivate.count < target {
+            let key = try Curve25519.KeyAgreement.PrivateKey(rawRepresentation: randomSource.bytes(32))
+            otpPrivate[sha256(key.publicKey.rawRepresentation)] = key
+            generated = true
+        }
+        while otpPQPrivate.count < target {
+            let pqKey = try MLKEM768.PrivateKey(seedRepresentation: randomSource.bytes(64), publicKey: nil)
+            otpPQPrivate[sha256(pqKey.publicKey.rawRepresentation)] = pqKey
+            generated = true
+        }
+        return generated
     }
 
     public var identityDHPrivateKey: Curve25519.KeyAgreement.PrivateKey { ikDHPrivate }

@@ -13,6 +13,11 @@ struct MessageBubble: View {
     var body: some View {
         if message.localStatus == "violation" {
             violationRow
+        } else if message.localStatus == "system" {
+            // Window starts, group/thread creation, roster changes (APP-SPEC
+            // §6.2): neutral centered rows, never message bubbles.
+            SystemRow(text: "\(isMine ? "You" : senderName) \(message.text)")
+                .id(message.id)
         } else if message.participantType == .agent {
             agentBubble
         } else {
@@ -20,6 +25,9 @@ struct MessageBubble: View {
         }
     }
 
+    /// iMessage-style bubble (iOS 26): continuous corners, gradient tint for
+    /// outgoing. Backgrounds stay opaque — translucent materials under busy
+    /// content fail the contrast audit.
     private var humanBubble: some View {
         HStack {
             if isMine { Spacer(minLength: 48) }
@@ -28,8 +36,16 @@ struct MessageBubble: View {
                     .padding(.horizontal, 14)
                     .padding(.vertical, 9)
                     .background(
-                        isMine ? AnyShapeStyle(.tint) : AnyShapeStyle(.quaternary),
-                        in: RoundedRectangle(cornerRadius: 18))
+                        isMine
+                            // Gradient runs darker, never lighter: the accent
+                            // asset is already the darkest white-text-safe
+                            // shade the audit accepts (A7).
+                            ? AnyShapeStyle(
+                                LinearGradient(
+                                    colors: [Color.accentColor, Color.accentColor.mix(with: .black, by: 0.18)],
+                                    startPoint: .top, endPoint: .bottom))
+                            : AnyShapeStyle(Color(.secondarySystemBackground)),
+                        in: RoundedRectangle(cornerRadius: 20, style: .continuous))
                     .foregroundStyle(isMine ? .white : .primary)
                 if isMine {
                     // Local-only status; copy says "sent to relay", never "delivered" (D5).
@@ -71,7 +87,12 @@ struct MessageBubble: View {
                 }
                 .padding(.horizontal, 14)
                 .padding(.vertical, 9)
-                .background(.purple.opacity(0.06), in: RoundedRectangle(cornerRadius: 18))
+                // Opaque purple-tinted fill (visually identical to the old
+                // 6% overlay): translucent fills give the contrast auditor no
+                // determinable background when rows overlap bars (A7).
+                .background(
+                    Color.purple.mix(with: Color(.systemBackground), by: 0.94),
+                    in: RoundedRectangle(cornerRadius: 18))
                 .overlay(
                     RoundedRectangle(cornerRadius: 18)
                         .strokeBorder(.purple.opacity(0.6), lineWidth: 1.5))
@@ -96,15 +117,23 @@ struct MessageBubble: View {
     }
 }
 
-/// Neutral centered system row (ai_window start/expiry, roster changes, anchors).
+/// Neutral centered system row (ai_window start/expiry, roster changes,
+/// anchors). The opaque capsule is load-bearing for the accessibility audit:
+/// bare text near the glass header gives the contrast auditor no determinable
+/// background and it hard-fails regardless of the actual color (A7) — the
+/// same opaque fill incoming bubbles use keeps it green in both schemes.
 struct SystemRow: View {
     let text: String
 
     var body: some View {
         Text(text)
             .font(.caption)
-            .foregroundStyle(.secondary)
+            .foregroundStyle(Color.gray.mix(with: .primary, by: 0.6))
+            .padding(.horizontal, 12)
+            .padding(.vertical, 5)
+            .background(Color(.secondarySystemBackground), in: Capsule())
             .frame(maxWidth: .infinity)
-            .padding(.vertical, 4)
+            .padding(.vertical, 2)
+            .accessibilityElement(children: .combine)
     }
 }

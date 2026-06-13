@@ -76,14 +76,17 @@ conformance suite (`swapPoint_deployedRelayConformance`) verifies a deployed
 relay enforces the AUTH-gated kind-1059 rule before it carries real traffic.
 
 ### 2.8 Prekey state lifetime
-One-time prekeys regenerate per app launch in v1 (the in-process relay's
-bundle is republished at boot), so cross-launch prekey exhaustion is not yet
-exercised. Last-resort fallback semantics (unlinkability caveat: two sessions
-initiated against the same `lrp` are linkable as such by the recipient only)
-are implemented and tested.
+Prekey private state persists across launches (Keychain, device-only) and the
+one-time pools replenish to 16 at boot, so handshakes addressed to a
+previously published bundle resolve after a relaunch and consumed prekeys
+stay consumed forever. Last-resort fallback semantics (unlinkability caveat:
+two sessions initiated against the same `lrp` are linkable as such by the
+recipient only) are implemented and tested.
 
 ### 2.9 Local link (Multipeer) co-presence is observable
-The S1 local-first transport (SPEC §10, Debug builds only) advertises an
+The S1 local-first transport (SPEC §10; user-toggleable in Settings → Nearby,
+default off in Release — radios and the Local Network prompt only start when
+the toggle is on) advertises an
 anonymous Bonjour service (`_pqrc-local`, random per-process peer name, no
 identity in discovery). What a nearby observer still learns:
 
@@ -101,6 +104,24 @@ identity in discovery). What a nearby observer still learns:
 - MultipeerConnectivity's own link encryption (`.required`) runs between
   anonymous peers and is treated as a transport nicety, not a security
   boundary; every guarantee comes from the seal + ratchet layers above it.
+
+### 2.10 Open inbox is an explicit reachability trade
+By default, first contact from an unknown sender waits in Message Requests
+and nothing renders (or is even fetched) until the user accepts. Settings →
+Reachability can open the inbox to anyone for a bounded window (≤ 8 h,
+auto-expiring): during it, any sender who knows your npub gets their binding
+fetched and their handshake processed automatically. That means: (a) a
+spammer who learns your address connects without review for the window's
+duration, and (b) accepting performs relay fetches an observer of YOUR relay
+connection could time-correlate. Both are bounded by the window and chosen
+explicitly; blocking still works as usual afterward.
+
+### 2.11 Aliases are channel-private, not authenticated names
+A contact's self-chosen alias travels only inside the encrypted session, so
+relays and strangers never see it — but it is a *claim*, not an identity:
+anyone you accept can call themselves anything. Identity remains the key +
+the 60-digit safety code; your local rename always overrides the alias, and
+the UI shows the verified shield only after a safety-code verification.
 
 ## 3. Endpoint compromise
 

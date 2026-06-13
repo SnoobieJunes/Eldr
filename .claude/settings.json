@@ -1,0 +1,9 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(swift test *)",
+      "Bash(xcodebuild test *)",
+      "Bash(xcrun xcresulttool *)"
+    ]
+  }
+}

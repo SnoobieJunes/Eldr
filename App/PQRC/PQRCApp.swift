@@ -33,9 +33,8 @@ final class AppSession {
     var bootError: String?
     /// Set when the user opens the demo from Settings or launch args.
     var demoRunning = false
-    /// npub from a scanned `pqrc:add?npub=…` QR. MainView observes this and
-    /// opens New Conversation prefilled — so a camera scan lands in the app
-    /// instead of a web search.
+    /// npub arriving via a `pqrc:add?npub=…` deep link (QR scan from the
+    /// Camera app lands here instead of in a web browser).
     var pendingNpub: String?
 
     init() {
@@ -50,20 +49,6 @@ final class AppSession {
             !arguments.contains("--reset")
         {
             Task { await bootSingle() }
-        }
-    }
-
-    /// Handles `pqrc:add?npub=npub1…` from a scanned QR code. The system
-    /// Camera opens this app (the `pqrc` URL scheme is registered in
-    /// Info.plist) instead of falling through to a web search. We only accept
-    /// a well-formed `npub1…` value; everything else is ignored.
-    func handleDeepLink(_ url: URL) {
-        guard url.scheme == "pqrc" else { return }
-        let components = URLComponents(url: url, resolvingAgainstBaseURL: false)
-        if let npub = components?.queryItems?.first(where: { $0.name == "npub" })?.value,
-            npub.hasPrefix("npub1")
-        {
-            pendingNpub = npub
         }
     }
 
@@ -97,66 +82,121 @@ final class AppSession {
         }
     }
 
-    /// Relay for the single-persona session, resolved in priority order:
-    /// 1. `PQRC_RELAY_URL` env var (Xcode scheme) or `relayURL` UserDefaults —
-    ///    any ws:// or wss:// relay, e.g. `ws://127.0.0.1:7777` for a local
-    ///    `swift run pqrc-relay`. The literal value `local` forces the
-    ///    in-process simulator.
-    /// 2. Default: the deployed anchor relay.
-    /// UI tests are unaffected either way — they boot the Local Universe.
+    /// Relay resolution, in priority order:
+    /// 1. `PQRC_RELAY_URL` env var (Xcode scheme) — single URL override.
+    /// 2. `relayURLs` UserDefaults — the user's server list from Settings.
+    /// 3. Default: the deployed anchor relay.
+    /// The literal value `local` (anywhere in the list) is the in-process
+    /// simulator. UI tests are unaffected — they boot the Local Universe.
     static let defaultRelayURL = "wss://relay.lerants.com"
 
-    /// The relay the single-persona session uses, resolved once:
-    /// `PQRC_RELAY_URL` env → `relayURL` UserDefaults → the deployed default.
-    /// The literal value `local` means the in-process simulator.
-    static var resolvedRelayURL: String {
-        ProcessInfo.processInfo.environment["PQRC_RELAY_URL"]
-            ?? UserDefaults.standard.string(forKey: "relayURL")
-            ?? defaultRelayURL
-    }
-
-    /// What we publish in the kind-10050 relay list (what peers use to reach
-    /// us). `local` maps to the placeholder scheme.
-    static var announceRelayURLs: [String] {
-        resolvedRelayURL == "local" ? ["local://relay"] : [resolvedRelayURL]
-    }
-
-    private func makeRelayTransport() async -> any RelayTransport {
-        let configured = Self.resolvedRelayURL
-        if configured != "local", let url = URL(string: configured),
-            url.scheme == "ws" || url.scheme == "wss"
-        {
-            return await NostrWebSocketTransport(url: url).connect()
+    static var configuredRelayURLs: [String] {
+        if let env = ProcessInfo.processInfo.environment["PQRC_RELAY_URL"] {
+            return [env]
         }
-        return await LocalRelaySimulator(url: "local://relay").connect()
+        // Test launches stay hermetic: launch args only exist in dev/test
+        // contexts, and a UI test must never depend on a live relay.
+        let arguments = ProcessInfo.processInfo.arguments
+        if arguments.contains("--uitest") || arguments.contains("--reset") {
+            return ["local"]
+        }
+        let saved = UserDefaults.standard.stringArray(forKey: "relayURLs") ?? []
+        return saved.isEmpty ? [Self.defaultRelayURL] : saved
+    }
+
+    private func makeRelayTransports() async -> [any RelayTransport] {
+        var transports: [any RelayTransport] = []
+        for configured in Self.configuredRelayURLs {
+            if configured == "local" {
+                transports.append(await LocalRelaySimulator(url: "local://relay").connect())
+            } else if let url = URL(string: configured),
+                url.scheme == "ws" || url.scheme == "wss"
+            {
+                transports.append(await NostrWebSocketTransport(url: url).connect())
+            }
+        }
+        if transports.isEmpty {
+            transports.append(await LocalRelaySimulator(url: "local://relay").connect())
+        }
+        return transports
+    }
+
+    /// Provider per the Settings picker. The Anthropic key lives in the
+    /// Keychain (account `anthropic-api-key`), never UserDefaults.
+    static func makeAgentProvider() -> any AgentProvider {
+        switch UserDefaults.standard.string(forKey: "aiProvider") ?? "ondevice" {
+        case "remote":
+            let keychain = KeychainStore(service: "chat.pqrc.keys")
+            if let keyData = keychain.loadIfPresent(account: "anthropic-api-key"),
+                case let key = String(decoding: keyData, as: UTF8.self), !key.isEmpty
+            {
+                return AnthropicAPIProvider(apiKey: key)
+            }
+            return MockAgentProvider()
+        case "mock":
+            return MockAgentProvider()
+        default:
+            return FoundationModelsAgentProvider.isAvailable
+                ? FoundationModelsAgentProvider() : MockAgentProvider()
+        }
+    }
+
+    /// Multipeer local link: user-toggleable (Settings → Nearby), OFF by
+    /// default in every build. It advertises a Bonjour service and opens
+    /// AWDL/Bluetooth — a privacy surface (and the iOS Simulator has no real
+    /// radios, so it just spams `DTLS … No route to host`). The user opts in
+    /// from Settings; only then do the radios start (and the Local Network
+    /// permission prompt appears on device).
+    static var localLinkEnabled: Bool {
+        UserDefaults.standard.bool(forKey: "localLinkEnabled")
     }
 
     func bootSingle() async {
-        let transport = await makeRelayTransport()
+        let transports = await makeRelayTransports()
         let blossom = LocalBlossomSimulator()
-        let provider: any AgentProvider =
-            FoundationModelsAgentProvider.isAvailable
-            ? FoundationModelsAgentProvider() : MockAgentProvider()
-        // Local-network (MultipeerConnectivity) delivery is OFF by default in
-        // every build: it advertises a Bonjour service — a privacy surface —
-        // so per SPEC §0 (privacy first) it stays disabled rather than
-        // auto-enabling in debug builds. The S1 transport stays implemented and
-        // exercised by the package tests; nothing in the app auto-enables it.
         let runtime = PersonaRuntime(
             displayName: UserDefaults.standard.string(forKey: "displayName") ?? "Me",
-            transports: [transport],
+            transports: transports,
             blobStore: blossom,
-            provider: provider,
+            provider: Self.makeAgentProvider(),
             keychainService: "chat.pqrc.keys",
-            enableLocalLink: false)
+            enableLocalLink: Self.localLinkEnabled)
         let model = AppModel(
             runtime: runtime,
             personaName: UserDefaults.standard.string(forKey: "displayName") ?? "Me")
         do {
-            try await model.start(inMemoryStore: false, relayURLs: Self.announceRelayURLs)
+            try await model.start(inMemoryStore: false, relayURLs: Self.configuredRelayURLs)
             mode = .single(model)
         } catch {
             bootError = String(describing: error)
+        }
+    }
+
+    /// Tears the single-persona session down and boots it again — the apply
+    /// path for relay-list and Nearby changes from Settings.
+    func rebootSingle() async {
+        if case .single(let model) = mode {
+            await model.runtime.shutdown()
+        }
+        mode = .onboarding
+        await bootSingle()
+    }
+
+    /// Re-resolves the AI provider after a Settings change (no reboot needed).
+    func applyAIProvider() async {
+        guard case .single(let model) = mode else { return }
+        await model.runtime.setProvider(Self.makeAgentProvider())
+    }
+
+    /// `pqrc:add?npub=npub1…` — from a scanned QR. Opens New Conversation
+    /// with the npub prefilled (handled by MainView).
+    func handleDeepLink(_ url: URL) {
+        guard url.scheme == "pqrc" else { return }
+        let components = URLComponents(url: url, resolvingAgainstBaseURL: false)
+        if let npub = components?.queryItems?.first(where: { $0.name == "npub" })?.value,
+            npub.hasPrefix("npub1")
+        {
+            pendingNpub = npub
         }
     }
 

@@ -6,11 +6,16 @@ import PQRCCore
 /// Only verified contacts can hold sessions (CLAUDE.md invariant 7).
 public struct VerifiedContact: Sendable, Equatable {
     public let binding: VerifiedBinding
+    /// The raw binding the verification ran against, kept so the app layer
+    /// can persist it and re-verify on restore. Trust still flows only
+    /// through `binding` (the `VerifiedBinding` type-state).
+    public let raw: IdentityBinding?
     public var nostrPubkeyHex: String { binding.nostrPubkey.hexString }
     public var identityHex: String { binding.identityPubkey.hexString }
 
-    public init(binding: VerifiedBinding) {
+    public init(binding: VerifiedBinding, raw: IdentityBinding? = nil) {
         self.binding = binding
+        self.raw = raw
     }
 }
 
@@ -65,10 +70,10 @@ public actor PQRCMessenger {
     private var sessions: [String: PQRCSession] = [:]  // peer identity hex -> session
     private var processedWrapIDs: Set<String> = []
     private var pendingRetry: [GiftWrap.Unwrapped] = []
-    /// Unknown-sender envelopes held for the message-request gate (D12), keyed
-    /// by sender Nostr pubkey hex, so accepting a request can replay the held
-    /// handshake. Bounded both ways (≤32 senders × ≤16 envelopes, oldest
-    /// evicted) so a spray of strangers cannot grow memory.
+    /// Unknown-sender envelopes held for the message-request gate (D12),
+    /// keyed by sender Nostr pubkey hex. Bounded both ways so a spray of
+    /// strangers cannot grow memory: at most 32 pending senders, at most 16
+    /// envelopes each (oldest evicted first).
     private var pendingRequests: [String: [GiftWrap.Unwrapped]] = [:]
     private var pendingRequestOrder: [String] = []
     private var pumpTasks: [Task<Void, Never>] = []
@@ -105,7 +110,9 @@ public actor PQRCMessenger {
     // MARK: - Setup / announcement
 
     /// Publishes the kind 10420 binding, 10421 bundle and 10050 relay list.
-    public func announce(relayURLs: [String]) async throws {
+    /// `maxAttempts` bounds the per-event retry: callers that publish at boot
+    /// pass a small value so a down relay logs a few lines instead of flooding.
+    public func announce(relayURLs: [String], maxAttempts: Int = 60) async throws {
         let now = clock.now()
         let binding = try IdentityBinding.make(
             identity: identity, nostrPubkey: Data(hexString: nostrKeypair.publicKeyHex) ?? Data())
@@ -117,7 +124,7 @@ public actor PQRCMessenger {
         let relayList = try PQRCEvents.relayListEvent(
             relayURLs: relayURLs, signer: nostrKeypair, createdAt: now, randomSource: randomSource)
         for event in [bindingEvent, bundleEvent, relayList] {
-            try await publishWithRetry(event)
+            try await publishWithRetry(event, maxAttempts: maxAttempts)
         }
     }
 
@@ -141,10 +148,10 @@ public actor PQRCMessenger {
                 if bindingEvent != nil && bundleEvent != nil { break }
             }
             guard let bindingEvent, let bundleEvent else { continue }
-            let verified = try PQRCEvents.verifyBindingEvent(bindingEvent)
+            let (verified, raw) = try PQRCEvents.verifyBindingEventWithRaw(bindingEvent)
             let bundle = try PQRCEvents.verifyPrekeyBundleEvent(
                 bundleEvent, verifiedBinding: verified)
-            let contact = VerifiedContact(binding: verified)
+            let contact = VerifiedContact(binding: verified, raw: raw)
             contactsByNostrPub[contact.nostrPubkeyHex] = contact
             return (contact, bundle)
         }
@@ -155,12 +162,30 @@ public actor PQRCMessenger {
         contactsByNostrPub[contact.nostrPubkeyHex] = contact
     }
 
+    public func verifiedContact(identityHex: String) -> VerifiedContact? {
+        contactsByNostrPub.values.first { $0.identityHex == identityHex }
+    }
+
+    /// Restores a persisted ratchet session (T2/persistence): the contact must
+    /// already be added (its binding re-verified by the caller — invariant 7
+    /// still gates every key through `BindingVerifier.verify`).
+    public func restoreSession(
+        with contact: VerifiedContact, snapshot: RatchetSnapshot,
+        usedLastResortPrekey: Bool = false
+    ) throws {
+        sessions[contact.identityHex] = try PQRCSession(
+            snapshot: snapshot,
+            peerIdentityPubkey: contact.binding.identityPubkey,
+            usedLastResortPrekey: usedLastResortPrekey,
+            clock: clock, randomSource: randomSource)
+    }
+
     // MARK: - Message requests (D12)
 
-    /// Accepts a pending request: fetches and fully verifies the sender's
-    /// 10420/10421 (both binding directions + every prekey signature), adds
-    /// the contact, then replays every held envelope through the normal
-    /// pipeline (handshake → session → message). Returns the verified contact.
+    /// Accepts a pending message request: fetches and fully verifies the
+    /// sender's 10420/10421, adds the contact, then replays every held
+    /// envelope through the normal pipeline (handshake → session → message).
+    /// Returns the verified contact so the caller can persist it.
     public func acceptRequest(senderNostrPubkeyHex: String) async throws -> VerifiedContact {
         let (contact, _) = try await fetchVerifiedPeer(nostrPubkeyHex: senderNostrPubkeyHex)
         let held = pendingRequests.removeValue(forKey: senderNostrPubkeyHex) ?? []
@@ -182,6 +207,14 @@ public actor PQRCMessenger {
     /// `start()` — the local receive pump is wired up there.
     public func setLocalLink(_ link: any LocalLinkTransport) {
         localLink = link
+    }
+
+    /// Seeds the envelope-dedupe set from persistence. Must be called before
+    /// `start()`: relays replay stored envelopes to every fresh subscription,
+    /// and without the seed each relaunch re-processes history (the ratchet
+    /// rejects it — keys are deleted — but it churns the retry queue).
+    public func seedProcessedWrapIDs(_ ids: Set<String>) {
+        processedWrapIDs.formUnion(ids)
     }
 
     public func setBlocked(_ identityHex: String, blocked: Bool) {
@@ -313,7 +346,14 @@ public actor PQRCMessenger {
         let (stream, continuation) = AsyncStream.makeStream(of: MessengerEvent.self)
         eventContinuation = continuation
         for transport in transports {
-            try await transport.authenticate(keypair: nostrKeypair, randomSource: randomSource)
+            // A down/unreachable relay must not block startup or onboarding:
+            // skip it on auth failure (sends still redial via publishWithRetry,
+            // and nothing here throws). Other transports keep running.
+            do {
+                try await transport.authenticate(keypair: nostrKeypair, randomSource: randomSource)
+            } catch {
+                continue
+            }
             let filters = [
                 NostrFilter(kinds: [PQRCConstants.giftWrapEventKind], pTags: [nostrKeypair.publicKeyHex])
             ]
@@ -377,10 +417,20 @@ public actor PQRCMessenger {
     }
 
     private func processUnwrapped(_ unwrapped: GiftWrap.Unwrapped) async {
+        // L-4: future-version traffic is rejected legibly here instead of
+        // cycling the retry queue until "overflow" (AEAD would reject it
+        // anyway — the receiver bakes "1" into the AD).
+        guard unwrapped.rumor.version == PQRCConstants.version else {
+            eventContinuation?.yield(
+                .quarantined(
+                    wrapEventID: unwrapped.wrapEventID,
+                    reason: "unsupported pqrc_version \(unwrapped.rumor.version)"))
+            return
+        }
         guard let contact = contactsByNostrPub[unwrapped.senderNostrPubkey] else {
             // Unknown sender: message-request gate (D12). The envelope is held
-            // (bounded) so accepting the request can replay it; nothing renders
-            // as a conversation until the user accepts.
+            // (bounded) so accepting the request can replay it — nothing
+            // renders as a conversation until the user accepts.
             holdForRequest(unwrapped)
             eventContinuation?.yield(
                 .messageRequest(
@@ -448,6 +498,22 @@ public actor PQRCMessenger {
                         wrapEventID: unwrapped.wrapEventID))
                 return
             }
+            // SPEC §13.3 enforced at the protocol layer (review M-1): an
+            // ai_window is dropped — and flagged — unless it is signed by the
+            // sender's binding-verified HUMAN identity key. The AgentEngine
+            // re-checks above (defense in depth), but no consumer of
+            // `ReceivedMessage.aiWindow` can ever see a forgeable announcement.
+            var aiWindow = unwrapped.rumor.aiWindow
+            if let window = aiWindow,
+                window.enabledBy != contact.binding.identityPubkey || !window.hasValidSignature()
+            {
+                aiWindow = nil
+                eventContinuation?.yield(
+                    .protocolViolation(
+                        senderIdentityHex: contact.identityHex,
+                        reason: "ai_window not signed by the sender's human identity key",
+                        wrapEventID: unwrapped.wrapEventID))
+            }
             eventContinuation?.yield(
                 .message(
                     ReceivedMessage(
@@ -455,7 +521,7 @@ public actor PQRCMessenger {
                         participantType: unwrapped.rumor.participantType,
                         body: body,
                         contentPointer: unwrapped.rumor.contentPointer,
-                        aiWindow: unwrapped.rumor.aiWindow,
+                        aiWindow: aiWindow,
                         wrapEventID: unwrapped.wrapEventID)))
             if !isRetry { await retryPending() }
         } catch let error as PQRCError {
@@ -501,8 +567,6 @@ public actor PQRCMessenger {
         Self.validateParticipantAuthenticity(rumor, agentPubkey: contact.binding.agentPubkey)
     }
 
-    /// Holds an unknown-sender envelope for the message-request gate, bounded
-    /// at 32 senders × 16 envelopes (oldest sender / oldest envelope evicted).
     private func holdForRequest(_ unwrapped: GiftWrap.Unwrapped) {
         let sender = unwrapped.senderNostrPubkey
         if pendingRequests[sender] == nil {

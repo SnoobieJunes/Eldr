@@ -33,6 +33,15 @@ public enum PQRCEvents {
     /// Parses AND fully verifies a kind-10420 event in both directions.
     /// Returns trusted keys only on success.
     public static func verifyBindingEvent(_ event: NostrEvent) throws -> VerifiedBinding {
+        try verifyBindingEventWithRaw(event).verified
+    }
+
+    /// As `verifyBindingEvent`, additionally returning the raw binding so the
+    /// app layer can persist it (and re-run `BindingVerifier.verify` on every
+    /// restore — invariant 7 survives persistence).
+    public static func verifyBindingEventWithRaw(
+        _ event: NostrEvent
+    ) throws -> (verified: VerifiedBinding, raw: IdentityBinding) {
         guard event.kind == PQRCConstants.bindingEventKind else {
             throw PQRCError.bindingVerificationFailed(.missingTag("kind"))
         }
@@ -56,8 +65,9 @@ public enum PQRCEvents {
             version: version,
             crossSignature: crossSig
         )
-        return try BindingVerifier.verify(
+        let verified = try BindingVerifier.verify(
             binding, outerSignatureValid: NostrKeypair.verify(event))
+        return (verified, binding)
     }
 
     // MARK: kind 10421 — prekey bundle

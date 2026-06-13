@@ -14,6 +14,7 @@ struct ConversationVM: Identifiable, Hashable {
     var pinned: Bool
     var verified: Bool
     var memberCount: Int
+    var unread: Int = 0
 }
 
 struct ThreadVM: Identifiable, Hashable {
@@ -56,7 +57,8 @@ final class AppModel {
     }
 
     func start(
-        inMemoryStore: Bool, storeURL: URL? = nil, relayURLs: [String] = ["local://relay"]
+        inMemoryStore: Bool, storeURL: URL? = nil,
+        relayURLs: [String] = ["local://relay"]
     ) async throws {
         let events = try await runtime.bootstrap(
             inMemoryStore: inMemoryStore, storeURL: storeURL, relayURLs: relayURLs)
@@ -64,11 +66,36 @@ final class AppModel {
         myIdentityHex = await runtime.identityHex
         prekeyCount = await runtime.oneTimePrekeyCount()
         contactNames[myIdentityHex] = personaName
+        await restorePersistedUI()
         onboarded = true
         pumpTask = Task { [weak self] in
             for await event in events {
                 await self?.apply(event)
             }
+        }
+    }
+
+    /// Rebuilds the conversation list, message history and threads from the
+    /// encrypted store — the relaunch path (messages used to vanish because
+    /// nothing ever read them back).
+    private func restorePersistedUI() async {
+        for conversationID in await runtime.persistedConversationIDs() {
+            let stored = await runtime.messages(conversationID: conversationID)
+            guard !stored.isEmpty else { continue }
+            messagesByConversation[conversationID] = stored
+            await refreshConversationRow(
+                conversationID, lastMessage: stored.last { $0.threadID == nil })
+        }
+        for (threadID, conversationID, title) in await runtime.allThreads() {
+            var threads = threadsByConversation[conversationID] ?? []
+            guard !threads.contains(where: { $0.id == threadID }) else { continue }
+            let count = (messagesByConversation[conversationID] ?? [])
+                .filter { $0.threadID == threadID }.count
+            threads.append(
+                ThreadVM(
+                    id: threadID, conversationID: conversationID,
+                    title: title, messageCount: count))
+            threadsByConversation[conversationID] = threads
         }
     }
 
@@ -119,10 +146,13 @@ final class AppModel {
     private func refreshConversationRow(_ id: String, lastMessage: StoredMessage?) async {
         let roster = await runtime.groupRoster(id)
         let title: String
+        var verified = false
         if let roster {
             title = roster.name
         } else {
-            title = await runtime.contactName(id)
+            let info = await runtime.contactInfo(id)
+            title = info.name
+            verified = info.verified
         }
         contactNames[id] = title
         var row = conversations.first { $0.id == id }
@@ -131,14 +161,45 @@ final class AppModel {
                 lastActivity: 0, pinned: false, verified: false,
                 memberCount: roster?.members.count ?? 2)
         row.title = title
+        row.verified = verified
         row.memberCount = roster?.members.count ?? 2
         if let lastMessage, lastMessage.threadID == nil {
             row.lastMessage = lastMessage.text
             row.lastActivity = lastMessage.sentAt
         }
+        row.unread = unreadCount(for: id, lastActivity: row.lastActivity)
         conversations.removeAll { $0.id == id }
         conversations.append(row)
         conversations.sort { ($0.pinned ? 1 : 0, $0.lastActivity) > ($1.pinned ? 1 : 0, $1.lastActivity) }
+    }
+
+    // MARK: - Read state (local-only; D5 — no remote receipts of any kind)
+
+    private var lastReadAt: [String: Int64] {
+        get {
+            ((UserDefaults.standard.dictionary(forKey: "lastReadAt") as? [String: Int]) ?? [:])
+                .mapValues(Int64.init)
+        }
+        set {
+            UserDefaults.standard.set(newValue.mapValues(Int.init), forKey: "lastReadAt")
+        }
+    }
+
+    private func unreadCount(for conversationID: String, lastActivity: Int64) -> Int {
+        let lastRead = lastReadAt[conversationID] ?? 0
+        return (messagesByConversation[conversationID] ?? [])
+            .filter { $0.threadID == nil && $0.sentAt > lastRead && $0.senderIdentity != myIdentityHex }
+            .count
+    }
+
+    func markRead(_ conversationID: String) {
+        var read = lastReadAt
+        read[conversationID] = (messagesByConversation[conversationID] ?? [])
+            .map(\.sentAt).max() ?? Int64(Date().timeIntervalSince1970)
+        lastReadAt = read
+        if let index = conversations.firstIndex(where: { $0.id == conversationID }) {
+            conversations[index].unread = 0
+        }
     }
 
     private func refreshThreadCounts(conversationID: String, threadID: String) {
@@ -189,14 +250,16 @@ final class AppModel {
     }
 
     /// Accepts a message request: the held handshake replays, the conversation
-    /// materializes, and the request row clears. Returns the conversation id so
-    /// the caller can navigate into it.
+    /// materializes, and the requests row clears. Returns the conversation id
+    /// so the UI can navigate straight into it.
     func acceptRequest(_ senderNostrPubkeyHex: String) async -> String? {
         guard
             let conversationID = try? await runtime.acceptMessageRequest(
                 senderNostrPubkeyHex: senderNostrPubkeyHex)
         else { return nil }
         messageRequests.removeAll { $0 == senderNostrPubkeyHex }
+        // The replayed envelope's events may have landed already; make sure
+        // the row exists even if the held message is still decrypting.
         await refreshConversationRow(
             conversationID,
             lastMessage: messagesByConversation[conversationID]?.last { $0.threadID == nil })
@@ -206,6 +269,40 @@ final class AppModel {
     func declineRequest(_ senderNostrPubkeyHex: String) async {
         await runtime.declineMessageRequest(senderNostrPubkeyHex: senderNostrPubkeyHex)
         messageRequests.removeAll { $0 == senderNostrPubkeyHex }
+    }
+
+    func renameContact(_ identityHex: String, nickname: String?) async {
+        await runtime.renameContact(identityHex, nickname: nickname)
+        await refreshConversationRow(
+            identityHex,
+            lastMessage: messagesByConversation[identityHex]?.last { $0.threadID == nil })
+    }
+
+    func setVerified(_ identityHex: String, verified: Bool) async {
+        await runtime.setVerified(identityHex, verified: verified)
+        if verified {
+            safetyCodeChangedFor.remove(identityHex)
+        }
+    }
+
+    func setMyAlias(_ alias: String?) async {
+        await runtime.setMyAlias(alias)
+        contactNames[myIdentityHex] = alias ?? personaName
+    }
+
+    func togglePinned(_ conversationID: String) async {
+        guard let index = conversations.firstIndex(where: { $0.id == conversationID }) else { return }
+        conversations[index].pinned.toggle()
+        let pinned = conversations[index].pinned
+        conversations.sort { ($0.pinned ? 1 : 0, $0.lastActivity) > ($1.pinned ? 1 : 0, $1.lastActivity) }
+        await runtime.setPinned(conversationID, pinned: pinned)
+    }
+
+    func deleteConversation(_ conversationID: String) async {
+        conversations.removeAll { $0.id == conversationID }
+        messagesByConversation[conversationID] = nil
+        threadsByConversation[conversationID] = nil
+        await runtime.deleteConversation(conversationID)
     }
 
     func messages(for conversationID: String) -> [StoredMessage] {

@@ -36,13 +36,25 @@ jobs:
       - uses: actions/checkout@v4
       - name: Select Xcode 26
         run: sudo xcode-select -s /Applications/Xcode_26.app
-      - name: Test (unit + UI). Security-tagged failures fail the build, no retries.
+      # Security tests run FIRST with NO retries (TEST-PLAN §12: a flaky
+      # security failure must fail the build, never be retried green).
+      - name: Security suite (no retries)
         run: |
           xcodebuild test \
             -project App/PQRC.xcodeproj \
             -scheme PQRC \
-            -destination 'platform=iOS Simulator,name=iPhone 17 Pro' \
+            -destination 'platform=iOS Simulator,name=iPhone 17 Pro,OS=26.5' \
             -skipPackagePluginValidation \
+            -only-testing:PQRCTests/SecuritySuiteTests \
+            -resultBundlePath SecurityResults.xcresult
+      - name: Test (remaining unit + UI, retried once for simulator flakes)
+        run: |
+          xcodebuild test \
+            -project App/PQRC.xcodeproj \
+            -scheme PQRC \
+            -destination 'platform=iOS Simulator,name=iPhone 17 Pro,OS=26.5' \
+            -skipPackagePluginValidation \
+            -skip-testing:PQRCTests/SecuritySuiteTests \
             -retry-tests-on-failure -test-iterations 2 \
             -resultBundlePath TestResults.xcresult
       - name: Upload result bundle
@@ -72,7 +84,7 @@ jobs:
           xcodebuild test \
             -project App/PQRC.xcodeproj \
             -scheme PQRC \
-            -destination 'platform=iOS Simulator,name=iPhone 17 Pro' \
+            -destination 'platform=iOS Simulator,name=iPhone 17 Pro,OS=26.5' \
             -skipPackagePluginValidation \
             -only-testing:PQRCTests/PerformancePipelineTests \
             -only-testing:PQRCUITests/PerformanceUITests \

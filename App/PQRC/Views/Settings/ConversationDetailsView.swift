@@ -10,10 +10,26 @@ struct ConversationDetailsView: View {
     @State private var verified = false
     @State private var showReport = false
     @State private var blocked = false
+    @State private var nickname = ""
 
     var body: some View {
         NavigationStack {
             Form {
+                Section("Name") {
+                    TextField(
+                        "Local name for this contact", text: $nickname,
+                        prompt: Text(model.contactNames[conversationID] ?? "Contact"))
+                    .accessibilityIdentifier("contact-nickname")
+                    .onSubmit {
+                        Task {
+                            await model.renameContact(
+                                conversationID, nickname: nickname.isEmpty ? nil : nickname)
+                        }
+                    }
+                    Text("Only you see this name. If they've chosen an alias, it shows when you clear this.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
                 Section("Verify \(model.contactNames[conversationID] ?? "contact")") {
                     Text(safetyCode.isEmpty ? "—" : safetyCode)
                         .font(.body.monospaced())
@@ -26,6 +42,11 @@ struct ConversationDetailsView: View {
                         .accessibilityLabel("Safety code QR for comparison")
                     Toggle("Mark as verified", isOn: $verified)
                         .accessibilityIdentifier("mark-verified")
+                        .onChange(of: verified) { _, newValue in
+                            // Persisted (D13): the shield badge survives
+                            // relaunch and clears safety-change warnings.
+                            Task { await model.setVerified(conversationID, verified: newValue) }
+                        }
                 }
                 Section("Safety") {
                     Button(blocked ? "Unblock" : "Block", role: .destructive) {
@@ -48,6 +69,9 @@ struct ConversationDetailsView: View {
             .navigationTitle("Details")
             .task {
                 safetyCode = await model.runtime.safetyCode(with: conversationID)
+                let info = await model.runtime.contactInfo(conversationID)
+                verified = info.verified
+                blocked = info.blocked
             }
             .toolbar {
                 ToolbarItem(placement: .confirmationAction) {
