@@ -33,9 +33,9 @@
 /* End PBXContainerItemProxy section */
 
 /* Begin PBXFileReference section */
-		AA0000000000000000000701 /* PQRC.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = PQRC.app; sourceTree = BUILT_PRODUCTS_DIR; };
-		AA0000000000000000000702 /* PQRCTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = PQRCTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
-		AA0000000000000000000703 /* PQRCUITests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = PQRCUITests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+		AA0000000000000000000701 /* EldrChat.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = EldrChat.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		AA0000000000000000000702 /* EldrChatTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = EldrChatTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+		AA0000000000000000000703 /* EldrChatUITests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = EldrChatUITests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
 
 /* Begin PBXFileSystemSynchronizedRootGroup section */
@@ -100,9 +100,9 @@
 		AA0000000000000000000602 /* Products */ = {
 			isa = PBXGroup;
 			children = (
-				AA0000000000000000000701 /* PQRC.app */,
-				AA0000000000000000000702 /* PQRCTests.xctest */,
-				AA0000000000000000000703 /* PQRCUITests.xctest */,
+				AA0000000000000000000701 /* EldrChat.app */,
+				AA0000000000000000000702 /* EldrChatTests.xctest */,
+				AA0000000000000000000703 /* EldrChatUITests.xctest */,
 			);
 			name = Products;
 			sourceTree = "<group>";
@@ -110,9 +110,9 @@
 /* End PBXGroup section */
 
 /* Begin PBXNativeTarget section */
-		AA0000000000000000000011 /* PQRC */ = {
+		AA0000000000000000000011 /* EldrChat */ = {
 			isa = PBXNativeTarget;
-			buildConfigurationList = AA0000000000000000000801 /* Build configuration list for PBXNativeTarget "PQRC" */;
+			buildConfigurationList = AA0000000000000000000801 /* Build configuration list for PBXNativeTarget "EldrChat" */;
 			buildPhases = (
 				AA0000000000000000000901 /* Sources */,
 				AA0000000000000000000501 /* Frameworks */,
@@ -125,19 +125,19 @@
 			fileSystemSynchronizedGroups = (
 				AA0000000000000000000401 /* PQRC */,
 			);
-			name = PQRC;
+			name = EldrChat;
 			packageProductDependencies = (
 				AA0000000000000000000201 /* PQRCCore */,
 				AA0000000000000000000202 /* PQRCNostr */,
 				AA0000000000000000000203 /* PQRCAgent */,
 			);
 			productName = PQRC;
-			productReference = AA0000000000000000000701 /* PQRC.app */;
+			productReference = AA0000000000000000000701 /* EldrChat.app */;
 			productType = "com.apple.product-type.application";
 		};
-		AA0000000000000000000012 /* PQRCTests */ = {
+		AA0000000000000000000012 /* EldrChatTests */ = {
 			isa = PBXNativeTarget;
-			buildConfigurationList = AA0000000000000000000802 /* Build configuration list for PBXNativeTarget "PQRCTests" */;
+			buildConfigurationList = AA0000000000000000000802 /* Build configuration list for PBXNativeTarget "EldrChatTests" */;
 			buildPhases = (
 				AA0000000000000000000902 /* Sources */,
 				AA0000000000000000000502 /* Frameworks */,
@@ -150,19 +150,19 @@
 			fileSystemSynchronizedGroups = (
 				AA0000000000000000000402 /* PQRCTests */,
 			);
-			name = PQRCTests;
+			name = EldrChatTests;
 			packageProductDependencies = (
 				AA0000000000000000000204 /* PQRCCore */,
 				AA0000000000000000000205 /* PQRCNostr */,
 				AA0000000000000000000206 /* PQRCAgent */,
 			);
 			productName = PQRCTests;
-			productReference = AA0000000000000000000702 /* PQRCTests.xctest */;
+			productReference = AA0000000000000000000702 /* EldrChatTests.xctest */;
 			productType = "com.apple.product-type.bundle.unit-test";
 		};
-		AA0000000000000000000013 /* PQRCUITests */ = {
+		AA0000000000000000000013 /* EldrChatUITests */ = {
 			isa = PBXNativeTarget;
-			buildConfigurationList = AA0000000000000000000803 /* Build configuration list for PBXNativeTarget "PQRCUITests" */;
+			buildConfigurationList = AA0000000000000000000803 /* Build configuration list for PBXNativeTarget "EldrChatUITests" */;
 			buildPhases = (
 				AA0000000000000000000903 /* Sources */,
 				AA0000000000000000000503 /* Frameworks */,
@@ -175,9 +175,9 @@
 			fileSystemSynchronizedGroups = (
 				AA0000000000000000000403 /* PQRCUITests */,
 			);
-			name = PQRCUITests;
+			name = EldrChatUITests;
 			productName = PQRCUITests;
-			productReference = AA0000000000000000000703 /* PQRCUITests.xctest */;
+			productReference = AA0000000000000000000703 /* EldrChatUITests.xctest */;
 			productType = "com.apple.product-type.bundle.ui-testing";
 		};
 /* End PBXNativeTarget section */
@@ -195,7 +195,7 @@
 					};
 				};
 			};
-			buildConfigurationList = AA0000000000000000000804 /* Build configuration list for PBXProject "PQRC" */;
+			buildConfigurationList = AA0000000000000000000804 /* Build configuration list for PBXProject "EldrChat" */;
 			developmentRegion = en;
 			hasScannedForEncodings = 0;
 			knownRegions = (
@@ -214,9 +214,9 @@
 			projectDirPath = "";
 			projectRoot = "";
 			targets = (
-				AA0000000000000000000011 /* PQRC */,
-				AA0000000000000000000012 /* PQRCTests */,
-				AA0000000000000000000013 /* PQRCUITests */,
+				AA0000000000000000000011 /* EldrChat */,
+				AA0000000000000000000012 /* EldrChatTests */,
+				AA0000000000000000000013 /* EldrChatUITests */,
 			);
 		};
 /* End PBXProject section */
@@ -258,12 +258,12 @@
 /* Begin PBXTargetDependency section */
 		AA0000000000000000000B01 /* PBXTargetDependency */ = {
 			isa = PBXTargetDependency;
-			target = AA0000000000000000000011 /* PQRC */;
+			target = AA0000000000000000000011 /* EldrChat */;
 			targetProxy = AA0000000000000000000301 /* PBXContainerItemProxy */;
 		};
 		AA0000000000000000000B02 /* PBXTargetDependency */ = {
 			isa = PBXTargetDependency;
-			target = AA0000000000000000000011 /* PQRC */;
+			target = AA0000000000000000000011 /* EldrChat */;
 			targetProxy = AA0000000000000000000302 /* PBXContainerItemProxy */;
 		};
 /* End PBXTargetDependency section */
@@ -330,10 +330,11 @@
 				DEVELOPMENT_TEAM = 49CQA5YX6U;
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
-				INFOPLIST_FILE = "Info.plist";
-				INFOPLIST_KEY_CFBundleDisplayName = PQRC;
+				INFOPLIST_FILE = Info.plist;
+				INFOPLIST_KEY_CFBundleDisplayName = EldrChat;
 				INFOPLIST_KEY_ITSAppUsesNonExemptEncryption = YES;
 				INFOPLIST_KEY_NSCameraUsageDescription = "Scan a contact's QR code to start an encrypted conversation";
+				INFOPLIST_KEY_NSLocalNetworkUsageDescription = "PQRC delivers end-to-end encrypted messages directly to nearby contacts when you are in the same room, with no server involved.";
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
 				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
 				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
@@ -344,7 +345,7 @@
 					"@executable_path/Frameworks",
 				);
 				MARKETING_VERSION = 0.1.0;
-				PRODUCT_BUNDLE_IDENTIFIER = chat.pqrc.app;
+				PRODUCT_BUNDLE_IDENTIFIER = chat.eldr.app;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SWIFT_EMIT_LOC_STRINGS = YES;
 				TARGETED_DEVICE_FAMILY = "1,2";
@@ -361,10 +362,11 @@
 				DEVELOPMENT_TEAM = 49CQA5YX6U;
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
-				INFOPLIST_FILE = "Info.plist";
-				INFOPLIST_KEY_CFBundleDisplayName = PQRC;
+				INFOPLIST_FILE = Info.plist;
+				INFOPLIST_KEY_CFBundleDisplayName = EldrChat;
 				INFOPLIST_KEY_ITSAppUsesNonExemptEncryption = YES;
 				INFOPLIST_KEY_NSCameraUsageDescription = "Scan a contact's QR code to start an encrypted conversation";
+				INFOPLIST_KEY_NSLocalNetworkUsageDescription = "PQRC delivers end-to-end encrypted messages directly to nearby contacts when you are in the same room, with no server involved.";
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
 				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
 				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
@@ -375,7 +377,7 @@
 					"@executable_path/Frameworks",
 				);
 				MARKETING_VERSION = 0.1.0;
-				PRODUCT_BUNDLE_IDENTIFIER = chat.pqrc.app;
+				PRODUCT_BUNDLE_IDENTIFIER = chat.eldr.app;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SWIFT_EMIT_LOC_STRINGS = YES;
 				TARGETED_DEVICE_FAMILY = "1,2";
@@ -388,9 +390,10 @@
 				BUNDLE_LOADER = "$(TEST_HOST)";
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = 49CQA5YX6U;
 				GENERATE_INFOPLIST_FILE = YES;
 				MARKETING_VERSION = 1.0;
-				PRODUCT_BUNDLE_IDENTIFIER = chat.pqrc.app.tests;
+				PRODUCT_BUNDLE_IDENTIFIER = chat.eldr.app.tests;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SWIFT_EMIT_LOC_STRINGS = NO;
 				TARGETED_DEVICE_FAMILY = "1,2";
@@ -404,9 +407,10 @@
 				BUNDLE_LOADER = "$(TEST_HOST)";
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = 49CQA5YX6U;
 				GENERATE_INFOPLIST_FILE = YES;
 				MARKETING_VERSION = 1.0;
-				PRODUCT_BUNDLE_IDENTIFIER = chat.pqrc.app.tests;
+				PRODUCT_BUNDLE_IDENTIFIER = chat.eldr.app.tests;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SWIFT_EMIT_LOC_STRINGS = NO;
 				TARGETED_DEVICE_FAMILY = "1,2";
@@ -419,9 +423,10 @@
 			buildSettings = {
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = 49CQA5YX6U;
 				GENERATE_INFOPLIST_FILE = YES;
 				MARKETING_VERSION = 1.0;
-				PRODUCT_BUNDLE_IDENTIFIER = chat.pqrc.app.uitests;
+				PRODUCT_BUNDLE_IDENTIFIER = chat.eldr.app.uitests;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SWIFT_EMIT_LOC_STRINGS = NO;
 				TARGETED_DEVICE_FAMILY = "1,2";
@@ -434,9 +439,10 @@
 			buildSettings = {
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = 49CQA5YX6U;
 				GENERATE_INFOPLIST_FILE = YES;
 				MARKETING_VERSION = 1.0;
-				PRODUCT_BUNDLE_IDENTIFIER = chat.pqrc.app.uitests;
+				PRODUCT_BUNDLE_IDENTIFIER = chat.eldr.app.uitests;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SWIFT_EMIT_LOC_STRINGS = NO;
 				TARGETED_DEVICE_FAMILY = "1,2";
@@ -447,7 +453,7 @@
 /* End XCBuildConfiguration section */
 
 /* Begin XCConfigurationList section */
-		AA0000000000000000000801 /* Build configuration list for PBXNativeTarget "PQRC" */ = {
+		AA0000000000000000000801 /* Build configuration list for PBXNativeTarget "EldrChat" */ = {
 			isa = XCConfigurationList;
 			buildConfigurations = (
 				AA0000000000000000000D11 /* Debug */,
@@ -456,7 +462,7 @@
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Release;
 		};
-		AA0000000000000000000802 /* Build configuration list for PBXNativeTarget "PQRCTests" */ = {
+		AA0000000000000000000802 /* Build configuration list for PBXNativeTarget "EldrChatTests" */ = {
 			isa = XCConfigurationList;
 			buildConfigurations = (
 				AA0000000000000000000D21 /* Debug */,
@@ -465,7 +471,7 @@
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Release;
 		};
-		AA0000000000000000000803 /* Build configuration list for PBXNativeTarget "PQRCUITests" */ = {
+		AA0000000000000000000803 /* Build configuration list for PBXNativeTarget "EldrChatUITests" */ = {
 			isa = XCConfigurationList;
 			buildConfigurations = (
 				AA0000000000000000000D31 /* Debug */,
@@ -474,7 +480,7 @@
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Release;
 		};
-		AA0000000000000000000804 /* Build configuration list for PBXProject "PQRC" */ = {
+		AA0000000000000000000804 /* Build configuration list for PBXProject "EldrChat" */ = {
 			isa = XCConfigurationList;
 			buildConfigurations = (
 				AA0000000000000000000D01 /* Debug */,
