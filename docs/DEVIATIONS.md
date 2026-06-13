@@ -16,7 +16,7 @@ and affects interop; `[app-only]` — client behavior, no wire impact;
 | D6 | No push notifications; foreground sync only | app-only |
 | D7 | Thread wire extension: `thread` ref, `thread_create`, `ai_invite` (thread-scoped ai_window, signature bound to the thread id) | upstream-NIP |
 | D8 | Block drops post-unseal with no trace and no notification; voluntary report/export flow (Guideline 1.2) | app-only |
-| D9 | EncryptedStore: SE-wrapped 256-bit master key, per-record HKDF keys, AES-GCM blobs in SwiftData, complete file protection | app-only |
+| D9 | EncryptedStore: SE-wrapped 256-bit master key, per-record HKDF keys, AES-GCM blobs in SwiftData, `completeUntilFirstUserAuthentication` file protection | app-only |
 | D10 | Handshake rumor piggybacks message #0 | upstream-NIP |
 | D11 | No published kind-0 profiles; local-only nicknames (encrypted at rest) | app-only |
 | D12 | Message-requests inbox gates unknown-sender handshakes | app-only |
@@ -218,7 +218,10 @@ and affects interop; `[app-only]` — client behavior, no wire impact;
   as neutral centered system rows on both ends; "Mark as verified" persists
   to the contact record and drives the list shield badge; conversation rows
   show relative timestamps + unread badges; swipe to pin/delete; the SwiftData
-  store files additionally get `FileProtectionType.complete` (review M6).
+  store files additionally get `FileProtectionType.completeUntilFirstUserAuthentication`
+  (review M6; downgraded from `.complete`, which made the DB unreadable while
+  the device was locked and caused open/write failures on real hardware — the
+  envelope encryption under the SE-wrapped key is the actual at-rest guarantee).
 
 ### Tech debt `[tech-debt]`
 

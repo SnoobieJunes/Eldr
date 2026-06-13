@@ -18,7 +18,7 @@ honesty about its limits is part of that.
 | Timing metadata | `created_at` fuzzed up to 2 days into the past on seal + wrap | `fuzz_timestampWithinTwoDaysPast_neverFuture` |
 | Size metadata | bucket padding {256,1K,4K,16K,64K}; >64 KB via constant-size pointer | `ciphertextLengths_collapseToBucketSet` |
 | Message integrity & context binding | AEAD AD = version‖participant_type‖n‖fuzzed_ts | `ad_bindsContext` |
-| At-rest confidentiality | Secure-Enclave-wrapped master key, per-record AES-GCM, complete file protection | `atRest_noPlaintextInStoreFiles` |
+| At-rest confidentiality | Secure-Enclave-wrapped master key, per-record AES-GCM, `completeUntilFirstUserAuthentication` file protection on the store | `atRest_noPlaintextInStoreFiles` |
 | AI transparency | agent label cryptographically bound (AD + agent_sig); windows/invites signed by the human identity key only, time-bounded, fail-closed | agent integrity suite |
 
 ## 2. What PQRC v1 does NOT protect — read this

@@ -116,8 +116,16 @@ final class AppModel {
     private func apply(_ event: RuntimeEvent) async {
         switch event {
         case .messageAdded(let message):
+            // Upsert by id: the runtime can yield the same message twice
+            // (restore + a live push, or local send + relay echo). A plain
+            // append leaves the list with duplicate StoredMessage.ids, which
+            // SwiftUI's ForEach hard-warns about and renders unpredictably.
             var list = messagesByConversation[message.conversationID] ?? []
-            list.append(message)
+            if let idx = list.firstIndex(where: { $0.id == message.id }) {
+                list[idx] = message
+            } else {
+                list.append(message)
+            }
             messagesByConversation[message.conversationID] = list
             await refreshConversationRow(message.conversationID, lastMessage: message)
             if let threadID = message.threadID {

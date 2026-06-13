@@ -379,19 +379,29 @@ actor SwiftDataMessageStore: MessageStore {
         let configuration: ModelConfiguration
         if inMemory {
             configuration = ModelConfiguration(schema: schema, isStoredInMemoryOnly: true)
-        } else if let url {
-            configuration = ModelConfiguration(schema: schema, url: url)
         } else {
-            configuration = ModelConfiguration(schema: schema)
+            // Pin the store location and ensure its parent exists FIRST — on a
+            // fresh install Library/Application Support may not exist yet, and
+            // letting Core Data discover that prints a wall of self-recovering
+            // "errno 2 / no such file" errors at launch.
+            let storeURL =
+                url ?? URL.applicationSupportDirectory.appendingPathComponent("default.store")
+            try? FileManager.default.createDirectory(
+                at: storeURL.deletingLastPathComponent(), withIntermediateDirectories: true)
+            configuration = ModelConfiguration(schema: schema, url: storeURL)
         }
         let container = try ModelContainer(for: schema, configurations: [configuration])
         if !inMemory {
-            // Defense-in-depth claimed by APP-SPEC §3 / THREAT_MODEL (review
-            // M6): complete file protection on the store files, on top of the
-            // envelope encryption that already covers every sensitive field.
+            // Defense-in-depth on top of the per-record envelope encryption
+            // (every sensitive field is AES-GCM-sealed under the SE-wrapped
+            // master key). completeUntilFirstUserAuthentication, NOT .complete:
+            // a messenger DB must stay readable while the device is locked
+            // (background work, relaunch); .complete makes it inaccessible then
+            // and causes real open/write failures on device. Still encrypted at
+            // rest and unreadable until the first post-boot unlock.
             for fileURL in container.configurations.map(\.url) {
                 try? FileManager.default.setAttributes(
-                    [.protectionKey: FileProtectionType.complete],
+                    [.protectionKey: FileProtectionType.completeUntilFirstUserAuthentication],
                     ofItemAtPath: fileURL.path)
             }
         }
