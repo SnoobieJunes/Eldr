@@ -100,6 +100,16 @@ struct ConversationView: View {
         .sheet(isPresented: $showDetails) {
             ConversationDetailsView(model: model, conversationID: conversationID)
         }
+        .alert(
+            "AI couldn't respond",
+            isPresented: Binding(
+                get: { model.agentError != nil },
+                set: { if !$0 { model.agentError = nil } })
+        ) {
+            Button("OK", role: .cancel) {}
+        } message: {
+            Text(model.agentError ?? "")
+        }
     }
 
     private var threadChips: some View {

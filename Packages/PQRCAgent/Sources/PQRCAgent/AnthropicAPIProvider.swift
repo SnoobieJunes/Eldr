@@ -50,13 +50,23 @@ public struct AnthropicAPIProvider: AgentProvider {
             "messages": [["role": "user", "content": user]],
         ]
         request.httpBody = try JSONSerialization.data(withJSONObject: payload)
-        let (data, _) = try await session.data(for: request)
+        let (data, response) = try await session.data(for: request)
+        // Surface real failures (401 bad key, 400 bad model, 429 rate limit)
+        // instead of a generic "malformed" — these were invisible before
+        // because every caller swallowed the error with `try?`.
+        if let http = response as? HTTPURLResponse, !(200..<300).contains(http.statusCode) {
+            let apiMessage =
+                ((try? JSONSerialization.jsonObject(with: data)) as? [String: Any])
+                .flatMap { ($0["error"] as? [String: Any])?["message"] as? String }
+            throw AgentProviderError.unavailable(
+                "Anthropic API \(http.statusCode): \(apiMessage ?? "request rejected")")
+        }
         guard
             let json = try JSONSerialization.jsonObject(with: data) as? [String: Any],
             let content = json["content"] as? [[String: Any]],
             let text = content.first?["text"] as? String
         else {
-            throw AgentProviderError.unavailable("malformed API response")
+            throw AgentProviderError.unavailable("unexpected API response shape")
         }
         return text
     }

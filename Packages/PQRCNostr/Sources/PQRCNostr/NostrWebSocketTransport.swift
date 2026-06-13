@@ -27,6 +27,10 @@ public actor NostrWebSocketTransport: RelayTransport {
 
     private var socket: URLSessionWebSocketTask?
     private var receiveLoop: Task<Void, Never>?
+    /// Circuit breaker: set after a connection/handshake failure so we stop
+    /// redialing on every operation (a down relay otherwise logs a `-1011` per
+    /// attempt). Cleared after a cooldown; the next operation redials.
+    private var connectionBackoff = false
     /// publish() waits here for the relay's ["OK", id, …], keyed by event id.
     private var pendingOKs: [String: CheckedContinuation<PublishAck, any Error>] = [:]
     /// Live subscriptions, keyed by our generated subscription id.
@@ -132,7 +136,9 @@ public actor NostrWebSocketTransport: RelayTransport {
     // MARK: Socket lifecycle
 
     private func ensureConnected() {
-        guard socket == nil else { return }
+        // In backoff after a failure: don't redial (operations fail fast, no
+        // new handshake attempt, no console spam) until the cooldown clears.
+        guard socket == nil, !connectionBackoff else { return }
         // waitsForConnectivity: on a phone the network comes and goes; let the
         // session hold the dial until a route exists instead of failing fast.
         let configuration = URLSessionConfiguration.default
@@ -205,6 +211,20 @@ public actor NostrWebSocketTransport: RelayTransport {
         challengeWaiters.removeAll()
         for (_, continuation) in subscriptions { continuation.finish(throwing: error) }
         subscriptions.removeAll()
+        // Enter a cooldown so we stop hammering an unreachable relay and stop
+        // flooding the console with handshake errors. The messenger's outbox
+        // still retries — it just fails fast (no redial) until this clears.
+        if !connectionBackoff {
+            connectionBackoff = true
+            Task { [weak self] in
+                try? await Task.sleep(for: .seconds(30))
+                await self?.clearBackoff()
+            }
+        }
+    }
+
+    private func clearBackoff() {
+        connectionBackoff = false
     }
 
     private func endSubscription(_ subscriptionID: String) async {

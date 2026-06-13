@@ -282,8 +282,12 @@ struct SettingsView: View {
                     .autocorrectionDisabled()
                     .textInputAutocapitalization(.never)
                     .accessibilityIdentifier("anthropic-key-field")
+                    // Persist on every change, not just on Return — typing or
+                    // pasting and tapping away must still save the key (and
+                    // re-resolve the provider), or it silently stays on Mock.
+                    .onChange(of: anthropicKey) { _, _ in saveAnthropicKey() }
                     .onSubmit { saveAnthropicKey() }
-                Text("Stored in the device Keychain, never synced or exported.")
+                Text("Stored in the device Keychain, never synced or exported. Drafts show an error here if the key is rejected.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }

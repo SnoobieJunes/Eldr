@@ -238,8 +238,26 @@ final class AppModel {
         try? await runtime.sendAsMyAI(text, conversationID: conversationID)
     }
 
+    /// Surfaced when an AI action fails (e.g. a bad Anthropic key or network),
+    /// so the user sees *why* instead of silently getting nothing.
+    var agentError: String?
+
     func draft(conversationID: String, threadID: String? = nil) async -> String? {
-        try? await runtime.draftReply(conversationID: conversationID, threadID: threadID).text
+        do {
+            return try await runtime.draftReply(
+                conversationID: conversationID, threadID: threadID).text
+        } catch {
+            agentError = Self.describeAgentError(error)
+            return nil
+        }
+    }
+
+    static func describeAgentError(_ error: Error) -> String {
+        if case AgentProviderError.unavailable(let detail) = error { return detail }
+        if case AgentProviderError.notConfigured = error {
+            return "No AI provider configured. Pick one in Settings → AI."
+        }
+        return (error as NSError).localizedDescription
     }
 
     func startWindow(conversationID: String, minutes: Int) async {
