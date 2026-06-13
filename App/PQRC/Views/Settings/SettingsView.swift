@@ -1,4 +1,5 @@
 import CoreImage.CIFilterBuiltins
+import PQRCAgent
 import PQRCCore
 import SwiftUI
 
@@ -277,6 +278,14 @@ struct SettingsView: View {
                     Task { await session.applyAIProvider() }
                 }
             }
+            // Make the silent Mock fallback visible: if the chosen provider
+            // isn't actually usable, replies come from a canned stub that does
+            // NOT read your conversation. This row says which brain is live.
+            Label(activeProviderStatus.text,
+                systemImage: activeProviderStatus.ok ? "checkmark.seal.fill" : "exclamationmark.triangle.fill")
+                .font(.caption)
+                .foregroundStyle(activeProviderStatus.ok ? .green : .orange)
+                .accessibilityIdentifier("ai-provider-status")
             if aiProvider == "remote" {
                 SecureField("Anthropic API key (sk-ant-…)", text: $anthropicKey)
                     .autocorrectionDisabled()
@@ -294,6 +303,24 @@ struct SettingsView: View {
             Text("Outside an active window or thread invite, your AI only drafts privately for you. It never sends on its own.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
+        }
+    }
+
+    /// What the AI engine will *actually* use — exposes the silent Mock
+    /// fallback (canned replies that don't read the chat).
+    private var activeProviderStatus: (text: String, ok: Bool) {
+        switch aiProvider {
+        case "remote":
+            let hasKey = !anthropicKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            return hasKey
+                ? ("Active: Anthropic API — reads your conversation and replies.", true)
+                : ("No API key yet — replies are a canned stub until you add one.", false)
+        case "mock":
+            return ("Mock provider — canned replies, for testing only.", false)
+        default:
+            return FoundationModelsAgentProvider.isAvailable
+                ? ("Active: on-device Apple Intelligence — reads your conversation.", true)
+                : ("On-device AI isn't available on this device — replies are a canned stub. Switch to Anthropic API for real replies.", false)
         }
     }
 
