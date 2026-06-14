@@ -613,26 +613,11 @@ actor PersonaRuntime {
             throw PQRCError.plaintextExceedsInlineLimit(size: text.utf8.count)
         }
 
-        for recipient in recipients {
-            if parts.count == 1 {
-                try await messenger.send(
-                    body, to: recipient, participantType: participantType,
-                    aiWindow: aiWindow)
-            } else {
-                let chunkID = UUID().uuidString
-                for (i, part) in parts.enumerated() {
-                    var chunkBody = body
-                    chunkBody.text = part
-                    chunkBody.chunk = MessageChunk(id: chunkID, index: i, total: parts.count)
-                    try await messenger.send(
-                        chunkBody, to: recipient, participantType: participantType,
-                        // One-shot controls (e.g. ai_window) ride only the first part.
-                        aiWindow: i == 0 ? aiWindow : nil)
-                }
-            }
-            await persistSession(recipient)
-        }
-
+        // Show the sender's OWN copy immediately, BEFORE publishing. Delivery
+        // (especially a large, chunked paste over a slow/flaky relay) must never
+        // leave you staring at an empty chat: the bubble is local and shouldn't
+        // depend on the relay round-trip succeeding. Status is local-only and
+        // never claims "delivered" (D5).
         let message = StoredMessage(
             id: UUID().uuidString, conversationID: conversationID,
             senderIdentity: identityHex, participantType: participantType,
@@ -647,6 +632,34 @@ actor PersonaRuntime {
                     threadID: threadID, paused: await engine.loopGuardActive(threadID: threadID)))
         }
         eventContinuation?.yield(.messageAdded(message))
+
+        // Publish to each recipient (chunked for large text). Best-effort: the
+        // message is already on screen, so a per-recipient delivery failure
+        // doesn't erase it. `messenger.send` already retries via the outbox.
+        for recipient in recipients {
+            do {
+                if parts.count == 1 {
+                    try await messenger.send(
+                        body, to: recipient, participantType: participantType,
+                        aiWindow: aiWindow)
+                } else {
+                    let chunkID = UUID().uuidString
+                    for (i, part) in parts.enumerated() {
+                        var chunkBody = body
+                        chunkBody.text = part
+                        chunkBody.chunk = MessageChunk(id: chunkID, index: i, total: parts.count)
+                        try await messenger.send(
+                            chunkBody, to: recipient, participantType: participantType,
+                            // One-shot controls (e.g. ai_window) ride only the first part.
+                            aiWindow: i == 0 ? aiWindow : nil)
+                    }
+                }
+                await persistSession(recipient)
+            } catch {
+                // Delivery to this recipient failed after the outbox's retries;
+                // the bubble stays visible. (A durable resend queue is future work.)
+            }
+        }
     }
 
     private func recipientsFor(conversationID: String) -> [String] {

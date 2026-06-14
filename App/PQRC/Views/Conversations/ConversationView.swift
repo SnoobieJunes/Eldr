@@ -9,7 +9,7 @@ struct ConversationView: View {
     let conversationID: String
 
     @State private var draftText = ""
-    /// Large-paste state: > 16 KB collapses into a chip (APP-SPEC §6.3).
+    /// Large-paste state: multi-KB content collapses into a chip (APP-SPEC §6.3).
     @State private var largePaste: String?
     /// Markdown/HTML message currently open in the full-screen reader.
     @State private var fullScreenContent: FullScreenContent?
@@ -320,8 +320,14 @@ struct ConversationView: View {
                         in: RoundedRectangle(cornerRadius: 20, style: .continuous))
                     .accessibilityIdentifier("composer-field")
                     .onChange(of: draftText) { _, newValue in
-                        // > 16 KB collapses into the chip (APP-SPEC §6.3).
-                        if newValue.utf8.count > 16384 {
+                        // Multi-KB content collapses into the chip (APP-SPEC
+                        // §6.3). The threshold is deliberately low: a big block
+                        // of text left live in the field makes the system
+                        // keyboard's QuickType engine thrash (Auto Layout spam,
+                        // lag), so we move it out of the field early. Still well
+                        // under the inline/chunk limit, so it sends as one
+                        // message.
+                        if newValue.utf8.count > 4096 {
                             largePaste = newValue
                             draftText = ""
                         }
