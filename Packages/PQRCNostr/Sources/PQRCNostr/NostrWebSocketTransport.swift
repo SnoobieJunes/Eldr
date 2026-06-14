@@ -6,6 +6,7 @@
 //
 
 import Foundation
+import OSLog
 import PQRCCore
 
 /// The real-network `RelayTransport`: NIP-01 over `URLSessionWebSocketTask`.
@@ -122,11 +123,35 @@ public actor NostrWebSocketTransport: RelayTransport {
 
     // MARK: RelayTransport
 
+    /// Diagnostics only: logs event KIND, byte SIZE, and the relay's reason —
+    /// never message content (canary-safe). Lets a relay rejecting/timing out on
+    /// large events surface in Console instead of vanishing into a retry loop.
+    private static let log = Logger(subsystem: "chat.pqrc", category: "relay")
+
     public func publish(_ event: NostrEvent) async throws -> PublishAck {
         ensureConnected()
         guard let socket else { throw NostrError.publishDropped }
-        try await socket.send(.string(NostrWire.encode(.event(event))))
-        return try await awaitOK(eventID: event.id, timeoutError: .publishDropped)
+        let wire = try NostrWire.encode(.event(event))
+        let bytes = wire.utf8.count
+        do {
+            try await socket.send(.string(wire))
+        } catch {
+            Self.log.error(
+                "publish send failed kind=\(event.kind, privacy: .public) bytes=\(bytes, privacy: .public) error=\(error.localizedDescription, privacy: .public)")
+            throw error
+        }
+        do {
+            let ack = try await awaitOK(eventID: event.id, timeoutError: .publishDropped)
+            if !ack.accepted {
+                Self.log.error(
+                    "publish rejected kind=\(event.kind, privacy: .public) bytes=\(bytes, privacy: .public) reason=\(ack.message ?? "(none)", privacy: .public)")
+            }
+            return ack
+        } catch {
+            Self.log.error(
+                "publish no-OK kind=\(event.kind, privacy: .public) bytes=\(bytes, privacy: .public) error=\(error.localizedDescription, privacy: .public)")
+            throw error
+        }
     }
 
     public func subscribe(_ filters: [NostrFilter]) async -> AsyncThrowingStream<NostrEvent, Error> {

@@ -125,10 +125,15 @@ struct MessageBubble: View {
                     expandButton
                     if isMine {
                         // Local-only status; copy says "sent to relay", never "delivered" (D5).
-                        // .secondary (not .tertiary): keeps the contrast audit green.
-                        Text(message.localStatus == "queued" ? "Queued" : "Sent to relay")
-                            .font(.caption2)
-                            .foregroundStyle(.secondary)
+                        // A publish that never reached the relay shows "Not sent" so a
+                        // send failure is visible (not silently dropped).
+                        Text(
+                            message.localStatus == "failed"
+                                ? "Not sent"
+                                : message.localStatus == "queued" ? "Queued" : "Sent to relay"
+                        )
+                        .font(.caption2)
+                        .foregroundStyle(message.localStatus == "failed" ? .red : .secondary)
                     }
                 }
             }

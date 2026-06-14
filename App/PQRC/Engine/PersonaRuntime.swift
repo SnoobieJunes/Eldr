@@ -636,6 +636,7 @@ actor PersonaRuntime {
         // Publish to each recipient (chunked for large text). Best-effort: the
         // message is already on screen, so a per-recipient delivery failure
         // doesn't erase it. `messenger.send` already retries via the outbox.
+        var reachedRelay = false
         for recipient in recipients {
             do {
                 if parts.count == 1 {
@@ -655,9 +656,18 @@ actor PersonaRuntime {
                     }
                 }
                 await persistSession(recipient)
+                reachedRelay = true
             } catch {
-                // Delivery to this recipient failed after the outbox's retries;
-                // the bubble stays visible. (A durable resend queue is future work.)
+                // Delivery to this recipient failed after the outbox's retries.
+            }
+        }
+        // Surface a total publish failure (no recipient reached the relay) as a
+        // visible "Not sent" status instead of a silent drop — so the user (and
+        // diagnostics) can tell a send failure from a receive failure.
+        if !reachedRelay, !asSystemRow {
+            try? await store.updateStatus(messageID: message.id, status: "failed")
+            if let updated = try? await store.message(id: message.id) {
+                eventContinuation?.yield(.messageChanged(updated))
             }
         }
     }
