@@ -142,21 +142,33 @@ public actor NostrWebSocketTransport: RelayTransport {
         do {
             try await socket.send(.string(wire))
         } catch {
-            Self.log.error(
-                "publish send failed kind=\(event.kind, privacy: .public) bytes=\(bytes, privacy: .public) error=\(error.localizedDescription, privacy: .public)")
+            // Diagnostics carry the event SIZE (and the relay reason, which can
+            // echo it) — both are size-metadata that padding exists to hide
+            // (SPEC §7). In-process OSLogStore can read even `.private` values
+            // (DEVIATIONS A1), so the only privacy-safe option is to compile
+            // them out of shipping builds entirely. Devs see full detail with a
+            // debugger attached; TestFlight/release leak nothing.
+            #if DEBUG
+                Self.log.error(
+                    "publish send failed kind=\(event.kind) bytes=\(bytes) error=\(error.localizedDescription)")
+            #endif
             throw error
         }
         do {
             let ack = try await awaitOK(eventID: event.id, timeoutError: .publishDropped)
             if !ack.accepted {
                 learnContentLimit(fromRejection: ack.message)
-                Self.log.error(
-                    "publish rejected kind=\(event.kind, privacy: .public) bytes=\(bytes, privacy: .public) reason=\(ack.message ?? "(none)", privacy: .public)")
+                #if DEBUG
+                    Self.log.error(
+                        "publish rejected kind=\(event.kind) bytes=\(bytes) reason=\(ack.message ?? "(none)")")
+                #endif
             }
             return ack
         } catch {
-            Self.log.error(
-                "publish no-OK kind=\(event.kind, privacy: .public) bytes=\(bytes, privacy: .public) error=\(error.localizedDescription, privacy: .public)")
+            #if DEBUG
+                Self.log.error(
+                    "publish no-OK kind=\(event.kind) bytes=\(bytes) error=\(error.localizedDescription)")
+            #endif
             throw error
         }
     }
