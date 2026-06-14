@@ -3,3 +3,7 @@ xcuserdata/
 DerivedData/
 .build/
 *.xcresult
+
+# Stray build output from command-line xcodebuild/swift build writing into the tree
+build/
+**/build/
