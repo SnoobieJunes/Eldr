@@ -18,6 +18,16 @@ public enum PQRCConstants {
     /// Plaintext above this size is never inlined; Blossom pointer or chunking only (SPEC §11).
     public static let inlineSizeLimit = 65536
 
+    /// Per-chunk raw UTF-8 text budget for relay chunking. Deliberately well
+    /// under `inlineSizeLimit` so the JSON-encoded `MessageBody` (string-escaped
+    /// text + metadata) always fits the top padding bucket, even with worst-case
+    /// escape expansion. Text at or below this size sends in a single envelope.
+    public static let maxChunkTextBytes = 24 * 1024
+
+    /// Hard ceiling on parts per chunked message (≈ 6 MB of text). Beyond this,
+    /// content belongs in a Blossom blob, not the relay.
+    public static let maxChunksPerMessage = 256
+
     /// `created_at` fuzz window: up to 2 days into the PAST, never the future (SPEC §8.4).
     public static let timestampFuzzWindowSeconds: Int64 = 2 * 24 * 60 * 60
 

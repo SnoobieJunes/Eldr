@@ -245,6 +245,72 @@ public struct AIContextMark: Codable, Equatable, Sendable {
     }
 }
 
+/// Reassembly metadata for a logical message split across several ratcheted
+/// envelopes (SPEC §7/§11: chunking is the relay-only alternative to a Blossom
+/// pointer for >64 KB content). Lives INSIDE the ciphertext, so relays and
+/// servers never see that a message was chunked, how many parts it has, or how
+/// big it is — only the bucket-padded per-envelope size like any other message.
+/// Optional and ignored by older clients (SPEC §12 forward compatibility).
+public struct MessageChunk: Codable, Equatable, Sendable {
+    /// Groups the parts of one logical message. Random per logical message.
+    public let id: String
+    /// 0-based position of this part.
+    public let index: Int
+    /// Total number of parts in the logical message.
+    public let total: Int
+
+    enum CodingKeys: String, CodingKey {
+        case id
+        case index
+        case total
+    }
+
+    public init(id: String, index: Int, total: Int) {
+        self.id = id
+        self.index = index
+        self.total = total
+    }
+}
+
+/// Splits and rejoins large text for relay chunking. Splitting is on grapheme
+/// (Character) boundaries so a chunk never bisects a multi-byte scalar or an
+/// emoji cluster, and each chunk's raw UTF-8 size stays within `budgetBytes`.
+public enum MessageChunker {
+    /// Returns the parts of `text`, each ≤ `budgetBytes` of UTF-8, preserving
+    /// order. A single returned element means no chunking is needed. Never
+    /// returns an empty array (an empty string yields `[""]`).
+    public static func split(
+        _ text: String, budgetBytes: Int = PQRCConstants.maxChunkTextBytes
+    ) -> [String] {
+        precondition(budgetBytes > 0, "chunk budget must be positive")
+        if text.utf8.count <= budgetBytes { return [text] }
+
+        var parts: [String] = []
+        var current = ""
+        var currentBytes = 0
+        for character in text {
+            let size = String(character).utf8.count
+            // A single grapheme larger than the budget can't be split further
+            // without corrupting it; it gets its own (slightly over-budget) part.
+            if currentBytes + size > budgetBytes, !current.isEmpty {
+                parts.append(current)
+                current = ""
+                currentBytes = 0
+            }
+            current.append(character)
+            currentBytes += size
+        }
+        if !current.isEmpty { parts.append(current) }
+        return parts
+    }
+
+    /// Reassembles parts in the given order. Caller is responsible for ordering
+    /// by chunk index before calling.
+    public static func join(_ parts: [String]) -> String {
+        parts.joined()
+    }
+}
+
 /// The rumor content schema (SPEC §8.2, NIP-XX §7) — the actual PQRC message
 /// payload, carried unsigned inside the seal. Unknown JSON fields are
 /// preserved-or-ignored, never fatal (SPEC §12); decoding uses only the keys
@@ -342,6 +408,10 @@ public struct MessageBody: Codable, Equatable, Sendable {
     /// D11 preserved). Optional and ignored by older clients (SPEC §12).
     /// Recorded in DEVIATIONS as an upstream-NIP candidate.
     public var alias: String?
+    /// Set when this body is one part of a chunked large message (DEVIATIONS:
+    /// relay-only chunking, the §11 alternative to a Blossom pointer). Inside
+    /// the ciphertext only; nil for ordinary single-envelope messages.
+    public var chunk: MessageChunk?
 
     enum CodingKeys: String, CodingKey {
         case text
@@ -356,6 +426,7 @@ public struct MessageBody: Codable, Equatable, Sendable {
         case aiContextMark = "ai_context_mark"
         case aiContextGrant = "ai_context_grant"
         case alias
+        case chunk
     }
 
     public init(
@@ -364,7 +435,8 @@ public struct MessageBody: Codable, Equatable, Sendable {
         groupCreate: GroupCreate? = nil, threadCreate: ThreadCreate? = nil,
         aiInvite: AIInvite? = nil, isContext: Bool? = nil,
         aiContext: Bool? = nil, aiContextMark: AIContextMark? = nil,
-        aiContextGrant: AIContextGrant? = nil, alias: String? = nil
+        aiContextGrant: AIContextGrant? = nil, alias: String? = nil,
+        chunk: MessageChunk? = nil
     ) {
         self.text = text
         self.sentAt = sentAt
@@ -378,6 +450,7 @@ public struct MessageBody: Codable, Equatable, Sendable {
         self.aiContextMark = aiContextMark
         self.aiContextGrant = aiContextGrant
         self.alias = alias
+        self.chunk = chunk
     }
 }
 

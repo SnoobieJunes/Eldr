@@ -78,6 +78,20 @@ actor PersonaRuntime {
     private var threadTitles: [String: String] = [:]
     /// Conversation my active ai_window was started in (window replies route here).
     private var myWindowConversationID: String?
+    /// Reassembly buffers for chunked large messages (relay chunking). Keyed by
+    /// chunk id; an entry holds the parts seen so far plus a template body (the
+    /// first-arriving chunk, text cleared) used to rebuild the whole message
+    /// once every part is present. Bounded by `maxChunkBuffers` so a peer can't
+    /// exhaust memory with dangling, never-completed chunk sets.
+    private var chunkBuffers: [String: ChunkAccumulator] = [:]
+    private let maxChunkBuffers = 32
+    struct ChunkAccumulator {
+        var template: MessageBody
+        var total: Int
+        var parts: [Int: String] = [:]
+        var receivedOrder: Int  // monotonic tag for LRU eviction
+    }
+    private var chunkArrivalCounter = 0
     private var pumpTask: Task<Void, Never>?
     private var eventContinuation: AsyncStream<RuntimeEvent>.Continuation?
     private var localSentAtBase: Int64 { clock.now() }
@@ -522,19 +536,35 @@ actor PersonaRuntime {
             // connected peer stays current (and ONLY connected peers — D11).
             alias: participantType == .human ? myAlias : nil)
 
-        var pointer: ContentPointer?
-        if text.utf8.count > PQRCConstants.inlineSizeLimit {
-            // Blob path: encrypt, upload, send the pointer; preview text inline.
-            pointer = try await BlobCipher.encryptAndStore(
-                Data(text.utf8), store: blobStore,
-                randomSource: randomSource, nonceSource: nonceSource)
-            body.text = "[Encrypted attachment · \(text.utf8.count / 1024) KB]"
+        // Large text is split into ordered, ratcheted chunks carried over the
+        // relay (SPEC §11 chunking — the privacy-preserving alternative to a
+        // Blossom pointer, which needs a shared blob server). Reassembly
+        // metadata rides INSIDE the ciphertext, so relays never see that a
+        // message was chunked. Each chunk is a full ratchet message key. Binary
+        // attachments will use the Blossom pointer path; text never does, so it
+        // works on a bare relay with no blob server.
+        let parts = MessageChunker.split(text)
+        guard parts.count <= PQRCConstants.maxChunksPerMessage else {
+            throw PQRCError.plaintextExceedsInlineLimit(size: text.utf8.count)
         }
 
         for recipient in recipients {
-            try await messenger.send(
-                body, to: recipient, participantType: participantType,
-                contentPointer: pointer, aiWindow: aiWindow)
+            if parts.count == 1 {
+                try await messenger.send(
+                    body, to: recipient, participantType: participantType,
+                    aiWindow: aiWindow)
+            } else {
+                let chunkID = UUID().uuidString
+                for (i, part) in parts.enumerated() {
+                    var chunkBody = body
+                    chunkBody.text = part
+                    chunkBody.chunk = MessageChunk(id: chunkID, index: i, total: parts.count)
+                    try await messenger.send(
+                        chunkBody, to: recipient, participantType: participantType,
+                        // One-shot controls (e.g. ai_window) ride only the first part.
+                        aiWindow: i == 0 ? aiWindow : nil)
+                }
+            }
             await persistSession(recipient)
         }
 
@@ -858,10 +888,69 @@ actor PersonaRuntime {
         }
     }
 
+    /// Buffers one chunk of a chunked message. Returns the fully reassembled
+    /// body (text joined in index order, `chunk` cleared) once the final part
+    /// arrives, or nil while parts are still outstanding. Buffers are namespaced
+    /// per sender so peers can't collide ids, and bounded by `maxChunkBuffers`.
+    private func accumulateChunk(_ body: MessageBody, from senderHex: String) -> MessageBody? {
+        guard let chunk = body.chunk else { return nil }
+        // Reject nonsensical metadata (defensive — a peer can lie about totals).
+        guard chunk.total >= 1, chunk.total <= PQRCConstants.maxChunksPerMessage,
+            chunk.index >= 0, chunk.index < chunk.total
+        else { return nil }
+
+        // A 1-of-1 chunk is just a whole message.
+        if chunk.total == 1 {
+            var whole = body
+            whole.chunk = nil
+            return whole
+        }
+
+        let key = "\(senderHex):\(chunk.id)"
+        chunkArrivalCounter += 1
+        var acc =
+            chunkBuffers[key]
+            ?? {
+                var template = body
+                template.text = ""
+                template.chunk = nil
+                return ChunkAccumulator(
+                    template: template, total: chunk.total, receivedOrder: chunkArrivalCounter)
+            }()
+        // Ignore a part whose total disagrees with the first one we saw.
+        guard acc.total == chunk.total else { return nil }
+        acc.parts[chunk.index] = body.text
+        acc.receivedOrder = chunkArrivalCounter
+
+        guard acc.parts.count == acc.total else {
+            chunkBuffers[key] = acc
+            evictStaleChunkBuffersIfNeeded()
+            return nil
+        }
+
+        // Complete: join in index order and clear the buffer.
+        chunkBuffers[key] = nil
+        let ordered = (0..<acc.total).compactMap { acc.parts[$0] }
+        guard ordered.count == acc.total else { return nil }  // a gap — drop, don't render partial
+        var whole = acc.template
+        whole.text = MessageChunker.join(ordered)
+        return whole
+    }
+
+    /// Bounds the reassembly map: when over capacity, drop the least-recently
+    /// touched incomplete buffer. Dangling chunk sets (sender vanished mid-send)
+    /// are abandoned rather than retained forever.
+    private func evictStaleChunkBuffersIfNeeded() {
+        guard chunkBuffers.count > maxChunkBuffers else { return }
+        if let oldest = chunkBuffers.min(by: { $0.value.receivedOrder < $1.value.receivedOrder })?.key {
+            chunkBuffers[oldest] = nil
+        }
+    }
+
     private func handleReceived(_ received: ReceivedMessage) async {
         let senderHex = received.senderIdentityHex
         var conversationID = senderHex
-        let body = received.body
+        var body = received.body
 
         // The ratchet advanced and an envelope was consumed: both survive
         // relaunch (FS makes the old snapshot worthless; the relay will
@@ -871,6 +960,14 @@ actor PersonaRuntime {
         let dedupeStore = store
         let wrapEventID = received.wrapEventID
         Task { try? await dedupeStore?.markProcessed(eventID: wrapEventID) }
+
+        // Chunked large message: each part advanced the ratchet (handled above);
+        // buffer until every part is present, then continue with the whole text.
+        // Until then there is nothing to render or act on, so we return early.
+        if body.chunk != nil {
+            guard let whole = accumulateChunk(body, from: senderHex) else { return }
+            body = whole
+        }
 
         // Peer self-chosen alias (D11-preserving: arrived over the encrypted
         // session, visible only to us). Local rename still wins.

@@ -27,6 +27,16 @@ struct MessageBubble: View {
         }
     }
 
+    /// Accessibility labels must stay short: a very large message (e.g. a
+    /// chunked multi-hundred-KB paste) would otherwise put its entire body into
+    /// the accessibility tree, making every VoiceOver/XCUITest traversal of the
+    /// conversation crawl. The visual bubble still shows the full text; only the
+    /// spoken/queried label is bounded.
+    static func accessibleText(_ text: String, limit: Int = 240) -> String {
+        guard text.count > limit else { return text }
+        return text.prefix(limit) + "… (long message)"
+    }
+
     /// Long-press menu entry for marking a message as AI context.
     @ViewBuilder private var aiContextMenuItem: some View {
         if let onToggleAIContext {
@@ -88,7 +98,7 @@ struct MessageBubble: View {
         .id(message.id)
         .privacySensitive()
         .accessibilityElement(children: .combine)
-        .accessibilityLabel("\(isMine ? "You" : senderName): \(message.text)")
+        .accessibilityLabel("\(isMine ? "You" : senderName): \(Self.accessibleText(message.text))")
     }
 
     /// Agent accent darkened for small-text contrast (≥ 4.5:1 on both schemes;
@@ -131,7 +141,7 @@ struct MessageBubble: View {
         .id(message.id)
         .privacySensitive()
         .accessibilityElement(children: .combine)
-        .accessibilityLabel("AI message from \(senderName)'s assistant: \(message.text)")
+        .accessibilityLabel("AI message from \(senderName)'s assistant: \(Self.accessibleText(message.text))")
         .accessibilityIdentifier("agent-bubble")
     }
 

@@ -131,11 +131,12 @@ final class LocalUniverse {
             log("4. Shared AI thread ran to the loop guard")
         }
 
-        // 5. >64 KB paste through the encrypted blob path.
+        // 5. >64 KB paste sent as ordered, ratcheted relay chunks (SPEC §11
+        //    chunking — no blob server needed; reassembled full on Bob's side).
         let bigPaste = String(repeating: "PQRC large paste demo line.\n", count: 8000)  // ~218 KB
         try? await alice.runtime.sendMessage(bigPaste, conversationID: bob.myIdentityHex)
         try await settle()
-        log("5. 200 KB paste sent via Blossom pointer")
+        log("5. 200 KB paste sent in encrypted chunks")
 
         // 5.5 Unknown-sender handshake: Eve messages Alice; Alice's client
         //     gates it in Message Requests (D12), no conversation renders.

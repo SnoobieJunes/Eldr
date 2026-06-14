@@ -262,13 +262,14 @@ struct ConversationView: View {
         VStack(spacing: 6) {
             if let paste = largePaste {
                 // The chip: the field never visibly chokes on a 200 KB paste.
-                // Copy is honest about the two paths (review L1): only > 64 KB
-                // takes the encrypted-attachment pointer; 16–64 KB still goes
-                // inline, padded to a size bucket like any other message.
+                // Large text rides the relay as ordered, ratcheted chunks
+                // (reassembled on the far side); smaller pastes go in a single
+                // padded envelope. Either way it's end-to-end encrypted text —
+                // no blob server involved.
                 HStack {
                     Label(
-                        paste.utf8.count > 65536
-                            ? "Large text · \(paste.utf8.count / 1024) KB · sends as encrypted attachment"
+                        paste.utf8.count > PQRCConstants.maxChunkTextBytes
+                            ? "Large text · \(paste.utf8.count / 1024) KB · sends in encrypted chunks"
                             : "Large text · \(paste.utf8.count / 1024) KB · sends padded inline",
                         systemImage: "doc.zipper")
                     .font(.caption)

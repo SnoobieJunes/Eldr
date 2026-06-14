@@ -161,7 +161,32 @@ and affects interop; `[app-only]` — client behavior, no wire impact;
   flagged one prior message," and only to established contacts — the
   privacy-maximizing alternative to re-sending the message body.
 
+- **N26 — `chunk` reassembly field in `MessageBody`** (2026-06-13): an optional
+  `{id, index, total}` carried INSIDE the ciphertext so a message larger than
+  the inline limit can be split across several ratcheted envelopes and rejoined
+  on receipt. This is the SPEC §11 chunking alternative to a Blossom pointer —
+  chosen for text because it needs no shared blob server and therefore works on
+  a bare relay (the in-process `LocalBlossomSimulator` cannot serve a second
+  device, so the pointer path silently failed cross-device). Relays see only
+  bucket-padded per-envelope sizes; the chunk count and total length never
+  appear in the clear. Each part is a one-time message key like any other.
+  Split budget is `maxChunkTextBytes = 24 KB` of raw UTF-8, well under the
+  64 KB inline limit so the JSON-escaped body always fits the top padding
+  bucket under realistic (~2×) escape expansion; pathological all-control-char
+  input that would expand ~6× is treated as an error at send, never silent
+  loss. Binary attachments (images/video) will still use the Blossom pointer
+  path once a networked blob server + HTTP `BlobStore` land. `[upstream-NIP]`
+
 ### App behavior `[app-only]`
+
+- **A12 — Block-level markdown + sanitized HTML rendering** (2026-06-13):
+  `MessageContent` renders headings, lists, fenced code, blockquotes, tables,
+  and rules natively (not just inline bold/italic), and normalizes a safe HTML
+  subset into the same markdown pipeline. Rendering is 100% native SwiftUI —
+  no web view is ever instantiated and no remote resource is loaded, so a
+  message cannot leak the reader's IP or run script (cardinal rule, SPEC §0).
+  `script`/`style`/comments are dropped with their contents and only
+  `http(s)` link schemes survive; everything else degrades to plain text.
 
 - **A1 — No payload logging at all.** Stronger than OSLog `privacy: .private`:
   in-process OSLogStore reads reveal private interpolations, so the logging

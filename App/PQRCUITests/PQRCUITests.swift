@@ -157,7 +157,7 @@ final class PQRCUITests: XCTestCase {
             "loop guard pause must be visible")
     }
 
-    func test_largePaste_200KB_becomesChip_sendsViaBlobPath_uiResponsive() throws {
+    func test_largePaste_200KB_becomesChip_sendsViaChunks_uiResponsive() throws {
         let app = launchUniverse(extraArguments: ["--uitest-bigpaste"])
         openConversation(app, "Bob")
         // The chip replaced the raw text — the field never chokes.
@@ -165,8 +165,10 @@ final class PQRCUITests: XCTestCase {
             element(app, "large-paste-chip").waitForExistence(timeout: 15),
             "large paste must collapse into a chip")
         tapWhenReady(app, button: "composer-send")
-        // The encrypted-attachment preview message appears (blob path, SPEC §11).
-        XCTAssertTrue(messageVisible(app, "Encrypted attachment"))
+        // Chunked over the relay (SPEC §11) and rendered in full — no blob
+        // server, no "encrypted attachment" placeholder. The pasted content is
+        // delivered as real text.
+        XCTAssertTrue(messageVisible(app, "PQRC large paste demo line"))
         // UI stays responsive: the composer accepts input immediately after.
         type(app, into: app.textFields["composer-field"], "still responsive")
     }
