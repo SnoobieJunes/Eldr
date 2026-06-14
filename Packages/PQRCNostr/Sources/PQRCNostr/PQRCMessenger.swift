@@ -453,26 +453,52 @@ public actor PQRCMessenger {
     public func start() async throws -> AsyncStream<MessengerEvent> {
         let (stream, continuation) = AsyncStream.makeStream(of: MessengerEvent.self)
         eventContinuation = continuation
+        // Reactive NIP-42: subscribe FIRST, don't gate the read on an upfront
+        // auth. Many relays (e.g. khatru with auth_required:false gating only
+        // kind-1059 reads) never send an unprompted AUTH challenge on connect —
+        // they challenge in response to the gated REQ. So we subscribe, and if
+        // the relay closes with "auth-required", authenticate with the challenge
+        // it just sent and re-subscribe. The loop also re-establishes the read
+        // after a socket drop (e.g. a Cloudflare idle-timeout), so receiving
+        // doesn't go permanently silent the way the old eager-auth path did.
+        let keypair = nostrKeypair
+        let random = randomSource
+        let filters = [
+            NostrFilter(kinds: [PQRCConstants.giftWrapEventKind], pTags: [keypair.publicKeyHex])
+        ]
         for transport in transports {
-            // A down/unreachable relay must not block startup or onboarding:
-            // skip it on auth failure (sends still redial via publishWithRetry,
-            // and nothing here throws). Other transports keep running.
-            do {
-                try await transport.authenticate(keypair: nostrKeypair, randomSource: randomSource)
-            } catch {
-                continue
-            }
-            let filters = [
-                NostrFilter(kinds: [PQRCConstants.giftWrapEventKind], pTags: [nostrKeypair.publicKeyHex])
-            ]
-            let events = await transport.subscribe(filters)
             let task = Task { [weak self] in
-                do {
-                    for try await event in events {
-                        await self?.handleIncoming(event)
+                var authFailures = 0
+                // Best-effort upfront auth so relays that gate silently (our
+                // in-process simulator drops kind-1059 for unauthed subscribers
+                // without a CLOSED) or that challenge on connect are authed
+                // before the first read. We do NOT skip subscribing if it fails:
+                // khatru challenges only on the gated REQ, handled reactively
+                // below. (In-process auth is instant; a real relay that never
+                // challenges on connect just times this out once at startup.)
+                try? await transport.authenticate(keypair: keypair, randomSource: random)
+                while !Task.isCancelled {
+                    guard let self else { return }
+                    let events = await transport.subscribe(filters)
+                    do {
+                        for try await event in events {
+                            await self.handleIncoming(event)
+                        }
+                        // Stream ended without error: relay closed the sub or
+                        // the socket dropped. Fall through to a delayed retry.
+                    } catch let error as NostrError where error == .authRequired {
+                        do {
+                            try await transport.authenticate(keypair: keypair, randomSource: random)
+                            authFailures = 0
+                            continue  // authenticated → re-subscribe immediately
+                        } catch {
+                            authFailures += 1
+                            if authFailures >= 5 { return }  // give up on this relay
+                        }
+                    } catch {
+                        // Socket error / relay gone: delayed retry below.
                     }
-                } catch {
-                    // Stream ended (relay gone); other transports keep running.
+                    try? await Task.sleep(for: .seconds(2))
                 }
             }
             pumpTasks.append(task)

@@ -191,6 +191,21 @@ and affects interop; `[app-only]` — client behavior, no wire impact;
   messages) to inject an editable reply into the box — never auto-sent, and
   local-only (drafting needs no `ai_window`; only *sending* as AI does, SPEC §13).
 
+- **A24 — Reactive NIP-42 AUTH + WebSocket keepalive** (2026-06-13, relay
+  message-delivery fix): the receive pump used to authenticate eagerly and SKIP
+  subscribing if AUTH failed — assuming the relay sends an unprompted `["AUTH",
+  challenge]` on connect. The deployed anchor relay (khatru, `auth_required:
+  false`, gating only kind-1059 reads) sends the challenge ONLY in response to
+  the gated REQ, so the eager auth timed out and the client never subscribed:
+  writes worked and keys published, but nothing was ever received. Now the pump
+  subscribes first and authenticates **reactively** — when the relay closes the
+  sub with `auth-required`, it authenticates with the challenge just sent and
+  re-subscribes (a best-effort upfront auth is still attempted for relays/the
+  in-process simulator that gate silently or challenge on connect). The loop
+  also re-establishes the read after a socket drop, and the transport sends a
+  30 s WebSocket ping so an intermediary (Cloudflare proxies idle WebSockets out
+  after ~100 s) can't silently kill delivery. Test: `ReactiveAuthTests`.
+
 - **A20 — Adaptive relay reconnect cooldown** (2026-06-13): the websocket
   transport's post-failure cooldown was a flat 30 s, which locked out all
   send/receive for 30 s after even a momentary blip. Now exponential —

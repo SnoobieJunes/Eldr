@@ -11,6 +11,10 @@ public enum NostrError: Error, Equatable, Sendable {
     case wrapMalformed
     case senderMismatch
     case notAuthenticated
+    /// The relay closed a subscription demanding NIP-42 AUTH (e.g. khatru
+    /// gating kind-1059 reads). The caller should authenticate with the
+    /// challenge the relay just sent, then re-subscribe.
+    case authRequired
     case publishDropped
     case blobNotFound
     case blobIntegrityFailure

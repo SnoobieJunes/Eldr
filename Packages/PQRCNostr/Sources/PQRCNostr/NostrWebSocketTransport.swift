@@ -27,6 +27,10 @@ public actor NostrWebSocketTransport: RelayTransport {
 
     private var socket: URLSessionWebSocketTask?
     private var receiveLoop: Task<Void, Never>?
+    /// Periodic WebSocket ping so an idle connection isn't silently dropped by
+    /// an intermediary (Cloudflare proxies close idle WebSockets after ~100 s).
+    private var pingLoop: Task<Void, Never>?
+    private let keepalivePing: Duration = .seconds(30)
     /// Circuit breaker: set after a connection/handshake failure so we stop
     /// redialing on every operation (a down relay otherwise logs a `-1011` per
     /// attempt). Cleared after an ADAPTIVE cooldown; the next operation redials.
@@ -204,6 +208,22 @@ public actor NostrWebSocketTransport: RelayTransport {
                 guard await self.receiveOnce(task) else { break }
             }
         }
+        pingLoop?.cancel()
+        let interval = keepalivePing
+        pingLoop = Task { [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(for: interval)
+                guard let self, await self.pingCurrentSocket() else { break }
+            }
+        }
+    }
+
+    /// Sends a keepalive ping on the live socket; false if there's no socket to
+    /// ping (the ping loop then exits and a later redial starts a fresh one).
+    private func pingCurrentSocket() -> Bool {
+        guard let socket else { return false }
+        socket.sendPing { _ in }  // pong/errors are handled by the receive loop's teardown
+        return true
     }
 
     /// One receive + dispatch. Returns false when the socket is done.
@@ -246,10 +266,17 @@ public actor NostrWebSocketTransport: RelayTransport {
             for waiter in waiters { waiter.resume(returning: challenge) }
         case .event(let subscriptionID, let event):
             subscriptions[subscriptionID]?.yield(event)
-        case .closed(let subscriptionID, _):
-            // Relay-initiated end of subscription: finish cleanly so consumers
-            // fall out of their `for try await` loops instead of hanging.
-            subscriptions.removeValue(forKey: subscriptionID)?.finish()
+        case .closed(let subscriptionID, let reason):
+            // Relay-initiated end of subscription. If it's a NIP-42 auth gate
+            // (khatru sends ["AUTH", challenge] alongside this), surface it as a
+            // typed error so the caller authenticates and re-subscribes;
+            // otherwise finish cleanly so consumers fall out of their loops.
+            let continuation = subscriptions.removeValue(forKey: subscriptionID)
+            if reason.contains("auth-required") {
+                continuation?.finish(throwing: NostrError.authRequired)
+            } else {
+                continuation?.finish()
+            }
         case .eose, .notice:
             break  // EOSE handled by stream ordering; NOTICEs carry no state.
         }
@@ -259,6 +286,8 @@ public actor NostrWebSocketTransport: RelayTransport {
     private func teardown(error: any Error) {
         receiveLoop?.cancel()
         receiveLoop = nil
+        pingLoop?.cancel()
+        pingLoop = nil
         socket?.cancel(with: .goingAway, reason: nil)
         socket = nil
         authChallenge = nil
