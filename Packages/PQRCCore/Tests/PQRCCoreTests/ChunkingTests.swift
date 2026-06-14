@@ -76,13 +76,23 @@ struct ChunkingTests {
         #expect(decoded.chunk == nil)
     }
 
-    @Test func chunkedBody_staysWithinInlineLimit() throws {
-        // A worst-ish case: budget-sized part of escape-heavy text must still
-        // JSON-encode under the top padding bucket so it never fails to send.
-        let part = String(repeating: "\"\n\\", count: PQRCConstants.maxChunkTextBytes / 3)
-        let body = MessageBody(
-            text: part, sentAt: 1, chunk: MessageChunk(id: "x", index: 0, total: 2))
-        let encoded = try WireJSON.encoder().encode(body)
-        #expect(encoded.count <= PQRCConstants.inlineSizeLimit)
+    @Test func everyChunkBody_fitsThe16384Bucket_evenEscapeHeavy() throws {
+        // The whole point of measuring escaped size: every chunk's encoded
+        // MessageBody must land in the 16384 padding bucket (not 65536), so the
+        // gift-wrapped event stays under common relays' 65535-byte content
+        // limit. Escape-heavy text (every char a 2-byte JSON escape) is the
+        // stress case — split it and check EACH chunk's encoded body.
+        let escapeHeavy = String(repeating: "\"\n\\", count: 40_000)  // ~120 KB raw
+        let parts = MessageChunker.split(escapeHeavy)
+        #expect(parts.count > 1)
+        for (i, part) in parts.enumerated() {
+            let body = MessageBody(
+                text: part, sentAt: 1_700_000_000,
+                alias: "a-reasonably-long-display-name",
+                chunk: MessageChunk(id: UUID().uuidString, index: i, total: parts.count))
+            let encoded = try WireJSON.encoder().encode(body)
+            #expect(encoded.count <= 16384, "chunk \(i) body \(encoded.count) > 16384 bucket")
+        }
+        #expect(MessageChunker.join(parts) == escapeHeavy)
     }
 }

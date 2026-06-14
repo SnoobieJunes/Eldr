@@ -170,12 +170,20 @@ and affects interop; `[app-only]` — client behavior, no wire impact;
   device, so the pointer path silently failed cross-device). Relays see only
   bucket-padded per-envelope sizes; the chunk count and total length never
   appear in the clear. Each part is a one-time message key like any other.
-  Split budget is `maxChunkTextBytes = 24 KB` of raw UTF-8, well under the
-  64 KB inline limit so the JSON-escaped body always fits the top padding
-  bucket under realistic (~2×) escape expansion; pathological all-control-char
-  input that would expand ~6× is treated as an error at send, never silent
-  loss. Binary attachments (images/video) will still use the Blossom pointer
-  path once a networked blob server + HTTP `BlobStore` land. `[upstream-NIP]`
+  Split budget is `maxChunkTextBytes = 15000`, measured as **JSON-escaped**
+  bytes (not raw UTF-8), so each chunk's encoded `MessageBody` lands in the
+  **16384** padding bucket — never the 65536 bucket. This is load-bearing: each
+  gift-wrap layer (rumor → seal → wrap) base64-expands the payload ~1.33×, so a
+  65536-bucket message becomes a ~156 KB event, whereas a 16384-bucket message
+  stays ~40 KB. Common relays (e.g. khatru) cap event content at **65535
+  bytes** and reject anything larger ("content is too large"), which silently
+  broke every >~8 KB paste until this sizing was corrected (the relay even
+  advertised a 1 MB limit in NIP-11 while enforcing 65535). Measuring escaped
+  size makes the bound hold for escape-heavy content (code, quotes). Guarded by
+  `EnvelopeTests.giftwrap_for16384BucketMessage_staysUnderRelayContentLimit` and
+  `ChunkingTests.everyChunkBody_fitsThe16384Bucket_evenEscapeHeavy`. Binary
+  attachments (images/video) will use the Blossom pointer path once a networked
+  blob server + HTTP `BlobStore` land. `[upstream-NIP]`
 
 ### App behavior `[app-only]`
 

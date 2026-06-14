@@ -18,11 +18,16 @@ public enum PQRCConstants {
     /// Plaintext above this size is never inlined; Blossom pointer or chunking only (SPEC §11).
     public static let inlineSizeLimit = 65536
 
-    /// Per-chunk raw UTF-8 text budget for relay chunking. Deliberately well
-    /// under `inlineSizeLimit` so the JSON-encoded `MessageBody` (string-escaped
-    /// text + metadata) always fits the top padding bucket, even with worst-case
-    /// escape expansion. Text at or below this size sends in a single envelope.
-    public static let maxChunkTextBytes = 24 * 1024
+    /// Per-chunk budget, measured as JSON-ESCAPED text bytes, for relay
+    /// chunking. Sized so the encoded `MessageBody` (escaped text + metadata)
+    /// lands in the 16384 padding bucket — NOT the 65536 bucket. That matters
+    /// because each layer of the gift wrap (rumor → seal → wrap) base64-expands
+    /// the payload ~1.33×, so a 65536-bucket message becomes a ~156 KB event,
+    /// while a 16384-bucket message stays ~40 KB — under the 65535-byte content
+    /// limit common relays (e.g. khatru) enforce. Measuring ESCAPED size keeps
+    /// escape-heavy content (code, quotes, newlines) from overflowing the bucket.
+    /// Text at or below this size sends in a single envelope.
+    public static let maxChunkTextBytes = 15_000
 
     /// Hard ceiling on parts per chunked message (≈ 6 MB of text). Beyond this,
     /// content belongs in a Blossom blob, not the relay.

@@ -103,6 +103,28 @@ struct EnvelopeTests {
         #expect(!outerKeys.contains(sender.publicKeyHex), "never the sender's real key")
     }
 
+    @Test func giftwrap_for16384BucketMessage_staysUnderRelayContentLimit() throws {
+        // The largest padding bucket a relay chunk uses is 16384. After the
+        // seal+wrap layers (each ~1.33× base64 expansion), the resulting event
+        // content MUST stay under the 65535-byte limit common relays (khatru)
+        // enforce — otherwise large pastes are rejected "content is too large".
+        // This is the regression guard for that exact failure.
+        let (sender, recipient) = try Self.fixtureKeys()
+        // 16384 bucket + 4-byte length prefix + 16-byte GCM tag.
+        let ciphertext = Data(repeating: 4, count: 16384 + 4 + 16)
+        let rumor = RumorContent(
+            type: .message, participantType: .human, senderRole: .identity,
+            header: RatchetHeader(dh: Data(repeating: 3, count: 32), pn: 0, n: 7, pq: nil),
+            ciphertext: ciphertext)
+        let wrap = try GiftWrap.wrap(
+            rumor: rumor, sender: sender, recipientNostrPubkey: recipient.publicKeyHex,
+            fuzzedTimestamp: 1_749_900_000,
+            randomSource: SeededRandomSource(seed: 1), nonceSource: SeededRandomSource(seed: 2))
+        #expect(
+            wrap.content.utf8.count <= 65535,
+            "wrap content \(wrap.content.utf8.count) exceeds the 65535 relay limit")
+    }
+
     @Test func giftwrap_relayVisibleSurfaceLeaksNothing() throws {
         let (sender, recipient) = try Self.fixtureKeys()
         let canary = "CANARY-the-quick-brown-plaintext"

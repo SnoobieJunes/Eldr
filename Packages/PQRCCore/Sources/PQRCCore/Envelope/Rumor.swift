@@ -274,22 +274,46 @@ public struct MessageChunk: Codable, Equatable, Sendable {
 
 /// Splits and rejoins large text for relay chunking. Splitting is on grapheme
 /// (Character) boundaries so a chunk never bisects a multi-byte scalar or an
-/// emoji cluster, and each chunk's raw UTF-8 size stays within `budgetBytes`.
+/// emoji cluster, and each chunk's budget is measured as JSON-ESCAPED bytes —
+/// the size the text actually occupies inside the encoded `MessageBody` — so
+/// escape-heavy content can't push a chunk into the next (much larger) padding
+/// bucket and blow past the relay's event-size limit.
 public enum MessageChunker {
-    /// Returns the parts of `text`, each ≤ `budgetBytes` of UTF-8, preserving
-    /// order. A single returned element means no chunking is needed. Never
-    /// returns an empty array (an empty string yields `[""]`).
+    /// Bytes a character costs once JSON-string-escaped (matches Swift's
+    /// JSONEncoder with `withoutEscapingSlashes`): `" \ \b \t \n \f \r` → 2,
+    /// other control chars → `\u00XX` (6), everything else → its UTF-8 length
+    /// (non-ASCII is emitted as raw UTF-8, not `\u`-escaped).
+    static func escapedCost(_ character: Character) -> Int {
+        var cost = 0
+        for scalar in character.unicodeScalars {
+            switch scalar.value {
+            case 0x22, 0x5C, 0x08, 0x09, 0x0A, 0x0C, 0x0D:
+                cost += 2
+            case 0x00...0x1F:
+                cost += 6
+            default:
+                cost += String(scalar).utf8.count
+            }
+        }
+        return cost
+    }
+
+    /// Returns the parts of `text`, each ≤ `budgetBytes` of JSON-escaped size,
+    /// preserving order. A single returned element means no chunking is needed.
+    /// Never returns an empty array (an empty string yields `[""]`).
     public static func split(
         _ text: String, budgetBytes: Int = PQRCConstants.maxChunkTextBytes
     ) -> [String] {
         precondition(budgetBytes > 0, "chunk budget must be positive")
-        if text.utf8.count <= budgetBytes { return [text] }
+        var totalCost = 0
+        for character in text { totalCost += escapedCost(character) }
+        if totalCost <= budgetBytes { return [text] }
 
         var parts: [String] = []
         var current = ""
         var currentBytes = 0
         for character in text {
-            let size = String(character).utf8.count
+            let size = escapedCost(character)
             // A single grapheme larger than the budget can't be split further
             // without corrupting it; it gets its own (slightly over-budget) part.
             if currentBytes + size > budgetBytes, !current.isEmpty {
