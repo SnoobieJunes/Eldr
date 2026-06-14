@@ -217,6 +217,12 @@ and affects interop; `[app-only]` — client behavior, no wire impact;
   (8-wide) concurrency, so a big share isn't gated on N serial OK round-trips;
   out-of-order arrival is fine (each chunk is a distinct message number,
   reassembled by index). Guarded by `ChunkingTests.chunkTextBudget_…`.
+  The in-process/offline relay (`local` in Settings) reports no wire limit, so
+  when it's the only server, chunking uses the full 64 KB bucket — delivery is
+  then Nearby (Bluetooth/Wi-Fi Direct), which has no size cap. A real relay
+  mixed in still wins (the budget takes the minimum), preserving the
+  local→relay fallback (§10): chunks stay small enough that a Nearby send that
+  drops can fail over to the relay.
 
 - **A24 — Reactive NIP-42 AUTH + WebSocket keepalive** (2026-06-13, relay
   message-delivery fix): the receive pump used to authenticate eagerly and SKIP

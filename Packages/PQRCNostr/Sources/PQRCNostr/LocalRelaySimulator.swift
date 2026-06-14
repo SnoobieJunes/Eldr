@@ -281,4 +281,12 @@ public actor LocalRelayConnection: RelayTransport {
         }
         authedPubkey = keypair.publicKeyHex
     }
+
+    /// The in-process / offline relay (`local` in Settings) has no wire content
+    /// limit, so it reports a generous one — adaptive chunking then uses the
+    /// largest padding bucket (64 KB, the §11 inline ceiling). When `local` is
+    /// the ONLY server, delivery is Nearby (Bluetooth/Wi-Fi Direct), which has
+    /// no size limit either; if it's mixed with a real relay, that relay's
+    /// smaller limit still wins (`chunkTextBudget` takes the minimum).
+    public func maxContentLength() async -> Int? { 64 * 1024 * 1024 }
 }
