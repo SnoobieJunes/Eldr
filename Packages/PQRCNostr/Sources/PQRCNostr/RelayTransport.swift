@@ -71,12 +71,18 @@ public protocol RelayTransport: Sendable {
     /// Actively confirm reachability now (dials if needed), updating and
     /// returning the status. Used by the "Check now" control.
     func checkConnection() async -> RelayStatus
+    /// The relay's NIP-11 `limitation.max_content_length` in bytes, if known.
+    /// Drives adaptive chunk sizing: bigger chunks on relays that accept bigger
+    /// events. nil means "unknown" → callers use the safe default.
+    func maxContentLength() async -> Int?
 }
 
 extension RelayTransport {
     /// In-process / simulator transports have no socket to drop — always healthy.
     public func currentStatus() async -> RelayStatus { .connected }
     public func checkConnection() async -> RelayStatus { await currentStatus() }
+    /// In-process transports have no NIP-11 limit; nil → callers use the default.
+    public func maxContentLength() async -> Int? { nil }
 }
 
 /// Local-link transport seam (SPEC §10; stretch goal S1, implemented by

@@ -199,6 +199,25 @@ and affects interop; `[app-only]` — client behavior, no wire impact;
   messages) to inject an editable reply into the box — never auto-sent, and
   local-only (drafting needs no `ai_window`; only *sending* as AI does, SPEC §13).
 
+- **A25 — Adaptive chunk sizing + concurrent chunk publish** (2026-06-14): for
+  large/LLM-context text shares, three tunings on top of the §11 chunking path
+  so it scales without any storage server (text-only by design; media stays out
+  of scope). (1) **Adaptive sizing**: the chunk budget is derived from the relay
+  set's smallest content limit — read from each relay's NIP-11
+  `max_content_length` (`RelayTransport.maxContentLength()`), and *lowered* if a
+  relay ever rejects with "content is too large: …, max is N" (relays that
+  advertise more than they enforce are self-corrected after one rejection). So a
+  permissive relay (≥~170 KB events) uses the full 64 KB bucket — 4× bigger
+  chunks — while strict relays stay at the safe 16 KB bucket. (2) **Bigger
+  ceiling**: `maxChunksPerMessage` 256 → 512, still under the ratchet
+  `maxSkip = 1000` so reordered chunks can't overrun the skipped-key cache —
+  enough for a frontier-LLM-sized (~1M-token) context in one logical message.
+  (3) **Concurrent publish**: `PQRCMessenger.sendBatch` encrypts chunks in order
+  (the ratchet is stateful) then publishes the wrapped events with bounded
+  (8-wide) concurrency, so a big share isn't gated on N serial OK round-trips;
+  out-of-order arrival is fine (each chunk is a distinct message number,
+  reassembled by index). Guarded by `ChunkingTests.chunkTextBudget_…`.
+
 - **A24 — Reactive NIP-42 AUTH + WebSocket keepalive** (2026-06-13, relay
   message-delivery fix): the receive pump used to authenticate eagerly and SKIP
   subscribing if AUTH failed — assuming the relay sends an unprompted `["AUTH",

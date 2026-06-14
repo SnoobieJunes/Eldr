@@ -76,6 +76,20 @@ struct ChunkingTests {
         #expect(decoded.chunk == nil)
     }
 
+    @Test func chunkTextBudget_picksLargestBucketThatFitsTheRelay() {
+        // Strict 65535-byte relay → 16384-bucket budget (the safe default zone).
+        #expect(PQRCConstants.chunkTextBudget(relayContentLimit: 65535) == 16384 - 1024)
+        // Generous 1 MB relay → full 65536-bucket budget (4× bigger chunks).
+        #expect(PQRCConstants.chunkTextBudget(relayContentLimit: 1_048_576) == 65536 - 1024)
+        // 256 KB relay also clears the 65536 bucket (event ~157 KB).
+        #expect(PQRCConstants.chunkTextBudget(relayContentLimit: 262_144) == 65536 - 1024)
+        // Unknown limit → the safe default.
+        #expect(
+            PQRCConstants.chunkTextBudget(relayContentLimit: nil) == PQRCConstants.maxChunkTextBytes)
+        // Absurdly tiny limit → smallest chunks, never zero/negative.
+        #expect(PQRCConstants.chunkTextBudget(relayContentLimit: 100) == 200)
+    }
+
     @Test func everyChunkBody_fitsThe16384Bucket_evenEscapeHeavy() throws {
         // The whole point of measuring escaped size: every chunk's encoded
         // MessageBody must land in the 16384 padding bucket (not 65536), so the

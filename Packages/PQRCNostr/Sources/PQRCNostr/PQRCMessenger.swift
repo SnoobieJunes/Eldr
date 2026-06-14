@@ -355,6 +355,21 @@ public actor PQRCMessenger {
 
     // MARK: - Send
 
+    /// Per-chunk text budget for the current relay set, for adaptive chunking.
+    /// Uses the MOST RESTRICTIVE known relay limit so a chunk is never produced
+    /// that some relay would reject; if any relay's limit is unknown, stays at
+    /// the safe default (the 16384-bucket budget that fits strict 65535 relays).
+    public func chunkTextBudget() async -> Int {
+        var minLimit: Int?
+        for transport in transports {
+            guard let limit = await transport.maxContentLength() else {
+                return PQRCConstants.maxChunkTextBytes
+            }
+            minLimit = min(minLimit ?? limit, limit)
+        }
+        return PQRCConstants.chunkTextBudget(relayContentLimit: minLimit)
+    }
+
     public func send(
         _ body: MessageBody,
         to peerIdentityHex: String,
@@ -365,18 +380,82 @@ public actor PQRCMessenger {
         guard let session = sessions[peerIdentityHex],
             let contact = contactsByNostrPub.values.first(where: { $0.identityHex == peerIdentityHex })
         else { throw PQRCError.sessionNotEstablished }
+        let outgoing = try await encryptOutgoing(
+            body, session: session, participantType: participantType,
+            contentPointer: contentPointer, aiWindow: aiWindow)
+        try await deliver(outgoing, to: contact)
+    }
+
+    /// Sends an ordered batch (chunks of one logical message) to one peer.
+    /// Encryption is sequential — the ratchet is stateful — but the relay
+    /// publishes run with bounded concurrency, so a big context isn't gated on
+    /// N serial OK round-trips. Reordered arrival is fine: each chunk is a
+    /// distinct message number and the receiver reassembles by index.
+    public func sendBatch(
+        _ bodies: [MessageBody], to peerIdentityHex: String,
+        participantType: ParticipantType = .human,
+        aiWindow: AIWindowAnnouncement? = nil
+    ) async throws {
+        guard let session = sessions[peerIdentityHex],
+            let contact = contactsByNostrPub.values.first(where: { $0.identityHex == peerIdentityHex })
+        else { throw PQRCError.sessionNotEstablished }
+        var relayWraps: [NostrEvent] = []
+        for (i, body) in bodies.enumerated() {
+            let outgoing = try await encryptOutgoing(
+                body, session: session, participantType: participantType,
+                aiWindow: i == 0 ? aiWindow : nil)
+            // Co-present peers take the local link (fast, in order); everyone
+            // else's wraps are collected for the concurrent relay publish.
+            if await tryLocalDelivery(outgoing, to: contact) { continue }
+            relayWraps.append(
+                try GiftWrap.wrap(
+                    rumor: outgoing.rumor, sender: nostrKeypair,
+                    recipientNostrPubkey: contact.nostrPubkeyHex,
+                    fuzzedTimestamp: outgoing.fuzzedTimestamp,
+                    randomSource: randomSource, nonceSource: nonceSource))
+        }
+        try await publishBatch(relayWraps)
+    }
+
+    /// Encrypts a body (advancing the ratchet) and attaches the agent signature
+    /// when required (SPEC §13.4). The ratchet state means callers MUST invoke
+    /// this in send order.
+    private func encryptOutgoing(
+        _ body: MessageBody, session: PQRCSession, participantType: ParticipantType,
+        contentPointer: ContentPointer? = nil, aiWindow: AIWindowAnnouncement? = nil
+    ) async throws -> OutgoingMessage {
         var outgoing = try await session.encrypt(
             body: body, participantType: participantType,
             contentPointer: contentPointer, aiWindow: aiWindow)
         if participantType == .agent {
-            // SPEC §13.4: every agent message carries the agent signature.
             let message = RumorContent.agentSignatureMessage(
                 ciphertext: outgoing.rumor.ciphertext ?? Data())
             var rumor = outgoing.rumor
             rumor.agentSig = try agentKey.signature(for: message)
             outgoing = OutgoingMessage(rumor: rumor, fuzzedTimestamp: outgoing.fuzzedTimestamp)
         }
-        try await deliver(outgoing, to: contact)
+        return outgoing
+    }
+
+    /// Publishes wrapped events with bounded concurrency. The per-publish
+    /// `awaitOK` round-trips overlap instead of serializing; a single failure
+    /// (after the outbox's own retries) aborts the rest — a partially-delivered
+    /// chunk set can't be reassembled anyway, and the caller surfaces it.
+    private func publishBatch(_ wraps: [NostrEvent]) async throws {
+        guard !wraps.isEmpty else { return }
+        let maxConcurrent = 8
+        try await withThrowingTaskGroup(of: Void.self) { group in
+            var inFlight = 0
+            for wrap in wraps {
+                if inFlight >= maxConcurrent {
+                    try await group.next()
+                    inFlight -= 1
+                }
+                group.addTask { try await self.publishWithRetry(wrap) }
+                inFlight += 1
+            }
+            try await group.waitForAll()
+        }
     }
 
     /// Group fan-out (APP-SPEC §7, D1): the same body, encrypted once per
@@ -400,22 +479,29 @@ public actor PQRCMessenger {
     /// path builds its own envelope from the same `OutgoingMessage`, keeping
     /// the one-fuzzed-timestamp-per-message invariant (APP-SPEC §2) intact.
     private func deliver(_ outgoing: OutgoingMessage, to contact: VerifiedContact) async throws {
-        if let localLink {
-            do {
-                let seal = try GiftWrap.seal(
-                    rumor: outgoing.rumor,
-                    sender: nostrKeypair,
-                    recipientNostrPubkey: contact.nostrPubkeyHex,
-                    fuzzedTimestamp: outgoing.fuzzedTimestamp,
-                    randomSource: randomSource,
-                    nonceSource: nonceSource)
-                try await localLink.send(seal, to: contact.binding.identityPubkey)
-                return
-            } catch {
-                // Not co-present (or the radio failed mid-send): relay path.
-            }
-        }
+        if await tryLocalDelivery(outgoing, to: contact) { return }
         try await wrapAndPublish(outgoing, to: contact)
+    }
+
+    /// Attempts local-link (co-present) delivery; returns true on success. Any
+    /// failure (peer out of range, link down, raced disconnect) returns false so
+    /// the caller falls through to the relay path — a message is never lost to
+    /// co-presence guesswork.
+    private func tryLocalDelivery(_ outgoing: OutgoingMessage, to contact: VerifiedContact) async -> Bool {
+        guard let localLink else { return false }
+        do {
+            let seal = try GiftWrap.seal(
+                rumor: outgoing.rumor,
+                sender: nostrKeypair,
+                recipientNostrPubkey: contact.nostrPubkeyHex,
+                fuzzedTimestamp: outgoing.fuzzedTimestamp,
+                randomSource: randomSource,
+                nonceSource: nonceSource)
+            try await localLink.send(seal, to: contact.binding.identityPubkey)
+            return true
+        } catch {
+            return false
+        }
     }
 
     private func wrapAndPublish(_ outgoing: OutgoingMessage, to contact: VerifiedContact) async throws {

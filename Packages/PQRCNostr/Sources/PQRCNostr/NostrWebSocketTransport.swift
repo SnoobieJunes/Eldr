@@ -54,6 +54,12 @@ public actor NostrWebSocketTransport: RelayTransport {
     /// instant any relay frame arrives (proves the socket is live), `.failed`
     /// on teardown/backoff. Purely observational — never gates delivery.
     private var statusState: RelayStatus = .disconnected
+    /// Best-known event content limit (bytes) for adaptive chunk sizing: seeded
+    /// from NIP-11 `max_content_length`, then lowered if the relay ever rejects
+    /// with "content is too large: …, max is N" (some relays advertise more than
+    /// they enforce — exactly what bit us). nil until learned.
+    private var knownMaxContent: Int?
+    private var nip11Attempted = false
 
     /// How long publish/authenticate wait for the relay before giving up.
     /// A dropped OK then surfaces as `publishDropped`, which the messenger's
@@ -143,6 +149,7 @@ public actor NostrWebSocketTransport: RelayTransport {
         do {
             let ack = try await awaitOK(eventID: event.id, timeoutError: .publishDropped)
             if !ack.accepted {
+                learnContentLimit(fromRejection: ack.message)
                 Self.log.error(
                     "publish rejected kind=\(event.kind, privacy: .public) bytes=\(bytes, privacy: .public) reason=\(ack.message ?? "(none)", privacy: .public)")
             }
@@ -152,6 +159,46 @@ public actor NostrWebSocketTransport: RelayTransport {
                 "publish no-OK kind=\(event.kind, privacy: .public) bytes=\(bytes, privacy: .public) error=\(error.localizedDescription, privacy: .public)")
             throw error
         }
+    }
+
+    public func maxContentLength() async -> Int? {
+        if !nip11Attempted {
+            nip11Attempted = true
+            if let advertised = await fetchNIP11ContentLimit() {
+                knownMaxContent = min(knownMaxContent ?? advertised, advertised)
+            }
+        }
+        return knownMaxContent
+    }
+
+    /// Fetches the relay's NIP-11 document over HTTP(S) and returns its
+    /// `limitation.max_content_length`, if present.
+    private func fetchNIP11ContentLimit() async -> Int? {
+        guard var components = URLComponents(url: url, resolvingAgainstBaseURL: false) else {
+            return nil
+        }
+        components.scheme = (url.scheme == "wss") ? "https" : "http"
+        guard let httpURL = components.url else { return nil }
+        var request = URLRequest(url: httpURL)
+        request.setValue("application/nostr+json", forHTTPHeaderField: "Accept")
+        request.timeoutInterval = 10
+        guard let (data, _) = try? await URLSession.shared.data(for: request),
+            let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+            let limitation = json["limitation"] as? [String: Any]
+        else { return nil }
+        return (limitation["max_content_length"] as? NSNumber)?.intValue
+    }
+
+    /// Lowers the known limit when the relay rejects an oversized event
+    /// ("content is too large: …, max is N") — so a relay that advertises more
+    /// than it enforces is corrected after one rejection instead of looping.
+    private func learnContentLimit(fromRejection message: String?) {
+        guard let message, message.contains("too large"),
+            let marker = message.range(of: "max is ")
+        else { return }
+        let digits = message[marker.upperBound...].prefix { $0.isNumber }
+        guard let n = Int(digits) else { return }
+        knownMaxContent = min(knownMaxContent ?? n, n)
     }
 
     public func subscribe(_ filters: [NostrFilter]) async -> AsyncThrowingStream<NostrEvent, Error> {

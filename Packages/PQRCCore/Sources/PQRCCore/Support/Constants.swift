@@ -29,9 +29,31 @@ public enum PQRCConstants {
     /// Text at or below this size sends in a single envelope.
     public static let maxChunkTextBytes = 15_000
 
-    /// Hard ceiling on parts per chunked message (≈ 6 MB of text). Beyond this,
-    /// content belongs in a Blossom blob, not the relay.
-    public static let maxChunksPerMessage = 256
+    /// Hard ceiling on parts per chunked message. Kept below `maxSkip` (1000)
+    /// so that even fully-reordered chunk arrival (e.g. from parallel publish)
+    /// can't overrun the ratchet's skipped-key cache. At the adaptive top chunk
+    /// size this is many MB / millions of tokens of text — enough to share a
+    /// frontier-LLM-sized context in one logical message.
+    public static let maxChunksPerMessage = 512
+
+    /// Largest per-chunk JSON-escaped text budget whose gift-wrapped event still
+    /// fits `relayContentLimit` (a relay's NIP-11 `max_content_length`). Picks
+    /// the biggest padding bucket whose wrapped size fits, then leaves headroom
+    /// for `MessageBody` metadata. The wrap expands the padded plaintext ~2.4×
+    /// (rumor → seal → wrap, each base64-encoded); 2.6× + fixed slack is the
+    /// conservative bound. Falls back to `maxChunkTextBytes` (the 16384-bucket
+    /// budget, safe on the strict 65535-limit relays common in the wild) when
+    /// the relay's limit is unknown.
+    public static func chunkTextBudget(relayContentLimit: Int?) -> Int {
+        guard let limit = relayContentLimit else { return maxChunkTextBytes }
+        for bucket in paddingBuckets.reversed() {  // 65536, 16384, …, 256
+            let estimatedEvent = Int(Double(bucket) * 2.6) + 2048
+            if estimatedEvent <= limit {
+                return max(200, bucket - 1024)  // room for metadata within the bucket
+            }
+        }
+        return 200  // even the smallest bucket doesn't fit — tiny chunks
+    }
 
     /// `created_at` fuzz window: up to 2 days into the PAST, never the future (SPEC §8.4).
     public static let timestampFuzzWindowSeconds: Int64 = 2 * 24 * 60 * 60

@@ -608,7 +608,9 @@ actor PersonaRuntime {
         // message was chunked. Each chunk is a full ratchet message key. Binary
         // attachments will use the Blossom pointer path; text never does, so it
         // works on a bare relay with no blob server.
-        let parts = MessageChunker.split(text)
+        // Adaptive: size chunks to the relay set's content limit (big on
+        // permissive relays, safe-small on strict ones).
+        let parts = MessageChunker.split(text, budgetBytes: await messenger.chunkTextBudget())
         guard parts.count <= PQRCConstants.maxChunksPerMessage else {
             throw PQRCError.plaintextExceedsInlineLimit(size: text.utf8.count)
         }
@@ -644,16 +646,18 @@ actor PersonaRuntime {
                         body, to: recipient, participantType: participantType,
                         aiWindow: aiWindow)
                 } else {
+                    // Build all chunk bodies and hand them to the batch sender,
+                    // which encrypts in order then publishes concurrently.
                     let chunkID = UUID().uuidString
-                    for (i, part) in parts.enumerated() {
+                    let chunkBodies = parts.enumerated().map { i, part -> MessageBody in
                         var chunkBody = body
                         chunkBody.text = part
                         chunkBody.chunk = MessageChunk(id: chunkID, index: i, total: parts.count)
-                        try await messenger.send(
-                            chunkBody, to: recipient, participantType: participantType,
-                            // One-shot controls (e.g. ai_window) ride only the first part.
-                            aiWindow: i == 0 ? aiWindow : nil)
+                        return chunkBody
                     }
+                    try await messenger.sendBatch(
+                        chunkBodies, to: recipient, participantType: participantType,
+                        aiWindow: aiWindow)
                 }
                 await persistSession(recipient)
                 reachedRelay = true
