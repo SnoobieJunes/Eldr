@@ -153,6 +153,9 @@ struct SettingsView: View {
                 relayURLs.remove(atOffsets: offsets)
                 saveRelays()
             }
+            LabeledContent("My keys on relay") { keyPublishIndicator }
+                .font(.callout)
+                .accessibilityIdentifier("key-publish-status")
             HStack {
                 TextField("wss://your.relay.example", text: $newRelayURL)
                     .autocorrectionDisabled()
@@ -205,6 +208,28 @@ struct SettingsView: View {
             Text("Servers")
         } footer: {
             Text("Messages are gift-wrapped: servers see only that an encrypted envelope exists for a recipient — never the sender or content. Enter `local` for the built-in offline relay.")
+        }
+    }
+
+    /// Whether peers can fetch my keys: a successful publish is also the
+    /// relay-liveness proof. We never re-publish just to refresh this (that
+    /// would be an online-presence beacon — SPEC §0); it updates on launch,
+    /// relay change, and prekey replenishment.
+    @ViewBuilder private var keyPublishIndicator: some View {
+        switch model.keyPublish {
+        case .pending:
+            HStack(spacing: 6) {
+                ProgressView()
+                Text("Publishing…").foregroundStyle(.secondary)
+            }
+        case .published:
+            Label("Published", systemImage: "checkmark.circle.fill")
+                .foregroundStyle(.green)
+                .labelStyle(.titleAndIcon)
+        case .failed:
+            Label("Not published", systemImage: "xmark.circle.fill")
+                .foregroundStyle(.red)
+                .labelStyle(.titleAndIcon)
         }
     }
 

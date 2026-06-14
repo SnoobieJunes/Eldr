@@ -38,7 +38,10 @@ public struct OpenAIAPIProvider: AgentProvider {
 
     private func complete(system: String, user: String) async throws -> String {
         guard !apiKey.isEmpty else { throw AgentProviderError.notConfigured }
-        var request = URLRequest(url: URL(string: "https://api.openai.com/v1/chat/completions")!)
+        guard let url = URL(string: "https://api.openai.com/v1/chat/completions") else {
+            throw AgentProviderError.unavailable("invalid OpenAI endpoint")
+        }
+        var request = URLRequest(url: url)
         request.httpMethod = "POST"
         request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
         request.setValue("application/json", forHTTPHeaderField: "content-type")

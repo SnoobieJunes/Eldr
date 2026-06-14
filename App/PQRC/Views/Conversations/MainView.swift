@@ -302,8 +302,12 @@ struct NewChatView: View {
                             _ = try await model.runtime.startConversation(
                                 npub: npub, firstMessage: firstMessage.isEmpty ? "👋" : firstMessage)
                             dismiss()
+                        } catch PQRCError.relayUnreachable {
+                            self.error = "Can't reach your relay right now. Check your connection or your relay in Settings — or use Nearby below to connect in person, no server needed."
+                        } catch PQRCError.peerKeysNotPublished {
+                            self.error = "Connected to the relay, but this contact hasn't published their keys here yet. Ask them to open the app on the same relay, then try again — or use Nearby below if you're together."
                         } catch {
-                            self.error = "Couldn't reach this contact's keys. Either the relay is unreachable, or they haven't published their PQRC keys to it yet. If you're together in person, use Nearby below — no server needed."
+                            self.error = "Couldn't start the conversation. If you're together in person, use Nearby below — no server needed."
                         }
                     }
                 }

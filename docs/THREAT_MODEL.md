@@ -30,6 +30,19 @@ that *an* envelope arrived for you, and when. If your threat model includes
 network observers correlating IPs, use an external transport protection (VPN,
 Tor) — PQRC does not provide it.
 
+### 2.1a Key-publish cadence is deliberately not a presence beacon
+Your 10420 binding / 10421 prekey bundle / 10050 relay list are public by
+design (a contact must fetch them to reach you). They carry a real `created_at`
+(replaceable events can't be backdated — the newer must win) published from
+your IP, so each publish is a timestamped, IP-attributable point. To avoid
+turning this into a liveness/online signal, the client publishes **only when
+there's a reason**: at launch, on a relay-list change, and when one-time
+prekeys run low (invariant 11) — **never on a timer or on every foreground**.
+"Is the relay up" is answered by the cheap connection check, not by re-writing
+keys. Fetching a contact's keys holds the subscription only long enough to
+collect them (seconds), then drops it, bounding how long a relay sees your
+interest in that pubkey.
+
 ### 2.2 Recipient `p`-tag against a global passive observer
 Every gift wrap carries the recipient's Nostr pubkey in a `p` tag — necessary
 for delivery. AUTH-gated relays stop *non-recipients querying* for your

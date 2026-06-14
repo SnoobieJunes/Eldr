@@ -29,8 +29,13 @@ public actor NostrWebSocketTransport: RelayTransport {
     private var receiveLoop: Task<Void, Never>?
     /// Circuit breaker: set after a connection/handshake failure so we stop
     /// redialing on every operation (a down relay otherwise logs a `-1011` per
-    /// attempt). Cleared after a cooldown; the next operation redials.
+    /// attempt). Cleared after an ADAPTIVE cooldown; the next operation redials.
     private var connectionBackoff = false
+    /// Consecutive-failure counter driving the exponential cooldown. Reset to 0
+    /// the instant a relay frame proves the socket is live — so a brief blip
+    /// recovers in ~1s instead of being locked out for a flat 30s, while a
+    /// genuinely-down relay still backs off to the cap and stops hammering.
+    private var backoffAttempt = 0
     /// publish() waits here for the relay's ["OK", id, …], keyed by event id.
     private var pendingOKs: [String: CheckedContinuation<PublishAck, any Error>] = [:]
     /// Live subscriptions, keyed by our generated subscription id.
@@ -50,9 +55,29 @@ public actor NostrWebSocketTransport: RelayTransport {
     /// outbox treats exactly like simulator chaos: back off and retry.
     private let responseTimeout: Duration
 
-    public init(url: URL, responseTimeout: Duration = .seconds(5)) {
+    /// Adaptive reconnect cooldown bounds. The delay after the Nth consecutive
+    /// failure is `min(base · 2^N, max)`: a single blip waits ~`base`, a
+    /// persistent outage climbs to `max` and holds there.
+    private let reconnectBaseBackoff: Duration
+    private let reconnectMaxBackoff: Duration
+
+    public init(
+        url: URL, responseTimeout: Duration = .seconds(5),
+        reconnectBaseBackoff: Duration = .seconds(1),
+        reconnectMaxBackoff: Duration = .seconds(30)
+    ) {
         self.url = url
         self.responseTimeout = responseTimeout
+        self.reconnectBaseBackoff = reconnectBaseBackoff
+        self.reconnectMaxBackoff = reconnectMaxBackoff
+    }
+
+    /// Cooldown for the current consecutive-failure count, clamped to the cap.
+    private var currentBackoff: Duration {
+        // Clamp the shift so 2^N can't overflow on a long outage.
+        let factor = Double(1 << min(backoffAttempt, 16))
+        let scaled = reconnectBaseBackoff * factor
+        return scaled < reconnectMaxBackoff ? scaled : reconnectMaxBackoff
     }
 
     /// Eagerly opens the socket and returns self, so call sites can write
@@ -185,8 +210,10 @@ public actor NostrWebSocketTransport: RelayTransport {
     private func receiveOnce(_ task: URLSessionWebSocketTask) async -> Bool {
         do {
             let message = try await task.receive()
-            // Any frame from the relay proves the socket is live.
+            // Any frame from the relay proves the socket is live: mark healthy
+            // and reset the cooldown so the next failure backs off from scratch.
             statusState = .connected
+            backoffAttempt = 0
             let text: String
             switch message {
             case .string(let value):
@@ -249,8 +276,10 @@ public actor NostrWebSocketTransport: RelayTransport {
         // still retries — it just fails fast (no redial) until this clears.
         if !connectionBackoff {
             connectionBackoff = true
+            let delay = currentBackoff
+            backoffAttempt += 1
             Task { [weak self] in
-                try? await Task.sleep(for: .seconds(30))
+                try? await Task.sleep(for: delay)
                 await self?.clearBackoff()
             }
         }

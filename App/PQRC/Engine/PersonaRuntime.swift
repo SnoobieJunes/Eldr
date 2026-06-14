@@ -24,12 +24,23 @@ enum RuntimeEvent: Sendable {
     /// A co-present peer was discovered + binding-verified over the local link
     /// (SPEC §10, Nearby setting) — startable with no relay.
     case nearbyDiscovered(identityHex: String)
+    /// My own key publish (10420/10421/10050) succeeded or failed — the
+    /// relay-liveness signal the UI shows.
+    case keyPublishChanged(KeyPublishStatus)
 }
 
 /// One configured relay's URL paired with its current connection health.
 struct RelayStatusInfo: Sendable, Equatable {
     let url: String
     let status: RelayStatus
+}
+
+/// Outcome of publishing my keys to the relay. A `.published` result doubles as
+/// proof the relay is reachable; `.failed` means peers can't find me there yet.
+enum KeyPublishStatus: Sendable, Equatable {
+    case pending
+    case published(at: Int64)
+    case failed
 }
 
 /// One local persona: identity + messenger + agent engine + encrypted store.
@@ -94,6 +105,17 @@ actor PersonaRuntime {
     private var chunkArrivalCounter = 0
     private var pumpTask: Task<Void, Never>?
     private var eventContinuation: AsyncStream<RuntimeEvent>.Continuation?
+    /// Outcome of the last attempt to publish my own keys (10420/10421/10050).
+    /// A successful publish is ALSO our relay-liveness signal — one round-trip
+    /// proves the relay is reachable AND now holds my keys. We do NOT re-publish
+    /// to poll liveness (that would make publishing an online-presence beacon —
+    /// SPEC §0); ongoing status uses the cheap connection check instead.
+    private(set) var keyPublish: KeyPublishStatus = .pending
+    /// Below this many unused one-time prekeys, replenish + republish so peers
+    /// don't fall back to the last-resort key (invariant 11). This is a
+    /// need-based trigger, never a timer.
+    private let prekeyLowWaterMark = 3
+    private let prekeyReplenishTarget = 10
     private var localSentAtBase: Int64 { clock.now() }
 
     init(
@@ -247,14 +269,14 @@ actor PersonaRuntime {
             try await link.start()
         }
 
-        // Publishing your identity (10420/10421/10050) is best-effort and
-        // runs in the background: generating keys is local and must not block
-        // on — or fail because of — relay availability. Bounded attempts so a
-        // down relay logs a few lines, not a flood; it republishes on next
-        // launch or via Settings → Republish.
+        // Publish identity (10420/10421/10050) once at launch, in the
+        // background so key generation never blocks on relay availability. The
+        // result is recorded as our relay-liveness signal (a successful publish
+        // proves the relay is reachable). We publish on launch, on relay-list
+        // change, and when prekeys run low — NEVER on a timer or on every
+        // foreground, so publishing can't become an online-presence beacon
+        // (SPEC §0). Ongoing "is the relay up" status uses the connection check.
         let publishURLs = relayURLs
-        let messengerRef = messenger!
-        Task { try? await messengerRef.announce(relayURLs: publishURLs, maxAttempts: 4) }
         let messengerEvents = try await messenger.start()
         let (stream, continuation) = AsyncStream.makeStream(of: RuntimeEvent.self)
         eventContinuation = continuation
@@ -263,6 +285,9 @@ actor PersonaRuntime {
                 await self?.handle(event)
             }
         }
+        // Dispatched AFTER the continuation is wired so the publish-status event
+        // is never yielded into a nil continuation and lost.
+        Task { [weak self] in await self?.publishKeys(relayURLs: publishURLs) }
         return stream
     }
 
@@ -502,12 +527,52 @@ actor PersonaRuntime {
         return openInboxUntil
     }
 
-    /// Replenishes one-time prekeys and republishes 10420/10421/10050.
+    /// Replenishes one-time prekeys and republishes 10420/10421/10050. Used by
+    /// Settings → Republish and on a relay-list change. Throws on publish
+    /// failure so the caller can surface it.
     func republishBundle(relayURLs: [String]) async throws {
-        _ = try await messenger.prekeyManager.replenish(to: 16)
+        lastPublishRelayURLs = relayURLs
+        _ = try await messenger.prekeyManager.replenish(to: prekeyReplenishTarget)
         await persistPrekeyState()
         try await messenger.announce(relayURLs: relayURLs)
+        recordPublish(.published(at: clock.now()))
     }
+
+    /// Publishes my keys and records the outcome as the relay-liveness signal.
+    /// Best-effort: never throws (used from background tasks); the recorded
+    /// status is how failure surfaces. Bounded attempts so a down relay logs a
+    /// few lines, not a flood.
+    private func publishKeys(relayURLs: [String]) async {
+        lastPublishRelayURLs = relayURLs
+        do {
+            try await messenger.announce(relayURLs: relayURLs, maxAttempts: 6)
+            recordPublish(.published(at: clock.now()))
+        } catch {
+            recordPublish(.failed)
+        }
+    }
+
+    private func recordPublish(_ status: KeyPublishStatus) {
+        keyPublish = status
+        eventContinuation?.yield(.keyPublishChanged(status))
+    }
+
+    /// Need-based republish: when unused one-time prekeys run low, replenish and
+    /// republish so incoming handshakes don't fall back to the last-resort key
+    /// (invariant 11). Called after the receive path consumes a prekey — driven
+    /// by message activity, never by a timer.
+    private func republishIfPrekeysLow() async {
+        let remaining = await messenger.prekeyManager.oneTimePrekeyCount
+        guard remaining <= prekeyLowWaterMark else { return }
+        let generated = (try? await messenger.prekeyManager.replenish(to: prekeyReplenishTarget)) ?? false
+        guard generated else { return }
+        await persistPrekeyState()
+        await publishKeys(relayURLs: lastPublishRelayURLs)
+    }
+
+    /// Relays used for the most recent publish, so prekey-low republishes reach
+    /// the same servers without re-plumbing the URL list.
+    private var lastPublishRelayURLs: [String] = []
 
     // MARK: - Sending
 
@@ -723,9 +788,12 @@ actor PersonaRuntime {
     }
 
     private func agentContext(conversationID: String, threadID: String?) async -> AgentContext {
-        let stored = (try? await (threadID != nil
-            ? store.messages(threadID: threadID!)
-            : store.messages(conversationID: conversationID))) ?? []
+        let stored: [StoredMessage]
+        if let threadID {
+            stored = (try? await store.messages(threadID: threadID)) ?? []
+        } else {
+            stored = (try? await store.messages(conversationID: conversationID)) ?? []
+        }
         // Scope for context-sharing authorization (DEVIATIONS N24).
         let scope: AIContextGrant.Scope =
             threadID.map { AIContextGrant.Scope.thread($0) } ?? .conversation(conversationID)
@@ -957,6 +1025,12 @@ actor PersonaRuntime {
         // replay this envelope to every fresh subscription).
         await persistSession(senderHex)
         await persistPrekeyState()
+        // If that inbound handshake drained our one-time prekeys, top them up
+        // and republish — need-based (invariant 11). This MUST run off the
+        // receive critical path: it awaits a relay publish, and blocking here
+        // would stall message delivery (relay AND Nearby both funnel through
+        // handleReceived) whenever the relay is slow. Detached, fire-and-forget.
+        Task { [weak self] in await self?.republishIfPrekeysLow() }
         let dedupeStore = store
         let wrapEventID = received.wrapEventID
         Task { try? await dedupeStore?.markProcessed(eventID: wrapEventID) }

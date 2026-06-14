@@ -179,7 +179,32 @@ and affects interop; `[app-only]` — client behavior, no wire impact;
 
 ### App behavior `[app-only]`
 
-- **A12 — Block-level markdown + sanitized HTML rendering** (2026-06-13):
+- **A19 — Full-screen markdown/HTML reader + AI-draft-into-composer**
+  (2026-06-13): rich messages (`MessageContent.isRich`) show an expand glyph and
+  a "View full screen" long-press item that opens `FullScreenReaderView` —
+  pinch-to-zoom (0.5–4×), two-axis scroll, a Rendered⇄Source toggle (raw,
+  fully-selectable text so very large docs that the in-bubble cap truncates are
+  still readable), and landscape (already enabled app-wide). Still 100% native,
+  no web view. Separately, the composer gains a "Draft with AI" sparkles button
+  + long-press item (beside Paste) that reuses the existing draft path
+  (`draftReply` → `agentContext`, which already includes `ai_context`-marked
+  messages) to inject an editable reply into the box — never auto-sent, and
+  local-only (drafting needs no `ai_window`; only *sending* as AI does, SPEC §13).
+
+- **A20 — Adaptive relay reconnect cooldown** (2026-06-13): the websocket
+  transport's post-failure cooldown was a flat 30 s, which locked out all
+  send/receive for 30 s after even a momentary blip. Now exponential —
+  `min(base·2^N, max)` (default base 1 s, cap 30 s) — reset to 0 the instant a
+  relay frame proves the socket live. A single blip recovers in ~1 s; a genuine
+  outage still backs off to the cap and stops hammering.
+
+- **A21 — Key publish moved off the receive critical path** (2026-06-13,
+  regression fix): the need-based prekey-low republish (A23) was awaited inline
+  in `handleReceived`, so a slow relay publish stalled inbound message delivery
+  (relay AND Nearby both funnel through it). It now runs as a detached task —
+  message rendering never waits on a network publish.
+
+- **A22 — Block-level markdown + sanitized HTML rendering** (2026-06-13):
   `MessageContent` renders headings, lists, fenced code, blockquotes, tables,
   and rules natively (not just inline bold/italic), and normalizes a safe HTML
   subset into the same markdown pipeline. Rendering is 100% native SwiftUI —
@@ -187,6 +212,19 @@ and affects interop; `[app-only]` — client behavior, no wire impact;
   message cannot leak the reader's IP or run script (cardinal rule, SPEC §0).
   `script`/`style`/comments are dropped with their contents and only
   `http(s)` link schemes survive; everything else degrades to plain text.
+
+- **A23 — Observable, need-based key publishing + honest reachability errors**
+  (2026-06-13): the launch key publish (10420/10421/10050) records its outcome
+  as a `KeyPublishStatus` shown in Settings ("My keys on relay"), and a
+  successful publish doubles as the relay-liveness signal. Republishing is
+  strictly need-based — launch, relay-list change, and one-time-prekey
+  replenishment (invariant 11) — and NEVER on a timer or every foreground, so
+  publishing can't become an online-presence beacon (cardinal rule, SPEC §0;
+  THREAT_MODEL §2.1a). The peer-key fetch is time-bounded (drops the
+  subscription after a few seconds, limiting how long a relay sees interest in
+  a pubkey) and throws distinguished `relayUnreachable` vs `peerKeysNotPublished`
+  errors — decided from the transport's connection state — so "New chat" tells
+  the user the true reason a contact can't be reached.
 
 - **A1 — No payload logging at all.** Stronger than OSLog `privacy: .private`:
   in-process OSLogStore reads reveal private interpolations, so the logging

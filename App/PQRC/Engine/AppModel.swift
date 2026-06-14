@@ -54,6 +54,9 @@ final class AppModel {
     var aiContextGrants: [String: [String: Int64]] = [:]
     /// Live relay connection health for the Settings indicator (Feature 5).
     var relayStatuses: [RelayStatusInfo] = []
+    /// Outcome of publishing my keys to the relay — shown in Settings so the
+    /// user can see at a glance whether peers can reach their keys.
+    var keyPublish: KeyPublishStatus = .pending
     var loopGuardPaused: Set<String> = []
     var protocolViolations: [String] = []
     /// Conversations with a pending safety-code-change warning (APP-SPEC §6.2).
@@ -189,6 +192,8 @@ final class AppModel {
             nearbyContacts = await runtime.nearbyList().map {
                 NearbyVM(identityHex: $0.identityHex, name: $0.name)
             }
+        case .keyPublishChanged(let status):
+            keyPublish = status
         }
     }
 

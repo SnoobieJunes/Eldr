@@ -385,6 +385,7 @@
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = Info.plist;
 				INFOPLIST_KEY_CFBundleDisplayName = EldrChat;
+				INFOPLIST_KEY_ITSAppUsesNonExemptEncryption = YES;
 				INFOPLIST_KEY_NSCameraUsageDescription = "Scan a contact's QR code to start an encrypted conversation";
 				INFOPLIST_KEY_NSLocalNetworkUsageDescription = "PQRC delivers end-to-end encrypted messages directly to nearby contacts when you are in the same room, with no server involved.";
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
@@ -415,6 +416,7 @@
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = Info.plist;
 				INFOPLIST_KEY_CFBundleDisplayName = EldrChat;
+				INFOPLIST_KEY_ITSAppUsesNonExemptEncryption = YES;
 				INFOPLIST_KEY_NSCameraUsageDescription = "Scan a contact's QR code to start an encrypted conversation";
 				INFOPLIST_KEY_NSLocalNetworkUsageDescription = "PQRC delivers end-to-end encrypted messages directly to nearby contacts when you are in the same room, with no server involved.";
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;

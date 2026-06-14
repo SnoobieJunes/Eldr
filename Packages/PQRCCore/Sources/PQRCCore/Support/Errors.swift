@@ -33,6 +33,12 @@ public enum PQRCError: Error, Equatable, Sendable {
     case recordNotFound
     case keyWrapFailure
 
+    // Reachability (distinguished so the UI can be honest, not guess):
+    // the relay couldn't be reached at all vs. the relay is fine but the peer
+    // has not published their keys to it yet.
+    case relayUnreachable
+    case peerKeysNotPublished
+
     public enum BindingFailure: Equatable, Sendable {
         case badOuterSignature
         case badCrossSignature

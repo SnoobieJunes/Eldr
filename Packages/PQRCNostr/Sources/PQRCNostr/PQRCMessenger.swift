@@ -152,23 +152,23 @@ public actor PQRCMessenger {
     /// Fetches and verifies a peer's 10420 + 10421 from any connected relay.
     /// Verification is all-or-nothing: no keys come back unless BOTH the
     /// binding (both directions) and every prekey signature verify.
+    ///
+    /// The read is time-bounded: we hold the subscription only long enough to
+    /// collect the keys, then drop it — so the relay learns we're interested in
+    /// this pubkey for seconds, not indefinitely (the social-graph metadata is
+    /// the same one-shot exposure as before, just not left open). On failure we
+    /// look at the relay's own connection state to tell the caller WHY: the
+    /// relay is unreachable, or it's fine but the peer hasn't published yet.
     public func fetchVerifiedPeer(
-        nostrPubkeyHex: String
+        nostrPubkeyHex: String, timeout: Duration = .seconds(8)
     ) async throws -> (contact: VerifiedContact, bundle: PrekeyBundle) {
         for transport in transports {
-            let stream = await transport.subscribe([
-                NostrFilter(
-                    kinds: [PQRCConstants.bindingEventKind, PQRCConstants.prekeyBundleEventKind],
-                    authors: [nostrPubkeyHex])
-            ])
-            var bindingEvent: NostrEvent?
-            var bundleEvent: NostrEvent?
-            for try await event in stream {
-                if event.kind == PQRCConstants.bindingEventKind { bindingEvent = event }
-                if event.kind == PQRCConstants.prekeyBundleEventKind { bundleEvent = event }
-                if bindingEvent != nil && bundleEvent != nil { break }
-            }
-            guard let bindingEvent, let bundleEvent else { continue }
+            guard
+                let (bindingEvent, bundleEvent) = try? await collectKeyEvents(
+                    from: transport, author: nostrPubkeyHex, timeout: timeout)
+            else { continue }
+            // Verification failures propagate (a forged/mismatched binding is a
+            // protocol error, not a reachability one).
             let (verified, raw) = try PQRCEvents.verifyBindingEventWithRaw(bindingEvent)
             let bundle = try PQRCEvents.verifyPrekeyBundleEvent(
                 bundleEvent, verifiedBinding: verified)
@@ -176,7 +176,50 @@ public actor PQRCMessenger {
             contactsByNostrPub[contact.nostrPubkeyHex] = contact
             return (contact, bundle)
         }
-        throw NostrError.invalidEvent
+        // Nothing came back from any relay. Be honest about why.
+        throw await anyTransportConnected()
+            ? PQRCError.peerKeysNotPublished : PQRCError.relayUnreachable
+    }
+
+    /// Collects a peer's binding + prekey events from one transport, racing the
+    /// subscription against `timeout`. Returns nil-by-throw if neither the keys
+    /// arrive nor the stream ends in time; the caller cancels the read either
+    /// way (bounding how long the relay sees our interest in this pubkey).
+    private func collectKeyEvents(
+        from transport: any RelayTransport, author: String, timeout: Duration
+    ) async throws -> (NostrEvent, NostrEvent) {
+        try await withThrowingTaskGroup(of: (NostrEvent, NostrEvent).self) { group in
+            group.addTask {
+                let stream = await transport.subscribe([
+                    NostrFilter(
+                        kinds: [
+                            PQRCConstants.bindingEventKind, PQRCConstants.prekeyBundleEventKind,
+                        ], authors: [author])
+                ])
+                var bindingEvent: NostrEvent?
+                var bundleEvent: NostrEvent?
+                for try await event in stream {
+                    if event.kind == PQRCConstants.bindingEventKind { bindingEvent = event }
+                    if event.kind == PQRCConstants.prekeyBundleEventKind { bundleEvent = event }
+                    if let bindingEvent, let bundleEvent { return (bindingEvent, bundleEvent) }
+                }
+                throw NostrError.invalidEvent  // stream ended without both
+            }
+            group.addTask {
+                try await Task.sleep(for: timeout)
+                throw NostrError.publishDropped  // timeout sentinel
+            }
+            defer { group.cancelAll() }
+            guard let result = try await group.next() else { throw NostrError.invalidEvent }
+            return result
+        }
+    }
+
+    private func anyTransportConnected() async -> Bool {
+        for transport in transports where await transport.currentStatus() == .connected {
+            return true
+        }
+        return false
     }
 
     public func addContact(_ contact: VerifiedContact) {

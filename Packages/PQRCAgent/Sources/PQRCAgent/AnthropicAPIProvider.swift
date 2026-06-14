@@ -38,7 +38,10 @@ public struct AnthropicAPIProvider: AgentProvider {
 
     private func complete(system: String, user: String) async throws -> String {
         guard !apiKey.isEmpty else { throw AgentProviderError.notConfigured }
-        var request = URLRequest(url: URL(string: "https://api.anthropic.com/v1/messages")!)
+        guard let url = URL(string: "https://api.anthropic.com/v1/messages") else {
+            throw AgentProviderError.unavailable("invalid Anthropic endpoint")
+        }
+        var request = URLRequest(url: url)
         request.httpMethod = "POST"
         request.setValue(apiKey, forHTTPHeaderField: "x-api-key")
         request.setValue("2023-06-01", forHTTPHeaderField: "anthropic-version")
