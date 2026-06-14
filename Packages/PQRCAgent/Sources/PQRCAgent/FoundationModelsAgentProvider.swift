@@ -10,21 +10,38 @@ import Foundation
 public struct FoundationModelsAgentProvider: AgentProvider {
     public init() {}
 
-    public static var isAvailable: Bool {
+    /// nil when the on-device model is ready; otherwise a specific, actionable
+    /// reason. This is what surfaces in Settings and in the thrown error, so the
+    /// user learns *why* Apple Intelligence isn't responding instead of silently
+    /// getting the Mock stub.
+    public static var availabilityReason: String? {
         #if canImport(FoundationModels)
-            if case .available = SystemLanguageModel.default.availability {
-                return true
+            switch SystemLanguageModel.default.availability {
+            case .available:
+                return nil
+            case .unavailable(let reason):
+                switch reason {
+                case .deviceNotEligible:
+                    return "This device isn't eligible for Apple Intelligence."
+                case .appleIntelligenceNotEnabled:
+                    return "Apple Intelligence is off — turn it on in Settings ▸ Apple Intelligence & Siri."
+                case .modelNotReady:
+                    return "The on-device model is still downloading. Try again in a few minutes."
+                @unknown default:
+                    return "On-device AI is unavailable on this device."
+                }
             }
-            return false
         #else
-            return false
+            return "This OS build doesn't include the on-device model framework."
         #endif
     }
 
+    public static var isAvailable: Bool { availabilityReason == nil }
+
     public func draftReply(context: AgentContext) async throws -> Draft {
         #if canImport(FoundationModels)
-            guard Self.isAvailable else {
-                throw AgentProviderError.unavailable("AI unavailable on this device")
+            if let reason = Self.availabilityReason {
+                throw AgentProviderError.unavailable(reason)
             }
             let session = LanguageModelSession(
                 instructions: """
@@ -32,17 +49,23 @@ public struct FoundationModelsAgentProvider: AgentProvider {
                     Draft a brief, natural reply to the conversation. Reply with the \
                     draft text only.
                     """)
-            let response = try await session.respond(to: Self.renderTranscript(context))
-            return Draft(text: response.content)
+            do {
+                let response = try await session.respond(to: Self.renderTranscript(context))
+                return Draft(text: response.content)
+            } catch {
+                // Surface generation/guardrail failures instead of swallowing
+                // them — a silent empty draft reads as "the AI is broken".
+                throw AgentProviderError.unavailable("On-device generation failed: \(error.localizedDescription)")
+            }
         #else
-            throw AgentProviderError.unavailable("FoundationModels not present")
+            throw AgentProviderError.unavailable("FoundationModels not present on this OS build")
         #endif
     }
 
     public func threadTurn(context: AgentContext) async throws -> AgentTurn? {
         #if canImport(FoundationModels)
-            guard Self.isAvailable else {
-                throw AgentProviderError.unavailable("AI unavailable on this device")
+            if let reason = Self.availabilityReason {
+                throw AgentProviderError.unavailable(reason)
             }
             let session = LanguageModelSession(
                 instructions: """
@@ -50,12 +73,16 @@ public struct FoundationModelsAgentProvider: AgentProvider {
                     thread with another person's AI. Contribute one short, useful \
                     message, or reply with exactly PASS to stay silent.
                     """)
-            let response = try await session.respond(to: Self.renderTranscript(context))
-            let text = response.content.trimmingCharacters(in: .whitespacesAndNewlines)
-            guard !text.isEmpty, text != "PASS" else { return nil }
-            return AgentTurn(messages: [AgentMessage(text: text)])
+            do {
+                let response = try await session.respond(to: Self.renderTranscript(context))
+                let text = response.content.trimmingCharacters(in: .whitespacesAndNewlines)
+                guard !text.isEmpty, text != "PASS" else { return nil }
+                return AgentTurn(messages: [AgentMessage(text: text)])
+            } catch {
+                throw AgentProviderError.unavailable("On-device generation failed: \(error.localizedDescription)")
+            }
         #else
-            throw AgentProviderError.unavailable("FoundationModels not present")
+            throw AgentProviderError.unavailable("FoundationModels not present on this OS build")
         #endif
     }
 

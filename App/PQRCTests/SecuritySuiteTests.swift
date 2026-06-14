@@ -8,7 +8,7 @@ import Security
 import SwiftData
 import Testing
 
-@testable import PQRC
+@testable import EldrChat
 
 extension Tag {
     @Tag static var security: Tag

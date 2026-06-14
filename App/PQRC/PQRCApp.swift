@@ -121,23 +121,51 @@ final class AppSession {
         return transports
     }
 
-    /// Provider per the Settings picker. The Anthropic key lives in the
-    /// Keychain (account `anthropic-api-key`), never UserDefaults.
+    /// Token-based API providers and the Keychain account each key is stored
+    /// under. Keys live in the Keychain (service `chat.pqrc.keys`), never
+    /// UserDefaults.
+    static let apiKeyAccounts: [String: String] = [
+        "claude": "anthropic-api-key",
+        "openai": "openai-api-key",
+        "gemini": "gemini-api-key",
+    ]
+
+    /// Provider per the Settings picker. Token-based providers (Claude/OpenAI/
+    /// Gemini) read their key from the Keychain; with no key they fall back to
+    /// the Demo provider so the AI still visibly responds instead of going
+    /// silent. The on-device default uses Core AI (FoundationModels) when
+    /// available, Demo otherwise.
     static func makeAgentProvider() -> any AgentProvider {
+        let keychain = KeychainStore(service: "chat.pqrc.keys")
+        func key(for provider: String) -> String? {
+            guard let account = apiKeyAccounts[provider],
+                let data = keychain.loadIfPresent(account: account)
+            else { return nil }
+            let value = String(decoding: data, as: UTF8.self)
+            return value.isEmpty ? nil : value
+        }
+
+        // Migrate the pre-multi-provider tags: "remote" was Anthropic, "mock"
+        // was the deterministic stub now superseded by the Demo provider.
+        let selected: String
         switch UserDefaults.standard.string(forKey: "aiProvider") ?? "ondevice" {
-        case "remote":
-            let keychain = KeychainStore(service: "chat.pqrc.keys")
-            if let keyData = keychain.loadIfPresent(account: "anthropic-api-key"),
-                case let key = String(decoding: keyData, as: UTF8.self), !key.isEmpty
-            {
-                return AnthropicAPIProvider(apiKey: key)
-            }
-            return MockAgentProvider()
-        case "mock":
-            return MockAgentProvider()
+        case "remote": selected = "claude"
+        case "mock": selected = "demo"
+        case let other: selected = other
+        }
+
+        switch selected {
+        case "claude":
+            return key(for: "claude").map { AnthropicAPIProvider(apiKey: $0) } ?? DemoAgentProvider()
+        case "openai":
+            return key(for: "openai").map { OpenAIAPIProvider(apiKey: $0) } ?? DemoAgentProvider()
+        case "gemini":
+            return key(for: "gemini").map { GeminiAPIProvider(apiKey: $0) } ?? DemoAgentProvider()
+        case "demo":
+            return DemoAgentProvider()
         default:
             return FoundationModelsAgentProvider.isAvailable
-                ? FoundationModelsAgentProvider() : MockAgentProvider()
+                ? FoundationModelsAgentProvider() : DemoAgentProvider()
         }
     }
 

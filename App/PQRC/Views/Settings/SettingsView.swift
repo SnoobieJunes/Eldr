@@ -1,6 +1,7 @@
 import CoreImage.CIFilterBuiltins
 import PQRCAgent
 import PQRCCore
+import PQRCNostr
 import SwiftUI
 
 /// Settings (APP-SPEC §10).
@@ -19,7 +20,12 @@ struct SettingsView: View {
     @State private var needsReconnect = false
     @State private var myAlias = ""
     @State private var anthropicKey = ""
+    @State private var openaiKey = ""
+    @State private var geminiKey = ""
     @State private var openInboxUntil: Int64?
+    @State private var aiTesting = false
+    @State private var aiTestResult: String?
+    @State private var checkingRelays = false
     @State private var now = Int64(Date().timeIntervalSince1970)
 
     private let ticker = Timer.publish(every: 1, on: .main, in: .common).autoconnect()
@@ -55,11 +61,18 @@ struct SettingsView: View {
             }
             .onAppear {
                 myAlias = UserDefaults.standard.string(forKey: "displayName") ?? ""
-                if let keyData = keychain.loadIfPresent(account: "anthropic-api-key") {
-                    anthropicKey = String(decoding: keyData, as: UTF8.self)
-                }
+                // Migrate the pre-multi-provider tags so the picker selection
+                // still resolves ("remote" → Claude, "mock" → Demo).
+                if aiProvider == "remote" { aiProvider = "claude" }
+                if aiProvider == "mock" { aiProvider = "demo" }
+                anthropicKey = loadKey("anthropic-api-key")
+                openaiKey = loadKey("openai-api-key")
+                geminiKey = loadKey("gemini-api-key")
                 Task { openInboxUntil = await model.runtime.openInboxActiveUntil() }
             }
+            // Server status is checked once at app launch and only re-checked
+            // when the user taps "Check connection" — re-pinging on every
+            // Settings open was getting the client throttled by the relay.
             .onReceive(ticker) { _ in
                 now = Int64(Date().timeIntervalSince1970)
             }
@@ -132,9 +145,7 @@ struct SettingsView: View {
         Section {
             ForEach(relayURLs, id: \.self) { url in
                 LabeledContent(url == "local" ? "Built-in local relay" : url) {
-                    Image(systemName: "checkmark.seal")
-                        .foregroundStyle(.green)
-                        .accessibilityLabel("Configured")
+                    relayIndicator(for: url)
                 }
                 .font(.callout)
             }
@@ -160,6 +171,20 @@ struct SettingsView: View {
             if let relayError {
                 Text(relayError).font(.caption).foregroundStyle(.red)
             }
+            Button {
+                checkingRelays = true
+                Task {
+                    await model.checkRelaysNow()
+                    checkingRelays = false
+                }
+            } label: {
+                HStack {
+                    Label("Check connection", systemImage: "antenna.radiowaves.left.and.right")
+                    if checkingRelays { Spacer(); ProgressView() }
+                }
+            }
+            .disabled(checkingRelays)
+            .accessibilityIdentifier("check-relays-button")
             if relayURLs != [AppSession.defaultRelayURL] {
                 Button("Reset to default server") {
                     relayURLs = [AppSession.defaultRelayURL]
@@ -181,6 +206,35 @@ struct SettingsView: View {
         } footer: {
             Text("Messages are gift-wrapped: servers see only that an encrypted envelope exists for a recipient — never the sender or content. Enter `local` for the built-in offline relay.")
         }
+    }
+
+    /// Live connection indicator per relay (Feature 5): green check / red x /
+    /// spinner. Status comes from the transports via `AppModel.relayStatuses`.
+    @ViewBuilder private func relayIndicator(for url: String) -> some View {
+        switch relayStatus(for: url) {
+        case .connected:
+            Image(systemName: "checkmark.circle.fill")
+                .foregroundStyle(.green)
+                .accessibilityLabel("Connected")
+        case .failed(let reason):
+            HStack(spacing: 4) {
+                Text(reason).font(.caption2).foregroundStyle(.secondary)
+                Image(systemName: "xmark.circle.fill").foregroundStyle(.red)
+            }
+            .accessibilityLabel("Disconnected: \(reason)")
+        case .connecting, .none:
+            ProgressView().controlSize(.small)
+                .accessibilityLabel("Connecting")
+        case .disconnected:
+            Image(systemName: "circle")
+                .foregroundStyle(.secondary)
+                .accessibilityLabel("Not connected")
+        }
+    }
+
+    private func relayStatus(for url: String) -> RelayStatus? {
+        func norm(_ s: String) -> String { s.hasSuffix("/") ? String(s.dropLast()) : s }
+        return model.relayStatuses.first { norm($0.url) == norm(url) }?.status
     }
 
     private func addRelay() {
@@ -264,41 +318,93 @@ struct SettingsView: View {
 
     // MARK: AI
 
+    /// Picker options. `remote` providers send decrypted context to a third
+    /// party, so selecting one runs the consent gate first.
+    private static let aiProviders: [(tag: String, label: String, remote: Bool)] = [
+        ("ondevice", "On-device (Core AI)", false),
+        ("claude", "Claude (Anthropic API)", true),
+        ("openai", "OpenAI API", true),
+        ("gemini", "Gemini API", true),
+        ("demo", "Demo (simulated)", false),
+    ]
+
+    private func isRemoteProvider(_ tag: String) -> Bool {
+        Self.aiProviders.first { $0.tag == tag }?.remote ?? false
+    }
+
+    /// Keychain account, field placeholder and bound state for the selected
+    /// token-based provider's API key (nil for on-device / demo).
+    private var remoteKeyConfig: (account: String, placeholder: String, key: Binding<String>)? {
+        switch aiProvider {
+        case "claude": return ("anthropic-api-key", "Anthropic API key (sk-ant-…)", $anthropicKey)
+        case "openai": return ("openai-api-key", "OpenAI API key (sk-…)", $openaiKey)
+        case "gemini": return ("gemini-api-key", "Gemini API key (AIza…)", $geminiKey)
+        default: return nil
+        }
+    }
+
     private var aiSection: some View {
         Section("AI") {
             Picker("Provider", selection: $aiProvider) {
-                Text("On-device (FoundationModels)").tag("ondevice")
-                Text("Mock (deterministic)").tag("mock")
-                Text("Anthropic API (remote)").tag("remote")
+                ForEach(Self.aiProviders, id: \.tag) { provider in
+                    Text(provider.label).tag(provider.tag)
+                }
             }
             .onChange(of: aiProvider) { _, newValue in
-                if newValue == "remote" {
+                // Token APIs send conversation content off-device: gate behind
+                // explicit consent. Local options apply immediately.
+                if isRemoteProvider(newValue) {
                     showRemoteConsent = true
                 } else {
                     Task { await session.applyAIProvider() }
                 }
             }
-            // Make the silent Mock fallback visible: if the chosen provider
-            // isn't actually usable, replies come from a canned stub that does
-            // NOT read your conversation. This row says which brain is live.
+            // Make the Demo fallback visible: if the chosen provider isn't
+            // actually usable, replies come from the simulated Demo provider
+            // that only echoes context. This row says which brain is live.
             Label(activeProviderStatus.text,
                 systemImage: activeProviderStatus.ok ? "checkmark.seal.fill" : "exclamationmark.triangle.fill")
                 .font(.caption)
                 .foregroundStyle(activeProviderStatus.ok ? .green : .orange)
                 .accessibilityIdentifier("ai-provider-status")
-            if aiProvider == "remote" {
-                SecureField("Anthropic API key (sk-ant-…)", text: $anthropicKey)
+            if let config = remoteKeyConfig {
+                SecureField(config.placeholder, text: config.key)
                     .autocorrectionDisabled()
                     .textInputAutocapitalization(.never)
-                    .accessibilityIdentifier("anthropic-key-field")
+                    .accessibilityIdentifier("api-key-field")
                     // Persist on every change, not just on Return — typing or
                     // pasting and tapping away must still save the key (and
-                    // re-resolve the provider), or it silently stays on Mock.
-                    .onChange(of: anthropicKey) { _, _ in saveAnthropicKey() }
-                    .onSubmit { saveAnthropicKey() }
+                    // re-resolve the provider), or it silently stays on Demo.
+                    .onChange(of: config.key.wrappedValue) { _, newValue in
+                        saveKey(account: config.account, value: newValue)
+                    }
+                    .onSubmit { saveKey(account: config.account, value: config.key.wrappedValue) }
                 Text("Stored in the device Keychain, never synced or exported. Drafts show an error here if the key is rejected.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
+            }
+            Button {
+                aiTesting = true
+                aiTestResult = nil
+                Task {
+                    let result = await model.testAI()
+                    aiTestResult = result
+                    aiTesting = false
+                }
+            } label: {
+                HStack {
+                    Label("Test AI now", systemImage: "stethoscope")
+                    if aiTesting { Spacer(); ProgressView() }
+                }
+            }
+            .disabled(aiTesting)
+            .accessibilityIdentifier("test-ai-button")
+            if let aiTestResult {
+                Text(aiTestResult)
+                    .font(.caption)
+                    .foregroundStyle(aiTestResult.hasPrefix("⚠️") ? .orange : .primary)
+                    .textSelection(.enabled)
+                    .accessibilityIdentifier("test-ai-result")
             }
             Text("Outside an active window or thread invite, your AI only drafts privately for you. It never sends on its own.")
                 .font(.caption)
@@ -306,30 +412,40 @@ struct SettingsView: View {
         }
     }
 
-    /// What the AI engine will *actually* use — exposes the silent Mock
-    /// fallback (canned replies that don't read the chat).
+    /// What the AI engine will *actually* use — exposes the Demo fallback
+    /// (simulated replies that only echo the chat, no real inference).
     private var activeProviderStatus: (text: String, ok: Bool) {
-        switch aiProvider {
-        case "remote":
-            let hasKey = !anthropicKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        if let config = remoteKeyConfig {
+            let name = Self.aiProviders.first { $0.tag == aiProvider }?.label ?? "Remote API"
+            let hasKey = !config.key.wrappedValue.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
             return hasKey
-                ? ("Active: Anthropic API — reads your conversation and replies.", true)
-                : ("No API key yet — replies are a canned stub until you add one.", false)
-        case "mock":
-            return ("Mock provider — canned replies, for testing only.", false)
+                ? ("Active: \(name) — reads your conversation and replies.", true)
+                : ("No API key yet — replies use the simulated Demo provider until you add one.", false)
+        }
+        switch aiProvider {
+        case "demo":
+            return ("Demo provider — simulated replies that echo the conversation, no real AI.", false)
         default:
-            return FoundationModelsAgentProvider.isAvailable
-                ? ("Active: on-device Apple Intelligence — reads your conversation.", true)
-                : ("On-device AI isn't available on this device — replies are a canned stub. Switch to Anthropic API for real replies.", false)
+            if let reason = FoundationModelsAgentProvider.availabilityReason {
+                // Surface the SPECIFIC reason (not enabled / downloading / not
+                // eligible) so the user can fix it, instead of a silent stub.
+                return ("\(reason) Until then replies use the simulated Demo provider — or pick a token-based API.", false)
+            }
+            return ("Active: on-device Core AI — reads your conversation.", true)
         }
     }
 
-    private func saveAnthropicKey() {
-        let trimmed = anthropicKey.trimmingCharacters(in: .whitespacesAndNewlines)
+    private func loadKey(_ account: String) -> String {
+        keychain.loadIfPresent(account: account)
+            .map { String(decoding: $0, as: UTF8.self) } ?? ""
+    }
+
+    private func saveKey(account: String, value: String) {
+        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
         if trimmed.isEmpty {
-            keychain.delete(account: "anthropic-api-key")
+            keychain.delete(account: account)
         } else {
-            try? keychain.save(Data(trimmed.utf8), account: "anthropic-api-key")
+            try? keychain.save(Data(trimmed.utf8), account: account)
         }
         Task { await session.applyAIProvider() }
     }

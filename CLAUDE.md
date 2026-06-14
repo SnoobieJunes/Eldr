@@ -47,9 +47,11 @@ swift test --package-path Packages/PQRCCore
 swift test --package-path Packages/PQRCNostr
 swift test --package-path Packages/PQRCAgent
 
-# Full app build + tests (discover available simulators first if the name fails)
-xcodebuild -showdestinations -scheme PQRC
-xcodebuild test -scheme PQRC -destination 'platform=iOS Simulator,name=iPhone 17'
+# Full app build + tests (discover available simulators first if the name fails).
+# The app project/target/scheme is EldrChat (renamed from PQRC; the old PQRC
+# scheme is stale and won't resolve a destination).
+xcodebuild -project App/EldrChat.xcodeproj -scheme EldrChat -showdestinations
+xcodebuild test -project App/EldrChat.xcodeproj -scheme EldrChat -destination 'platform=iOS Simulator,name=iPhone 17'
 ```
 
 ## Hard invariants — MUSTs the tests enforce

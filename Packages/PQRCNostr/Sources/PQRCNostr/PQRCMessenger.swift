@@ -26,6 +26,10 @@ public struct ReceivedMessage: Sendable {
     public let body: MessageBody
     public let contentPointer: ContentPointer?
     public let aiWindow: AIWindowAnnouncement?
+    /// Validated context-sharing grant (nil if absent or forged). Forged grants
+    /// are stripped here and reported as protocol violations — the same
+    /// doctrine as `aiWindow` (review M-1).
+    public let aiContextGrant: AIContextGrant?
     public let wrapEventID: String
 }
 
@@ -591,6 +595,21 @@ public actor PQRCMessenger {
                         reason: "ai_window not signed by the sender's human identity key",
                         wrapEventID: unwrapped.wrapEventID))
             }
+            // Same doctrine for the context-sharing grant (DEVIATIONS N24): the
+            // *consume* axis is an agent permission, so it MUST carry the
+            // sender's human-identity signature. Forged grants never reach a
+            // consumer; the AgentEngine re-checks (defense in depth).
+            var aiContextGrant = body.aiContextGrant
+            if let grant = aiContextGrant,
+                grant.enabledBy != contact.binding.identityPubkey || !grant.hasValidSignature()
+            {
+                aiContextGrant = nil
+                eventContinuation?.yield(
+                    .protocolViolation(
+                        senderIdentityHex: contact.identityHex,
+                        reason: "ai_context_grant not signed by the sender's human identity key",
+                        wrapEventID: unwrapped.wrapEventID))
+            }
             eventContinuation?.yield(
                 .message(
                     ReceivedMessage(
@@ -599,6 +618,7 @@ public actor PQRCMessenger {
                         body: body,
                         contentPointer: unwrapped.rumor.contentPointer,
                         aiWindow: aiWindow,
+                        aiContextGrant: aiContextGrant,
                         wrapEventID: unwrapped.wrapEventID)))
             if !isRetry { await retryPending() }
         } catch let error as PQRCError {

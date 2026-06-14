@@ -8,17 +8,28 @@ import SwiftData
 /// Events the runtime surfaces to the UI layer (already persisted).
 enum RuntimeEvent: Sendable {
     case messageAdded(StoredMessage)
+    /// An existing message's local state changed (e.g. its AI-context marker).
+    case messageChanged(StoredMessage)
     case conversationChanged(String)
     case messageRequest(senderNostrPubkeyHex: String)
     case protocolViolation(conversationID: String, reason: String)
     case aiWindowChanged(conversationID: String, identityHex: String, activeUntil: Int64?)
     case aiInviteChanged(threadID: String, identityHex: String, activeUntil: Int64?)
+    /// A context-sharing grant changed for a scope (DEVIATIONS N24). `scopeTag`
+    /// is `AIContextGrant.Scope.tag` ("conversation:<id>" | "thread:<id>").
+    case aiContextGrantChanged(scopeTag: String, identityHex: String, activeUntil: Int64?)
     case threadCreated(conversationID: String, threadID: String, title: String)
     case loopGuardChanged(threadID: String, paused: Bool)
     case safetyCodeChanged(identityHex: String)
     /// A co-present peer was discovered + binding-verified over the local link
     /// (SPEC §10, Nearby setting) — startable with no relay.
     case nearbyDiscovered(identityHex: String)
+}
+
+/// One configured relay's URL paired with its current connection health.
+struct RelayStatusInfo: Sendable, Equatable {
+    let url: String
+    let status: RelayStatus
 }
 
 /// One local persona: identity + messenger + agent engine + encrypted store.
@@ -490,8 +501,9 @@ actor PersonaRuntime {
     /// groups. >64 KB content takes the blob path automatically (SPEC §11).
     func sendMessage(
         _ text: String, conversationID: String, participantType: ParticipantType = .human,
-        threadID: String? = nil, isContext: Bool = false,
+        threadID: String? = nil, isContext: Bool = false, aiContext: Bool = false,
         aiWindow: AIWindowAnnouncement? = nil, aiInvite: AIInvite? = nil,
+        aiContextGrant: AIContextGrant? = nil,
         threadCreate: ThreadCreate? = nil, groupCreate: GroupCreate? = nil,
         asSystemRow: Bool = false
     ) async throws {
@@ -504,6 +516,8 @@ actor PersonaRuntime {
             thread: threadID.map { RumorContent.ThreadRef(id: $0) },
             groupCreate: groupCreate, threadCreate: threadCreate, aiInvite: aiInvite,
             isContext: isContext ? true : nil,
+            aiContext: aiContext ? true : nil,
+            aiContextGrant: aiContextGrant,
             // Self-chosen alias rides along inside the ciphertext so every
             // connected peer stays current (and ONLY connected peers — D11).
             alias: participantType == .human ? myAlias : nil)
@@ -528,7 +542,8 @@ actor PersonaRuntime {
             id: UUID().uuidString, conversationID: conversationID,
             senderIdentity: identityHex, participantType: participantType,
             text: body.text, sentAt: body.sentAt, threadID: threadID,
-            isContext: isContext, localStatus: asSystemRow ? "system" : "sent")
+            isContext: isContext, aiContext: aiContext,
+            localStatus: asSystemRow ? "system" : "sent")
         try await store.save(message)
         if let threadID {
             await engine.recordThreadMessage(threadID: threadID, participantType: participantType)
@@ -627,6 +642,20 @@ actor PersonaRuntime {
             provider: provider, context: await agentContext(conversationID: conversationID, threadID: threadID))
     }
 
+    /// Diagnostic for Settings "Test AI now": run the active provider against a
+    /// fixed sample so the user sees a real reply or the precise failure reason,
+    /// independent of whether any conversation exists yet.
+    func probeAI() async throws -> String {
+        let sample = AgentContext(
+            myIdentityHex: identityHex, myDisplayName: displayName,
+            transcript: [
+                TranscriptEntry(
+                    senderIdentityHex: "sample", senderDisplayName: "Test",
+                    participantType: .human, text: "Hi! Are you working? Reply in one short sentence.")
+            ])
+        return try await engine.draft(provider: provider, context: sample).text
+    }
+
     func startAIWindow(conversationID: String, durationSeconds: Int64) async throws {
         let announcement = try await engine.startMyWindow(durationSeconds: durationSeconds)
         myWindowConversationID = conversationID
@@ -667,14 +696,25 @@ actor PersonaRuntime {
         let stored = (try? await (threadID != nil
             ? store.messages(threadID: threadID!)
             : store.messages(conversationID: conversationID))) ?? []
-        let transcript = stored.suffix(20).map { message in
-            TranscriptEntry(
+        // Scope for context-sharing authorization (DEVIATIONS N24).
+        let scope: AIContextGrant.Scope =
+            threadID.map { AIContextGrant.Scope.thread($0) } ?? .conversation(conversationID)
+        let sharingAuthorized = await engine.contextSharingAuthorized(scope: scope)
+        let transcript = stored.suffix(20).map { message -> TranscriptEntry in
+            let isMine = message.senderIdentity == identityHex
+            // A message flagged "Add to AI Context" is elevated to shared
+            // context the agent treats specially: my own marked messages always
+            // (my AI, my content); a peer's only when BOTH humans granted in
+            // this scope — default-deny otherwise (invariant 9, privacy).
+            let shared = message.aiContext && (isMine || sharingAuthorized)
+            return TranscriptEntry(
                 senderIdentityHex: message.senderIdentity,
-                senderDisplayName: message.senderIdentity == identityHex
+                senderDisplayName: isMine
                     ? displayName : (contactRecords[message.senderIdentity]?.displayName ?? "Contact"),
                 participantType: message.participantType,
                 text: message.text,
-                isContext: message.isContext)
+                isContext: message.isContext,
+                isSharedContext: shared)
         }
         return AgentContext(
             myIdentityHex: identityHex, myDisplayName: displayName,
@@ -701,6 +741,84 @@ actor PersonaRuntime {
 
     func engineActiveInvite(threadID: String, identityHex: String) async -> Int64? {
         await engine.activeInvite(threadID: threadID, identityHex: identityHex)
+    }
+
+    // MARK: - AI context marking & sharing grants (Features 3–4)
+
+    /// Toggle the "Add to AI Context" marker on local messages. For messages I
+    /// authored, mirror the flag to the peer (author-guarded on their side).
+    func markAsAIContext(messageIDs: [String], value: Bool, conversationID: String) async {
+        for id in messageIDs {
+            try? await store.setAIContext(messageID: id, value: value)
+            guard let updated = try? await store.message(id: id) else { continue }
+            eventContinuation?.yield(.messageChanged(updated))
+            if updated.senderIdentity == identityHex {
+                await sendContextMark(messageID: id, value: value, conversationID: conversationID)
+            }
+        }
+    }
+
+    /// Content-free control telling the peer to mirror my marker (DEVIATIONS
+    /// N25). Not persisted locally — it renders no bubble on either side.
+    private func sendContextMark(messageID: String, value: Bool, conversationID: String) async {
+        let body = MessageBody(
+            text: "", sentAt: clock.now(),
+            group: groupRosters[conversationID].map { _ in RumorContent.GroupRef(id: conversationID) },
+            aiContextMark: AIContextMark(messageID: messageID, value: value))
+        for recipient in recipientsFor(conversationID: conversationID) {
+            try? await messenger.send(body, to: recipient, participantType: .human)
+            await persistSession(recipient)
+        }
+    }
+
+    /// Human-only: sign + broadcast a context-sharing grant for a scope, and
+    /// record a visible system row (transparency-as-privacy).
+    func grantAIContext(
+        scope: AIContextGrant.Scope, durationSeconds: Int64,
+        conversationID: String, threadID: String? = nil
+    ) async throws {
+        let grant = try await engine.startMyContextGrant(
+            scope: scope, durationSeconds: durationSeconds)
+        try await sendMessage(
+            "enabled AI context sharing", conversationID: conversationID,
+            threadID: threadID, aiContextGrant: grant, asSystemRow: true)
+        eventContinuation?.yield(
+            .aiContextGrantChanged(
+                scopeTag: scope.tag, identityHex: identityHex, activeUntil: grant.activeUntil))
+    }
+
+    func withdrawAIContext(scope: AIContextGrant.Scope) async {
+        await engine.withdrawMyContextGrant(scope: scope)
+        eventContinuation?.yield(
+            .aiContextGrantChanged(scopeTag: scope.tag, identityHex: identityHex, activeUntil: nil))
+    }
+
+    func engineActiveContextGrant(scope: AIContextGrant.Scope, identityHex: String) async -> Int64? {
+        await engine.activeContextGrant(scope: scope, identityHex: identityHex)
+    }
+
+    // MARK: - Relay status (Feature 5)
+
+    /// Last-known status of each configured relay (for the Settings indicator).
+    func relayStatuses() async -> [RelayStatusInfo] {
+        var out: [RelayStatusInfo] = []
+        for transport in transports {
+            out.append(RelayStatusInfo(url: Self.relayURL(transport), status: await transport.currentStatus()))
+        }
+        return out
+    }
+
+    /// Actively re-check every relay now ("Check now").
+    func checkRelays() async -> [RelayStatusInfo] {
+        var out: [RelayStatusInfo] = []
+        for transport in transports {
+            out.append(RelayStatusInfo(url: Self.relayURL(transport), status: await transport.checkConnection()))
+        }
+        return out
+    }
+
+    private static func relayURL(_ transport: any RelayTransport) -> String {
+        (transport as? NostrWebSocketTransport)?.url.absoluteString ?? "local"
     }
 
     // MARK: - Receive pipeline
@@ -761,6 +879,21 @@ actor PersonaRuntime {
             persistContact(senderHex)
             eventContinuation?.yield(.conversationChanged(senderHex))
         }
+        // Retro-flag control (DEVIATIONS N25): mirror a marker the sender set on
+        // their OWN prior message. Author guard — the target must be a message we
+        // received from this same sender. Renders nothing.
+        if let mark = body.aiContextMark {
+            if let target = try? await store.message(id: mark.messageID),
+                target.senderIdentity == senderHex
+            {
+                try? await store.setAIContext(messageID: mark.messageID, value: mark.value)
+                if let updated = try? await store.message(id: mark.messageID) {
+                    eventContinuation?.yield(.messageChanged(updated))
+                }
+            }
+            return
+        }
+
         // Alias-only control message: nothing to render, nothing to store.
         if body.text.isEmpty, body.alias != nil, body.groupCreate == nil,
             body.threadCreate == nil, body.aiInvite == nil, received.aiWindow == nil
@@ -809,6 +942,16 @@ actor PersonaRuntime {
                         activeUntil: invite.activeUntil))
             }
         }
+        // Context-sharing grant (validated at the messenger; engine re-checks —
+        // defense in depth). Invalid grants were already stripped to nil.
+        if let grant = received.aiContextGrant {
+            if (try? await engine.receiveContextGrant(grant, fromSenderIdentityHex: senderHex)) != nil {
+                eventContinuation?.yield(
+                    .aiContextGrantChanged(
+                        scopeTag: grant.scope.tag, identityHex: senderHex,
+                        activeUntil: grant.activeUntil))
+            }
+        }
 
         // Blob path: resolve the pointer to the real content (SPEC §11).
         // Large content is stored as a bounded preview — rendering hundreds of
@@ -828,12 +971,14 @@ actor PersonaRuntime {
 
         // Control messages render as neutral system rows, not bubbles.
         let isSystemRow =
-            received.aiWindow != nil || body.groupCreate != nil || body.threadCreate != nil
+            received.aiWindow != nil || received.aiContextGrant != nil
+            || body.groupCreate != nil || body.threadCreate != nil
         let message = StoredMessage(
             id: UUID().uuidString, conversationID: conversationID,
             senderIdentity: senderHex, participantType: received.participantType,
             text: text, sentAt: body.sentAt, threadID: body.thread?.id,
-            isContext: body.isContext ?? false, localStatus: isSystemRow ? "system" : "received")
+            isContext: body.isContext ?? false, aiContext: body.aiContext ?? false,
+            localStatus: isSystemRow ? "system" : "received")
         try? await store.save(message)
         eventContinuation?.yield(.messageAdded(message))
 

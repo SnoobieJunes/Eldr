@@ -15,9 +15,9 @@
             <BuildableReference
                BuildableIdentifier = "primary"
                BlueprintIdentifier = "AA0000000000000000000011"
-               BuildableName = "PQRC.app"
-               BlueprintName = "PQRC"
-               ReferencedContainer = "container:PQRC.xcodeproj">
+               BuildableName = "EldrChat.app"
+               BlueprintName = "EldrChat"
+               ReferencedContainer = "container:EldrChat.xcodeproj">
             </BuildableReference>
          </BuildActionEntry>
       </BuildActionEntries>
@@ -34,9 +34,9 @@
             <BuildableReference
                BuildableIdentifier = "primary"
                BlueprintIdentifier = "AA0000000000000000000012"
-               BuildableName = "PQRCTests.xctest"
-               BlueprintName = "PQRCTests"
-               ReferencedContainer = "container:PQRC.xcodeproj">
+               BuildableName = "EldrChatTests.xctest"
+               BlueprintName = "EldrChatTests"
+               ReferencedContainer = "container:EldrChat.xcodeproj">
             </BuildableReference>
          </TestableReference>
          <TestableReference
@@ -45,9 +45,9 @@
             <BuildableReference
                BuildableIdentifier = "primary"
                BlueprintIdentifier = "AA0000000000000000000013"
-               BuildableName = "PQRCUITests.xctest"
-               BlueprintName = "PQRCUITests"
-               ReferencedContainer = "container:PQRC.xcodeproj">
+               BuildableName = "EldrChatUITests.xctest"
+               BlueprintName = "EldrChatUITests"
+               ReferencedContainer = "container:EldrChat.xcodeproj">
             </BuildableReference>
          </TestableReference>
       </Testables>
@@ -67,9 +67,9 @@
          <BuildableReference
             BuildableIdentifier = "primary"
             BlueprintIdentifier = "AA0000000000000000000011"
-            BuildableName = "PQRC.app"
-            BlueprintName = "PQRC"
-            ReferencedContainer = "container:PQRC.xcodeproj">
+            BuildableName = "EldrChat.app"
+            BlueprintName = "EldrChat"
+            ReferencedContainer = "container:EldrChat.xcodeproj">
          </BuildableReference>
       </BuildableProductRunnable>
    </LaunchAction>
@@ -84,9 +84,9 @@
          <BuildableReference
             BuildableIdentifier = "primary"
             BlueprintIdentifier = "AA0000000000000000000011"
-            BuildableName = "PQRC.app"
-            BlueprintName = "PQRC"
-            ReferencedContainer = "container:PQRC.xcodeproj">
+            BuildableName = "EldrChat.app"
+            BlueprintName = "EldrChat"
+            ReferencedContainer = "container:EldrChat.xcodeproj">
          </BuildableReference>
       </BuildableProductRunnable>
    </ProfileAction>

@@ -20,6 +20,8 @@ struct ThreadView: View {
         return until
     }
 
+    private var threadScope: AIContextGrant.Scope { .thread(thread.id) }
+
     var body: some View {
         VStack(spacing: 0) {
             header
@@ -88,6 +90,25 @@ struct ThreadView: View {
                     .buttonStyle(.borderedProminent)
                     .accessibilityIdentifier("invite-ai")
                 }
+                if model.iGrantedContext(scope: threadScope, now: now) {
+                    Button("Stop sharing context") {
+                        Task { await model.withdrawContextSharing(scope: threadScope) }
+                    }
+                    .buttonStyle(.bordered)
+                    .accessibilityIdentifier("withdraw-context")
+                } else {
+                    Button {
+                        Task {
+                            await model.grantContextSharing(
+                                scope: threadScope, minutes: 30,
+                                conversationID: thread.conversationID, threadID: thread.id)
+                        }
+                    } label: {
+                        Label("Share context", systemImage: "brain")
+                    }
+                    .buttonStyle(.bordered)
+                    .accessibilityIdentifier("grant-context")
+                }
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -106,7 +127,14 @@ struct ThreadView: View {
                         MessageBubble(
                             message: message,
                             isMine: message.senderIdentity == model.myIdentityHex,
-                            senderName: model.contactNames[message.senderIdentity] ?? "Contact")
+                            senderName: model.contactNames[message.senderIdentity] ?? "Contact",
+                            onToggleAIContext: {
+                                Task {
+                                    await model.markAIContext(
+                                        messageIDs: [message.id], value: !message.aiContext,
+                                        conversationID: thread.conversationID)
+                                }
+                            })
                     }
                 }
                 .padding()

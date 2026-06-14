@@ -195,6 +195,15 @@ actor SwiftDataMessageStore: MessageStore {
         }
     }
 
+    func message(id: String) async throws -> StoredMessage? {
+        let crypter = try requireCrypter()
+        let descriptor = FetchDescriptor<MessageModel>(predicate: #Predicate { $0.id == id })
+        guard let model = try modelContext.fetch(descriptor).first,
+            let plain = try? crypter.open(model.encryptedPayload, recordID: "msg-\(id)")
+        else { return nil }
+        return try? JSONDecoder().decode(StoredMessage.self, from: plain)
+    }
+
     func updateStatus(messageID: String, status: String) async throws {
         let crypter = try requireCrypter()
         let descriptor = FetchDescriptor<MessageModel>(
@@ -204,6 +213,20 @@ actor SwiftDataMessageStore: MessageStore {
             var message = try? JSONDecoder().decode(StoredMessage.self, from: plain)
         else { throw PQRCError.recordNotFound }
         message.localStatus = status
+        model.encryptedPayload = try crypter.seal(
+            try JSONEncoder().encode(message), recordID: "msg-\(messageID)")
+        try modelContext.save()
+    }
+
+    func setAIContext(messageID: String, value: Bool) async throws {
+        let crypter = try requireCrypter()
+        let descriptor = FetchDescriptor<MessageModel>(
+            predicate: #Predicate { $0.id == messageID })
+        guard let model = try modelContext.fetch(descriptor).first,
+            let plain = try? crypter.open(model.encryptedPayload, recordID: "msg-\(messageID)"),
+            var message = try? JSONDecoder().decode(StoredMessage.self, from: plain)
+        else { throw PQRCError.recordNotFound }
+        message.aiContext = value
         model.encryptedPayload = try crypter.seal(
             try JSONEncoder().encode(message), recordID: "msg-\(messageID)")
         try modelContext.save()

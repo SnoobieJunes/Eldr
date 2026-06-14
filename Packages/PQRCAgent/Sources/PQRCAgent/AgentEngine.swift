@@ -36,6 +36,9 @@ public actor AgentEngine {
     private var conversationWindows: [String: Int64] = [:]
     /// Thread-scope invites: threadID -> (human identity hex -> active_until).
     private var threadInvites: [String: [String: Int64]] = [:]
+    /// Context-sharing grants: scope tag -> (granter identity hex -> active_until).
+    /// Orthogonal to windows/invites: this is the *consume* axis, never *send*.
+    private var contextGrants: [String: [String: Int64]] = [:]
     /// Loop guard (D14): consecutive agent messages per thread.
     private var consecutiveAgentMessages: [String: Int] = [:]
 
@@ -124,6 +127,61 @@ public actor AgentEngine {
             return nil
         }
         return until
+    }
+
+    // MARK: - ai_context_grant (consume axis, DEVIATIONS N24)
+
+    /// Human-only action: sign and activate my own context-sharing grant for a
+    /// scope. Same bounded-duration rules as windows/invites.
+    public func startMyContextGrant(
+        scope: AIContextGrant.Scope, durationSeconds: Int64
+    ) throws -> AIContextGrant {
+        guard Self.allowedWindowDurations.contains(durationSeconds) else {
+            throw AgentEngineError.windowDurationUnbounded
+        }
+        let grant = try AIContextGrant.make(
+            scope: scope, activeUntil: clock.now() + durationSeconds, identity: myIdentity)
+        contextGrants[scope.tag, default: [:]][myIdentityHex] = grant.activeUntil
+        return grant
+    }
+
+    public func withdrawMyContextGrant(scope: AIContextGrant.Scope) {
+        contextGrants[scope.tag]?[myIdentityHex] = nil
+    }
+
+    /// Validates an incoming grant: signed by the claimed sender's HUMAN
+    /// identity key, time-bounded. Agents cannot self-activate (invariant 9).
+    public func receiveContextGrant(
+        _ grant: AIContextGrant, fromSenderIdentityHex sender: String
+    ) throws {
+        guard grant.enabledBy.hexString == sender else {
+            throw AgentEngineError.windowNotFromHumanIdentity
+        }
+        guard grant.hasValidSignature() else {
+            throw AgentEngineError.windowSignatureInvalid
+        }
+        guard grant.activeUntil - clock.now() <= Self.maxWindowDuration else {
+            throw AgentEngineError.windowDurationUnbounded
+        }
+        contextGrants[grant.scope.tag, default: [:]][sender] = grant.activeUntil
+    }
+
+    public func activeContextGrant(scope: AIContextGrant.Scope, identityHex: String) -> Int64? {
+        guard let until = contextGrants[scope.tag]?[identityHex], until > clock.now() else {
+            return nil
+        }
+        return until
+    }
+
+    /// Whether shared context may flow in a scope. Default policy is
+    /// BIDIRECTIONAL (ties resolve to privacy, SPEC §0): my own grant must be
+    /// live AND at least one other human's grant must be live. So no one's
+    /// marked context is consumed by a peer AI unless both humans opted in.
+    public func contextSharingAuthorized(scope: AIContextGrant.Scope) -> Bool {
+        let now = clock.now()
+        let live = contextGrants[scope.tag]?.filter { $0.value > now } ?? [:]
+        guard live[myIdentityHex] != nil else { return false }
+        return live.keys.contains { $0 != myIdentityHex }
     }
 
     // MARK: - The autonomous-send gate (fail closed)

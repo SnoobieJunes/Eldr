@@ -9,16 +9,22 @@ public struct TranscriptEntry: Sendable, Equatable {
     public let participantType: ParticipantType
     public let text: String
     public let isContext: Bool
+    /// True when this entry is another human's `ai_context`-marked message that
+    /// the active grant authorizes my agent to consume as shared context. My own
+    /// messages and agent contributions never set this.
+    public let isSharedContext: Bool
 
     public init(
         senderIdentityHex: String, senderDisplayName: String,
-        participantType: ParticipantType, text: String, isContext: Bool = false
+        participantType: ParticipantType, text: String, isContext: Bool = false,
+        isSharedContext: Bool = false
     ) {
         self.senderIdentityHex = senderIdentityHex
         self.senderDisplayName = senderDisplayName
         self.participantType = participantType
         self.text = text
         self.isContext = isContext
+        self.isSharedContext = isSharedContext
     }
 }
 

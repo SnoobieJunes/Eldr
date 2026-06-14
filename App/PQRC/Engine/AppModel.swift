@@ -49,6 +49,11 @@ final class AppModel {
     var aiWindows: [String: [String: Int64]] = [:]
     /// threadID -> (identityHex -> activeUntil): drives the thread header.
     var aiInvites: [String: [String: Int64]] = [:]
+    /// scopeTag ("conversation:<id>" | "thread:<id>") -> (identityHex -> activeUntil):
+    /// drives the "AI context sharing active" indicator.
+    var aiContextGrants: [String: [String: Int64]] = [:]
+    /// Live relay connection health for the Settings indicator (Feature 5).
+    var relayStatuses: [RelayStatusInfo] = []
     var loopGuardPaused: Set<String> = []
     var protocolViolations: [String] = []
     /// Conversations with a pending safety-code-change warning (APP-SPEC §6.2).
@@ -87,6 +92,12 @@ final class AppModel {
                 await self?.apply(event)
             }
         }
+        // One-shot relay health check at launch (Feature 5). The Settings
+        // indicator is populated from this and not refreshed again until the
+        // user taps "Check connection" — repeatedly re-pinging on every Settings
+        // open was getting the client throttled by the relay. Runs detached so
+        // it never blocks first paint.
+        Task { [weak self] in await self?.checkRelaysNow() }
     }
 
     /// Rebuilds the conversation list, message history and threads from the
@@ -131,6 +142,14 @@ final class AppModel {
             if let threadID = message.threadID {
                 refreshThreadCounts(conversationID: message.conversationID, threadID: threadID)
             }
+        case .messageChanged(let message):
+            // A marker flip (no new row): replace in place if we have it.
+            if var list = messagesByConversation[message.conversationID],
+                let idx = list.firstIndex(where: { $0.id == message.id })
+            {
+                list[idx] = message
+                messagesByConversation[message.conversationID] = list
+            }
         case .conversationChanged(let id):
             await refreshConversationRow(id, lastMessage: nil)
         case .messageRequest(let sender):
@@ -147,6 +166,10 @@ final class AppModel {
             var invites = aiInvites[threadID] ?? [:]
             invites[identityHex] = activeUntil
             aiInvites[threadID] = invites
+        case .aiContextGrantChanged(let scopeTag, let identityHex, let activeUntil):
+            var grants = aiContextGrants[scopeTag] ?? [:]
+            grants[identityHex] = activeUntil
+            aiContextGrants[scopeTag] = grants
         case .threadCreated(let conversationID, let threadID, let title):
             var threads = threadsByConversation[conversationID] ?? []
             if !threads.contains(where: { $0.id == threadID }) {
@@ -283,6 +306,50 @@ final class AppModel {
 
     func withdrawAI(threadID: String) async {
         await runtime.withdrawMyAI(threadID: threadID)
+    }
+
+    // MARK: - AI context (Features 3–4)
+
+    /// Mark/unmark messages as "AI context".
+    func markAIContext(messageIDs: [String], value: Bool, conversationID: String) async {
+        await runtime.markAsAIContext(messageIDs: messageIDs, value: value, conversationID: conversationID)
+    }
+
+    /// Allow the other party's AI to consume my marked context (and reciprocally
+    /// my AI to consume theirs) for a bounded duration, in this scope.
+    func grantContextSharing(
+        scope: AIContextGrant.Scope, minutes: Int, conversationID: String, threadID: String? = nil
+    ) async {
+        try? await runtime.grantAIContext(
+            scope: scope, durationSeconds: Int64(minutes * 60),
+            conversationID: conversationID, threadID: threadID)
+    }
+
+    func withdrawContextSharing(scope: AIContextGrant.Scope) async {
+        await runtime.withdrawAIContext(scope: scope)
+    }
+
+    /// Whether my own grant is currently live for a scope (drives the toggle UI).
+    func iGrantedContext(scope: AIContextGrant.Scope, now: Int64) -> Bool {
+        guard let until = aiContextGrants[scope.tag]?[myIdentityHex] else { return false }
+        return until > now
+    }
+
+    /// A one-shot diagnostic: runs the active provider on a sample transcript
+    /// and returns its reply, or the precise error (Settings "Test AI now").
+    func testAI() async -> String {
+        do { return try await runtime.probeAI() }
+        catch { return "⚠️ " + Self.describeAgentError(error) }
+    }
+
+    // MARK: - Relay status (Feature 5)
+
+    func refreshRelayStatuses() async {
+        relayStatuses = await runtime.relayStatuses()
+    }
+
+    func checkRelaysNow() async {
+        relayStatuses = await runtime.checkRelays()
     }
 
     func createGroup(name: String, members: [String]) async -> String? {

@@ -21,6 +21,7 @@ public enum RumorType: String, Codable, Sendable {
     case groupCreate = "group_create"
     case threadCreate = "thread_create"
     case aiInvite = "ai_invite"
+    case aiContextGrant = "ai_context_grant"
 }
 
 /// Blossom content pointer for >64 KB payloads (SPEC §11). Wire name: `ptr`.
@@ -148,6 +149,102 @@ public struct AIInvite: Codable, Equatable, Sendable {
     }
 }
 
+/// Human-signed grant authorizing the *consume* axis of AI context sharing
+/// (APP-SPEC §8 extension, DEVIATIONS N24): within the named scope and until
+/// `active_until`, the other party's agent may ingest this human's
+/// `ai_context`-marked messages, and reciprocally this human's agent may ingest
+/// theirs. It does NOT authorize sending — that remains `ai_window`/`ai_invite`.
+/// Like those, valid ONLY when signed by the human identity key; agents cannot
+/// self-activate (SPEC §13.3, CLAUDE.md invariant 9). A distinct domain string
+/// keeps grant signatures from ever being replayed as a window/invite.
+public struct AIContextGrant: Codable, Equatable, Sendable {
+    /// Conversation- or thread-scoped, with the id bound into the signature so a
+    /// conversation grant can't be reflected into a thread (or vice versa).
+    public struct Scope: Codable, Equatable, Sendable {
+        public let kind: String  // "conversation" | "thread"
+        public let id: String
+
+        public init(kind: String, id: String) {
+            self.kind = kind
+            self.id = id
+        }
+
+        public static func conversation(_ id: String) -> Scope { Scope(kind: "conversation", id: id) }
+        public static func thread(_ id: String) -> Scope { Scope(kind: "thread", id: id) }
+
+        /// Stable key for engine state + signing.
+        public var tag: String { "\(kind):\(id)" }
+    }
+
+    public let type: String
+    public let scope: Scope
+    public let activeUntil: Int64
+    public let enabledBy: Data
+    public let sig: Data
+
+    enum CodingKeys: String, CodingKey {
+        case type
+        case scope
+        case activeUntil = "active_until"
+        case enabledBy = "enabled_by"
+        case sig
+    }
+
+    public init(scope: Scope, activeUntil: Int64, enabledBy: Data, sig: Data) {
+        self.type = "ai_context_grant"
+        self.scope = scope
+        self.activeUntil = activeUntil
+        self.enabledBy = enabledBy
+        self.sig = sig
+    }
+
+    /// Domain-separated message the human identity key signs. The domain string
+    /// is deliberately different from `pqrc-ai-window-v1` (no cross-replay), and
+    /// the scope tag is bound in.
+    public static func signatureMessage(scope: Scope, activeUntil: Int64, enabledBy: Data) -> Data {
+        var msg = Data("pqrc-ai-context-grant-v1".utf8)
+        msg.append(Data(int64BE: activeUntil))
+        msg.append(enabledBy)
+        msg.append(Data(scope.tag.utf8))
+        return msg
+    }
+
+    public static func make(scope: Scope, activeUntil: Int64, identity: PQRCIdentity) throws -> AIContextGrant {
+        let pub = identity.publicKeyData
+        let sig = try identity.sign(signatureMessage(scope: scope, activeUntil: activeUntil, enabledBy: pub))
+        return AIContextGrant(scope: scope, activeUntil: activeUntil, enabledBy: pub, sig: sig)
+    }
+
+    /// Signature check only — time bounds are enforced by the AgentEngine gate.
+    public func hasValidSignature() -> Bool {
+        PQRCIdentity.verify(
+            signature: sig,
+            message: Self.signatureMessage(scope: scope, activeUntil: activeUntil, enabledBy: enabledBy),
+            publicKey: enabledBy
+        )
+    }
+}
+
+/// Content-free control to (re)flag a *previously sent* message as AI-shareable
+/// context (DEVIATIONS N25). Carries only the target message id + the new value,
+/// inside the encrypted body; renders no bubble. The receiver MUST reject a mark
+/// for any message it did not receive from this same sender (no flagging someone
+/// else's words as shareable).
+public struct AIContextMark: Codable, Equatable, Sendable {
+    public let messageID: String
+    public let value: Bool
+
+    enum CodingKeys: String, CodingKey {
+        case messageID = "message_id"
+        case value
+    }
+
+    public init(messageID: String, value: Bool) {
+        self.messageID = messageID
+        self.value = value
+    }
+}
+
 /// The rumor content schema (SPEC §8.2, NIP-XX §7) — the actual PQRC message
 /// payload, carried unsigned inside the seal. Unknown JSON fields are
 /// preserved-or-ignored, never fatal (SPEC §12); decoding uses only the keys
@@ -231,6 +328,15 @@ public struct MessageBody: Codable, Equatable, Sendable {
     public var aiInvite: AIInvite?
     /// "Context:"-prefixed agent contributions render with a folder glyph (APP-SPEC §8).
     public var isContext: Bool?
+    /// Human-applied "this message is AI-shareable context" marker (DEVIATIONS
+    /// N23). Distinct from `isContext` (the agent-authored render hint): this is
+    /// set by a human via "Add to AI Context" and is only *consumed* by the peer
+    /// AI under an active `AIContextGrant`. Inside the ciphertext only.
+    public var aiContext: Bool?
+    /// Retro-flag control for an already-sent message (DEVIATIONS N25).
+    public var aiContextMark: AIContextMark?
+    /// Human-signed context-sharing grant (DEVIATIONS N24).
+    public var aiContextGrant: AIContextGrant?
     /// Sender-chosen display alias, shared only inside the encrypted channel —
     /// so only already-established contacts ever see it (no public profile,
     /// D11 preserved). Optional and ignored by older clients (SPEC §12).
@@ -246,6 +352,9 @@ public struct MessageBody: Codable, Equatable, Sendable {
         case threadCreate = "thread_create"
         case aiInvite = "ai_invite"
         case isContext = "is_context"
+        case aiContext = "ai_context"
+        case aiContextMark = "ai_context_mark"
+        case aiContextGrant = "ai_context_grant"
         case alias
     }
 
@@ -253,7 +362,9 @@ public struct MessageBody: Codable, Equatable, Sendable {
         text: String, sentAt: Int64,
         group: RumorContent.GroupRef? = nil, thread: RumorContent.ThreadRef? = nil,
         groupCreate: GroupCreate? = nil, threadCreate: ThreadCreate? = nil,
-        aiInvite: AIInvite? = nil, isContext: Bool? = nil, alias: String? = nil
+        aiInvite: AIInvite? = nil, isContext: Bool? = nil,
+        aiContext: Bool? = nil, aiContextMark: AIContextMark? = nil,
+        aiContextGrant: AIContextGrant? = nil, alias: String? = nil
     ) {
         self.text = text
         self.sentAt = sentAt
@@ -263,6 +374,9 @@ public struct MessageBody: Codable, Equatable, Sendable {
         self.threadCreate = threadCreate
         self.aiInvite = aiInvite
         self.isContext = isContext
+        self.aiContext = aiContext
+        self.aiContextMark = aiContextMark
+        self.aiContextGrant = aiContextGrant
         self.alias = alias
     }
 }

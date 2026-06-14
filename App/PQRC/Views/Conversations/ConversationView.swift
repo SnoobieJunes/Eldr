@@ -15,7 +15,12 @@ struct ConversationView: View {
     @State private var showWindowPicker = false
     @State private var showThreadSheet = false
     @State private var showDetails = false
+    /// Multi-select mode for batch "Add to AI Context" (Feature 3).
+    @State private var selecting = false
+    @State private var selection: Set<String> = []
     @State private var now = Int64(Date().timeIntervalSince1970)
+
+    private var conversationScope: AIContextGrant.Scope { .conversation(conversationID) }
 
     private let ticker = Timer.publish(every: 1, on: .main, in: .common).autoconnect()
 
@@ -37,8 +42,16 @@ struct ConversationView: View {
                 AIWindowBanner(name: banner.name, until: banner.until, now: now)
             }
             threadChips
+            if model.iGrantedContext(scope: conversationScope, now: now) {
+                Label("AI context sharing is on", systemImage: "brain.head.profile")
+                    .font(.caption.weight(.medium))
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 6)
+                    .background(Color.purple.opacity(0.12))
+                    .accessibilityIdentifier("context-sharing-banner")
+            }
             messageList
-            composer
+            if selecting { selectionBar } else { composer }
         }
         .navigationTitle(model.contactNames[conversationID] ?? "Conversation")
         .navigationBarTitleDisplayMode(.inline)
@@ -54,6 +67,14 @@ struct ConversationView: View {
         }
         .toolbar {
             ToolbarItemGroup(placement: .topBarTrailing) {
+                Button {
+                    selecting.toggle()
+                    selection = []
+                } label: {
+                    Image(systemName: selecting ? "checkmark.circle" : "checklist")
+                }
+                .accessibilityLabel(selecting ? "Done selecting" : "Select messages")
+                .accessibilityIdentifier("select-messages-button")
                 Button {
                     showThreadSheet = true
                 } label: {
@@ -86,6 +107,18 @@ struct ConversationView: View {
                 Task {
                     aiDraft = await model.draft(conversationID: conversationID)
                     showDraftSheet = aiDraft != nil
+                }
+            }
+            if model.iGrantedContext(scope: conversationScope, now: now) {
+                Button("Stop sharing AI context", role: .destructive) {
+                    Task { await model.withdrawContextSharing(scope: conversationScope) }
+                }
+            } else {
+                Button("Share AI context (30 min)") {
+                    Task {
+                        await model.grantContextSharing(
+                            scope: conversationScope, minutes: 30, conversationID: conversationID)
+                    }
                 }
             }
         } message: {
@@ -148,10 +181,7 @@ struct ConversationView: View {
             ScrollView {
                 LazyVStack(spacing: 6) {
                     ForEach(model.messages(for: conversationID)) { message in
-                        MessageBubble(
-                            message: message,
-                            isMine: message.senderIdentity == model.myIdentityHex,
-                            senderName: model.contactNames[message.senderIdentity] ?? "Contact")
+                        messageRow(message)
                     }
                 }
                 .padding(.horizontal)
@@ -169,6 +199,63 @@ struct ConversationView: View {
                 }
             }
         }
+    }
+
+    @ViewBuilder private func messageRow(_ message: StoredMessage) -> some View {
+        let bubble = MessageBubble(
+            message: message,
+            isMine: message.senderIdentity == model.myIdentityHex,
+            senderName: model.contactNames[message.senderIdentity] ?? "Contact",
+            onToggleAIContext: selecting
+                ? nil
+                : {
+                    Task {
+                        await model.markAIContext(
+                            messageIDs: [message.id], value: !message.aiContext,
+                            conversationID: conversationID)
+                    }
+                })
+        if selecting {
+            HStack(spacing: 8) {
+                Image(systemName: selection.contains(message.id) ? "checkmark.circle.fill" : "circle")
+                    .foregroundStyle(selection.contains(message.id) ? .purple : .secondary)
+                bubble
+            }
+            .contentShape(Rectangle())
+            .onTapGesture {
+                if selection.contains(message.id) { selection.remove(message.id) } else {
+                    selection.insert(message.id)
+                }
+            }
+        } else {
+            bubble
+        }
+    }
+
+    /// Bottom action bar shown while multi-selecting.
+    private var selectionBar: some View {
+        HStack {
+            Button("Cancel") {
+                selecting = false
+                selection = []
+            }
+            Spacer()
+            Button {
+                let ids = Array(selection)
+                Task {
+                    await model.markAIContext(messageIDs: ids, value: true, conversationID: conversationID)
+                }
+                selecting = false
+                selection = []
+            } label: {
+                Label("Add \(selection.count) to AI Context", systemImage: "brain")
+            }
+            .buttonStyle(.borderedProminent)
+            .disabled(selection.isEmpty)
+        }
+        .padding(.horizontal)
+        .padding(.vertical, 8)
+        .background(.bar)
     }
 
     private var composer: some View {

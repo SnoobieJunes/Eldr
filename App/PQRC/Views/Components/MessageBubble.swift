@@ -9,6 +9,8 @@ struct MessageBubble: View {
     let message: StoredMessage
     let isMine: Bool
     let senderName: String
+    /// Toggles the "Add to AI Context" marker (Feature 3). nil hides the action.
+    var onToggleAIContext: (() -> Void)? = nil
 
     var body: some View {
         if message.localStatus == "violation" {
@@ -19,9 +21,32 @@ struct MessageBubble: View {
             SystemRow(text: "\(isMine ? "You" : senderName) \(message.text)")
                 .id(message.id)
         } else if message.participantType == .agent {
-            agentBubble
+            agentBubble.contextMenu { aiContextMenuItem }
         } else {
-            humanBubble
+            humanBubble.contextMenu { aiContextMenuItem }
+        }
+    }
+
+    /// Long-press menu entry for marking a message as AI context.
+    @ViewBuilder private var aiContextMenuItem: some View {
+        if let onToggleAIContext {
+            Button {
+                onToggleAIContext()
+            } label: {
+                Label(
+                    message.aiContext ? "Remove from AI Context" : "Add to AI Context",
+                    systemImage: message.aiContext ? "brain.head.profile" : "brain")
+            }
+        }
+    }
+
+    /// Small marker shown on messages flagged for AI context.
+    @ViewBuilder private var aiContextBadge: some View {
+        if message.aiContext {
+            Image(systemName: "brain")
+                .font(.caption2)
+                .foregroundStyle(.purple)
+                .accessibilityLabel("Marked as AI context")
         }
     }
 
@@ -32,7 +57,7 @@ struct MessageBubble: View {
         HStack {
             if isMine { Spacer(minLength: 48) }
             VStack(alignment: isMine ? .trailing : .leading, spacing: 2) {
-                Text(message.text)
+                MessageContent(text: message.text)
                     .padding(.horizontal, 14)
                     .padding(.vertical, 9)
                     .background(
@@ -47,12 +72,15 @@ struct MessageBubble: View {
                             : AnyShapeStyle(Color(.secondarySystemBackground)),
                         in: RoundedRectangle(cornerRadius: 20, style: .continuous))
                     .foregroundStyle(isMine ? .white : .primary)
-                if isMine {
-                    // Local-only status; copy says "sent to relay", never "delivered" (D5).
-                    // .secondary (not .tertiary): keeps the contrast audit green.
-                    Text(message.localStatus == "queued" ? "Queued" : "Sent to relay")
-                        .font(.caption2)
-                        .foregroundStyle(.secondary)
+                HStack(spacing: 4) {
+                    aiContextBadge
+                    if isMine {
+                        // Local-only status; copy says "sent to relay", never "delivered" (D5).
+                        // .secondary (not .tertiary): keeps the contrast audit green.
+                        Text(message.localStatus == "queued" ? "Queued" : "Sent to relay")
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                    }
                 }
             }
             if !isMine { Spacer(minLength: 48) }
@@ -83,7 +111,8 @@ struct MessageBubble: View {
                             .foregroundStyle(agentAccent)
                             .accessibilityLabel("Context contribution")
                     }
-                    Text(message.text)
+                    MessageContent(text: message.text)
+                    aiContextBadge
                 }
                 .padding(.horizontal, 14)
                 .padding(.vertical, 9)

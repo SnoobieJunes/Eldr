@@ -33,6 +33,16 @@ public struct NostrFilter: Sendable, Equatable {
     }
 }
 
+/// Connection health for the Settings relay indicator. Reporting this never
+/// changes delivery behavior (the messenger's outbox is the recovery path);
+/// it only gives the user a green check / red x per configured server.
+public enum RelayStatus: Sendable, Equatable {
+    case connected
+    case connecting
+    case disconnected
+    case failed(String)
+}
+
 public struct PublishAck: Sendable, Equatable {
     public let eventID: String
     public let accepted: Bool
@@ -56,6 +66,17 @@ public protocol RelayTransport: Sendable {
     func subscribe(_ filters: [NostrFilter]) async -> AsyncThrowingStream<NostrEvent, Error>
     /// NIP-42 AUTH: sign the relay's challenge to unlock gated reads (kind 1059).
     func authenticate(keypair: NostrKeypair, randomSource: any RandomSource) async throws
+    /// Last-known connection health, for the Settings indicator.
+    func currentStatus() async -> RelayStatus
+    /// Actively confirm reachability now (dials if needed), updating and
+    /// returning the status. Used by the "Check now" control.
+    func checkConnection() async -> RelayStatus
+}
+
+extension RelayTransport {
+    /// In-process / simulator transports have no socket to drop — always healthy.
+    public func currentStatus() async -> RelayStatus { .connected }
+    public func checkConnection() async -> RelayStatus { await currentStatus() }
 }
 
 /// Local-link transport seam (SPEC §10; stretch goal S1, implemented by

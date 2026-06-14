@@ -23,7 +23,7 @@ import PQRCCore
 /// outbox retry loop (APP-SPEC §13) is the recovery mechanism, and each retry
 /// attempt redials a fresh socket.
 public actor NostrWebSocketTransport: RelayTransport {
-    public let url: URL  // e.g. wss://relay.lerants.com or ws://127.0.0.1:7777
+    public nonisolated let url: URL  // e.g. wss://relay.lerants.com or ws://127.0.0.1:7777
 
     private var socket: URLSessionWebSocketTask?
     private var receiveLoop: Task<Void, Never>?
@@ -40,6 +40,10 @@ public actor NostrWebSocketTransport: RelayTransport {
     private var authChallenge: String?
     private var challengeWaiters: [UUID: CheckedContinuation<String, any Error>] = [:]
     private var nextSubscriptionNumber = 0
+    /// Connection health for the Settings indicator. Set `.connected` the
+    /// instant any relay frame arrives (proves the socket is live), `.failed`
+    /// on teardown/backoff. Purely observational — never gates delivery.
+    private var statusState: RelayStatus = .disconnected
 
     /// How long publish/authenticate wait for the relay before giving up.
     /// A dropped OK then surfaces as `publishDropped`, which the messenger's
@@ -62,6 +66,29 @@ public actor NostrWebSocketTransport: RelayTransport {
 
     public func disconnect() {
         teardown(error: CancellationError())
+        statusState = .disconnected
+    }
+
+    public func currentStatus() async -> RelayStatus {
+        if connectionBackoff { return .failed("Relay unreachable — retrying shortly") }
+        return statusState
+    }
+
+    /// Dial if needed and wait briefly for the receive loop to confirm a live
+    /// frame. In the running app the messenger already holds live subscriptions
+    /// on this socket, so a healthy relay confirms within a few hundred ms.
+    public func checkConnection() async -> RelayStatus {
+        if connectionBackoff { return .failed("Relay unreachable — cooling down before retry") }
+        ensureConnected()
+        for _ in 0..<40 {  // up to ~4s
+            switch statusState {
+            case .connected, .failed:
+                return await currentStatus()
+            case .connecting, .disconnected:
+                try? await Task.sleep(for: .milliseconds(100))
+            }
+        }
+        return await currentStatus()
     }
 
     // MARK: RelayTransport
@@ -145,6 +172,7 @@ public actor NostrWebSocketTransport: RelayTransport {
         configuration.waitsForConnectivity = true
         let task = URLSession(configuration: configuration).webSocketTask(with: url)
         socket = task
+        statusState = .connecting
         task.resume()
         receiveLoop = Task { [weak self] in
             while let self {
@@ -157,6 +185,8 @@ public actor NostrWebSocketTransport: RelayTransport {
     private func receiveOnce(_ task: URLSessionWebSocketTask) async -> Bool {
         do {
             let message = try await task.receive()
+            // Any frame from the relay proves the socket is live.
+            statusState = .connected
             let text: String
             switch message {
             case .string(let value):
@@ -205,6 +235,9 @@ public actor NostrWebSocketTransport: RelayTransport {
         socket?.cancel(with: .goingAway, reason: nil)
         socket = nil
         authChallenge = nil
+        if !(error is CancellationError) {
+            statusState = .failed(Self.describe(error))
+        }
         for (_, continuation) in pendingOKs { continuation.resume(throwing: error) }
         pendingOKs.removeAll()
         for (_, waiter) in challengeWaiters { waiter.resume(throwing: error) }
@@ -257,5 +290,20 @@ public actor NostrWebSocketTransport: RelayTransport {
     private func timeoutChallengeWaiter(_ waiterID: UUID) {
         challengeWaiters.removeValue(forKey: waiterID)?
             .resume(throwing: NostrError.notAuthenticated)
+    }
+
+    /// Short, user-facing reason for the Settings indicator (no payload data).
+    private static func describe(_ error: any Error) -> String {
+        let ns = error as NSError
+        if ns.domain == NSURLErrorDomain {
+            switch ns.code {
+            case NSURLErrorNotConnectedToInternet: return "No internet connection"
+            case NSURLErrorTimedOut: return "Connection timed out"
+            case NSURLErrorCannotFindHost, NSURLErrorCannotConnectToHost: return "Can't reach this server"
+            case NSURLErrorSecureConnectionFailed: return "Secure connection failed"
+            default: return "Connection error (\(ns.code))"
+            }
+        }
+        return "Connection lost"
     }
 }

@@ -134,6 +134,32 @@ and affects interop; `[app-only]` — client behavior, no wire impact;
   AgentEngine still re-checks). (b) L-4 — rumors with `pqrc_version ≠ "1"`
   quarantine immediately with a legible reason instead of cycling the retry
   queue to overflow.
+- **N23 — `ai_context` marker in `MessageBody`** (2026-06-13): a human-applied
+  "this message is AI-shareable context" flag (wire `ai_context`), set via
+  "Add to AI Context". Distinct from `is_context` (the agent-authored render
+  hint). Travels INSIDE the ratchet ciphertext only — never on the public
+  event, so which messages a user flagged is not observable. Older clients
+  ignore the key (SPEC §12). Queued for the NIP §7 body-field list.
+- **N24 — `ai_context_grant` signed grant** (2026-06-13): a third member of the
+  `ai_window`/`ai_invite` family, authorizing the *consume* axis only (the
+  other party's agent may ingest the granter's `ai_context`-marked messages,
+  and reciprocally). Human-identity-signed, bounded duration
+  {15m,30m,1h,2h} ≤ 2h, scope = `conversation`|`thread` (+id). Uses a DISTINCT
+  domain string `pqrc-ai-context-grant-v1` with the scope bound in, so a grant
+  signature can never be replayed as a window/invite or across scopes.
+  Invariant 9 preserved: consume-authorization carries its own human signature,
+  is verified in `AgentEngine.receiveContextGrant`, and forged grants are
+  stripped + flagged at the messenger (the N22/M-1 doctrine). It NEVER widens
+  the send axis. Default consumption policy is **bidirectional** (both humans
+  must have a live grant in scope) — a tie broken toward privacy. Queued for
+  the NIP §2 (signature row) and §7.
+- **N25 — `ai_context_mark` retro-flag control** (2026-06-13): a content-free
+  `{message_id, value}` control inside an encrypted `MessageBody` that lets a
+  sender (re)flag their OWN prior message as shareable context. Renders no
+  bubble. Receiver MUST reject a mark for any message it did not receive from
+  that same sender (no flagging someone else's words). Reveals only "sender
+  flagged one prior message," and only to established contacts — the
+  privacy-maximizing alternative to re-sending the message body.
 
 ### App behavior `[app-only]`
 
@@ -230,6 +256,19 @@ and affects interop; `[app-only]` — client behavior, no wire impact;
   because every primitive is standard/published (SPEC §2). The compliance code
   key is deliberately omitted until Apple issues one. Submission answers and
   the annual BIS self-classification filing are in `docs/EXPORT-COMPLIANCE.md`.
+- **A17 — Sanitized native rich rendering** (2026-06-13): message bubbles render
+  markdown (inline styling) and a SAFE subset of HTML via a hand-written
+  `HTMLRenderer` → `AttributedString`. We deliberately do NOT use
+  `NSAttributedString(.html)` or a `WKWebView`: those are WebKit-backed and load
+  remote resources / run scripts, which would leak the reader's IP and create an
+  exfiltration vector. The renderer strips `<script>`/`<style>`/comments with
+  their contents, ignores unknown tags, blocks remote images, and only keeps
+  `http(s)` links (no `javascript:` etc.). Fidelity (complex CSS/layout) is
+  traded for privacy — the cardinal rule (SPEC §0).
+- **A18 — Live relay status is observational only** (2026-06-13): the Settings
+  green-check / red-x per relay reflects socket health surfaced from the
+  transports; it never gates delivery (the messenger outbox remains the recovery
+  path) and adds no metadata to the wire.
 
 ### Tech debt `[tech-debt]`
 
@@ -283,3 +322,7 @@ and affects interop; `[app-only]` — client behavior, no wire impact;
   cross-launch ordering precision.
 - Group send cost O(n) accepted (D1) rather than weakening per-link FS/PCS.
 - "Sent to relay" wording (D5) rather than receipt metadata.
+- AI context sharing defaults to **bidirectional active grants** (N24): a peer's
+  marked context is consumed only when BOTH humans have a live grant in scope,
+  rather than a single author-side grant exposing one party's content
+  unilaterally. The looser single-side mode is not shipped.
