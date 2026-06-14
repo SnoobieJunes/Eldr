@@ -11,6 +11,11 @@ struct MessageBubble: View {
     let senderName: String
     /// Toggles the "Add to AI Context" marker (Feature 3). nil hides the action.
     var onToggleAIContext: (() -> Void)? = nil
+    /// Opens this message's markdown/HTML in the full-screen reader. nil hides it.
+    var onFullScreen: ((String) -> Void)? = nil
+
+    /// Whether this message has document structure worth opening full screen.
+    private var isRich: Bool { MessageContent.isRich(message.text) }
 
     var body: some View {
         if message.localStatus == "violation" {
@@ -21,9 +26,42 @@ struct MessageBubble: View {
             SystemRow(text: "\(isMine ? "You" : senderName) \(message.text)")
                 .id(message.id)
         } else if message.participantType == .agent {
-            agentBubble.contextMenu { aiContextMenuItem }
+            agentBubble.contextMenu { bubbleMenu }
         } else {
-            humanBubble.contextMenu { aiContextMenuItem }
+            humanBubble.contextMenu { bubbleMenu }
+        }
+    }
+
+    /// Long-press menu: full-screen (for rich content) + AI-context toggle.
+    @ViewBuilder private var bubbleMenu: some View {
+        fullScreenMenuItem
+        aiContextMenuItem
+    }
+
+    /// "View full screen" — only for markdown/HTML messages.
+    @ViewBuilder private var fullScreenMenuItem: some View {
+        if isRich, let onFullScreen {
+            Button {
+                onFullScreen(message.text)
+            } label: {
+                Label("View full screen", systemImage: "arrow.up.left.and.arrow.down.right")
+            }
+        }
+    }
+
+    /// Small expand glyph shown on rich bubbles for discoverability.
+    @ViewBuilder private var expandButton: some View {
+        if isRich, let onFullScreen {
+            Button {
+                onFullScreen(message.text)
+            } label: {
+                Image(systemName: "arrow.up.left.and.arrow.down.right")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("View full screen")
+            .accessibilityIdentifier("expand-message")
         }
     }
 
@@ -82,8 +120,9 @@ struct MessageBubble: View {
                             : AnyShapeStyle(Color(.secondarySystemBackground)),
                         in: RoundedRectangle(cornerRadius: 20, style: .continuous))
                     .foregroundStyle(isMine ? .white : .primary)
-                HStack(spacing: 4) {
+                HStack(spacing: 6) {
                     aiContextBadge
+                    expandButton
                     if isMine {
                         // Local-only status; copy says "sent to relay", never "delivered" (D5).
                         // .secondary (not .tertiary): keeps the contrast audit green.
@@ -111,9 +150,12 @@ struct MessageBubble: View {
         HStack {
             if isMine { Spacer(minLength: 48) }
             VStack(alignment: isMine ? .trailing : .leading, spacing: 3) {
-                Label("⟡ \(senderName)'s AI", systemImage: "sparkles")
-                    .font(.caption2.weight(.semibold))
-                    .foregroundStyle(agentAccent)
+                HStack(spacing: 6) {
+                    Label("⟡ \(senderName)'s AI", systemImage: "sparkles")
+                        .font(.caption2.weight(.semibold))
+                        .foregroundStyle(agentAccent)
+                    expandButton
+                }
                 HStack(alignment: .top, spacing: 6) {
                     if message.isContext {
                         Image(systemName: "folder")

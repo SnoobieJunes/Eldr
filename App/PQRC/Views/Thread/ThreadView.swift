@@ -11,6 +11,8 @@ struct ThreadView: View {
     @State private var draftText = ""
     @State private var showInvitePicker = false
     @State private var now = Int64(Date().timeIntervalSince1970)
+    /// Markdown/HTML message currently open in the full-screen reader.
+    @State private var fullScreenContent: FullScreenContent?
     private let ticker = Timer.publish(every: 1, on: .main, in: .common).autoconnect()
 
     private var myInviteUntil: Int64? {
@@ -49,6 +51,9 @@ struct ThreadView: View {
         }
         .navigationTitle("✳︎ \(thread.title)")
         .navigationBarTitleDisplayMode(.inline)
+        .fullScreenCover(item: $fullScreenContent) { content in
+            FullScreenReaderView(text: content.text)
+        }
         .onReceive(ticker) { _ in
             now = Int64(Date().timeIntervalSince1970)
         }
@@ -134,7 +139,8 @@ struct ThreadView: View {
                                         messageIDs: [message.id], value: !message.aiContext,
                                         conversationID: thread.conversationID)
                                 }
-                            })
+                            },
+                            onFullScreen: { fullScreenContent = FullScreenContent(text: $0) })
                     }
                 }
                 .padding()

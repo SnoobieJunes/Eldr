@@ -33,6 +33,23 @@ struct MessageContent: View {
     nonisolated static func looksLikeHTML(_ s: String) -> Bool {
         s.range(of: "<[a-zA-Z/][^>]*>", options: .regularExpression) != nil
     }
+
+    /// True when the content has real document structure worth opening full
+    /// screen — any HTML, or markdown with a heading/list/code/quote/table/rule,
+    /// or more than one block. A lone plain paragraph ("hello!") is not rich.
+    nonisolated static func isRich(_ text: String) -> Bool {
+        if looksLikeHTML(text) { return true }
+        let blocks = MarkdownBlock.parse(text)
+        guard blocks.count == 1 else { return blocks.count > 1 }
+        if case .paragraph = blocks[0] { return false }
+        return true
+    }
+}
+
+/// Identifiable wrapper so a message body can drive `.fullScreenCover(item:)`.
+struct FullScreenContent: Identifiable {
+    let id = UUID()
+    let text: String
 }
 
 // MARK: - Block model + parser
@@ -259,6 +276,10 @@ enum MarkdownInline {
 /// incoming bubble and the accent-tinted outgoing bubble.
 struct MarkdownView: View {
     let markdown: String
+    /// The dedicated full-screen reader shows one document at a time, so it can
+    /// afford much higher render limits than the conversation list (where many
+    /// bubbles compete). Raises the caps below.
+    var expanded: Bool = false
 
     /// Above this source size, full block layout (a non-lazy VStack of many
     /// Text views) gets expensive enough to stutter the conversation list, so
@@ -270,12 +291,15 @@ struct MarkdownView: View {
     /// explodes into blocks.
     private static let maxRichBlocks = 600
 
+    private var richByteLimit: Int { expanded ? 512 * 1024 : Self.maxRichBytes }
+    private var richBlockLimit: Int { expanded ? 6000 : Self.maxRichBlocks }
+
     var body: some View {
-        if markdown.utf8.count > Self.maxRichBytes {
+        if markdown.utf8.count > richByteLimit {
             plain
         } else {
             let blocks = MarkdownBlock.parse(markdown)
-            if blocks.count > Self.maxRichBlocks {
+            if blocks.count > richBlockLimit {
                 plain
             } else {
                 VStack(alignment: .leading, spacing: 6) {
@@ -294,7 +318,8 @@ struct MarkdownView: View {
     /// this is a display bound, not data loss.
     private static let maxDisplayBytes = 24 * 1024
     private var plain: some View {
-        let shown = String(markdown.prefix(Self.maxDisplayBytes))
+        let limit = expanded ? 256 * 1024 : Self.maxDisplayBytes
+        let shown = String(markdown.prefix(limit))
         let truncated = shown.utf8.count < markdown.utf8.count
         return VStack(alignment: .leading, spacing: 4) {
             Text(verbatim: shown)
@@ -537,5 +562,97 @@ enum HTMLToMarkdown {
         ]
         for (k, v) in map { r = r.replacingOccurrences(of: k, with: v) }
         return r
+    }
+}
+
+// MARK: - Full-screen reader
+
+/// Full-screen reader for a markdown/HTML message: pinch-to-zoom, two-axis
+/// scrolling, a Rendered⇄Source toggle, and landscape support (the app already
+/// allows landscape). Same native renderer as the bubble — no web view, no
+/// remote loads (privacy is cardinal, SPEC §0). Source mode exposes the raw,
+/// fully-selectable text so even very large documents are readable in full.
+struct FullScreenReaderView: View {
+    let text: String
+
+    @Environment(\.dismiss) private var dismiss
+    @State private var zoom: CGFloat = 1
+    @State private var committedZoom: CGFloat = 1
+    @State private var showSource = false
+
+    private let minZoom: CGFloat = 0.5
+    private let maxZoom: CGFloat = 4
+
+    private var magnify: some Gesture {
+        MagnifyGesture()
+            .onChanged { value in
+                zoom = min(max(committedZoom * value.magnification, minZoom), maxZoom)
+            }
+            .onEnded { _ in committedZoom = zoom }
+    }
+
+    var body: some View {
+        NavigationStack {
+            GeometryReader { geo in
+                ScrollView([.vertical, .horizontal]) {
+                    content
+                        .padding()
+                        // Wrap prose to the screen width at 1×; zooming scales
+                        // past it and the two-axis scroll lets you pan.
+                        .frame(width: geo.size.width, alignment: .leading)
+                        .scaleEffect(zoom, anchor: .topLeading)
+                }
+                .gesture(magnify)
+                .onTapGesture(count: 2) { resetZoom() }
+            }
+            .navigationTitle(showSource ? "Source" : "Reading")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .topBarLeading) {
+                    Button("Done") { dismiss() }
+                        .accessibilityIdentifier("fullscreen-done")
+                }
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button {
+                        showSource.toggle()
+                        resetZoom()
+                    } label: {
+                        Label(
+                            showSource ? "Rendered" : "Source",
+                            systemImage: showSource
+                                ? "doc.richtext" : "chevron.left.forwardslash.chevron.right")
+                    }
+                    .accessibilityIdentifier("fullscreen-source-toggle")
+                }
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button { resetZoom() } label: {
+                        Image(systemName: "1.magnifyingglass")
+                    }
+                    .disabled(zoom == 1)
+                    .accessibilityLabel("Reset zoom")
+                }
+            }
+            .accessibilityIdentifier("fullscreen-reader")
+        }
+    }
+
+    @ViewBuilder private var content: some View {
+        if showSource {
+            Text(verbatim: MessageContent.normalized(text))
+                .font(.system(.callout, design: .monospaced))
+                .textSelection(.enabled)
+        } else {
+            // Render the full document (raised caps): the reader shows one
+            // message at a time, so it can afford richer layout than the list.
+            MarkdownView(markdown: MessageContent.normalized(text), expanded: true)
+                .tint(.accentColor)
+        }
+    }
+
+    private func resetZoom() {
+        withAnimation(.snappy) {
+            zoom = 1
+            committedZoom = 1
+        }
     }
 }

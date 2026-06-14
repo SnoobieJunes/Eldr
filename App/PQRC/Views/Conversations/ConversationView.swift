@@ -1,5 +1,6 @@
 import PQRCCore
 import SwiftUI
+import UIKit
 
 /// The message view (APP-SPEC §6.2): bubbles, agent styling, system rows,
 /// ai_window banner, thread chips, composer with the large-paste chip.
@@ -10,6 +11,10 @@ struct ConversationView: View {
     @State private var draftText = ""
     /// Large-paste state: > 16 KB collapses into a chip (APP-SPEC §6.3).
     @State private var largePaste: String?
+    /// Markdown/HTML message currently open in the full-screen reader.
+    @State private var fullScreenContent: FullScreenContent?
+    /// Set while the AI is drafting a response into the composer.
+    @State private var aiDrafting = false
     @State private var aiDraft: String?
     @State private var showDraftSheet = false
     @State private var showWindowPicker = false
@@ -133,6 +138,9 @@ struct ConversationView: View {
         .sheet(isPresented: $showDetails) {
             ConversationDetailsView(model: model, conversationID: conversationID)
         }
+        .fullScreenCover(item: $fullScreenContent) { content in
+            FullScreenReaderView(text: content.text)
+        }
         .alert(
             "AI couldn't respond",
             isPresented: Binding(
@@ -214,7 +222,8 @@ struct ConversationView: View {
                             messageIDs: [message.id], value: !message.aiContext,
                             conversationID: conversationID)
                     }
-                })
+                },
+            onFullScreen: selecting ? nil : { fullScreenContent = FullScreenContent(text: $0) })
         if selecting {
             HStack(spacing: 8) {
                 Image(systemName: selection.contains(message.id) ? "checkmark.circle.fill" : "circle")
@@ -287,6 +296,21 @@ struct ConversationView: View {
                 .accessibilityIdentifier("large-paste-chip")
             }
             HStack(alignment: .bottom, spacing: 8) {
+                // Draft with AI: pulls the conversation + your "AI context"
+                // messages and drops an editable reply into the box (not sent).
+                Button {
+                    draftWithAI()
+                } label: {
+                    Image(systemName: "sparkles")
+                        .font(.title3)
+                        .symbolRenderingMode(.hierarchical)
+                        .foregroundStyle(aiDrafting ? AnyShapeStyle(.secondary) : AnyShapeStyle(.purple))
+                        .overlay { if aiDrafting { ProgressView().controlSize(.small) } }
+                }
+                .frame(minWidth: 40, minHeight: 44)
+                .disabled(aiDrafting)
+                .accessibilityLabel("Draft with AI")
+                .accessibilityIdentifier("composer-draft-ai")
                 TextField("Message", text: $draftText, axis: .vertical)
                     .lineLimit(1...5)
                     .padding(.horizontal, 14)
@@ -301,6 +325,20 @@ struct ConversationView: View {
                             largePaste = newValue
                             draftText = ""
                         }
+                    }
+                    // Long-press the empty box: "Draft with AI" beside Paste.
+                    .contextMenu {
+                        Button {
+                            if let clip = UIPasteboard.general.string { insertIntoComposer(clip) }
+                        } label: {
+                            Label("Paste", systemImage: "doc.on.clipboard")
+                        }
+                        Button {
+                            draftWithAI()
+                        } label: {
+                            Label("Draft with AI", systemImage: "sparkles")
+                        }
+                        .disabled(aiDrafting)
                     }
                 Button {
                     let outgoing = largePaste ?? draftText
@@ -321,6 +359,28 @@ struct ConversationView: View {
         .padding(.horizontal)
         .padding(.vertical, 8)
         .background(.bar)
+    }
+
+    /// Ask the AI to draft a reply from the conversation + "AI context" messages
+    /// and inject it into the composer (editable, NOT sent). Errors surface via
+    /// the existing `agentError` alert.
+    private func draftWithAI() {
+        guard !aiDrafting else { return }
+        aiDrafting = true
+        Task {
+            let drafted = await model.draft(conversationID: conversationID)
+            aiDrafting = false
+            if let drafted { insertIntoComposer(drafted) }
+        }
+    }
+
+    /// Appends text to the composer without clobbering what's already typed.
+    private func insertIntoComposer(_ text: String) {
+        if draftText.isEmpty {
+            draftText = text
+        } else {
+            draftText += (draftText.hasSuffix("\n") ? "" : "\n") + text
+        }
     }
 }
 
