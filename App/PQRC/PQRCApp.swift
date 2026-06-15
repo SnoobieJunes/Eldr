@@ -166,6 +166,8 @@ final class AppSession {
         "openai": "openai-api-key",
         "gemini": "gemini-api-key",
         "openrouter": "openrouter-api-key",
+        "groq": "groq-api-key",
+        "custom": "custom-api-key",
     ]
 
     /// Provider per the Settings picker. Token-based providers (Claude/OpenAI/
@@ -175,7 +177,7 @@ final class AppSession {
     /// available, Demo otherwise.
     /// Builds a live provider for one backend kind, reading API keys from THIS
     /// silo's Keychain service so accounts never share AI credentials.
-    static func makeProvider(kind: String, siloID: String) -> any AgentProvider {
+    static func makeProvider(config: ConfiguredAI, siloID: String) -> any AgentProvider {
         let keychain = KeychainStore(service: siloService(siloID))
         func key(for provider: String) -> String? {
             guard let account = apiKeyAccounts[provider],
@@ -184,7 +186,8 @@ final class AppSession {
             let value = String(decoding: data, as: UTF8.self)
             return value.isEmpty ? nil : value
         }
-        switch kind {
+        let model = config.model ?? ""
+        switch config.kind {
         case "claude":
             return key(for: "claude").map { AnthropicAPIProvider(apiKey: $0) } ?? DemoAgentProvider()
         case "openai":
@@ -192,7 +195,21 @@ final class AppSession {
         case "gemini":
             return key(for: "gemini").map { GeminiAPIProvider(apiKey: $0) } ?? DemoAgentProvider()
         case "openrouter":
-            return key(for: "openrouter").map { OpenRouterAPIProvider(apiKey: $0) } ?? DemoAgentProvider()
+            return key(for: "openrouter").map {
+                model.isEmpty
+                    ? OpenRouterAPIProvider(apiKey: $0) : OpenRouterAPIProvider(apiKey: $0, model: model)
+            } ?? DemoAgentProvider()
+        case "groq":
+            return key(for: "groq").map {
+                model.isEmpty ? GroqAPIProvider(apiKey: $0) : GroqAPIProvider(apiKey: $0, model: model)
+            } ?? DemoAgentProvider()
+        case "custom":
+            // Self-hosted / any OpenAI-compatible server: needs a base URL; the
+            // key is OPTIONAL (a local Ollama/LM Studio usually has none). No URL
+            // yet → Demo stub so the AI still visibly responds.
+            let base = (config.baseURL ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !base.isEmpty else { return DemoAgentProvider() }
+            return CustomOpenAIProvider(baseURL: base, apiKey: key(for: "custom") ?? "", model: model)
         case "demo":
             return DemoAgentProvider()
         default:  // "ondevice"
@@ -227,13 +244,29 @@ final class AppSession {
         }
     }
 
+    /// Per-conversation AI context override (Settings → conversation details):
+    /// "off" | "marked" | "full", or nil = use each AI's own gather policy.
+    /// `nonisolated` so the (actor) PersonaRuntime can read it without an await.
+    nonisolated static func conversationContextMode(_ conversationID: String) -> String? {
+        UserDefaults.standard.string(forKey: "aiContextMode.\(conversationID)")
+    }
+    nonisolated static func setConversationContextMode(_ mode: String?, conversationID: String) {
+        let key = "aiContextMode.\(conversationID)"
+        if let mode { UserDefaults.standard.set(mode, forKey: key) }
+        else { UserDefaults.standard.removeObject(forKey: key) }
+    }
+
     /// The configured AIs bound to live providers — the runtime's tethered AIs.
     static func makeRuntimeAIs(siloID: String) -> [TetheredAI] {
-        loadConfiguredAIs(siloID: siloID).map {
+        loadConfiguredAIs(siloID: siloID).map { config in
             TetheredAI(
-                id: $0.id, name: $0.name,
-                provider: makeProvider(kind: $0.kind, siloID: siloID),
-                isRemote: ConfiguredAI.isRemote($0.kind))
+                id: config.id, name: config.name,
+                provider: makeProvider(config: config, siloID: siloID),
+                isRemote: ConfiguredAI.isRemote(config.kind),
+                instructions: config.instructions,
+                contextPolicy: config.effectivePolicy,
+                contextDepth: config.effectiveDepth,
+                outputMode: config.effectiveOutputMode)
         }
     }
 

@@ -81,18 +81,23 @@ struct AISettingsView: View {
             }
 
             Section {
-                Toggle("Egress firewall", isOn: $firewallEnabled)
-                    .accessibilityIdentifier("egress-firewall-toggle")
-                    .onChange(of: firewallEnabled) { _, on in
-                        if on {
+                // Custom binding (NOT onChange): flipping OFF just opens the
+                // confirmation — it does NOT set the value, so the toggle stays
+                // visually ON until the user confirms. The alert is what actually
+                // sets it false. (The old onChange re-armed it on every change,
+                // so confirming re-triggered the re-arm and it could never turn
+                // off — the "can't disable the firewall" bug.)
+                Toggle("Egress firewall", isOn: Binding(
+                    get: { firewallEnabled },
+                    set: { newValue in
+                        if newValue {
+                            firewallEnabled = true
                             Task { await session.applyAIProvider() }
                         } else {
-                            // Re-arm the toggle until the user confirms via the
-                            // warning, so it can't be disabled by accident.
-                            firewallEnabled = true
                             showFirewallWarning = true
                         }
-                    }
+                    }))
+                    .accessibilityIdentifier("egress-firewall-toggle")
             } header: {
                 Text("Egress firewall")
             } footer: {
@@ -145,6 +150,7 @@ struct AISettingsView: View {
     }
 
     @ViewBuilder private func aiRow(_ ai: Binding<ConfiguredAI>) -> some View {
+        let currentKind = ai.kind.wrappedValue
         VStack(alignment: .leading, spacing: 6) {
             TextField("Name", text: ai.name)
                 .font(.headline)
@@ -162,17 +168,64 @@ struct AISettingsView: View {
                     persist()
                 }
             }
-            if ConfiguredAI.isRemote(ai.kind.wrappedValue),
-                let account = ConfiguredAI.keyAccount(for: ai.kind.wrappedValue)
+
+            // Self-hosted / custom: an OpenAI-compatible server URL (key optional).
+            if ConfiguredAI.needsBaseURL(currentKind) {
+                TextField("http://192.168.1.20:11434/v1", text: optionalBinding(ai.baseURL))
+                    .keyboardType(.URL)
+                    .autocorrectionDisabled()
+                    .textInputAutocapitalization(.never)
+                    .accessibilityIdentifier("ai-base-url")
+                Text("A machine on your network running Ollama or LM Studio (OpenAI-compatible). Same Wi-Fi, no cloud — turn on its network server and use its LAN address.")
+                    .font(.caption2).foregroundStyle(.secondary)
+            }
+            if ConfiguredAI.supportsModelField(currentKind) {
+                TextField(modelPlaceholder(currentKind), text: optionalBinding(ai.model))
+                    .autocorrectionDisabled()
+                    .textInputAutocapitalization(.never)
+                    .accessibilityIdentifier("ai-model")
+            }
+
+            if ConfiguredAI.isRemote(currentKind),
+                let account = ConfiguredAI.keyAccount(for: currentKind)
             {
-                SecureField("API key", text: keyBinding(account: account))
+                SecureField(
+                    ConfiguredAI.keyOptional(currentKind) ? "API key (optional)" : "API key",
+                    text: keyBinding(account: account))
                     .autocorrectionDisabled()
                     .textInputAutocapitalization(.never)
                     .accessibilityIdentifier("api-key-field")
                 Text("Stored in the device Keychain, never synced or exported.")
-                    .font(.caption2)
-                    .foregroundStyle(.secondary)
+                    .font(.caption2).foregroundStyle(.secondary)
             }
+
+            DisclosureGroup("Context & behavior") {
+                VStack(alignment: .leading, spacing: 8) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Instructions (custom persona)")
+                            .font(.caption).foregroundStyle(.secondary)
+                        TextField(
+                            "e.g. You're my terse scheduling assistant; never speculate.",
+                            text: optionalBinding(ai.instructions), axis: .vertical)
+                            .lineLimit(1...4)
+                            .accessibilityIdentifier("ai-instructions")
+                    }
+                    Picker("Gathers", selection: policyBinding(ai)) {
+                        ForEach(ConfiguredAI.policies, id: \.tag) { Text($0.label).tag($0.tag) }
+                    }
+                    .accessibilityIdentifier("ai-policy")
+                    Picker("Does", selection: outputBinding(ai)) {
+                        ForEach(ConfiguredAI.outputModes, id: \.tag) { Text($0.label).tag($0.tag) }
+                    }
+                    .accessibilityIdentifier("ai-output")
+                    Stepper(
+                        "Context depth: \(ai.wrappedValue.effectiveDepth) messages",
+                        value: depthBinding(ai), in: 1...100)
+                        .accessibilityIdentifier("ai-depth")
+                }
+                .padding(.vertical, 2)
+            }
+
             Text(statusLine(for: ai.wrappedValue))
                 .font(.caption2)
                 .foregroundStyle(statusOK(for: ai.wrappedValue) ? .green : .orange)
@@ -180,8 +233,44 @@ struct AISettingsView: View {
         .padding(.vertical, 2)
     }
 
+    private func modelPlaceholder(_ kind: String) -> String {
+        switch kind {
+        case "groq": return "Model (default: llama-3.1-8b-instant)"
+        case "openrouter": return "Model (default: openai/gpt-4o-mini)"
+        case "custom": return "Model (e.g. llama3.2 — needed for Ollama)"
+        default: return "Model"
+        }
+    }
+
+    private func optionalBinding(_ source: Binding<String?>) -> Binding<String> {
+        Binding(
+            get: { source.wrappedValue ?? "" },
+            set: { source.wrappedValue = $0.isEmpty ? nil : $0; persist() })
+    }
+    private func policyBinding(_ ai: Binding<ConfiguredAI>) -> Binding<String> {
+        Binding(
+            get: { ai.wrappedValue.effectivePolicy },
+            set: { ai.wrappedValue.contextPolicy = $0; persist() })
+    }
+    private func outputBinding(_ ai: Binding<ConfiguredAI>) -> Binding<String> {
+        Binding(
+            get: { ai.wrappedValue.effectiveOutputMode },
+            set: { ai.wrappedValue.outputMode = $0; persist() })
+    }
+    private func depthBinding(_ ai: Binding<ConfiguredAI>) -> Binding<Int> {
+        Binding(
+            get: { ai.wrappedValue.effectiveDepth },
+            set: { ai.wrappedValue.contextDepth = $0; persist() })
+    }
+
     /// What this AI will actually use, surfacing the Demo fallback.
     private func statusLine(for ai: ConfiguredAI) -> String {
+        if ai.kind == "custom" {
+            let base = (ai.baseURL ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+            return base.isEmpty
+                ? "Add a server URL to use this self-hosted AI (Demo stub until then)."
+                : "Active: self-hosted at \(base)"
+        }
         if ConfiguredAI.isRemote(ai.kind) {
             return hasKey(for: ai.kind)
                 ? "Active: \(ConfiguredAI.label(for: ai.kind))"
@@ -197,6 +286,9 @@ struct AISettingsView: View {
     }
 
     private func statusOK(for ai: ConfiguredAI) -> Bool {
+        if ai.kind == "custom" {
+            return !(ai.baseURL ?? "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        }
         if ConfiguredAI.isRemote(ai.kind) { return hasKey(for: ai.kind) }
         if ai.kind == "demo" { return false }
         return FoundationModelsAgentProvider.availabilityReason == nil

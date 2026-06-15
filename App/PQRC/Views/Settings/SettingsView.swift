@@ -19,6 +19,9 @@ struct SettingsView: View {
     @State private var openInboxUntil: Int64?
     @State private var checkingRelays = false
     @State private var republishingPrekeys = false
+    /// Mirrors `session.hasBiometricUnlock` (a Keychain read, which @Observable
+    /// can't track) so the Face ID toggle actually re-renders when flipped.
+    @State private var biometricOn = false
     @State private var now = Int64(Date().timeIntervalSince1970)
 
     private let ticker = Timer.publish(every: 1, on: .main, in: .common).autoconnect()
@@ -54,6 +57,7 @@ struct SettingsView: View {
             }
             .onAppear {
                 myAlias = UserDefaults.standard.string(forKey: "displayName") ?? ""
+                biometricOn = session.hasBiometricUnlock
                 Task {
                     openInboxUntil = await model.runtime.openInboxActiveUntil()
                     // Refresh the live prekey count so the Prekeys section isn't
@@ -384,9 +388,12 @@ struct SettingsView: View {
     private var accountSection: some View {
         Section {
             Toggle("Unlock with Face ID / Touch ID", isOn: Binding(
-                get: { session.hasBiometricUnlock },
+                get: { biometricOn },
                 set: { on in
                     if on { session.enableBiometricUnlock() } else { session.disableBiometricUnlock() }
+                    // Re-sync from the Keychain: an enable that failed (no device
+                    // passcode set) snaps back off and surfaces biometricError.
+                    biometricOn = session.hasBiometricUnlock
                 }))
                 .accessibilityIdentifier("biometric-toggle")
             if let error = session.biometricError {

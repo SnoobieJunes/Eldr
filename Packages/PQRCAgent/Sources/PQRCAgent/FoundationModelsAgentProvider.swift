@@ -60,12 +60,7 @@ public struct FoundationModelsAgentProvider: AgentProvider {
             if let reason = Self.availabilityReason {
                 throw AgentProviderError.unavailable(reason)
             }
-            let session = LanguageModelSession(
-                instructions: """
-                    You are \(context.myDisplayName)'s personal messaging assistant. \
-                    Draft a brief, natural reply to the conversation. Reply with the \
-                    draft text only.
-                    """)
+            let session = LanguageModelSession(instructions: context.draftSystemPrompt())
             do {
                 let response = try await session.respond(to: Self.renderTranscript(context))
                 let text = response.content.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -94,14 +89,7 @@ public struct FoundationModelsAgentProvider: AgentProvider {
             if let reason = Self.availabilityReason {
                 throw AgentProviderError.unavailable(reason)
             }
-            let session = LanguageModelSession(
-                instructions: """
-                    You are \(context.myDisplayName)'s AI participating in a shared \
-                    thread with other people's AIs. Contribute one useful message — \
-                    share the relevant context the other AIs need to help, in as \
-                    much detail as is useful — or reply with exactly PASS to stay \
-                    silent.
-                    """)
+            let session = LanguageModelSession(instructions: context.turnSystemPrompt())
             do {
                 let response = try await session.respond(to: Self.renderTranscript(context))
                 let text = response.content.trimmingCharacters(in: .whitespacesAndNewlines)

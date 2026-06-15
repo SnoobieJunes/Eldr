@@ -20,16 +20,14 @@ public struct AnthropicAPIProvider: AgentProvider {
 
     public func draftReply(context: AgentContext) async throws -> Draft {
         let text = try await complete(
-            system:
-                "You draft brief, natural message replies for \(context.myDisplayName). Reply with the draft text only.",
+            system: context.draftSystemPrompt(),
             user: FoundationModelsAgentProvider.renderTranscript(context))
         return Draft(text: text)
     }
 
     public func threadTurn(context: AgentContext) async throws -> AgentTurn? {
         let text = try await complete(
-            system:
-                "You are \(context.myDisplayName)'s AI in a shared thread with another person's AI. Contribute one short useful message, or reply exactly PASS to stay silent.",
+            system: context.turnSystemPrompt(),
             user: FoundationModelsAgentProvider.renderTranscript(context))
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty, trimmed != "PASS" else { return nil }

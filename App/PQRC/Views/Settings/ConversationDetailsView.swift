@@ -11,6 +11,9 @@ struct ConversationDetailsView: View {
     @State private var showReport = false
     @State private var blocked = false
     @State private var nickname = ""
+    /// Per-conversation AI context override: "default" (use each AI's own
+    /// setting) | "off" | "marked" | "full".
+    @State private var aiContextMode = "default"
 
     var body: some View {
         NavigationStack {
@@ -48,6 +51,23 @@ struct ConversationDetailsView: View {
                             Task { await model.setVerified(conversationID, verified: newValue) }
                         }
                 }
+                Section {
+                    Picker("AI context here", selection: $aiContextMode) {
+                        Text("Use each AI's own setting").tag("default")
+                        Text("Off in this conversation").tag("off")
+                        Text("Only messages I add to context").tag("marked")
+                        Text("Full conversation while active").tag("full")
+                    }
+                    .accessibilityIdentifier("conversation-ai-mode")
+                    .onChange(of: aiContextMode) { _, newValue in
+                        AppSession.setConversationContextMode(
+                            newValue == "default" ? nil : newValue, conversationID: conversationID)
+                    }
+                } header: {
+                    Text("AI in this conversation")
+                } footer: {
+                    Text("Overrides your AIs' own context setting, just here. \"Off\" keeps every AI from gathering anything from this conversation.")
+                }
                 Section("Safety") {
                     Button(blocked ? "Unblock" : "Block", role: .destructive) {
                         blocked.toggle()
@@ -72,6 +92,7 @@ struct ConversationDetailsView: View {
                 let info = await model.runtime.contactInfo(conversationID)
                 verified = info.verified
                 blocked = info.blocked
+                aiContextMode = AppSession.conversationContextMode(conversationID) ?? "default"
             }
             .toolbar {
                 ToolbarItem(placement: .confirmationAction) {

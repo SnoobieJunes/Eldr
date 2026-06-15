@@ -90,11 +90,29 @@ one:
 
 - **On-device Core AI** — runs entirely on your iPhone. Nothing leaves the
   device.
-- **A remote API (like Claude)** — more capable, but message content is sent to
-  that provider. You'll paste an API key (stored only in your device's Keychain).
+- **Off-device API integrations** — more capable, but message content is sent to
+  that provider. You paste an API key (stored only in your device's Keychain):
+  - **Claude** (Anthropic)
+  - **OpenAI** (ChatGPT)
+  - **Gemini** (Google)
+  - **OpenRouter** — one key, many models
+  - **Groq** — very fast, low cost
+- **Self-hosted** — run a model on your own machine with **Ollama** or **LM
+  Studio** and point EldrChat at it (Custom / OpenAI-compatible). On the same
+  Wi-Fi, nothing goes to the cloud — your content never leaves your devices.
+  Plaintext `http://` is allowed for local-network addresses (no certificate
+  needed). *(A direct Wi-Fi / Multipeer link, for use without a shared router,
+  is planned.)*
 - A **Demo** option gives simple simulated replies for testing.
 
-Tap **Test primary AI now** to confirm it works.
+Each AI has its own **Context & behavior** (Settings ▸ AI): custom
+**instructions** (a persona), what it **gathers** (live conversation while
+active · only messages you add to context · off), how deep, and what it **does**
+(participate · draft only · summarize). You can also override the context per
+conversation in that conversation's **Details**.
+
+**Transparency first:** see exactly what each model receives in **Settings ▸ AI ▸
+What your AI sees**. Tap **Test primary AI now** to confirm it works.
 
 ### "My AI" — your private solo chat
 

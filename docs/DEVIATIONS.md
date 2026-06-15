@@ -466,6 +466,28 @@ and affects interop; `[app-only]` — client behavior, no wire impact;
   since nil is omitted). Bonus: it makes own-message/relay-echo dedup id-stable.
   Live-window/thread AI context never depended on this (it reads by activation
   time, not marks) and already worked; this fixes the curated-marking path.
+- **A30 — Per-AI context profiles + Groq/self-hosted backends + toggle fixes**
+  (2026-06-15): each tethered AI now carries a profile — custom `instructions`
+  (a persona, augmenting not replacing the draft/PASS conventions), a gather
+  `contextPolicy` (active | strict=marked-only-even-when-active | off), a
+  `contextDepth`, and an `outputMode` (participate | draft-only=never-auto-posts |
+  summarize). A per-conversation override (off | marked | full) wins over the
+  per-AI policy and, when "off", suppresses ALL AI activity there (loop guards +
+  empty context). All profile fields are optional on `ConfiguredAI` so older
+  configs still decode. New backends: **Groq** (OpenAI-compatible, fast) and
+  **Custom/self-hosted** — ANY OpenAI-compatible server (Ollama / LM Studio /
+  vLLM on the user's own machine, or another vendor). The custom backend's API
+  key is OPTIONAL (local servers have none → no Authorization header, and it does
+  NOT throw `notConfigured`); a base URL is required. To make a local server
+  usable, `Info.plist` adds `NSAppTransportSecurity.NSAllowsLocalNetworking` —
+  plaintext `http://` is permitted to local/private addresses ONLY; the public
+  internet still requires HTTPS (every hosted endpoint already is). Two UI bug
+  fixes: the egress-firewall toggle used `onChange` to re-arm on every change, so
+  confirming the warning re-triggered the re-arm and it could never turn off (now
+  a custom binding that only opens the confirm on OFF); the Face ID toggle read a
+  computed Keychain property `@Observable` can't track, so it never re-rendered
+  when flipped (now mirrored into `@State`, re-synced after each toggle so an
+  enable that fails — no device passcode — snaps back and shows the reason).
 - **A25 — Duress = decoy account** (2026-06-14): because every passphrase opens
   its own separate silo, a duress/decoy account needs no special code — create an
   account with a memorable "duress" passphrase, stock it with innocuous chats,

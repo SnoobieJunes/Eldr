@@ -193,7 +193,26 @@ actor PersonaRuntime {
     private func contextFor(
         _ ai: TetheredAI, conversationID: String, threadID: String?
     ) async -> AgentContext {
-        let ctx = await agentContext(conversationID: conversationID, threadID: threadID)
+        // A per-conversation override (Settings → conversation details) wins over
+        // the AI's own gather policy.
+        var policy = ai.contextPolicy
+        switch AppSession.conversationContextMode(conversationID) {
+        case "off": policy = "off"
+        case "marked": policy = "strict"
+        case "full": policy = "active"
+        default: break
+        }
+        guard policy != "off" else {
+            // Gathers nothing here — an empty transcript (still carrying the AI's
+            // instructions so a manual draft can respond generically).
+            return AgentContext(
+                myIdentityHex: identityHex, myDisplayName: displayName, transcript: [],
+                threadID: threadID, threadTitle: threadID.flatMap { threadTitles[$0] },
+                instructions: ai.instructions, summarize: ai.summarizes)
+        }
+        let ctx = await agentContext(
+            conversationID: conversationID, threadID: threadID, depth: ai.contextDepth,
+            strict: policy == "strict", instructions: ai.instructions, summarize: ai.summarizes)
         guard ai.isRemote, firewallEnabled else { return ctx }
         return redactedForRemote(ctx)
     }
@@ -218,7 +237,8 @@ actor PersonaRuntime {
         }
         return AgentContext(
             myIdentityHex: context.myIdentityHex, myDisplayName: "you",
-            transcript: entries, threadID: context.threadID, threadTitle: context.threadTitle)
+            transcript: entries, threadID: context.threadID, threadTitle: context.threadTitle,
+            instructions: context.instructions, summarize: context.summarize)
     }
 
     // MARK: - Bootstrap
@@ -852,15 +872,22 @@ actor PersonaRuntime {
             && recipientsFor(conversationID: conversationID).isEmpty
     }
 
+    /// A per-conversation override of "off" (Settings → conversation details)
+    /// disables ALL AI activity here — no autonomous posting and no context.
+    private func aiSuppressed(in conversationID: String) -> Bool {
+        AppSession.conversationContextMode(conversationID) == "off"
+    }
+
     /// Each tethered AI replies to me in turn, rebuilding context each time so a
     /// later AI sees what an earlier one just said (Claude + on-device sharing
     /// context). Stays entirely local: a solo conversation has no recipients, so
     /// nothing is published.
     private func runSelfAIReplies(conversationID: String) async {
         defer { soloRepliesInFlight.remove(conversationID) }
+        guard !aiSuppressed(in: conversationID) else { return }
         var posted = 0
         var lastError: String?
-        for ai in ais {
+        for ai in ais where ai.participatesAutonomously {
             let context = await contextFor(ai, conversationID: conversationID, threadID: nil)
             do {
                 // Race generation against a timeout so a wedged/slow on-device
@@ -1088,7 +1115,10 @@ actor PersonaRuntime {
         try await sendMessage(text, conversationID: conversationID, participantType: .agent)
     }
 
-    private func agentContext(conversationID: String, threadID: String?) async -> AgentContext {
+    private func agentContext(
+        conversationID: String, threadID: String?, depth: Int = ConfiguredAI.defaultDepth,
+        strict: Bool = false, instructions: String? = nil, summarize: Bool = false
+    ) async -> AgentContext {
         let stored: [StoredMessage]
         if let threadID {
             stored = (try? await store.messages(threadID: threadID)) ?? []
@@ -1115,19 +1145,22 @@ actor PersonaRuntime {
                 && myWindowConversationID == conversationID
             aiActive = windowLive || isSoloConversation(conversationID)
         }
+        // A "strict" gather policy (per-AI or a per-conversation "marked only"
+        // override) forces marked-context-only even while the AI is active.
+        let effectiveActive = aiActive && !strict
         let since = aiActiveSince[threadID ?? conversationID] ?? Int64.max
         let recent = stored.filter { message in
             // While the AI is on, it reads the LIVE conversation from the moment
             // it was turned on (the window/invite/solo state is the authorization
             // to participate) — but never messages from before that.
-            if aiActive, message.sentAt >= since { return true }
+            if effectiveActive, message.sentAt >= since { return true }
             // Otherwise only manually-marked context: mine always; a peer's only
             // under an active bilateral grant.
             if message.aiContext {
                 return message.senderIdentity == identityHex || sharingAuthorized
             }
             return false
-        }.suffix(20)
+        }.suffix(depth)
         // Byte-bound the window: keep the most recent entries whose combined text
         // fits a budget, so a few multi-MB pastes can't balloon memory or a remote
         // payload (the AI-to-AI OOM cap). Always keep at least the newest message.
@@ -1160,7 +1193,8 @@ actor PersonaRuntime {
         return AgentContext(
             myIdentityHex: identityHex, myDisplayName: displayName,
             transcript: Array(transcript), threadID: threadID,
-            threadTitle: threadID.flatMap { threadTitles[$0] })
+            threadTitle: threadID.flatMap { threadTitles[$0] },
+            instructions: instructions, summarize: summarize)
     }
 
     /// Runs my agents' turns in a thread (gated entirely by the engine). Each of
@@ -1169,8 +1203,8 @@ actor PersonaRuntime {
     /// share context back and forth in a thread.
     func takeAgentThreadTurn(threadID: String) async {
         let conversationID = threadConversations[threadID] ?? ""
-        guard !conversationID.isEmpty else { return }
-        for ai in ais {
+        guard !conversationID.isEmpty, !aiSuppressed(in: conversationID) else { return }
+        for ai in ais where ai.participatesAutonomously {
             _ = await engine.runThreadTurn(
                 provider: ai.provider,
                 context: await contextFor(ai, conversationID: conversationID, threadID: threadID),
@@ -1513,10 +1547,13 @@ actor PersonaRuntime {
                 .loopGuardChanged(
                     threadID: threadID, paused: await engine.loopGuardActive(threadID: threadID)))
             await takeAgentThreadTurn(threadID: threadID)
-        } else if received.participantType == .human, senderHex != identityHex {
+        } else if received.participantType == .human, senderHex != identityHex,
+            !aiSuppressed(in: conversationID)
+        {
             // Conversation scope: only during MY active ai_window. Each tethered
-            // AI replies in turn (the engine gate fails closed when no window).
-            for ai in ais {
+            // AI that participates replies in turn (the engine gate fails closed
+            // when no window; draft-only/off AIs never auto-post).
+            for ai in ais where ai.participatesAutonomously {
                 _ = await engine.runWindowReply(
                     provider: ai.provider,
                     context: await contextFor(ai, conversationID: conversationID, threadID: nil),

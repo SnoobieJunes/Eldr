@@ -224,6 +224,83 @@ struct MultiAIBehaviorTests {
         let names = await spy.capturedNames
         #expect(names.contains("Alice"), "with the firewall off, the real display name is sent")
     }
+
+    // MARK: - Context profile (instructions / policy / depth / output mode)
+
+    /// Custom per-AI instructions (the persona profile field) reach the provider.
+    @Test func customInstructions_reachTheProvider() async throws {
+        let spy = SpyProvider()
+        let runtime = await makeRuntime(
+            "Me", ais: [TetheredAI(id: "a", name: "ai", provider: spy, instructions: "Be a pirate.")])
+        await runtime.keychain.deleteAll()
+        _ = try await runtime.bootstrap(inMemoryStore: true)
+        let chatID = try await runtime.createSelfChat()
+        try await runtime.sendMessage("hello", conversationID: chatID)
+        try await Task.sleep(for: .milliseconds(400))
+        #expect(await spy.capturedInstructions == "Be a pirate.")
+    }
+
+    /// "Draft only" output mode: consulted for manual drafts but NEVER auto-posts.
+    @Test func draftOnlyAI_neverAutoPosts() async throws {
+        let runtime = await makeRuntime(
+            "Me",
+            ais: [TetheredAI(id: "a", name: "ai", provider: DemoAgentProvider(), outputMode: "draft")])
+        await runtime.keychain.deleteAll()
+        _ = try await runtime.bootstrap(inMemoryStore: true)
+        let chatID = try await runtime.createSelfChat()
+        try await runtime.sendMessage("plan my week", conversationID: chatID)
+        try await Task.sleep(for: .milliseconds(400))
+        let replies = await runtime.messages(conversationID: chatID).filter { $0.participantType == .agent }
+        #expect(replies.isEmpty, "a draft-only AI suggests but never auto-posts")
+    }
+
+    /// "Off" gather policy: the AI never participates autonomously.
+    @Test func offPolicyAI_doesNotParticipate() async throws {
+        let runtime = await makeRuntime(
+            "Me",
+            ais: [TetheredAI(id: "a", name: "ai", provider: DemoAgentProvider(), contextPolicy: "off")])
+        await runtime.keychain.deleteAll()
+        _ = try await runtime.bootstrap(inMemoryStore: true)
+        let chatID = try await runtime.createSelfChat()
+        try await runtime.sendMessage("anything", conversationID: chatID)
+        try await Task.sleep(for: .milliseconds(400))
+        let replies = await runtime.messages(conversationID: chatID).filter { $0.participantType == .agent }
+        #expect(replies.isEmpty, "an 'off' AI gathers nothing and never posts")
+    }
+
+    /// "Strict" gather policy ignores the live conversation even while active —
+    /// only messages explicitly added to context are handed to the model.
+    @Test func strictPolicy_ignoresLiveConversation() async throws {
+        let spy = SpyProvider()
+        let runtime = await makeRuntime(
+            "Me", ais: [TetheredAI(id: "a", name: "ai", provider: spy, contextPolicy: "strict")])
+        await runtime.keychain.deleteAll()
+        _ = try await runtime.bootstrap(inMemoryStore: true)
+        let chatID = try await runtime.createSelfChat()
+        try await runtime.sendMessage("unmarked live message", conversationID: chatID)
+        try await Task.sleep(for: .milliseconds(400))
+        #expect(
+            await spy.capturedCount == 0,
+            "strict policy ingests no live messages — only ones added to context")
+    }
+
+    /// Per-conversation override of "off" disables AI here even when the AI's own
+    /// policy is active.
+    @Test func perConversationOff_suppressesAI() async throws {
+        let runtime = await makeRuntime(
+            "Me", ais: [TetheredAI(id: "a", name: "ai", provider: DemoAgentProvider())])
+        await runtime.keychain.deleteAll()
+        _ = try await runtime.bootstrap(inMemoryStore: true)
+        let chatID = try await runtime.createSelfChat()
+        AppSession.setConversationContextMode("off", conversationID: chatID)
+        defer { AppSession.setConversationContextMode(nil, conversationID: chatID) }
+        try await runtime.sendMessage("hi", conversationID: chatID)
+        try await Task.sleep(for: .milliseconds(400))
+        let replies = await runtime.messages(conversationID: chatID).filter { $0.participantType == .agent }
+        #expect(
+            replies.isEmpty,
+            "per-conversation 'off' stops the AI even though its own policy is active")
+    }
 }
 
 /// Deniable silos: a silo created under one passphrase persists and reopens with
@@ -281,11 +358,21 @@ struct SiloRuntimeTests {
 /// tests can assert exactly what would leave the device for a remote AI.
 actor SpyProvider: AgentProvider {
     private(set) var capturedNames: [String] = []
-    func draftReply(context: AgentContext) async throws -> Draft {
+    private(set) var capturedInstructions: String?
+    private(set) var capturedSummarize = false
+    private(set) var capturedCount = 0
+    private func capture(_ context: AgentContext) {
         capturedNames = context.transcript.map(\.senderDisplayName)
+        capturedInstructions = context.instructions
+        capturedSummarize = context.summarize
+        capturedCount = context.transcript.count
+    }
+    func draftReply(context: AgentContext) async throws -> Draft {
+        capture(context)
         return Draft(text: "ok")
     }
     func threadTurn(context: AgentContext) async throws -> AgentTurn? {
-        AgentTurn(messages: [AgentMessage(text: "ok")])
+        capture(context)
+        return AgentTurn(messages: [AgentMessage(text: "ok")])
     }
 }
