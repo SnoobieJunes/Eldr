@@ -686,6 +686,18 @@ public actor PQRCMessenger {
     }
 
     private func processHandshake(_ unwrapped: GiftWrap.Unwrapped, from contact: VerifiedContact) async {
+        // An established session must NOT be torn down by a DUPLICATE or REPLAYED
+        // handshake (relay re-delivery, or a last-resort-prekey handshake whose
+        // wrap escaped dedup). Rebuilding installs a fresh responder ratchet
+        // (nr=0, new root key) and silently desyncs every subsequent message from
+        // this peer — the "their first message arrives, then this one sender goes
+        // quiet" bug. The handshake's piggybacked message #0 was already delivered
+        // when the session was first established, so a duplicate is simply ignored.
+        // The retry path (`retryPending`) already guards this; the live path must
+        // too, so the guard lives here at the single rebuild point. (A genuine
+        // same-identity re-handshake is out of scope for v1 — it would need an
+        // explicit, separately-gated re-establish, not an implicit side effect.)
+        guard sessions[contact.identityHex] == nil else { return }
         guard let handshake = unwrapped.rumor.handshake,
             handshake.ik == contact.binding.identityPubkey
         else {

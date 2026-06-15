@@ -29,8 +29,12 @@ import Synchronization
 /// `LocalLinkSimulator`. Verify on hardware per docs/SETUP-GUIDE.md.
 public final class MultipeerNearbyLink: NSObject, NearbyLink, Sendable {
     /// Bonjour service type: 1–15 chars, lowercase/digits/hyphen per Apple's
-    /// rules. Changing it is a wire-visible break for local discovery.
+    /// rules. Changing it is a wire-visible break for local discovery. The
+    /// default ("pqrc-local") is the direct peer-to-peer Nearby service; the
+    /// device-hosted relay hub uses a distinct one ("pqrc-relay") so the two
+    /// don't cross-discover. Both must be listed in Info.plist NSBonjourServices.
     public static let serviceType = "pqrc-local"
+    private let serviceType: String
 
     /// MCSession is not marked Sendable, but Apple documents its methods as
     /// callable from any thread, and PQRC assigns its delegate exactly once at
@@ -66,7 +70,11 @@ public final class MultipeerNearbyLink: NSObject, NearbyLink, Sendable {
     /// `randomSource` feeds the ephemeral display name; production passes
     /// `SystemRandomSource()`. 16 hex chars keeps collisions negligible while
     /// staying within MCPeerID's 63-byte UTF-8 limit.
-    public init(randomSource: any RandomSource = SystemRandomSource()) {
+    public init(
+        serviceType: String = MultipeerNearbyLink.serviceType,
+        randomSource: any RandomSource = SystemRandomSource()
+    ) {
+        self.serviceType = serviceType
         self.displayName = randomSource.bytes(8).hexString
         self.state = Mutex(State())
         (self.stream, self.continuation) = AsyncStream.makeStream(of: NearbyLinkEvent.self)
@@ -85,9 +93,9 @@ public final class MultipeerNearbyLink: NSObject, NearbyLink, Sendable {
                 peer: peerID, securityIdentity: nil, encryptionPreference: .required)
             session.delegate = self
             let advertiser = MCNearbyServiceAdvertiser(
-                peer: peerID, discoveryInfo: nil, serviceType: Self.serviceType)
+                peer: peerID, discoveryInfo: nil, serviceType: serviceType)
             advertiser.delegate = self
-            let browser = MCNearbyServiceBrowser(peer: peerID, serviceType: Self.serviceType)
+            let browser = MCNearbyServiceBrowser(peer: peerID, serviceType: serviceType)
             browser.delegate = self
             state.sessionBox = SessionBox(session)
             state.advertiser = advertiser

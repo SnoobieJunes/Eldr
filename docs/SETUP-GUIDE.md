@@ -27,10 +27,17 @@ No third-party services are required for anything in this guide.
 git clone <repo> && cd Eldr
 
 # All protocol logic lives in SPM packages and tests headlessly:
-swift test --package-path Packages/PQRCCore     # crypto, ratchet, PQXDH, vectors
-swift test --package-path Packages/PQRCNostr    # envelope, transports, S1 local link, chaos matrix
-swift test --package-path Packages/PQRCAgent    # agent integrity suite
+swift test --package-path Packages/PQRCCore     # crypto, ratchet, PQXDH, vectors, SiloKey
+swift test --package-path Packages/PQRCNostr    # envelope, transports, S1 local link, NearbyRelayHub, chaos matrix
+swift test --package-path Packages/PQRCAgent    # agent integrity + AgentSkills + reasoning-trace stripping
+swift test --package-path Packages/PQRCMCP      # MCP server protocol suite (A35)
+swift test --package-path Packages/PQRCACP      # ACP agent suite (A36)
 ```
+
+The last two packages are **standalone agent-interop tools** with no app/crypto
+deps (DEVIATIONS A35/A36): `PQRCMCP` builds `pqrc-mcp` (EldrChat as a read-only
+MCP secure-chat source); `PQRCACP` builds `eldr-acp` (the on-device LLM as an ACP
+coding agent for Xcode 27). Both run their tests network-free.
 
 All three must be green. `PQRCNostr` includes the SPEC §10 local-link suite
 (`LocalLinkTests`) running against the deterministic `LocalLinkSimulator` —
@@ -41,12 +48,15 @@ hello adversarial cases. No network, no radios, no real clock.
 
 ```bash
 # Discover simulators if the destination below fails:
-xcodebuild -showdestinations -project App/PQRC.xcodeproj -scheme PQRC
+xcodebuild -showdestinations -project App/EldrChat.xcodeproj -scheme EldrChat
 
-xcodebuild test -project App/PQRC.xcodeproj -scheme PQRC \
+xcodebuild test -project App/EldrChat.xcodeproj -scheme EldrChat \
   -destination 'platform=iOS Simulator,name=iPhone 17 Pro,OS=26.5' \
   -skipPackagePluginValidation
 ```
+
+> The project/target/scheme is **EldrChat** (renamed from PQRC). The old `PQRC`
+> scheme is stale and won't resolve a destination — use `EldrChat`.
 
 `-skipPackagePluginValidation` is required (swift-secp256k1 ships a build
 plugin). If a simulator wedges with "Application failed preflight checks":
@@ -220,6 +230,26 @@ co-present.
 - Stale peers after force-quit → relaunch both; the hello exchange re-runs on
   every connection and reconnects map the newest proof.
 
+### 6.5 Device-hosted relay hub — `host` / `nearby` (A31)
+
+For a small group with no trusted network, one device can be a **pocket relay**
+(`NearbyRelayHub`, a distinct `_pqrc-relay` Bonjour service — not the direct-Nearby
+`_pqrc-local` of §6.1):
+
+1. On the host: **Settings ▸ Servers** → add the literal keyword **`host`** →
+   Apply. That device now runs the `LocalRelaySimulator` engine over Multipeer.
+2. On each companion: **Settings ▸ Servers** → add **`nearby`** → Apply. They
+   connect to the host over the radio (no router, no public relay).
+3. Send messages. The kind-1059 anchor-relay rule holds over the hub: the host
+   forwards **sealed ciphertext + p-tags only** and cannot read message content.
+4. Optionally enable the host's **shared AI** (a tethered AI with the **`hub`**
+   backend on a companion): the companion's (firewall-redacted) message text goes
+   to the host's on-device model behind the off-device-AI consent alert. This is
+   the one path where the host sees content — by the companion's explicit consent.
+
+The whole protocol is unit-tested against `LocalLinkSimulator`
+(`NearbyRelayHubTests`); the MC radio adapter itself needs two physical devices.
+
 ## 7. Deploying a production anchor relay (beyond `pqrc-relay`)
 
 `pqrc-relay` is for development. For a deployed relay (e.g.
@@ -246,16 +276,67 @@ strfry or khatru:
 swift test --package-path Packages/PQRCCore
 swift test --package-path Packages/PQRCNostr
 swift test --package-path Packages/PQRCAgent
+swift test --package-path Packages/PQRCMCP     # MCP server (A35)
+swift test --package-path Packages/PQRCACP     # ACP agent (A36)
 
 # Opt-in socket suites:
 PQRC_LOOPBACK_TESTS=1 swift test --package-path Packages/PQRCNostr --filter Loopback
 PQRC_RELAY_URL=wss://relay.lerants.com swift test --package-path Packages/PQRCNostr --filter deployedRelay
 
-# Relay server:
+# Relay server / agent-interop executables:
 swift run --package-path Packages/PQRCNostr pqrc-relay --port 7777
+swift run --package-path Packages/PQRCMCP pqrc-mcp          # MCP stdio server (DemoSecureChatBridge)
+ELDR_ACP_FAKE_LLM=1 swift run --package-path Packages/PQRCACP eldr-acp   # ACP agent, no model server
 
 # Full app suite:
-xcodebuild test -project App/PQRC.xcodeproj -scheme PQRC \
+xcodebuild test -project App/EldrChat.xcodeproj -scheme EldrChat \
   -destination 'platform=iOS Simulator,name=iPhone 17 Pro,OS=26.5' \
   -skipPackagePluginValidation
 ```
+
+## 9. Driving Xcode 27 with the ACP agent (`eldr-acp`)
+
+EldrChat ships an **Agent Client Protocol** agent so a self-hosted LLM can pilot
+Xcode 27 (write code, build, run on simulators). Xcode 27 is the ACP *client*;
+`eldr-acp` is the *agent* it spawns over stdio (A36).
+
+**1. Build + install the agent**
+```bash
+swift build -c release --package-path Packages/PQRCACP
+cp "$(swift build -c release --package-path Packages/PQRCACP --show-bin-path)/eldr-acp" ~/.local/bin/eldr-acp
+```
+
+**2. Create a launcher.** Xcode 27's "Add an Agent" dialog has **no
+environment-variable field**, so a one-line wrapper supplies the LLM config and
+selects the beta toolchain. `~/.local/bin/eldr-acp-xcode`:
+```zsh
+#!/bin/zsh
+[ -f "$HOME/.config/eldr-acp/env" ] && source "$HOME/.config/eldr-acp/env"
+export ELDR_LLM_URL="${ELDR_LLM_URL:-http://127.0.0.1:1337/v1}"   # LM Studio / Ollama
+export ELDR_LLM_TOKEN="${ELDR_LLM_TOKEN:-<your LM Studio token>}"
+export ELDR_LLM_MODEL="${ELDR_LLM_MODEL:-<your model id, e.g. an instruct model>}"
+export DEVELOPER_DIR="${DEVELOPER_DIR:-/Applications/Xcode-beta.app/Contents/Developer}"
+exec "$HOME/.local/bin/eldr-acp"
+```
+`chmod +x ~/.local/bin/eldr-acp-xcode`. Put the token in `~/.config/eldr-acp/env`
+(`ELDR_LLM_TOKEN=…`) so it survives token rotation without editing the script.
+
+**3. Register in Xcode 27** → Settings ▸ Intelligence ▸ **Add an Agent**:
+
+| Field | Value |
+|---|---|
+| **Name** | `Eldr` |
+| **Executable** | `/Users/<you>/.local/bin/eldr-acp-xcode` (full path) |
+| **Interpreter** | *(blank — the launcher has a shebang and is executable)* |
+| **Arguments** | *(none)* |
+
+Click **Add**. The agent uses the working directory Xcode hands it per session
+(your open project), so `ELDR_WORKDIR` is only a fallback.
+
+**Notes**
+- The LLM must support OpenAI **tool/function calling** (LM Studio does). Prefer an
+  **instruct** model over a reasoning model for snappy, low-confusion tool use.
+- Smoke-test with no model server: `ELDR_ACP_FAKE_LLM=1 ~/.local/bin/eldr-acp-xcode`
+  then type an `initialize` line — it must reply immediately.
+- `run_shell` honors `DEVELOPER_DIR`, so `xcodebuild`/`xcrun simctl` target the
+  Xcode 27 beta toolchain even though your default `xcode-select` may be stable.

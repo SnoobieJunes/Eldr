@@ -77,12 +77,12 @@ struct SecuritySuiteTests {
         let relay = LocalRelaySimulator()
         let alice = PersonaRuntime(
             displayName: "Alice", transports: [await relay.connect()],
-            blobStore: LocalBlossomSimulator(), provider: MockAgentProvider(),
+            blobStore: LocalBlossomSimulator(), ais: [TetheredAI(id: "test", name: "test-ai", provider: MockAgentProvider())],
             randomSource: SeededRandomSource(seed: 81), nonceSource: SeededRandomSource(seed: 82),
             keychainService: "chat.pqrc.test-logs-alice")
         let bob = PersonaRuntime(
             displayName: "Bob", transports: [await relay.connect()],
-            blobStore: LocalBlossomSimulator(), provider: MockAgentProvider(),
+            blobStore: LocalBlossomSimulator(), ais: [TetheredAI(id: "test", name: "test-ai", provider: MockAgentProvider())],
             randomSource: SeededRandomSource(seed: 83), nonceSource: SeededRandomSource(seed: 84),
             keychainService: "chat.pqrc.test-logs-bob")
         await alice.keychain.deleteAll()
@@ -117,12 +117,12 @@ struct SecuritySuiteTests {
         let relay = LocalRelaySimulator()
         let alice = PersonaRuntime(
             displayName: "Alice", transports: [await relay.connect()],
-            blobStore: LocalBlossomSimulator(), provider: MockAgentProvider(),
+            blobStore: LocalBlossomSimulator(), ais: [TetheredAI(id: "test", name: "test-ai", provider: MockAgentProvider())],
             randomSource: SeededRandomSource(seed: 71), nonceSource: SeededRandomSource(seed: 72),
             keychainService: "chat.pqrc.test-block-alice")
         let bob = PersonaRuntime(
             displayName: "Bob", transports: [await relay.connect()],
-            blobStore: LocalBlossomSimulator(), provider: MockAgentProvider(),
+            blobStore: LocalBlossomSimulator(), ais: [TetheredAI(id: "test", name: "test-ai", provider: MockAgentProvider())],
             randomSource: SeededRandomSource(seed: 73), nonceSource: SeededRandomSource(seed: 74),
             keychainService: "chat.pqrc.test-block-bob")
         await alice.keychain.deleteAll()
@@ -149,7 +149,7 @@ struct SecuritySuiteTests {
         let relay = LocalRelaySimulator()
         let runtime = PersonaRuntime(
             displayName: "Doomed", transports: [await relay.connect()],
-            blobStore: LocalBlossomSimulator(), provider: MockAgentProvider(),
+            blobStore: LocalBlossomSimulator(), ais: [TetheredAI(id: "test", name: "test-ai", provider: MockAgentProvider())],
             keychainService: "chat.pqrc.test-wipe")
         await runtime.keychain.deleteAll()
         _ = try await runtime.bootstrap(inMemoryStore: true)

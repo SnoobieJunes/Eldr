@@ -10,7 +10,8 @@ No bytes leave the device.
 **From the app:** Settings → *Try the demo (Local Universe)* (Debug builds;
 the reviewer-facing entry per TESTFLIGHT-GUIDE §F).
 
-**From Xcode / CLI:** launch the `PQRC` scheme with arguments:
+**From Xcode / CLI:** launch the `EldrChat` scheme (renamed from `PQRC`; the old
+scheme is stale) with arguments:
 
 ```
 --local-universe                # boot the universe, no script
@@ -23,6 +24,12 @@ UI tests replay this script via `--uitest --demo-script`
 A segmented persona switcher appears at the top: you are whoever is selected,
 with that persona's keys, store, and agent. Switch personas at any time to see
 the other side of the conversation.
+
+> The Local Universe predates the deniable-silo work (DEVIATIONS A23/A33): it
+> boots a fixed test silo using the bare (empty-`siloID`) keys and bypasses the
+> passphrase lock screen, so the demo and the existing test suite are unaffected
+> by multi-account isolation. The silo lock screen is exercised separately by
+> `SiloKeyTests` and the app account-gate tests, not by the demo script.
 
 ## The scripted demo (what `--demo-script` does, in order)
 
@@ -54,10 +61,13 @@ the other side of the conversation.
    resumes them.
 
 5. **Large paste (≈218 KB).** Alice sends a paste far above the 64 KB inline
-   limit. It encrypts under a fresh key, uploads to the Blossom simulator
-   (mirrored), and only a constant-size pointer travels in the envelope.
-   *Verify:* the composer collapsed it into a chip; the relay's stored
-   envelopes stay bucket-sized regardless of content size.
+   limit. In the text-only product this takes the **relay-chunking** path
+   (DEVIATIONS N26/A25): the message splits across several ratcheted gift-wrap
+   envelopes (each a one-time key), sized to the relay's content limit, and is
+   rejoined on receipt — no blob server. *Verify:* the composer collapsed it into
+   a chip; each stored envelope is bucket-padded (the relay sees only a burst of
+   N constant-size events, never the total size). (The `ptr`/Blossom pointer path
+   exists in core but is reserved for binary attachments, out of scope for v1.)
 
 5.5 **Message request.** Eve — whom Alice has never verified — initiates a
    handshake. *Verify:* as Alice, Eve appears under **Message Requests**, never

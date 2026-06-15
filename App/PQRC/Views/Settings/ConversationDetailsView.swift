@@ -11,6 +11,13 @@ struct ConversationDetailsView: View {
     @State private var showReport = false
     @State private var blocked = false
     @State private var nickname = ""
+    /// Per-conversation AI context override: "default" (use each AI's own
+    /// setting) | "off" | "marked" | "full".
+    @State private var aiContextMode = "default"
+    /// Read-only echo of the primary AI's effective mode / remoteness / firewall
+    /// for this conversation, refreshed when the override changes.
+    @State private var summary: (mode: String, isRemote: Bool, firewallOn: Bool) =
+        ("active", false, true)
 
     var body: some View {
         NavigationStack {
@@ -26,7 +33,7 @@ struct ConversationDetailsView: View {
                                 conversationID, nickname: nickname.isEmpty ? nil : nickname)
                         }
                     }
-                    Text("Only you see this name. If they've chosen an alias, it shows when you clear this.")
+                    Text("Only you see this name — local to your device, never broadcast. If you've turned on a remote AI, a name you set here is included in prompts sent to that provider. If they've chosen an alias, it shows when you clear this.")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
@@ -47,6 +54,37 @@ struct ConversationDetailsView: View {
                             // relaunch and clears safety-change warnings.
                             Task { await model.setVerified(conversationID, verified: newValue) }
                         }
+                }
+                Section {
+                    // Unified vocabulary (matches the per-AI "Gathers" picker and
+                    // the in-chat "AI here" chip): Use default · Off · Marked only
+                    // · Live. Tags stay the engine's "default"/"off"/"marked"/
+                    // "full" — only the labels are unified.
+                    Picker("AI context here", selection: $aiContextMode) {
+                        Text("Use default").tag("default")
+                        Text("Off in this conversation").tag("off")
+                        Text("Marked only — messages I add to context").tag("marked")
+                        Text("Live — full conversation while active").tag("full")
+                    }
+                    .accessibilityIdentifier("conversation-ai-mode")
+                    .onChange(of: aiContextMode) { _, newValue in
+                        AppSession.setConversationContextMode(
+                            newValue == "default" ? nil : newValue, conversationID: conversationID,
+                            siloID: model.siloID)
+                        summary = model.primaryAIContextSummary(conversationID)
+                    }
+                    // Live echo of what the AI actually does here + the firewall/
+                    // consent indicator whenever a REMOTE AI is active (privacy
+                    // cardinal rule: any widening of what a remote AI sees keeps
+                    // the firewall state visible).
+                    AIContextEcho(summary: summary)
+                    if summary.mode != "off" && summary.isRemote {
+                        RemoteAIFirewallRow(firewallOn: summary.firewallOn)
+                    }
+                } header: {
+                    Text("AI in this conversation — overrides your AI's default (now: \(AIContextVocab.glance(summary)))")
+                } footer: {
+                    Text("Overrides your AIs' own context setting, just here. \"Off\" keeps every AI from gathering anything from this conversation.")
                 }
                 Section("Safety") {
                     Button(blocked ? "Unblock" : "Block", role: .destructive) {
@@ -72,6 +110,9 @@ struct ConversationDetailsView: View {
                 let info = await model.runtime.contactInfo(conversationID)
                 verified = info.verified
                 blocked = info.blocked
+                aiContextMode =
+                    AppSession.conversationContextMode(conversationID, siloID: model.siloID) ?? "default"
+                summary = model.primaryAIContextSummary(conversationID)
             }
             .toolbar {
                 ToolbarItem(placement: .confirmationAction) {
@@ -82,6 +123,60 @@ struct ConversationDetailsView: View {
                 ReportSheet()
             }
         }
+    }
+}
+
+/// Shared vocabulary for the AI-context surfaces (Details section, the in-chat
+/// "AI here" chip, the chip sheet) so they always read the same. Input is the
+/// engine `mode` ("off" | "strict" | "active") from
+/// `AppModel.primaryAIContextSummary`; output is the user-facing wording.
+enum AIContextVocab {
+    /// Compact glance label for a chip / header: "AI off here", "AI: marked",
+    /// "AI: live". Mirrors PersonaRuntime's resolution (off / strict / active).
+    static func glance(_ summary: (mode: String, isRemote: Bool, firewallOn: Bool)) -> String {
+        switch summary.mode {
+        case "off": return "AI off here"
+        case "strict": return "AI: marked"
+        default: return "AI: live"  // "active"
+        }
+    }
+
+    /// One-line "Your AI sees: …" echo describing what the AI gathers here.
+    static func sees(_ summary: (mode: String, isRemote: Bool, firewallOn: Bool)) -> String {
+        switch summary.mode {
+        case "off": return "Your AI sees: nothing from this conversation."
+        case "strict": return "Your AI sees: only messages you add to context."
+        default: return "Your AI sees: the full recent conversation while it's active."
+        }
+    }
+}
+
+/// One-line echo of what the AI actually gathers in a conversation. Read-only.
+struct AIContextEcho: View {
+    let summary: (mode: String, isRemote: Bool, firewallOn: Bool)
+    var body: some View {
+        Label(AIContextVocab.sees(summary), systemImage: "eye")
+            .font(.caption)
+            .foregroundStyle(.secondary)
+            .accessibilityIdentifier("ai-sees-echo")
+    }
+}
+
+/// Firewall/consent indicator shown whenever a REMOTE AI is active for a
+/// conversation — the privacy cardinal rule requires the egress-firewall state
+/// stay visible anywhere a remote AI's exposure can widen. Read-only (the toggle
+/// itself lives in Settings ▸ AI).
+struct RemoteAIFirewallRow: View {
+    let firewallOn: Bool
+    var body: some View {
+        Label(
+            firewallOn
+                ? "Remote AI · egress firewall ON — names redacted, context bounded before it leaves your device."
+                : "Remote AI · egress firewall OFF — real names and full context leave your device unredacted.",
+            systemImage: firewallOn ? "lock.shield" : "lock.open")
+            .font(.caption)
+            .foregroundStyle(firewallOn ? AnyShapeStyle(.secondary) : AnyShapeStyle(.orange))
+            .accessibilityIdentifier("remote-ai-firewall-row")
     }
 }
 

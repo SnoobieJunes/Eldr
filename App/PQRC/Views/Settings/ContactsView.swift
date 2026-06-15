@@ -48,7 +48,7 @@ struct ContactsView: View {
             }
             Button("Cancel", role: .cancel) { renaming = nil }
         } message: {
-            Text("Only you see this name. Leave empty to use the name they chose for themselves.")
+            Text("Only you see this name — it's local to your device, never broadcast (your codename for someone differs from everyone else's). Note: if you've turned on a remote AI, a name you type here is included in prompts sent to that provider. Leave empty to use the name they chose for themselves.")
         }
     }
 

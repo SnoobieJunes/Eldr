@@ -65,6 +65,35 @@ struct SessionTests {
             clock: clock)
     }
 
+    /// A crafted ratchet header with an out-of-range counter (`n` negative or
+    /// >2^32) must be REJECTED, not crash. The AD serializes `n` as UInt32 and
+    /// `UInt32(Int)` traps on out-of-range — so without the guard a single
+    /// message from an accepted contact would DoS the app (and re-crash on relay
+    /// replay). Invariant 12 / SPEC §12: garbage wire input is never fatal.
+    @Test func decrypt_outOfRangeHeaderCounter_throwsNotTraps() async throws {
+        let u = try await Self.establish()
+        let good = try await u.aliceSession.encrypt(
+            body: MessageBody(text: "hi", sentAt: u.clock.now()), participantType: .human)
+        let h = try #require(good.rumor.header)
+        let ct = try #require(good.rumor.ciphertext)
+        for badN in [-1, Int(UInt32.max) + 1] {
+            let badRumor = RumorContent(
+                type: .message, participantType: .human, senderRole: .identity,
+                header: RatchetHeader(dh: h.dh, pn: h.pn, n: badN, pq: h.pq), ciphertext: ct)
+            await #expect(throws: PQRCError.malformedRumor) {
+                _ = try await u.bobSession.decrypt(
+                    rumor: badRumor, fuzzedTimestamp: good.fuzzedTimestamp)
+            }
+        }
+        // A bad `pn` is rejected the same way.
+        let badPn = RumorContent(
+            type: .message, participantType: .human, senderRole: .identity,
+            header: RatchetHeader(dh: h.dh, pn: -1, n: h.n, pq: h.pq), ciphertext: ct)
+        await #expect(throws: PQRCError.malformedRumor) {
+            _ = try await u.bobSession.decrypt(rumor: badPn, fuzzedTimestamp: good.fuzzedTimestamp)
+        }
+    }
+
     @Test func session_fullConversation_bothDirections() async throws {
         let universe = try await Self.establish()
         for i in 0..<6 {

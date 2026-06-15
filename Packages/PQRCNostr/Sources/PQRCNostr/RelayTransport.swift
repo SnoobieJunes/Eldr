@@ -1,13 +1,20 @@
 import Foundation
 import PQRCCore
 
-/// NIP-01 subscription filter (subset PQRC needs).
-public struct NostrFilter: Sendable, Equatable {
+/// NIP-01 subscription filter (subset PQRC needs). Codable so it can ride a
+/// `NearbyLink` REQ frame to a device-hosted relay (the Multipeer relay hub).
+public struct NostrFilter: Sendable, Equatable, Codable {
     public var kinds: [Int]?
     public var authors: [String]?
     public var pTags: [String]?
     public var ids: [String]?
     public var since: Int64?
+
+    enum CodingKeys: String, CodingKey {
+        case kinds, authors
+        case pTags = "p_tags"
+        case ids, since
+    }
 
     public init(
         kinds: [Int]? = nil, authors: [String]? = nil, pTags: [String]? = nil,

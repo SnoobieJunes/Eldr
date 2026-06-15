@@ -136,7 +136,13 @@ struct EnvelopeTests {
             randomSource: SeededRandomSource(seed: 6), nonceSource: SeededRandomSource(seed: 7))
 
         #expect(wrap.kind == PQRCConstants.giftWrapEventKind)
-        #expect(wrap.tags == [["p", recipient.publicKeyHex]], "only the recipient p tag")
+        // The recipient p tag plus a NIP-40 expiration anchored to the FUZZED
+        // created_at (expiration − window == created_at), so it leaks no timing
+        // the public created_at doesn't already.
+        let expectedExpiration = String(1_749_900_222 + PQRCConstants.expirationWindowSeconds)
+        #expect(
+            wrap.tags == [["p", recipient.publicKeyHex], ["expiration", expectedExpiration]],
+            "only the recipient p tag and a fuzz-anchored expiration")
         #expect(wrap.pubkey != sender.publicKeyHex)
 
         let serialized = String(decoding: try WireJSON.encoder().encode(wrap), as: UTF8.self)

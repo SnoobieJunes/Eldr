@@ -81,12 +81,16 @@ public enum GiftWrap {
         let wrapContent = try SealCipher.encrypt(
             sealJSON, privateKey: oneTimeKey.privateKeyData,
             peerPublicKeyHex: recipientNostrPubkey, nonceSource: nonceSource)
+        // NIP-40: a relay running the expiration policy auto-deletes the wrap
+        // after this time. Anchored to the FUZZED created_at (not real now) so it
+        // reveals no timing beyond what created_at already does (SPEC §8.4).
+        let expiration = fuzzedTimestamp + PQRCConstants.expirationWindowSeconds
         return try oneTimeKey.sign(
             NostrEvent(
                 pubkey: oneTimeKey.publicKeyHex,
                 createdAt: fuzzedTimestamp,
                 kind: PQRCConstants.giftWrapEventKind,
-                tags: [["p", recipientNostrPubkey]],
+                tags: [["p", recipientNostrPubkey], ["expiration", String(expiration)]],
                 content: wrapContent
             ), randomSource: randomSource)
     }

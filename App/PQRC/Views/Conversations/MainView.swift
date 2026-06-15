@@ -11,26 +11,80 @@ struct MainView: View {
     @State private var showNewGroup = false
     @State private var showSettings = false
     @State private var deepLinkNpub: String?
-    @State private var path: [String] = []
+    /// Selected conversation drives the detail pane on wide screens (iPad/Mac/
+    /// landscape) and pushes on compact widths (iPhone portrait) — one binding,
+    /// both layouts, via NavigationSplitView (CLAUDE.md responsive roadmap).
+    @State private var selection: String?
+    // Show the conversation list by default on wide screens (the list is the
+    // home of the app); .automatic hid it in iPad portrait until the user found
+    // "Show Sidebar". Ignored on compact iPhone widths (which stack).
+    @State private var columnVisibility: NavigationSplitViewVisibility = .all
 
     var body: some View {
-        NavigationStack(path: $path) {
-            List {
-                if !model.messageRequests.isEmpty {
-                    Section("Message Requests") {
-                        ForEach(model.messageRequests, id: \.self) { sender in
-                            MessageRequestRow(model: model, sender: sender) { conversationID in
-                                path.append(conversationID)
-                            }
+        NavigationSplitView(columnVisibility: $columnVisibility) {
+            sidebar
+        } detail: {
+            // Each conversation gets its own stack so threads/details push within
+            // the detail pane on wide screens; rebuilds per selection so state
+            // (composer, scroll) doesn't bleed between conversations.
+            NavigationStack {
+                if let selection {
+                    ConversationView(model: model, conversationID: selection)
+                        .id(selection)
+                        .onAppear { model.markRead(selection) }
+                } else {
+                    ContentUnavailableView(
+                        "No conversation selected",
+                        systemImage: "bubble.left.and.bubble.right",
+                        description: Text("Pick a conversation, or start a new one."))
+                }
+            }
+        }
+        .sheet(isPresented: $showNewChat) {
+            NewChatView(model: model, prefilledNpub: deepLinkNpub ?? "")
+                .onDisappear { deepLinkNpub = nil }
+        }
+        .sheet(isPresented: $showNewGroup) {
+            NewGroupView(model: model)
+        }
+        .sheet(isPresented: $showSettings) {
+            SettingsView(model: model)
+        }
+        .onChange(of: session.pendingNpub) { _, npub in
+            // QR deep link (pqrc:add?npub=…): open New Conversation
+            // prefilled with the scanned address.
+            guard let npub else { return }
+            deepLinkNpub = npub
+            session.pendingNpub = nil
+            showNewChat = true
+        }
+    }
+
+    /// Conversation list — the sidebar on wide screens, the root on iPhone.
+    private var sidebar: some View {
+        List(selection: $selection) {
+            if !model.messageRequests.isEmpty {
+                Section("Message Requests") {
+                    ForEach(model.messageRequests, id: \.self) { sender in
+                        MessageRequestRow(model: model, sender: sender) { conversationID in
+                            selection = conversationID
                         }
                     }
                 }
-                Section {
-                    ForEach(model.conversations) { conversation in
-                        NavigationLink(value: conversation.id) {
-                            ConversationRow(conversation: conversation)
-                        }
+            }
+            Section {
+                ForEach(model.conversations) { conversation in
+                    ConversationRow(conversation: conversation)
+                        .tag(conversation.id)
+                        // Combine the identicon + text into ONE accessibility
+                        // element so the WHOLE row is the identified, hittable
+                        // target. After the NavigationSplitView migration the id
+                        // landed on the inner identicon (44×44, reported as "not
+                        // hittable"), and the timestamp text became its own
+                        // too-small audit-flagged element. Combining fixes both.
+                        .accessibilityElement(children: .combine)
                         .accessibilityIdentifier("conversation-\(conversation.title)")
+                        .accessibilityAddTraits(.isButton)
                         .swipeActions(edge: .leading) {
                             Button {
                                 Task { await model.togglePinned(conversation.id) }
@@ -48,65 +102,51 @@ struct MainView: View {
                                 Label("Delete", systemImage: "trash")
                             }
                         }
-                    }
-                } header: {
-                    if model.conversations.isEmpty {
-                        Text("No conversations yet — start one with a contact's npub.")
-                    }
+                }
+            } header: {
+                if model.conversations.isEmpty {
+                    Text("No conversations yet — start one with a contact's npub.")
                 }
             }
-            .safeAreaInset(edge: .top) {
-                if let personaSwitcher {
-                    personaSwitcher
+        }
+        .safeAreaInset(edge: .top) {
+            if let personaSwitcher {
+                personaSwitcher
+            }
+        }
+        .navigationTitle("PQRC")
+        .toolbar {
+            ToolbarItem(placement: .topBarLeading) {
+                Button {
+                    showSettings = true
+                } label: {
+                    Image(systemName: "gearshape")
                 }
+                .accessibilityLabel("Settings")
             }
-            .navigationTitle("PQRC")
-            .navigationDestination(for: String.self) { conversationID in
-                ConversationView(model: model, conversationID: conversationID)
-                    .onAppear { model.markRead(conversationID) }
-            }
-            .toolbar {
-                ToolbarItem(placement: .topBarLeading) {
-                    Button {
-                        showSettings = true
-                    } label: {
-                        Image(systemName: "gearshape")
+            ToolbarItemGroup(placement: .topBarTrailing) {
+                Button {
+                    Task {
+                        if let id = await model.createSelfChat() { selection = id }
                     }
-                    .accessibilityLabel("Settings")
+                } label: {
+                    Image(systemName: "brain")
                 }
-                ToolbarItemGroup(placement: .topBarTrailing) {
-                    Button {
-                        showNewGroup = true
-                    } label: {
-                        Image(systemName: "person.3")
-                    }
-                    .accessibilityLabel("New group")
-                    Button {
-                        showNewChat = true
-                    } label: {
-                        Image(systemName: "square.and.pencil")
-                    }
-                    .accessibilityLabel("New conversation")
-                    .accessibilityIdentifier("new-chat")
+                .accessibilityLabel("New AI chat")
+                .accessibilityIdentifier("new-ai-chat")
+                Button {
+                    showNewGroup = true
+                } label: {
+                    Image(systemName: "person.3")
                 }
-            }
-            .sheet(isPresented: $showNewChat) {
-                NewChatView(model: model, prefilledNpub: deepLinkNpub ?? "")
-                    .onDisappear { deepLinkNpub = nil }
-            }
-            .sheet(isPresented: $showNewGroup) {
-                NewGroupView(model: model)
-            }
-            .sheet(isPresented: $showSettings) {
-                SettingsView(model: model)
-            }
-            .onChange(of: session.pendingNpub) { _, npub in
-                // QR deep link (pqrc:add?npub=…): open New Conversation
-                // prefilled with the scanned address.
-                guard let npub else { return }
-                deepLinkNpub = npub
-                session.pendingNpub = nil
-                showNewChat = true
+                .accessibilityLabel("New group")
+                Button {
+                    showNewChat = true
+                } label: {
+                    Image(systemName: "square.and.pencil")
+                }
+                .accessibilityLabel("New conversation")
+                .accessibilityIdentifier("new-chat")
             }
         }
     }
@@ -381,7 +421,12 @@ struct NewGroupView: View {
                     TextField("Name", text: $name)
                         .accessibilityIdentifier("group-name")
                 }
-                Section("Members") {
+                Section {
+                    if candidates.isEmpty {
+                        Text("No contacts yet. Leave this empty to make a private group with just you and your AIs — add people later from the group.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
                     ForEach(candidates, id: \.id) { candidate in
                         Button {
                             if selected.contains(candidate.id) {
@@ -400,14 +445,18 @@ struct NewGroupView: View {
                         }
                         .accessibilityIdentifier("group-member-\(candidate.name)")
                     }
+                } header: {
+                    Text("Members")
+                } footer: {
+                    Text("Optional. With no one else selected this is a solo group — just you and your tethered AIs, where they reply to you and to each other. Add people anytime.")
                 }
-                Button("Create group") {
+                Button(selected.isEmpty ? "Create solo AI group" : "Create group") {
                     Task {
                         _ = await model.createGroup(name: name, members: Array(selected))
                         dismiss()
                     }
                 }
-                .disabled(name.isEmpty || selected.isEmpty)
+                .disabled(name.isEmpty)
                 .accessibilityIdentifier("group-create")
             }
             .navigationTitle("New Group")

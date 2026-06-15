@@ -95,6 +95,61 @@ struct PersistenceAndRequestTests {
         #expect(await bob2.pendingRetryCount() == 0)
     }
 
+    /// REGRESSION (replay-desync): a DUPLICATE/replayed handshake must NOT tear
+    /// down an established session. Before the fix, `processHandshake` rebuilt the
+    /// responder ratchet unconditionally, so a replayed handshake (here: the
+    /// piggybacked #0 re-delivered after a dedup-persistence race) silently
+    /// desynced the session and every later message from that one sender vanished
+    /// into the retry void — "their first message arrives, then they go quiet."
+    @Test func replayedHandshake_doesNotDesyncEstablishedSession() async throws {
+        let relay = LocalRelaySimulator()
+        let alice = try await Persona.make(
+            name: "Alice", seedByte: "a3", seed: 21, transports: [await relay.connect()])
+        let bob = try await Persona.make(
+            name: "Bob", seedByte: "b3", seed: 22, transports: [await relay.connect()])
+        await alice.messenger.addContact(try bob.asContact())
+        await bob.messenger.addContact(try alice.asContact())
+
+        let bobEvents = EventCollector()
+        await bobEvents.attach(try await bob.messenger.start())
+        try await alice.messenger.establishSession(
+            with: try bob.asContact(), bundle: try await bob.prekeyManager.publicBundle(),
+            firstMessage: MessageBody(text: "m0", sentAt: 1))
+        _ = await bobEvents.waitForMessages(1)
+        try await alice.messenger.send(MessageBody(text: "m1", sentAt: 2), to: bob.identityHex)
+        let throughM1 = await bobEvents.waitForMessages(2)
+        let m1WrapID = try #require(throughM1.last?.wrapEventID)
+
+        // "Relaunch" Bob with the advanced session RESTORED, but seed the dedup set
+        // with only m1 — NOT the handshake/#0 wrap (modeling the un-awaited
+        // markProcessed race). On start, the relay replays the handshake to a
+        // messenger that ALREADY has the session.
+        let snapshot = try #require(
+            await bob.messenger.sessionSnapshot(peerIdentityHex: alice.identityHex))
+        await bob.messenger.stop()
+        let bob2 = try PQRCMessenger(
+            identity: bob.identity, nostrKeypair: bob.nostrKeypair,
+            prekeyManager: bob.prekeyManager, identityDH: bob.identityDH,
+            transports: [await relay.connect()], clock: bob.clock,
+            randomSource: SeededRandomSource(seed: 23),
+            nonceSource: SeededRandomSource(seed: 24), outboundRetryBaseMillis: 2)
+        await bob2.addContact(try alice.asContact())
+        try await bob2.restoreSession(with: try alice.asContact(), snapshot: snapshot)
+        await bob2.seedProcessedWrapIDs([m1WrapID])
+        let bob2Events = EventCollector()
+        await bob2Events.attach(try await bob2.start())
+        try? await Task.sleep(for: .milliseconds(150))  // let the replayed handshake process
+
+        // The replayed handshake must NOT have desynced the restored session: a
+        // brand-new message from Alice still decrypts, and nothing is stuck.
+        try await alice.messenger.send(MessageBody(text: "m2", sentAt: 3), to: bob.identityHex)
+        let after = await bob2Events.waitForMessages(1)
+        #expect(
+            after.contains { $0.body.text == "m2" },
+            "a message after a replayed handshake must still arrive (no replay-desync)")
+        #expect(await bob2.pendingRetryCount() == 0, "no message silently stuck in the retry void")
+    }
+
     /// D12 acceptance: an unknown sender's envelope is held, the request is
     /// surfaced, and accepting fetches + verifies the sender then replays the
     /// held handshake so the first message materializes.

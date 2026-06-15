@@ -36,16 +36,59 @@ public struct AgentContext: Sendable {
     /// Set when the turn is for an embedded thread.
     public let threadID: String?
     public let threadTitle: String?
+    /// The user's custom system prompt for this AI (the "instructions" profile
+    /// field); nil → the backend's built-in default. Augments, not replaces, the
+    /// protocol conventions (draft-only / PASS-to-stay-silent) below.
+    public let instructions: String?
+    /// When true, the AI should contribute a brief summary, not verbatim quotes
+    /// (the "summarize" output mode — less content leaves the device).
+    public let summarize: Bool
+    /// A fully-composed system prompt that REPLACES the built-in one — used for
+    /// shared-thread turns, where the runtime injects the PQRC guardrails + any
+    /// pinned agent-skills (`AgentSkills.threadSystemPrompt`). nil → built-in.
+    public let systemPromptOverride: String?
 
     public init(
         myIdentityHex: String, myDisplayName: String, transcript: [TranscriptEntry],
-        threadID: String? = nil, threadTitle: String? = nil
+        threadID: String? = nil, threadTitle: String? = nil,
+        instructions: String? = nil, summarize: Bool = false, systemPromptOverride: String? = nil
     ) {
         self.myIdentityHex = myIdentityHex
         self.myDisplayName = myDisplayName
         self.transcript = transcript
         self.threadID = threadID
         self.threadTitle = threadTitle
+        self.instructions = instructions
+        self.summarize = summarize
+        self.systemPromptOverride = systemPromptOverride
+    }
+
+    /// System prompt for a private draft, honoring the user's instructions +
+    /// summarize mode. Custom instructions AUGMENT the conventions so providers
+    /// keep behaving correctly (e.g. "reply with the draft only").
+    public func draftSystemPrompt() -> String {
+        var p =
+            "You draft brief, natural message replies for \(myDisplayName). Reply with the draft text only."
+        if summarize { p += " Prefer a concise summary over verbatim quoting." }
+        if let instructions, !instructions.isEmpty {
+            p += "\n\nYour user's instructions: \(instructions)"
+        }
+        return p
+    }
+
+    /// System prompt for a shared-thread / window turn, same augmentation rules.
+    /// A `systemPromptOverride` (the runtime's composed guardrails + skills) wins.
+    public func turnSystemPrompt() -> String {
+        if let systemPromptOverride { return systemPromptOverride }
+        var p =
+            "You are \(myDisplayName)'s AI in a shared thread with another person's AI. Contribute one short useful message, or reply exactly PASS to stay silent."
+        if summarize {
+            p += " Share a brief summary of the relevant context rather than quoting it verbatim."
+        }
+        if let instructions, !instructions.isEmpty {
+            p += "\n\nYour user's instructions: \(instructions)"
+        }
+        return p
     }
 }
 

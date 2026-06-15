@@ -39,13 +39,15 @@ final class LocalUniverse {
                 displayName: name,
                 transports: [await relay.connect()],
                 blobStore: blossom,
-                provider: scripted,
+                ais: [TetheredAI(id: "demo", name: "\(name)'s AI", provider: scripted)],
                 randomSource: SeededRandomSource(seed: UInt64(9000 + index)),
                 nonceSource: SeededRandomSource(seed: UInt64(9100 + index)),
-                keychainService: "chat.pqrc.universe.\(name.lowercased())")
+                keychainService: "chat.pqrc.universe.\(name.lowercased())",
+                siloID: "universe-\(name.lowercased())")
             // Fresh identities per boot: the demo universe never reuses keys.
             runtime.keychain.deleteAll()
-            let model = AppModel(runtime: runtime, personaName: name)
+            let model = AppModel(
+                runtime: runtime, personaName: name, siloID: "universe-\(name.lowercased())")
             try await model.start(inMemoryStore: true)
             models.append(model)
         }

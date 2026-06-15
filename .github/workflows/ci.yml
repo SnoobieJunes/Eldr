@@ -17,7 +17,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Select Xcode 26
-        run: sudo xcode-select -s /Applications/Xcode_26.app
+        run: sudo xcode-select -s /Applications/Xcode.app
       - name: Cache SPM
         uses: actions/cache@v4
         with:
@@ -35,7 +35,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Select Xcode 26
-        run: sudo xcode-select -s /Applications/Xcode_26.app
+        run: sudo xcode-select -s /Applications/Xcode.app
       # Security tests run FIRST with NO retries (TEST-PLAN §12: a flaky
       # security failure must fail the build, never be retried green).
       - name: Security suite (no retries)
@@ -72,7 +72,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Select Xcode 26
-        run: sudo xcode-select -s /Applications/Xcode_26.app
+        run: sudo xcode-select -s /Applications/Xcode.app
       - name: Restore perf baselines
         uses: actions/cache@v4
         with:

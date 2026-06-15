@@ -38,20 +38,42 @@ public struct FoundationModelsAgentProvider: AgentProvider {
 
     public static var isAvailable: Bool { availabilityReason == nil }
 
+    /// One-shot on-device generation for small utility tasks (e.g. inventing a
+    /// local display codename). Stays entirely on device — it never touches a
+    /// remote API. Throws `AgentProviderError.unavailable` when the on-device
+    /// model isn't ready, so callers can fall back to a local generator.
+    public static func oneShot(instructions: String, prompt: String) async throws -> String {
+        #if canImport(FoundationModels)
+            if let reason = availabilityReason {
+                throw AgentProviderError.unavailable(reason)
+            }
+            let session = LanguageModelSession(instructions: instructions)
+            let response = try await session.respond(to: prompt)
+            return response.content.trimmingCharacters(in: .whitespacesAndNewlines)
+        #else
+            throw AgentProviderError.unavailable("FoundationModels not present on this OS build")
+        #endif
+    }
+
     public func draftReply(context: AgentContext) async throws -> Draft {
         #if canImport(FoundationModels)
             if let reason = Self.availabilityReason {
                 throw AgentProviderError.unavailable(reason)
             }
-            let session = LanguageModelSession(
-                instructions: """
-                    You are \(context.myDisplayName)'s personal messaging assistant. \
-                    Draft a brief, natural reply to the conversation. Reply with the \
-                    draft text only.
-                    """)
+            let session = LanguageModelSession(instructions: context.draftSystemPrompt())
             do {
                 let response = try await session.respond(to: Self.renderTranscript(context))
-                return Draft(text: response.content)
+                let text = response.content.trimmingCharacters(in: .whitespacesAndNewlines)
+                // An empty/whitespace completion is a failure, not a draft: a
+                // blank reply reads as "the AI is broken and lying about it".
+                // Surface it so the UI shows a reason instead of inserting "".
+                guard !text.isEmpty else {
+                    throw AgentProviderError.unavailable(
+                        "The on-device model returned an empty reply. Try again, or pick a different provider in Settings ▸ AI.")
+                }
+                return Draft(text: text)
+            } catch let error as AgentProviderError {
+                throw error
             } catch {
                 // Surface generation/guardrail failures instead of swallowing
                 // them — a silent empty draft reads as "the AI is broken".
@@ -67,12 +89,7 @@ public struct FoundationModelsAgentProvider: AgentProvider {
             if let reason = Self.availabilityReason {
                 throw AgentProviderError.unavailable(reason)
             }
-            let session = LanguageModelSession(
-                instructions: """
-                    You are \(context.myDisplayName)'s AI participating in a shared \
-                    thread with another person's AI. Contribute one short, useful \
-                    message, or reply with exactly PASS to stay silent.
-                    """)
+            let session = LanguageModelSession(instructions: context.turnSystemPrompt())
             do {
                 let response = try await session.respond(to: Self.renderTranscript(context))
                 let text = response.content.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -86,7 +103,7 @@ public struct FoundationModelsAgentProvider: AgentProvider {
         #endif
     }
 
-    static func renderTranscript(_ context: AgentContext) -> String {
+    public static func renderTranscript(_ context: AgentContext) -> String {
         context.transcript.suffix(20).map { entry in
             let role = entry.participantType == .agent ? "\(entry.senderDisplayName)'s AI" : entry.senderDisplayName
             return "\(role): \(entry.text)"

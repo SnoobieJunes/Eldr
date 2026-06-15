@@ -24,6 +24,13 @@ struct ConversationView: View {
     @State private var selecting = false
     @State private var selection: Set<String> = []
     @State private var now = Int64(Date().timeIntervalSince1970)
+    /// The "AI here" toolbar chip's sheet.
+    @State private var showAIHere = false
+    /// Read-only summary of the primary AI's effective mode for THIS conversation,
+    /// driving the glance chip. Re-read on appear and whenever the override sheet
+    /// changes it (it lives in UserDefaults, not @Observable state).
+    @State private var aiSummary: (mode: String, isRemote: Bool, firewallOn: Bool) =
+        ("active", false, true)
 
     private var conversationScope: AIContextGrant.Scope { .conversation(conversationID) }
 
@@ -58,6 +65,11 @@ struct ConversationView: View {
             messageList
             if selecting { selectionBar } else { composer }
         }
+        // Reading-width cap so chat doesn't sprawl edge-to-edge on iPad/Mac/
+        // landscape detail panes (CLAUDE.md responsive roadmap); centered, with
+        // no effect on compact iPhone widths.
+        .frame(maxWidth: 760)
+        .frame(maxWidth: .infinity)
         .navigationTitle(model.contactNames[conversationID] ?? "Conversation")
         .navigationBarTitleDisplayMode(.inline)
         // Opaque bar: the title fails the contrast audit over scrolled content.
@@ -66,11 +78,15 @@ struct ConversationView: View {
             if ProcessInfo.processInfo.arguments.contains("--uitest-bigpaste"), largePaste == nil {
                 largePaste = String(repeating: "PQRC large paste demo line.\n", count: 8000)
             }
+            aiSummary = model.primaryAIContextSummary(conversationID)
         }
         .onReceive(ticker) { _ in
             now = Int64(Date().timeIntervalSince1970)
         }
         .toolbar {
+            ToolbarItem(placement: .topBarLeading) {
+                aiHereChip
+            }
             ToolbarItemGroup(placement: .topBarTrailing) {
                 Button {
                     selecting.toggle()
@@ -138,6 +154,12 @@ struct ConversationView: View {
         .sheet(isPresented: $showDetails) {
             ConversationDetailsView(model: model, conversationID: conversationID)
         }
+        .sheet(isPresented: $showAIHere, onDismiss: {
+            // The override lives in UserDefaults; refresh the glance chip on close.
+            aiSummary = model.primaryAIContextSummary(conversationID)
+        }) {
+            AIHereSheet(model: model, conversationID: conversationID)
+        }
         .fullScreenCover(item: $fullScreenContent) { content in
             FullScreenReaderView(text: content.text)
         }
@@ -151,6 +173,40 @@ struct ConversationView: View {
         } message: {
             Text(model.agentError ?? "")
         }
+    }
+
+    /// Toolbar status chip: the AI's EFFECTIVE gather mode for THIS conversation
+    /// at a glance, with a firewall glyph when a remote AI is active. Tap opens
+    /// the per-conversation override sheet. Reuses the Capsule chip style of
+    /// `threadChips` (opaque fill — no `.glassEffect()` over scroll content).
+    private var aiHereChip: some View {
+        Button {
+            showAIHere = true
+        } label: {
+            HStack(spacing: 4) {
+                Image(systemName: "sparkles")
+                Text(AIContextVocab.glance(aiSummary))
+                // Remote AI: the egress-firewall state is always visible (privacy
+                // cardinal rule) — shielded when on, an orange open lock when off.
+                if aiSummary.mode != "off" && aiSummary.isRemote {
+                    Image(systemName: aiSummary.firewallOn ? "lock.shield" : "lock.open")
+                        .foregroundStyle(aiSummary.firewallOn ? AnyShapeStyle(.secondary) : AnyShapeStyle(.orange))
+                }
+            }
+            .font(.caption.weight(.medium))
+            .foregroundStyle(.primary)
+            .padding(.horizontal, 10)
+            .padding(.vertical, 6)
+            // Opaque fill: translucent materials fail the contrast audit under
+            // busy content (matches threadChips).
+            .background(Color(.secondarySystemBackground), in: Capsule())
+        }
+        .accessibilityIdentifier("ai-here-chip")
+        .accessibilityLabel(
+            "AI in this conversation: \(AIContextVocab.glance(aiSummary))"
+                + (aiSummary.mode != "off" && aiSummary.isRemote
+                    ? (aiSummary.firewallOn ? ", egress firewall on" : ", egress firewall off")
+                    : ""))
     }
 
     private var threadChips: some View {
@@ -214,6 +270,7 @@ struct ConversationView: View {
             message: message,
             isMine: message.senderIdentity == model.myIdentityHex,
             senderName: model.contactNames[message.senderIdentity] ?? "Contact",
+            agentName: message.agentName ?? model.aiNames[message.senderIdentity],
             onToggleAIContext: selecting
                 ? nil
                 : {
@@ -514,6 +571,64 @@ struct ThreadCreateSheet: View {
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
                     Button("Cancel") { dismiss() }
+                }
+            }
+        }
+        .presentationDetents([.medium])
+    }
+}
+
+/// Tap-target of the in-chat "AI here" chip: the per-conversation AI context
+/// override, surfaced in the chat itself (the SAME control as
+/// ConversationDetailsView's "AI context here"). Writes/reads the SAME
+/// `AppSession.conversationContextMode`, so chip · this sheet · Details stay in
+/// sync, and the engine reads it every turn (changes apply in real time).
+struct AIHereSheet: View {
+    @Bindable var model: AppModel
+    let conversationID: String
+    @Environment(\.dismiss) private var dismiss
+    /// "default" | "off" | "marked" | "full".
+    @State private var aiContextMode = "default"
+    @State private var summary: (mode: String, isRemote: Bool, firewallOn: Bool) =
+        ("active", false, true)
+
+    var body: some View {
+        NavigationStack {
+            Form {
+                Section {
+                    Picker("AI context here", selection: $aiContextMode) {
+                        Text("Use default").tag("default")
+                        Text("Off in this conversation").tag("off")
+                        Text("Marked only — messages I add to context").tag("marked")
+                        Text("Live — full conversation while active").tag("full")
+                    }
+                    .accessibilityIdentifier("conversation-ai-mode")
+                    .onChange(of: aiContextMode) { _, newValue in
+                        AppSession.setConversationContextMode(
+                            newValue == "default" ? nil : newValue, conversationID: conversationID,
+                            siloID: model.siloID)
+                        summary = model.primaryAIContextSummary(conversationID)
+                    }
+                    AIContextEcho(summary: summary)
+                    if summary.mode != "off" && summary.isRemote {
+                        RemoteAIFirewallRow(firewallOn: summary.firewallOn)
+                    }
+                } header: {
+                    Text("AI in this conversation — overrides your AI's default (now: \(AIContextVocab.glance(summary)))")
+                } footer: {
+                    Text("Overrides your AIs' own context setting, just here. \"Off\" keeps every AI from gathering anything from this conversation. Applies in real time. Set per-AI defaults and the egress firewall in Settings ▸ AI.")
+                }
+            }
+            .navigationTitle("AI here")
+            .navigationBarTitleDisplayMode(.inline)
+            .task {
+                aiContextMode =
+                    AppSession.conversationContextMode(conversationID, siloID: model.siloID) ?? "default"
+                summary = model.primaryAIContextSummary(conversationID)
+            }
+            .toolbar {
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Done") { dismiss() }
                 }
             }
         }

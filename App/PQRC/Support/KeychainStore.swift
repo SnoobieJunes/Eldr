@@ -1,9 +1,20 @@
 import Foundation
+import LocalAuthentication
 import Security
 
 enum KeychainError: Error {
     case unexpectedStatus(OSStatus)
     case notFound
+}
+
+/// Outcome of a biometric-gated read, so the caller can message precisely:
+/// a missing item, a user cancel, and a real auth failure are all different
+/// (and only the last should look like an error to the user).
+enum BiometricLoad {
+    case success(Data)
+    case missing
+    case cancelled
+    case failed(OSStatus)
 }
 
 /// Keychain access for long-term secrets (SPEC §3.1, APP-SPEC §3).
@@ -67,6 +78,71 @@ struct KeychainStore: Sendable {
             kSecAttrService as String: service,
         ]
         SecItemDelete(query as CFDictionary)
+    }
+
+    /// Saves a secret gated behind biometrics / device passcode (`.userPresence`):
+    /// reading it later prompts Face ID / Touch ID. Used for the convenience
+    /// "unlock with Face ID" tier — the high-security tier stores nothing here.
+    func saveBiometric(_ data: Data, account: String) throws {
+        delete(account: account)
+        var error: Unmanaged<CFError>?
+        guard let access = SecAccessControlCreateWithFlags(
+            nil, kSecAttrAccessibleWhenUnlockedThisDeviceOnly, .userPresence, &error)
+        else { throw KeychainError.unexpectedStatus(errSecParam) }
+        let attributes: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: service,
+            kSecAttrAccount as String: account,
+            kSecValueData as String: data,
+            kSecAttrSynchronizable as String: false,
+            kSecAttrAccessControl as String: access,
+        ]
+        let status = SecItemAdd(attributes as CFDictionary, nil)
+        guard status == errSecSuccess else { throw KeychainError.unexpectedStatus(status) }
+    }
+
+    /// Reads a biometric-gated secret, presenting `prompt` in the Face ID sheet.
+    /// Distinguishes a missing item, a user cancel, and a real auth failure so
+    /// the caller can message accordingly (a cancel is not an error — the user
+    /// may want to type a different account's passphrase). Call off the main
+    /// thread (the biometric prompt blocks).
+    func loadBiometric(account: String, prompt: String) -> BiometricLoad {
+        let context = LAContext()
+        context.localizedReason = prompt
+        let query: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: service,
+            kSecAttrAccount as String: account,
+            kSecReturnData as String: true,
+            kSecMatchLimit as String: kSecMatchLimitOne,
+            kSecUseAuthenticationContext as String: context,
+        ]
+        var result: CFTypeRef?
+        let status = SecItemCopyMatching(query as CFDictionary, &result)
+        switch status {
+        case errSecSuccess:
+            if let data = result as? Data { return .success(data) }
+            return .failed(status)
+        case errSecItemNotFound:
+            return .missing
+        // -128: the user tapped Cancel in the Face ID / passcode sheet.
+        case errSecUserCanceled:
+            return .cancelled
+        default:
+            return .failed(status)
+        }
+    }
+
+    func contains(account: String) -> Bool {
+        let query: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: service,
+            kSecAttrAccount as String: account,
+            kSecMatchLimit as String: kSecMatchLimitOne,
+            // Don't trigger biometric auth just to check existence.
+            kSecUseAuthenticationUI as String: kSecUseAuthenticationUISkip,
+        ]
+        return SecItemCopyMatching(query as CFDictionary, nil) != errSecItemNotFound
     }
 
     /// Test hook: raw attributes of an item, for asserting accessibility flags.

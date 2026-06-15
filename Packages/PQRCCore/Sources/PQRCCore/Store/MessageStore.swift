@@ -17,12 +17,20 @@ public struct StoredMessage: Codable, Equatable, Sendable, Identifiable {
     public var aiContext: Bool
     /// Local-only delivery state: "queued" | "sent" (APP-SPEC D5 — no remote receipts).
     public var localStatus: String
+    /// Friendly codename of the AI that authored this message, when it was one
+    /// of the local human's own configured AIs (multi-AI tethering). PURELY
+    /// LOCAL — never written to the wire (SPEC §0, names stay client-side); it
+    /// only lets the UI label "clever-otter-glides-204" instead of a generic
+    /// "your AI" when several AIs share a conversation. nil for human messages
+    /// and for peers' agents (those resolve to a locally-derived name).
+    public var agentName: String?
 
     public init(
         id: String, conversationID: String, senderIdentity: String,
         participantType: ParticipantType, text: String, sentAt: Int64,
         threadID: String? = nil, isContext: Bool = false,
-        aiContext: Bool = false, localStatus: String = "queued"
+        aiContext: Bool = false, localStatus: String = "queued",
+        agentName: String? = nil
     ) {
         self.id = id
         self.conversationID = conversationID
@@ -34,11 +42,12 @@ public struct StoredMessage: Codable, Equatable, Sendable, Identifiable {
         self.isContext = isContext
         self.aiContext = aiContext
         self.localStatus = localStatus
+        self.agentName = agentName
     }
 
     enum CodingKeys: String, CodingKey {
         case id, conversationID, senderIdentity, participantType, text, sentAt
-        case threadID, isContext, aiContext, localStatus
+        case threadID, isContext, aiContext, localStatus, agentName
     }
 
     /// Tolerant decode: `aiContext` was added after first ship, so payloads
@@ -56,6 +65,7 @@ public struct StoredMessage: Codable, Equatable, Sendable, Identifiable {
         isContext = try c.decodeIfPresent(Bool.self, forKey: .isContext) ?? false
         aiContext = try c.decodeIfPresent(Bool.self, forKey: .aiContext) ?? false
         localStatus = try c.decodeIfPresent(String.self, forKey: .localStatus) ?? "queued"
+        agentName = try c.decodeIfPresent(String.self, forKey: .agentName)
     }
 }
 

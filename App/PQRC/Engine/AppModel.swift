@@ -63,6 +63,10 @@ final class AppModel {
     var safetyCodeChangedFor: Set<String> = []
     var prekeyCount = 0
     var contactNames: [String: String] = [:]
+    /// identityHex -> a peer's locally-generated AI codename (never broadcast),
+    /// used to label their assistant's bubbles. My own AIs label via the
+    /// message's stored `agentName`.
+    var aiNames: [String: String] = [:]
     /// Nearby peers discovered over the local link (SPEC §10) — startable with
     /// no relay. Populated only when the Nearby setting is on.
     var nearbyContacts: [NearbyVM] = []
@@ -72,9 +76,15 @@ final class AppModel {
 
     private var pumpTask: Task<Void, Never>?
 
-    init(runtime: PersonaRuntime, personaName: String) {
+    /// The unlocked silo this model belongs to — namespaces local-only UI state
+    /// (read receipts) so accounts never share or accumulate it at rest (A33).
+    /// Empty/distinct for the demo universe's in-memory personas.
+    let siloID: String
+
+    init(runtime: PersonaRuntime, personaName: String, siloID: String = "") {
         self.runtime = runtime
         self.personaName = personaName
+        self.siloID = siloID
     }
 
     func start(
@@ -180,6 +190,8 @@ final class AppModel {
                     ThreadVM(id: threadID, conversationID: conversationID, title: title, messageCount: 0))
                 threadsByConversation[conversationID] = threads
             }
+        case .agentError(let message):
+            agentError = message
         case .loopGuardChanged(let threadID, let paused):
             if paused {
                 loopGuardPaused.insert(threadID)
@@ -207,6 +219,7 @@ final class AppModel {
             let info = await runtime.contactInfo(id)
             title = info.name
             verified = info.verified
+            if let aiName = await runtime.contactAIName(id) { aiNames[id] = aiName }
         }
         contactNames[id] = title
         var row = conversations.first { $0.id == id }
@@ -229,13 +242,14 @@ final class AppModel {
 
     // MARK: - Read state (local-only; D5 — no remote receipts of any kind)
 
+    private var lastReadKey: String { AppSession.siloDefaultsKey("lastReadAt", siloID) }
     private var lastReadAt: [String: Int64] {
         get {
-            ((UserDefaults.standard.dictionary(forKey: "lastReadAt") as? [String: Int]) ?? [:])
+            ((UserDefaults.standard.dictionary(forKey: lastReadKey) as? [String: Int]) ?? [:])
                 .mapValues(Int64.init)
         }
         set {
-            UserDefaults.standard.set(newValue.mapValues(Int.init), forKey: "lastReadAt")
+            UserDefaults.standard.set(newValue.mapValues(Int.init), forKey: lastReadKey)
         }
     }
 
@@ -291,8 +305,17 @@ final class AppModel {
 
     func draft(conversationID: String, threadID: String? = nil) async -> String? {
         do {
-            return try await runtime.draftReply(
+            let text = try await runtime.draftReply(
                 conversationID: conversationID, threadID: threadID).text
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            // A blank draft (some providers return "" instead of erroring) would
+            // insert nothing and read as "the AI silently did nothing". Treat it
+            // as a failure with a visible reason.
+            guard !text.isEmpty else {
+                agentError = "The AI returned an empty reply. Try again, or check your provider in Settings ▸ AI."
+                return nil
+            }
+            return text
         } catch {
             agentError = Self.describeAgentError(error)
             return nil
@@ -370,6 +393,61 @@ final class AppModel {
 
     func createGroup(name: String, members: [String]) async -> String? {
         try? await runtime.createGroup(name: name, memberIdentityHexes: members)
+    }
+
+    /// Creates a solo AI chat (just you + your tethered AIs). Refreshes the row
+    /// so it appears immediately, then returns its id for navigation.
+    func createSelfChat() async -> String? {
+        guard let id = try? await runtime.createSelfChat() else { return nil }
+        await refreshConversationRow(id, lastMessage: nil)
+        return id
+    }
+
+    /// Adds verified contacts to a group/solo conversation at any time.
+    func addMembers(_ conversationID: String, add identityHexes: [String]) async {
+        try? await runtime.addMembers(conversationID: conversationID, add: identityHexes)
+        await refreshConversationRow(conversationID, lastMessage: nil)
+    }
+
+    /// The transcript the tethered LLM(s) currently see for a conversation
+    /// (read-only, for the Settings "AI context" view).
+    func contextPreview(conversationID: String) async -> [ContextPreviewLine] {
+        await runtime.contextPreview(conversationID: conversationID)
+    }
+
+    /// Names of the AIs tethered to me right now.
+    func tetheredAINames() async -> [String] {
+        await runtime.tetheredAINames()
+    }
+
+    /// Read-only summary of the PRIMARY AI's effective gather mode for a
+    /// conversation, for the in-chat "AI here" glance chip and the Details echo.
+    /// Resolves the per-conversation override over the AI's own policy exactly as
+    /// the engine does (PersonaRuntime.contextFor: override "off"/"marked"/"full"
+    /// maps the AI's "off"/"strict"/"active"). No engine/crypto state is touched —
+    /// it reads the same persisted settings (`loadConfiguredAIs`,
+    /// `conversationContextMode`, `firewallEnabled`) the runtime reads each turn,
+    /// so the chip and Details stay in lockstep with what the AI actually does.
+    ///
+    /// - `mode` is one of "off" | "strict" | "active" (engine vocabulary).
+    /// - `isRemote` is true when the primary AI sends context off-device.
+    /// - `firewallOn` is the egress-firewall state (name redaction + byte bound).
+    func primaryAIContextSummary(_ conversationID: String)
+        -> (mode: String, isRemote: Bool, firewallOn: Bool)
+    {
+        // The primary AI is the first ENABLED one, matching the runtime's
+        // `makeRuntimeAIs(...).filter(\.isEnabled)` → `ais[0]`.
+        let enabled = AppSession.loadConfiguredAIs(siloID: siloID).filter(\.isEnabled)
+        let primary = enabled.first
+        var mode = primary?.effectivePolicy ?? "off"
+        switch AppSession.conversationContextMode(conversationID, siloID: siloID) {
+        case "off": mode = "off"
+        case "marked": mode = "strict"
+        case "full": mode = "active"
+        default: break
+        }
+        let isRemote = primary.map { ConfiguredAI.isRemote($0.kind) } ?? false
+        return (mode, isRemote, AppSession.firewallEnabled)
     }
 
     func block(_ identityHex: String) async {

@@ -1,0 +1,62 @@
+import Foundation
+
+extension String {
+    /// Strips a reasoning model's chain-of-thought scratchpad from a completion so
+    /// it never lands in a chat bubble. Reasoning models (qwen3, DeepSeek-R1, …)
+    /// wrap their private thinking in `<think>…</think>` (and a few spell it
+    /// `<thinking>` / `<reasoning>`); EldrChat only wants the final answer.
+    ///
+    /// Handles three cases:
+    ///  - a well-formed `<think>…</think>` block (removed, keeping any real answer
+    ///    before or after it);
+    ///  - an UNCLOSED `<think>` left by a length-truncated response — everything
+    ///    from the tag onward is dropped (the model never reached its answer);
+    ///  - no tag at all (returned trimmed, unchanged).
+    func strippingReasoningTrace() -> String {
+        var s = self
+        for tag in ["think", "thinking", "reasoning"] {
+            let open = "<\(tag)>"
+            let close = "</\(tag)>"
+            while let openRange = s.range(of: open, options: .caseInsensitive) {
+                if let closeRange = s.range(
+                    of: close, options: .caseInsensitive,
+                    range: openRange.upperBound..<s.endIndex)
+                {
+                    s.removeSubrange(openRange.lowerBound..<closeRange.upperBound)
+                } else {
+                    // Unclosed (truncated mid-thought): nothing usable follows.
+                    s.removeSubrange(openRange.lowerBound..<s.endIndex)
+                }
+            }
+        }
+        // (2) Harmony / channel-tagged reasoning (gpt-oss; some Gemma QAT builds
+        //     emit "<|channel>thought … <channel|> ANSWER"; real Harmony uses
+        //     "<|channel|>final<|message|> ANSWER"). Keep only the final channel.
+        s = s.keepingFinalChannelOnly()
+        // (3) Strip any stray channel/control tokens that survived.
+        for token in [
+            "<|channel|>", "<|channel>", "<channel|>", "<|message|>", "<|start|>",
+            "<|end|>", "<|return|>",
+        ] {
+            s = s.replacingOccurrences(of: token, with: "")
+        }
+        return s.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    /// Harmony / channel-tagged reasoning: the private reasoning sits in a
+    /// "thought"/"analysis" channel that precedes the answer's final channel. If a
+    /// channel marker is present, keep only the text after the final-answer
+    /// transition; if the only channel is an unfinished thought (no final
+    /// transition), there's no usable answer, so return empty.
+    private func keepingFinalChannelOnly() -> String {
+        guard contains("channel"), contains("<"), contains("|") else { return self }
+        if let r = range(of: "final<|message|>", options: [.caseInsensitive, .backwards]) {
+            return String(self[r.upperBound...])
+        }
+        if let r = range(of: "<channel|>", options: [.caseInsensitive, .backwards]) {
+            return String(self[r.upperBound...])
+        }
+        if range(of: "<|channel", options: .caseInsensitive) != nil { return "" }
+        return self
+    }
+}

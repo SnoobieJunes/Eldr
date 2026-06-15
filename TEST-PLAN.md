@@ -85,4 +85,22 @@ Wired to APP-SPEC §12 budgets: launch (`XCTApplicationLaunchMetric`), send-pipe
 
 ## 12. CI stub
 
-`.github/workflows/ci.yml`: macOS runner with Xcode 26 selected via `xcode-select` (adjust the runner image label to whatever currently hosts Xcode 26); jobs: `swift test` per package (parallel) → `xcodebuild test` (app + UI) → perf job non-blocking with baseline artifact upload. Cache SPM. Fail the build on any `.security`-tagged failure regardless of retry policy.
+`.github/workflows/ci.yml`: macOS runner with Xcode 26 selected via `xcode-select` (adjust the runner image label to whatever currently hosts Xcode 26); jobs: `swift test` per package (parallel) → `xcodebuild test` (app + UI) → perf job non-blocking with baseline artifact upload. Cache SPM. Fail the build on any `.security`-tagged failure regardless of retry policy. **Add the two new packages to the per-package matrix:** `PQRCMCP` and `PQRCACP` (both headless, network-free — see §13).
+
+## 13. Coverage added after the original v1 cut
+
+Tests landed alongside the post-v1 features (DEVIATIONS A20–A36). The framework, determinism, and "no unit test touches the network/real clock" rules in §1 still hold. Grounded in the actual suites:
+
+- **Deniable silos (A23–A26, A33)** — `App/PQRCTests/SiloKeyTests.swift`: `deterministic_samePassphraseSameSilo`, `differentPassphrase_differentSiloAndKey`, `sealOpen_roundTrips_onlyWithTheRightKey` (the KEK derivation + per-silo seal/open). The launch lock screen / Face-ID-first path is covered app-side (account-gate tests + the `--uitest-biometric` DEBUG harness, A24/b0f7a9f).
+- **Multi-AI behavior (A20–A21, A28, A30)** — `App/PQRCTests/MultiAIBehaviorTests.swift` (15 cases): solo-AI chat replies without a window, the per-conversation context override, marked-only default context, and the gate staying intact for conversations with other humans (the AgentIntegrity suite §6 is unchanged and still green for the human-present case).
+- **Agent-to-agent skills (A32)** — `Packages/PQRCAgent/.../AgentSkillsTests.swift`: `catalog_hasTheTwentySkills`, `baseInjection_carriesGuardrailsAndScope`, `threadSystemPrompt_injectsPinnedSkillAndInstructions`, `threadSystemPrompt_noSkills_keepsGuardrailsAndPASS`; plus an app test that a pinned skill reaches the AI's thread-turn context.
+- **Reasoning-trace stripping + new backends (A30, A34)** — `Packages/PQRCAgent/.../APIProviderTests.swift`: `strippingReasoningTrace_removesThinkBlocks`, `strippingReasoningTrace_handlesChannelFormat`, plus backend-config guards (`openRouter_emptyKey_throwsNotConfigured`, `custom_missingURL_isUnavailable_notNotConfigured`, `custom_endpoint_buildsChatCompletionsURL`, `remoteProviders_emptyKey_allThrowNotConfigured`).
+- **Device-hosted relay hub (A31)** — `Packages/PQRCNostr/.../NearbyRelayHubTests.swift` (~7 cases) over `LocalLinkSimulator`: AUTH-gated kind-1059 forwarding (host sees ciphertext only), the opt-in `ai_request`/`ai_response` path, reconnect. The MC radio adapter itself is hardware-only (T11).
+- **MCP server protocol (A35)** — `Packages/PQRCMCP/.../MCPServerTests.swift` (9): `initialize_returnsProtocolCapabilitiesAndServerInfo`, `toolsList_isReadOnly_noWriteTools` (the read-only-by-construction guarantee), `toolsCall_readConversation_returnsCodenamesNotIdentities` (firewall-redacted output), `toolsCall_missingRequiredArg_isInvalidParams`, `resources_listAndRead`, plus a full stdio handshake.
+- **ACP agent (A36)** — `Packages/PQRCACP/Tests/` (~35 across `ACPAgentTests` + `UnitTests`): handshake, streamed `agent_message_chunk` + `stopReason`, a `read_file` tool round-trip to `tool_call_update: completed`, cancel, the bidirectional outbound-request correlation, and the vendored `strippingReasoningTrace`. Network-free via a mock LLM (`ELDR_ACP_FAKE_LLM=1`).
+
+**Remaining gaps / honest notes:**
+- The MCP **in-app `PersonaRuntime` bridge** (Phase 2) and its consent gate are **not yet built**, so only the demo bridge + protocol layer are tested (A35). The ACP **end-to-end run from Xcode 27** is being exercised in a separate worktree; the committed coverage is the headless suite (A36).
+- Hardware-only paths remain untested in CI: the Multipeer radio adapters for both direct-Nearby (T11) and the relay hub, and the live self-hosted/LM-Studio integrations (verified manually, noted in A30/A34).
+- Performance budgets (§11) still reference the `ptr`/blob path for the 1 MB case; the shipped large-text path is relay **chunking** (N26/A25) and is covered functionally by `ChunkingTests` (size-budget + escape-heavy bucket fit), not yet by a perf budget.
+- The frozen vectors (§2) were regenerated pre-freeze for the NIP-40 expiration tag (A22) and deferred-fold rekey semantics (N6); they remain byte-frozen now.
