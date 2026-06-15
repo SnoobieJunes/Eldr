@@ -1,3 +1,4 @@
+import PQRCAgent
 import PQRCCore
 import SwiftUI
 
@@ -10,6 +11,8 @@ struct ThreadView: View {
 
     @State private var draftText = ""
     @State private var showInvitePicker = false
+    @State private var showSkills = false
+    @State private var pinnedSkillCount = 0
     @State private var now = Int64(Date().timeIntervalSince1970)
     /// Markdown/HTML message currently open in the full-screen reader.
     @State private var fullScreenContent: FullScreenContent?
@@ -51,6 +54,23 @@ struct ThreadView: View {
         }
         .navigationTitle("✳︎ \(thread.title)")
         .navigationBarTitleDisplayMode(.inline)
+        .toolbar {
+            ToolbarItem(placement: .topBarTrailing) {
+                Button {
+                    showSkills = true
+                } label: {
+                    Label(
+                        pinnedSkillCount == 0 ? "Skills" : "Skills · \(pinnedSkillCount)",
+                        systemImage: "puzzlepiece.extension")
+                }
+                .accessibilityIdentifier("thread-skills")
+            }
+        }
+        .sheet(isPresented: $showSkills) {
+            ThreadSkillsView(threadID: thread.id)
+                .onDisappear { pinnedSkillCount = AppSession.threadSkills(thread.id).count }
+        }
+        .task { pinnedSkillCount = AppSession.threadSkills(thread.id).count }
         .fullScreenCover(item: $fullScreenContent) { content in
             FullScreenReaderView(text: content.text)
         }
@@ -196,5 +216,55 @@ struct ThreadView: View {
         .padding(.horizontal)
         .padding(.vertical, 8)
         .background(.bar)
+    }
+}
+
+/// Pin agent-to-agent **skills** to a thread (docs/eldrchat-agent-skills.md):
+/// a shared vocabulary so two people's AIs hand off work cleanly. Pinned skills
+/// are appended to every AI's thread-turn prompt; the AIs use whichever fits.
+struct ThreadSkillsView: View {
+    let threadID: String
+    @Environment(\.dismiss) private var dismiss
+    @State private var selected: Set<String> = []
+
+    var body: some View {
+        NavigationStack {
+            List {
+                Section {
+                    Text("Pin shared **skills** for this thread — a common vocabulary (plan-sync, tech-spec, code-debug, context-export, …) so each person's AI can hand off work the other can parse and act on. Every AI in the thread already follows the same scope, context-boundary, and recording rules; skills add the format.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                ForEach(AgentSkills.catalog) { skill in
+                    Button {
+                        if selected.contains(skill.id) {
+                            selected.remove(skill.id)
+                        } else {
+                            selected.insert(skill.id)
+                        }
+                        AppSession.setThreadSkills(Array(selected), threadID: threadID)
+                    } label: {
+                        HStack(alignment: .top, spacing: 10) {
+                            Image(
+                                systemName: selected.contains(skill.id)
+                                    ? "checkmark.circle.fill" : "circle")
+                                .foregroundStyle(selected.contains(skill.id) ? Color.accentColor : .secondary)
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text(skill.name).font(.headline)
+                                Text(skill.summary).font(.caption).foregroundStyle(.secondary)
+                            }
+                        }
+                    }
+                    .tint(.primary)
+                    .accessibilityIdentifier("skill-\(skill.id)")
+                }
+            }
+            .navigationTitle("Thread skills")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .confirmationAction) { Button("Done") { dismiss() } }
+            }
+            .task { selected = Set(AppSession.threadSkills(threadID)) }
+        }
     }
 }

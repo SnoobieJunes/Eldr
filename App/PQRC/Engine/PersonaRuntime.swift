@@ -210,9 +210,23 @@ actor PersonaRuntime {
                 threadID: threadID, threadTitle: threadID.flatMap { threadTitles[$0] },
                 instructions: ai.instructions, summarize: ai.summarizes)
         }
+        // Shared-thread turns get the agent-skills guardrail injection + any
+        // skills the humans pinned to this thread (docs/eldrchat-agent-skills.md):
+        // channel/scope/context-boundary/bounded-autonomy/transparency + the
+        // shared envelope. Solo/window turns keep the plain prompt.
+        let override: String? = threadID.map { tid in
+            AgentSkills.threadSystemPrompt(
+                displayName: displayName,
+                contextDomain: AppSession.aiContextDomain(),
+                peerName: groupRosters[conversationID]?.name ?? contactName(conversationID),
+                threadID: tid,
+                activeSkillIDs: AppSession.threadSkills(tid),
+                instructions: ai.instructions)
+        }
         let ctx = await agentContext(
             conversationID: conversationID, threadID: threadID, depth: ai.contextDepth,
-            strict: policy == "strict", instructions: ai.instructions, summarize: ai.summarizes)
+            strict: policy == "strict", instructions: ai.instructions, summarize: ai.summarizes,
+            systemPromptOverride: override)
         guard ai.isRemote, firewallEnabled else { return ctx }
         return redactedForRemote(ctx)
     }
@@ -238,7 +252,8 @@ actor PersonaRuntime {
         return AgentContext(
             myIdentityHex: context.myIdentityHex, myDisplayName: "you",
             transcript: entries, threadID: context.threadID, threadTitle: context.threadTitle,
-            instructions: context.instructions, summarize: context.summarize)
+            instructions: context.instructions, summarize: context.summarize,
+            systemPromptOverride: context.systemPromptOverride)
     }
 
     // MARK: - Bootstrap
@@ -1117,7 +1132,8 @@ actor PersonaRuntime {
 
     private func agentContext(
         conversationID: String, threadID: String?, depth: Int = ConfiguredAI.defaultDepth,
-        strict: Bool = false, instructions: String? = nil, summarize: Bool = false
+        strict: Bool = false, instructions: String? = nil, summarize: Bool = false,
+        systemPromptOverride: String? = nil
     ) async -> AgentContext {
         let stored: [StoredMessage]
         if let threadID {
@@ -1194,7 +1210,8 @@ actor PersonaRuntime {
             myIdentityHex: identityHex, myDisplayName: displayName,
             transcript: Array(transcript), threadID: threadID,
             threadTitle: threadID.flatMap { threadTitles[$0] },
-            instructions: instructions, summarize: summarize)
+            instructions: instructions, summarize: summarize,
+            systemPromptOverride: systemPromptOverride)
     }
 
     /// Runs my agents' turns in a thread (gated entirely by the engine). Each of

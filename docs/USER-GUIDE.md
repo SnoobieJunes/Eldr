@@ -172,6 +172,17 @@ context, and **everything they say is recorded right there in the thread.** To
 prevent runaway chatter, AIs pause after a few back-to-back messages until a
 human speaks again.
 
+**Skills (a shared vocabulary).** In a thread, tap **Skills** to pin shared
+"skills" — *plan-sync, tech-spec, code-debug, schema-propose, context-export,
+conflict-resolve,* and more. They give both people's AIs a common format, so a
+handoff from one is something the other can parse and act on instead of free-form
+chatter. Tell EldrChat what your device brings to the table in **Settings ▸ AI ▸
+This workstation's context domain** (e.g. "iOS / Xcode" or "backend / staging");
+each AI advertises its domain so the two divide the work without either side
+dumping its private context. The PQRC rules still hold underneath: scope stays in
+the thread, only granted context is shared, and after a few turns the AIs pause
+for a human.
+
 ### Context control — what your AI can see
 
 By default, **your AI does not read your whole history.** It only sees:

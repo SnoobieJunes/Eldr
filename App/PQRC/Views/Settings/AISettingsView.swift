@@ -19,6 +19,8 @@ struct AISettingsView: View {
     /// Egress firewall: ON by default. Disabling is gated behind a warning.
     @AppStorage("egressFirewallEnabled") private var firewallEnabled = true
     @State private var showFirewallWarning = false
+    /// The asymmetry knob for shared-thread agent skills (what THIS device brings).
+    @State private var contextDomain = AppSession.aiContextDomain()
 
     /// AI config + API keys are scoped to the unlocked silo, so accounts never
     /// share AI setup or credentials.
@@ -102,6 +104,19 @@ struct AISettingsView: View {
                 Text("Egress firewall")
             } footer: {
                 Text("On by default. When on, anything sent to a REMOTE AI is stripped of real names (replaced with your private codenames) and trimmed to a safe size before it leaves your device. On-device AI is never affected. Disabling it is not recommended.")
+            }
+
+            Section {
+                TextField("e.g. iOS / Xcode", text: $contextDomain)
+                    .autocorrectionDisabled()
+                    .onChange(of: contextDomain) { _, value in
+                        AppSession.setAIContextDomain(value)
+                    }
+                    .accessibilityIdentifier("ai-context-domain")
+            } header: {
+                Text("This workstation's context domain")
+            } footer: {
+                Text("A short label of what THIS device brings to a shared AI thread (e.g. \"iOS / Xcode\" or \"backend / staging\"). Each person's AI advertises its domain so two of them divide work without dumping full context. Optional — used by the thread Skills feature.")
             }
 
             Section("What your AI sees") {

@@ -301,6 +301,30 @@ struct MultiAIBehaviorTests {
             replies.isEmpty,
             "per-conversation 'off' stops the AI even though its own policy is active")
     }
+
+    /// A skill pinned to a thread (agent-to-agent skills) reaches the AI's
+    /// thread-turn system prompt, along with the PQRC guardrail injection.
+    @Test func pinnedSkill_reachesThreadTurnContext() async throws {
+        let spy = SpyProvider()
+        let runtime = await makeRuntime("Me", ais: [TetheredAI(id: "a", name: "ai", provider: spy)])
+        await runtime.keychain.deleteAll()
+        _ = try await runtime.bootstrap(inMemoryStore: true)
+        let chatID = try await runtime.createSelfChat()
+        let threadID = try await runtime.createThread(conversationID: chatID, title: "Design")
+        AppSession.setThreadSkills(["tech-spec"], threadID: threadID)
+        defer { AppSession.setThreadSkills([], threadID: threadID) }
+        // Inviting my AI fires a thread turn, which builds the thread context.
+        try await runtime.inviteMyAI(threadID: threadID, durationSeconds: 30 * 60)
+        try await Task.sleep(for: .milliseconds(400))
+
+        let prompt = await spy.capturedSystemPrompt
+        #expect(
+            prompt?.contains("scope:thread:\(threadID)") == true,
+            "the thread guardrail injection reached the AI")
+        #expect(
+            prompt?.contains("tech-spec") == true,
+            "the pinned skill's contract reached the AI's thread-turn prompt")
+    }
 }
 
 /// Deniable silos: a silo created under one passphrase persists and reopens with
@@ -361,11 +385,13 @@ actor SpyProvider: AgentProvider {
     private(set) var capturedInstructions: String?
     private(set) var capturedSummarize = false
     private(set) var capturedCount = 0
+    private(set) var capturedSystemPrompt: String?
     private func capture(_ context: AgentContext) {
         capturedNames = context.transcript.map(\.senderDisplayName)
         capturedInstructions = context.instructions
         capturedSummarize = context.summarize
         capturedCount = context.transcript.count
+        capturedSystemPrompt = context.systemPromptOverride
     }
     func draftReply(context: AgentContext) async throws -> Draft {
         capture(context)

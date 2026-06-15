@@ -301,6 +301,29 @@ final class AppSession {
         else { UserDefaults.standard.removeObject(forKey: key) }
     }
 
+    /// Agent-skills asymmetry knob: a short label of THIS workstation's context
+    /// domain (e.g. "iOS / Xcode"), injected into shared-thread prompts so each
+    /// tether advertises what it has without dumping its full context.
+    nonisolated static func aiContextDomain() -> String {
+        UserDefaults.standard.string(forKey: "aiContextDomain") ?? ""
+    }
+    nonisolated static func setAIContextDomain(_ value: String) {
+        let t = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        if t.isEmpty { UserDefaults.standard.removeObject(forKey: "aiContextDomain") }
+        else { UserDefaults.standard.set(t, forKey: "aiContextDomain") }
+    }
+
+    /// Agent skills pinned to a thread (ids from `AgentSkills.catalog`), appended
+    /// to each AI's thread-turn prompt.
+    nonisolated static func threadSkills(_ threadID: String) -> [String] {
+        UserDefaults.standard.stringArray(forKey: "threadSkills.\(threadID)") ?? []
+    }
+    nonisolated static func setThreadSkills(_ ids: [String], threadID: String) {
+        let key = "threadSkills.\(threadID)"
+        if ids.isEmpty { UserDefaults.standard.removeObject(forKey: key) }
+        else { UserDefaults.standard.set(ids, forKey: key) }
+    }
+
     /// The configured AIs bound to live providers — the runtime's tethered AIs.
     static func makeRuntimeAIs(siloID: String) -> [TetheredAI] {
         loadConfiguredAIs(siloID: siloID).filter(\.isEnabled).map { config in

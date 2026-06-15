@@ -43,11 +43,15 @@ public struct AgentContext: Sendable {
     /// When true, the AI should contribute a brief summary, not verbatim quotes
     /// (the "summarize" output mode — less content leaves the device).
     public let summarize: Bool
+    /// A fully-composed system prompt that REPLACES the built-in one — used for
+    /// shared-thread turns, where the runtime injects the PQRC guardrails + any
+    /// pinned agent-skills (`AgentSkills.threadSystemPrompt`). nil → built-in.
+    public let systemPromptOverride: String?
 
     public init(
         myIdentityHex: String, myDisplayName: String, transcript: [TranscriptEntry],
         threadID: String? = nil, threadTitle: String? = nil,
-        instructions: String? = nil, summarize: Bool = false
+        instructions: String? = nil, summarize: Bool = false, systemPromptOverride: String? = nil
     ) {
         self.myIdentityHex = myIdentityHex
         self.myDisplayName = myDisplayName
@@ -56,6 +60,7 @@ public struct AgentContext: Sendable {
         self.threadTitle = threadTitle
         self.instructions = instructions
         self.summarize = summarize
+        self.systemPromptOverride = systemPromptOverride
     }
 
     /// System prompt for a private draft, honoring the user's instructions +
@@ -72,7 +77,9 @@ public struct AgentContext: Sendable {
     }
 
     /// System prompt for a shared-thread / window turn, same augmentation rules.
+    /// A `systemPromptOverride` (the runtime's composed guardrails + skills) wins.
     public func turnSystemPrompt() -> String {
+        if let systemPromptOverride { return systemPromptOverride }
         var p =
             "You are \(myDisplayName)'s AI in a shared thread with another person's AI. Contribute one short useful message, or reply exactly PASS to stay silent."
         if summarize {

@@ -508,6 +508,22 @@ and affects interop; `[app-only]` — client behavior, no wire impact;
   the SAME provider can hold DIFFERENT keys. **Self-hosted robustness:** the custom
   provider's URL builder accepts a bare `host:port` (→ `/v1/chat/completions`), a
   `…/v1`, or a full path, so LM Studio / Ollama "just work".
+- **A32 — Agent-to-agent skills for shared threads** (2026-06-15, per
+  docs/eldrchat-agent-skills.md): a thread-turn AI now gets a fixed **base
+  injection** of PQRC guardrails (channel / scope / scoped-context boundary /
+  bounded autonomy / transparency / the shared `⟡⟡` envelope) plus any **skills**
+  the humans pinned to that thread, from a 20-entry catalog (plan-sync, tech-spec,
+  code-debug, context-export, conflict-resolve, …). It's pure prompt composition
+  (`AgentSkills` in PQRCAgent): the runtime builds the thread-turn system prompt
+  and passes it as `AgentContext.systemPromptOverride`, which the providers use in
+  place of the built-in turn prompt — NO new wire format, event kind, or privacy
+  exception (the envelope is just message text, recorded by the existing thread
+  output path; `context-export` is the AI half of the existing `AIContextGrant`).
+  Per-account "context domain" (the asymmetry knob) and per-thread pinned-skill
+  lists live in UserDefaults (`nonisolated` AppSession statics). UI: a **Skills**
+  picker in the thread + a context-domain field in Settings ▸ AI. Tested:
+  PQRCAgent `AgentSkills` (catalog/base-injection/composition) + an app test that
+  a pinned skill reaches the AI's thread-turn context.
 - **A25 — Duress = decoy account** (2026-06-14): because every passphrase opens
   its own separate silo, a duress/decoy account needs no special code — create an
   account with a memorable "duress" passphrase, stock it with innocuous chats,
