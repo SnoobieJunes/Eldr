@@ -902,8 +902,32 @@ final class AppSession {
 
 struct RootView: View {
     @Environment(AppSession.self) private var session
+    /// The "explore a new planet" first-run tour. Lives here (RootView) so it
+    /// overlays the whole app without touching MainView/ConversationView, and is
+    /// shared into the environment so Settings ▸ About can relaunch it.
+    @State private var tour = TourCoordinator()
 
     var body: some View {
+        content
+            .environment(tour)
+            .onboardingTour(tour, activeSiloID: session.activeSiloID)
+            // First entry into a real account → present the welcome tour once.
+            // (`.onChange` covers unlock/create; `.task` covers a same-launch boot.)
+            .onChange(of: isSingleMode) { _, single in
+                if single { tour.presentIfFirstRun(siloID: session.activeSiloID) }
+            }
+            .task {
+                if isSingleMode { tour.presentIfFirstRun(siloID: session.activeSiloID) }
+            }
+    }
+
+    /// True only for a real unlocked account (not the lock screen or demo).
+    private var isSingleMode: Bool {
+        if case .single = session.mode { return true }
+        return false
+    }
+
+    @ViewBuilder private var content: some View {
         switch session.mode {
         case .locked, .onboarding:
             AccountGateView()

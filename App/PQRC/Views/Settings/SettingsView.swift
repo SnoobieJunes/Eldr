@@ -9,6 +9,8 @@ struct SettingsView: View {
     @Bindable var model: AppModel
     @Environment(\.dismiss) private var dismiss
     @Environment(AppSession.self) private var session
+    /// Relaunch the first-run "explore a new planet" tour (provided by RootView).
+    @Environment(TourCoordinator.self) private var tour
     @State private var wipeConfirmStage = 0
     @AppStorage("ephemeralReceivingKeys") private var ephemeralKeys = false
     @AppStorage("localLinkEnabled") private var localLinkEnabled = AppSession.localLinkEnabled
@@ -523,6 +525,16 @@ struct SettingsView: View {
 
     private var aboutSection: some View {
         Section("About") {
+            Button {
+                dismiss()
+                // Let Settings fully dismiss before the full-screen tour mounts,
+                // so the cover doesn't fight the sheet's dismissal transition.
+                tour.relaunch()
+            } label: {
+                Label("Take the tour", systemImage: "sparkles")
+            }
+            .accessibilityIdentifier("take-the-tour")
+            .accessibilityHint("Replays the guided tour of EldrChat's features and privacy.")
             LabeledContent("Protocol", value: "pqrc-v1")
             LabeledContent("License", value: "AGPL-3.0")
             Text("Honest limits: relays can see your IP address and that someone messaged you. They cannot see who sent it or what it says. Messages are not deniable, and this identity lives only on this device.")
