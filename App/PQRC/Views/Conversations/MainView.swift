@@ -76,7 +76,15 @@ struct MainView: View {
                 ForEach(model.conversations) { conversation in
                     ConversationRow(conversation: conversation)
                         .tag(conversation.id)
+                        // Combine the identicon + text into ONE accessibility
+                        // element so the WHOLE row is the identified, hittable
+                        // target. After the NavigationSplitView migration the id
+                        // landed on the inner identicon (44×44, reported as "not
+                        // hittable"), and the timestamp text became its own
+                        // too-small audit-flagged element. Combining fixes both.
+                        .accessibilityElement(children: .combine)
                         .accessibilityIdentifier("conversation-\(conversation.title)")
+                        .accessibilityAddTraits(.isButton)
                         .swipeActions(edge: .leading) {
                             Button {
                                 Task { await model.togglePinned(conversation.id) }

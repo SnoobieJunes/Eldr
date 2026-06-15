@@ -125,7 +125,17 @@ final class AppSession {
     /// simulator. UI tests are unaffected — they boot the Local Universe.
     static let defaultRelayURL = "wss://relay.lerants.com"
 
-    static var configuredRelayURLs: [String] {
+    /// Per-silo UserDefaults key: the bare base for legacy/test (empty silo), or
+    /// suffixed by siloID so accounts never share — or accumulate each other's —
+    /// settings at rest. A deniability requirement (DEVIATIONS A33): a flat,
+    /// device-global key would let one silo (or anyone with file access) read
+    /// another silo's content/activity, and a hidden account must leave no such
+    /// trace.
+    nonisolated static func siloDefaultsKey(_ base: String, _ siloID: String) -> String {
+        siloID.isEmpty ? base : "\(base).\(siloID)"
+    }
+
+    static func configuredRelayURLs(siloID: String) -> [String] {
         if let env = ProcessInfo.processInfo.environment["PQRC_RELAY_URL"] {
             return [env]
         }
@@ -137,8 +147,13 @@ final class AppSession {
         {
             return ["local"]
         }
-        let saved = UserDefaults.standard.stringArray(forKey: "relayURLs") ?? []
+        let saved =
+            UserDefaults.standard.stringArray(forKey: siloDefaultsKey("relayURLs", siloID)) ?? []
         return saved.isEmpty ? [Self.defaultRelayURL] : saved
+    }
+
+    static func setRelayURLs(_ urls: [String], siloID: String) {
+        UserDefaults.standard.set(urls, forKey: siloDefaultsKey("relayURLs", siloID))
     }
 
     /// Retained while this device hosts a Multipeer relay (`host` in the relay
@@ -148,13 +163,13 @@ final class AppSession {
     /// "Nearby host's AI" backend can route inference through the same link.
     private var relayClient: MultipeerRelayClient?
 
-    private func makeRelayTransports() async -> [any RelayTransport] {
+    private func makeRelayTransports(siloID: String) async -> [any RelayTransport] {
         await relayHost?.stop()
         relayHost = nil
         await relayClient?.stop()
         relayClient = nil
         var transports: [any RelayTransport] = []
-        for configured in Self.configuredRelayURLs {
+        for configured in Self.configuredRelayURLs(siloID: siloID) {
             switch configured {
             case "local":
                 transports.append(await LocalRelaySimulator(url: "local://relay").connect())
@@ -304,11 +319,15 @@ final class AppSession {
     /// Per-conversation AI context override (Settings → conversation details):
     /// "off" | "marked" | "full", or nil = use each AI's own gather policy.
     /// `nonisolated` so the (actor) PersonaRuntime can read it without an await.
-    nonisolated static func conversationContextMode(_ conversationID: String) -> String? {
-        UserDefaults.standard.string(forKey: "aiContextMode.\(conversationID)")
+    nonisolated static func conversationContextMode(_ conversationID: String, siloID: String = "")
+        -> String?
+    {
+        UserDefaults.standard.string(forKey: siloDefaultsKey("aiContextMode.\(conversationID)", siloID))
     }
-    nonisolated static func setConversationContextMode(_ mode: String?, conversationID: String) {
-        let key = "aiContextMode.\(conversationID)"
+    nonisolated static func setConversationContextMode(
+        _ mode: String?, conversationID: String, siloID: String = ""
+    ) {
+        let key = siloDefaultsKey("aiContextMode.\(conversationID)", siloID)
         if let mode { UserDefaults.standard.set(mode, forKey: key) }
         else { UserDefaults.standard.removeObject(forKey: key) }
     }
@@ -316,22 +335,24 @@ final class AppSession {
     /// Agent-skills asymmetry knob: a short label of THIS workstation's context
     /// domain (e.g. "iOS / Xcode"), injected into shared-thread prompts so each
     /// tether advertises what it has without dumping its full context.
-    nonisolated static func aiContextDomain() -> String {
-        UserDefaults.standard.string(forKey: "aiContextDomain") ?? ""
+    nonisolated static func aiContextDomain(siloID: String = "") -> String {
+        UserDefaults.standard.string(forKey: siloDefaultsKey("aiContextDomain", siloID)) ?? ""
     }
-    nonisolated static func setAIContextDomain(_ value: String) {
+    nonisolated static func setAIContextDomain(_ value: String, siloID: String = "") {
+        let key = siloDefaultsKey("aiContextDomain", siloID)
         let t = value.trimmingCharacters(in: .whitespacesAndNewlines)
-        if t.isEmpty { UserDefaults.standard.removeObject(forKey: "aiContextDomain") }
-        else { UserDefaults.standard.set(t, forKey: "aiContextDomain") }
+        if t.isEmpty { UserDefaults.standard.removeObject(forKey: key) }
+        else { UserDefaults.standard.set(t, forKey: key) }
     }
 
     /// Agent skills pinned to a thread (ids from `AgentSkills.catalog`), appended
     /// to each AI's thread-turn prompt.
-    nonisolated static func threadSkills(_ threadID: String) -> [String] {
-        UserDefaults.standard.stringArray(forKey: "threadSkills.\(threadID)") ?? []
+    nonisolated static func threadSkills(_ threadID: String, siloID: String = "") -> [String] {
+        UserDefaults.standard.stringArray(forKey: siloDefaultsKey("threadSkills.\(threadID)", siloID))
+            ?? []
     }
-    nonisolated static func setThreadSkills(_ ids: [String], threadID: String) {
-        let key = "threadSkills.\(threadID)"
+    nonisolated static func setThreadSkills(_ ids: [String], threadID: String, siloID: String = "") {
+        let key = siloDefaultsKey("threadSkills.\(threadID)", siloID)
         if ids.isEmpty { UserDefaults.standard.removeObject(forKey: key) }
         else { UserDefaults.standard.set(ids, forKey: key) }
     }
@@ -377,7 +398,29 @@ final class AppSession {
     static func siloExists(_ siloID: String) -> Bool {
         KeychainStore(service: siloService(siloID)).loadIfPresent(account: "wrapped-master-key") != nil
     }
-    private static func displayNameKey(_ siloID: String) -> String { "displayName.\(siloID)" }
+    static func displayNameKey(_ siloID: String) -> String { "displayName.\(siloID)" }
+
+    /// One-time migration of pre-silo (flat) UserDefaults into a silo namespace,
+    /// then deletion of the flat originals. The first silo to boot claims any
+    /// legacy device-global value; afterwards the flat keys are gone, so nothing
+    /// bleeds across accounts or sits readable at rest (deniability — A33). Only
+    /// the device-global keys are migrated (`relayURLs`, `aiContextDomain`, and
+    /// the `lastReadAt` contact-activity map); per-conversation override keys are
+    /// namespaced going forward but not back-migrated (they're keyed by a
+    /// silo-specific conversation/thread id, so they never collided across silos).
+    private static func migrateFlatDefaults(into siloID: String) {
+        let defaults = UserDefaults.standard
+        for base in ["relayURLs", "aiContextDomain", "lastReadAt"] {
+            let flatKey = base
+            let scopedKey = siloDefaultsKey(base, siloID)
+            if defaults.object(forKey: scopedKey) == nil,
+                let flat = defaults.object(forKey: flatKey)
+            {
+                defaults.set(flat, forKey: scopedKey)
+            }
+            defaults.removeObject(forKey: flatKey)
+        }
+    }
 
     /// Unlock an existing silo by passphrase. Wrong passphrase / no such silo is
     /// reported generically — a typo and a non-existent account are
@@ -479,8 +522,12 @@ final class AppSession {
 
     private func bootSilo(_ derived: SiloKey.Derived) async {
         activeSilo = derived
+        // Pull any pre-silo (flat, device-global) UserDefaults into THIS silo's
+        // namespace and delete the flat originals, so an older build's settings
+        // don't linger readable at rest or bleed across accounts (A33).
+        Self.migrateFlatDefaults(into: derived.siloID)
         let name = UserDefaults.standard.string(forKey: Self.displayNameKey(derived.siloID)) ?? "Me"
-        let transports = await makeRelayTransports()
+        let transports = await makeRelayTransports(siloID: derived.siloID)
         let runtime = PersonaRuntime(
             displayName: name,
             transports: transports,
@@ -488,13 +535,14 @@ final class AppSession {
             ais: Self.makeRuntimeAIs(siloID: derived.siloID, hubClient: relayClient),
             keychainService: Self.siloService(derived.siloID),
             siloKEK: derived.kek,
+            siloID: derived.siloID,
             enableLocalLink: Self.localLinkEnabled)
         await runtime.setFirewallEnabled(Self.firewallEnabled)
-        let model = AppModel(runtime: runtime, personaName: name)
+        let model = AppModel(runtime: runtime, personaName: name, siloID: derived.siloID)
         do {
             try await model.start(
                 inMemoryStore: false, storeURL: Self.siloStoreURL(derived.siloID),
-                relayURLs: Self.configuredRelayURLs)
+                relayURLs: Self.configuredRelayURLs(siloID: derived.siloID))
             mode = .single(model)
         } catch {
             bootError = String(describing: error)

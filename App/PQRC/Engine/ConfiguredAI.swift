@@ -115,9 +115,10 @@ struct ConfiguredAI: Identifiable, Codable, Equatable, Sendable {
         ["claude", "openai", "gemini", "openrouter", "groq", "custom", "hub"].contains(kind)
     }
 
-    /// Backends whose enablement shows the "send to a remote API" consent alert.
-    /// "hub" is excluded — its peer is a trusted nearby device, not a cloud API.
-    static func requiresConsent(_ kind: String) -> Bool { isRemote(kind) && kind != "hub" }
+    /// Backends whose enablement shows the off-device consent alert. ALL remote
+    /// backends, INCLUDING "hub": using a nearby host's AI still sends your
+    /// message content to that other device, so the user is asked first.
+    static func requiresConsent(_ kind: String) -> Bool { isRemote(kind) }
 
     /// Keychain account holding the API key for a remote backend, if any.
     static func keyAccount(for kind: String) -> String? {

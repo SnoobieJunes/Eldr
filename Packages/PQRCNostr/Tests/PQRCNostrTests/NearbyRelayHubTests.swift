@@ -134,6 +134,7 @@ struct NearbyRelayHubTests {
         // The host offers an AI; a companion uses it over the same link.
         let answer: HubAIAnswer = { system, prompt in "echo: \(prompt)" }
         let (_, host, client) = try await makeHostAndClient(ai: answer)
+        try await client.authenticate(keypair: try keypair("ab"), randomSource: SystemRandomSource())
         let reply = await client.requestAI(system: "be brief", prompt: "what's the plan?")
         #expect(reply == "echo: what's the plan?", "the companion used the host's shared AI over Multipeer")
         await client.stop()
@@ -142,6 +143,7 @@ struct NearbyRelayHubTests {
 
     @Test func host_withNoAI_repliesNil() async throws {
         let (_, host, client) = try await makeHostAndClient(ai: nil)
+        try await client.authenticate(keypair: try keypair("ac"), randomSource: SystemRandomSource())
         let reply = await client.requestAI(system: "x", prompt: "y")
         #expect(reply == nil, "a host not sharing an AI returns no reply")
         await client.stop()

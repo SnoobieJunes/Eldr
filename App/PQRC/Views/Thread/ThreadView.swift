@@ -67,10 +67,12 @@ struct ThreadView: View {
             }
         }
         .sheet(isPresented: $showSkills) {
-            ThreadSkillsView(threadID: thread.id)
-                .onDisappear { pinnedSkillCount = AppSession.threadSkills(thread.id).count }
+            ThreadSkillsView(threadID: thread.id, siloID: model.siloID)
+                .onDisappear {
+                    pinnedSkillCount = AppSession.threadSkills(thread.id, siloID: model.siloID).count
+                }
         }
-        .task { pinnedSkillCount = AppSession.threadSkills(thread.id).count }
+        .task { pinnedSkillCount = AppSession.threadSkills(thread.id, siloID: model.siloID).count }
         .fullScreenCover(item: $fullScreenContent) { content in
             FullScreenReaderView(text: content.text)
         }
@@ -224,6 +226,8 @@ struct ThreadView: View {
 /// are appended to every AI's thread-turn prompt; the AIs use whichever fits.
 struct ThreadSkillsView: View {
     let threadID: String
+    /// The unlocked silo, so pinned skills are stored per-account (A33).
+    let siloID: String
     @Environment(\.dismiss) private var dismiss
     @State private var selected: Set<String> = []
 
@@ -242,7 +246,7 @@ struct ThreadSkillsView: View {
                         } else {
                             selected.insert(skill.id)
                         }
-                        AppSession.setThreadSkills(Array(selected), threadID: threadID)
+                        AppSession.setThreadSkills(Array(selected), threadID: threadID, siloID: siloID)
                     } label: {
                         HStack(alignment: .top, spacing: 10) {
                             Image(
@@ -264,7 +268,7 @@ struct ThreadSkillsView: View {
             .toolbar {
                 ToolbarItem(placement: .confirmationAction) { Button("Done") { dismiss() } }
             }
-            .task { selected = Set(AppSession.threadSkills(threadID)) }
+            .task { selected = Set(AppSession.threadSkills(threadID, siloID: siloID)) }
         }
     }
 }

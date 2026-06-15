@@ -495,11 +495,17 @@ and affects interop; `[app-only]` — client behavior, no wire impact;
   `NearbyLink` (`NearbyRelayHost`); companions type `nearby` → a `RelayTransport`
   over the radio (`MultipeerRelayClient`). No router, no public relay, no third
   party. The kind-1059 anchor-relay rule (serve a wrap only to the AUTHed,
-  p-tagged recipient) still holds over the hub, so the host (a trusted peer's
-  device) sees only sealed ciphertext + p-tags, never content — strictly better
-  than café Wi-Fi or a public relay. The host can also **share its on-device AI**
-  via `ai_request`/`ai_response` frames (the "Tier 2 LLM over Multipeer" request —
-  realized iPhone-to-iPhone, no Mac needed). The whole protocol runs against
+  p-tagged recipient) still holds over the hub, so on the **message-delivery
+  path** the host (a trusted peer's device) sees only sealed ciphertext + p-tags,
+  never content — strictly better than café Wi-Fi or a public relay. The host can
+  also **share its on-device AI** via `ai_request`/`ai_response` frames (the
+  "Tier 2 LLM over Multipeer" request — realized iPhone-to-iPhone, no Mac needed).
+  This AI-sharing path is the **one exception** to "host never sees content": a
+  companion that opts into the host's AI sends its own (firewall-redacted) message
+  text to the host's model — content, by the companion's explicit consent (the
+  off-device-AI consent alert now fires for the `hub` backend too), AUTH-gated so
+  only an authenticated companion can request it. The delivery path stays
+  content-free; only the opt-in AI path carries words. The whole protocol runs against
   `LocalLinkSimulator` (6 headless tests); only the MC radio adapter needs
   hardware (a new `pqrc-relay` Bonjour service, distinct from direct-Nearby's
   `pqrc-local`). **Per-AI controls:** each tethered AI has an independent on/off
@@ -538,7 +544,36 @@ and affects interop; `[app-only]` — client behavior, no wire impact;
   per-silo records (the only approach that doesn't leak count); naive decoy files
   are distinguishable (a real store has a valid SQLite header, random padding
   doesn't), so they are deliberately NOT shipped — false deniability is worse
-  than a documented limit. Tracked for Phase 2.
+  than a documented limit. Tracked for Phase 2. **Same residual surface, after
+  A33:** per-account settings now carry a `.<siloID>` suffix in the (unencrypted)
+  UserDefaults plist, so the *set of distinct siloID suffixes* there is one more
+  place a forensic image can count accounts — the same count leak as the store
+  files, not a new content leak (the values are scoped, and a silo writes a
+  suffixed key only once it has non-default settings). The Phase-2 pooled-store
+  design subsumes this (opaque records, no siloID in the clear).
+- **A33 — Per-silo UserDefaults namespacing (deniable-account isolation)**
+  `[app-only]` (2026-06-15): the deniable-silo work (A23–A26) sealed each
+  account's *secrets* and *store* per-silo, but several app preferences were
+  still written under flat, device-global UserDefaults keys — so a second silo's
+  runtime read the first's, and a forensic image read all of them at rest. That
+  broke the core promise: a hidden account must leave no trace a cover account
+  (or file access) can correlate. The leaking keys were `relayURLs`, the
+  `aiContextDomain` asymmetry knob, the per-conversation `aiContextMode.<convID>`
+  override, per-thread `threadSkills.<threadID>`, and the `lastReadAt`
+  contact-activity map (the worst — a plaintext list of who you talk to). Plus
+  Settings wrote a flat `displayName` that boot never read (dead *and* leaky).
+  Fix: every per-account default is namespaced `<base>.<siloID>` via
+  `AppSession.siloDefaultsKey`; the runtime carries its `siloID`, `AppModel`
+  carries its `siloID`, and the Settings/Thread/Conversation views pass it
+  through. `bootSilo` runs a one-time `migrateFlatDefaults` that pulls any legacy
+  flat `relayURLs`/`aiContextDomain`/`lastReadAt` into the booting silo's
+  namespace and *deletes the flat originals*, and the alias editor now writes the
+  per-silo `displayName.<siloID>` boot already reads (also fixes a real "alias
+  doesn't persist" bug). Relay lists are treated as **per-account**, not
+  device-global, as the privacy-maximizing choice (a hidden silo's custom relay
+  must not surface in a cover silo's Settings). Tests/demo use the bare
+  (empty-siloID) keys, so the existing suite is unchanged; the residual
+  count-leak from the `.<siloID>` suffixes is folded into A26.
 
 ### Tech debt `[tech-debt]`
 

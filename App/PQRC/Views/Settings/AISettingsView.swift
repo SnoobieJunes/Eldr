@@ -20,7 +20,8 @@ struct AISettingsView: View {
     @AppStorage("egressFirewallEnabled") private var firewallEnabled = true
     @State private var showFirewallWarning = false
     /// The asymmetry knob for shared-thread agent skills (what THIS device brings).
-    @State private var contextDomain = AppSession.aiContextDomain()
+    /// Loaded per-silo in `.task` (can't read `siloID` in a property initializer).
+    @State private var contextDomain = ""
 
     /// AI config + API keys are scoped to the unlocked silo, so accounts never
     /// share AI setup or credentials.
@@ -110,7 +111,7 @@ struct AISettingsView: View {
                 TextField("e.g. iOS / Xcode", text: $contextDomain)
                     .autocorrectionDisabled()
                     .onChange(of: contextDomain) { _, value in
-                        AppSession.setAIContextDomain(value)
+                        AppSession.setAIContextDomain(value, siloID: siloID)
                     }
                     .accessibilityIdentifier("ai-context-domain")
             } header: {
@@ -130,7 +131,10 @@ struct AISettingsView: View {
         }
         .navigationTitle("AI")
         .navigationBarTitleDisplayMode(.inline)
-        .task { ais = AppSession.loadConfiguredAIs(siloID: siloID) }
+        .task {
+            ais = AppSession.loadConfiguredAIs(siloID: siloID)
+            contextDomain = AppSession.aiContextDomain(siloID: siloID)
+        }
         .alert("Turn off the egress firewall?", isPresented: $showFirewallWarning) {
             Button("Turn off — send raw context", role: .destructive) {
                 firewallEnabled = false
@@ -140,7 +144,7 @@ struct AISettingsView: View {
         } message: {
             Text("With the firewall off, a remote AI provider will receive your contacts' real names and your full recent conversation, unredacted and unbounded. On-device AI is unaffected either way. Only do this if you fully trust that provider.")
         }
-        .alert("Send conversations to a remote API?", isPresented: showConsent) {
+        .alert("Send conversation content off this device?", isPresented: showConsent) {
             Button("Enable remote AI", role: .destructive) {
                 pendingRemote = nil
                 persist()
@@ -156,7 +160,7 @@ struct AISettingsView: View {
                 persist()
             }
         } message: {
-            Text("Decrypted conversation context will be sent to a remote API for inference. Your signing keys never leave this device, but message content does. This trades privacy for capability.")
+            Text("Decrypted message content is sent off this device for inference — to a cloud provider, or, for the Nearby host's AI, to that nearby device. Your signing keys never leave this device, but your words do (contact names are replaced with codenames while the egress firewall is on). This trades privacy for capability.")
         }
     }
 
@@ -287,7 +291,7 @@ struct AISettingsView: View {
     /// What this AI will actually use, surfacing the Demo fallback.
     private func statusLine(for ai: ConfiguredAI) -> String {
         if ai.kind == "hub" {
-            return AppSession.configuredRelayURLs.contains("nearby")
+            return AppSession.configuredRelayURLs(siloID: siloID).contains("nearby")
                 ? "Uses a nearby host's AI over Multipeer — stay near the host."
                 : "Set this device's relay to `nearby` (Settings ▸ Servers) to use a host's shared AI."
         }
@@ -312,7 +316,7 @@ struct AISettingsView: View {
     }
 
     private func statusOK(for ai: ConfiguredAI) -> Bool {
-        if ai.kind == "hub" { return AppSession.configuredRelayURLs.contains("nearby") }
+        if ai.kind == "hub" { return AppSession.configuredRelayURLs(siloID: siloID).contains("nearby") }
         if ai.kind == "custom" {
             return !(ai.baseURL ?? "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
         }

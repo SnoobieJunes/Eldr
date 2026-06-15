@@ -16,6 +16,12 @@ import PQRCCore
 /// wrong companion. The radio itself authenticates nobody; all real guarantees
 /// ride the seal + ratchet inside, exactly as on the internet relay path.
 ///
+/// ONE exception to "host never sees content": the OPTIONAL AI-sharing path
+/// (`ai_request`). When a companion explicitly opts into the host's AI, it sends
+/// its own message text (egress-firewall-redacted — contact names → codenames)
+/// to the host's model. That is content, by the companion's own choice and
+/// consent; the relay/message-delivery path remains content-free.
+///
 /// The whole protocol runs against `LocalLinkSimulator` in tests; only the MC
 /// radio adapter (`MultipeerNearbyLink`) needs hardware.
 
@@ -200,6 +206,14 @@ public actor NearbyRelayHost {
             }
         case .aiRequest:
             guard let aiID = frame.aiID else { return }
+            // Gate inference behind AUTH (mirroring the `req` gate): an
+            // unauthenticated peer can't spam the host's model — compute/battery
+            // DoS. Authed companions are unaffected.
+            guard authedPubkey[peer] != nil else {
+                await send(
+                    .init(kind: .aiResponse, message: "Authenticate first.", aiID: aiID), to: peer)
+                return
+            }
             let reply = await aiAnswer?(frame.aiSystem ?? "", frame.aiPrompt ?? "")
             await send(
                 .init(

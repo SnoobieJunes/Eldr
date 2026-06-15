@@ -61,7 +61,8 @@ struct ConversationDetailsView: View {
                     .accessibilityIdentifier("conversation-ai-mode")
                     .onChange(of: aiContextMode) { _, newValue in
                         AppSession.setConversationContextMode(
-                            newValue == "default" ? nil : newValue, conversationID: conversationID)
+                            newValue == "default" ? nil : newValue, conversationID: conversationID,
+                            siloID: model.siloID)
                     }
                 } header: {
                     Text("AI in this conversation")
@@ -92,7 +93,8 @@ struct ConversationDetailsView: View {
                 let info = await model.runtime.contactInfo(conversationID)
                 verified = info.verified
                 blocked = info.blocked
-                aiContextMode = AppSession.conversationContextMode(conversationID) ?? "default"
+                aiContextMode =
+                    AppSession.conversationContextMode(conversationID, siloID: model.siloID) ?? "default"
             }
             .toolbar {
                 ToolbarItem(placement: .confirmationAction) {

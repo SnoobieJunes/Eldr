@@ -218,10 +218,16 @@ Wi-Fi/Bluetooth:
   and *more* private than a café's Wi-Fi or a public relay because nothing leaves
   the little circle of devices.
 
+  - **Messages stay end-to-end encrypted exactly as on the internet:** the host
+    relays sealed envelopes and never sees the content of messages you send to
+    other people.
   - The host can also **share its on-device AI** — companions use the host's Apple
-    Intelligence over the same link.
-  - Everything stays end-to-end encrypted exactly as on the internet: the host
-    relays sealed envelopes and never sees message content.
+    Intelligence over the same link. This is the one exception to the line above:
+    if *you* choose to use the host's AI, the message text *you* send to that AI
+    goes to the host's device so its model can answer (contact names are still
+    replaced with codenames while the firewall is on). EldrChat asks you to
+    confirm before enabling it, just like any off-device AI — so it's your call,
+    not the host's.
 
 *(These radio features need real hardware — they don't run on the iOS Simulator.)*
 

@@ -57,6 +57,11 @@ actor PersonaRuntime {
     /// nil = the legacy device-bound (Secure Enclave) path, used only to READ a
     /// pre-silo account during migration.
     private let siloKEK: SymmetricKey?
+    /// This silo's id, used to namespace per-account UserDefaults (per-conversation
+    /// AI mode, thread skills, context domain) so accounts never read or
+    /// accumulate each other's settings (deniability — A33). Empty in tests/demo,
+    /// which use the bare (un-suffixed) keys.
+    private let siloID: String
 
     private(set) var identity: PQRCIdentity!
     private(set) var nostrKeypair: NostrKeypair!
@@ -148,9 +153,11 @@ actor PersonaRuntime {
         nonceSource: any NonceSource = SystemNonceSource(),
         keychainService: String,
         siloKEK: SymmetricKey? = nil,
+        siloID: String = "",
         enableLocalLink: Bool = false
     ) {
         self.siloKEK = siloKEK
+        self.siloID = siloID
         self.displayName = displayName
         self.transports = transports
         self.blobStore = blobStore
@@ -196,7 +203,7 @@ actor PersonaRuntime {
         // A per-conversation override (Settings → conversation details) wins over
         // the AI's own gather policy.
         var policy = ai.contextPolicy
-        switch AppSession.conversationContextMode(conversationID) {
+        switch AppSession.conversationContextMode(conversationID, siloID: siloID) {
         case "off": policy = "off"
         case "marked": policy = "strict"
         case "full": policy = "active"
@@ -214,13 +221,24 @@ actor PersonaRuntime {
         // skills the humans pinned to this thread (docs/eldrchat-agent-skills.md):
         // channel/scope/context-boundary/bounded-autonomy/transparency + the
         // shared envelope. Solo/window turns keep the plain prompt.
+        // Names in the guardrail prompt obey the egress firewall too: for a
+        // REMOTE AI with the firewall on, use codenames ("you" / a contact's
+        // local autoName) instead of real display names — otherwise the skills
+        // prompt would leak the very social graph the firewall withholds from the
+        // redacted transcript (DEVIATIONS A19/A20).
+        let redactNames = ai.isRemote && firewallEnabled
+        let promptDisplayName = redactNames ? "you" : displayName
+        let promptPeerName =
+            redactNames
+            ? (contactRecords[conversationID]?.autoName ?? "a contact")
+            : (groupRosters[conversationID]?.name ?? contactName(conversationID))
         let override: String? = threadID.map { tid in
             AgentSkills.threadSystemPrompt(
-                displayName: displayName,
-                contextDomain: AppSession.aiContextDomain(),
-                peerName: groupRosters[conversationID]?.name ?? contactName(conversationID),
+                displayName: promptDisplayName,
+                contextDomain: AppSession.aiContextDomain(siloID: siloID),
+                peerName: promptPeerName,
                 threadID: tid,
-                activeSkillIDs: AppSession.threadSkills(tid),
+                activeSkillIDs: AppSession.threadSkills(tid, siloID: siloID),
                 instructions: ai.instructions)
         }
         let ctx = await agentContext(
@@ -890,7 +908,7 @@ actor PersonaRuntime {
     /// A per-conversation override of "off" (Settings → conversation details)
     /// disables ALL AI activity here — no autonomous posting and no context.
     private func aiSuppressed(in conversationID: String) -> Bool {
-        AppSession.conversationContextMode(conversationID) == "off"
+        AppSession.conversationContextMode(conversationID, siloID: siloID) == "off"
     }
 
     /// Each tethered AI replies to me in turn, rebuilding context each time so a

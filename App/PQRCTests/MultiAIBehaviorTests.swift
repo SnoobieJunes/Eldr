@@ -340,6 +340,10 @@ struct MultiAIBehaviorTests {
         try await host.start()
         try await client.start()
         try await Task.sleep(for: .milliseconds(150))
+        // The host gates AI inference behind AUTH; a real companion authenticates.
+        try await client.authenticate(
+            keypair: try NostrKeypair(privateKey: Data(repeating: 0xab, count: 32)),
+            randomSource: SystemRandomSource())
 
         let provider = NearbyHubAIProvider(client: client)
         let draft = try await provider.draftReply(

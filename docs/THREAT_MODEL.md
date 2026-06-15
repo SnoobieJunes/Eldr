@@ -139,6 +139,29 @@ identity in discovery). What a nearby observer still learns:
   anonymous peers and is treated as a transport nicety, not a security
   boundary; every guarantee comes from the seal + ratchet layers above it.
 
+### 2.9a Device-hosted relay hub: delivery is content-free, AI-sharing is not
+A device can act as a **pocket relay** (`host` in Settings → Servers) so
+companions (`nearby`) exchange messages with no router or public relay
+(`NearbyRelayHub`, a distinct `_pqrc-relay` Bonjour service). Two distinct paths
+with two distinct exposures:
+
+- **Message-delivery path — content-free.** The host runs the relay engine and
+  forwards gift-wrapped events. The kind-1059 anchor-relay rule still applies (a
+  wrap is served only to the AUTHed, p-tagged recipient), so the host — a trusted
+  peer's device, not a public server — sees only sealed ciphertext + p-tags,
+  exactly what any relay sees, and cannot fan a wrap to the wrong companion or
+  read one. Strictly better than café Wi-Fi for the same reasons as §2.9.
+- **AI-sharing path — the host SEES content, by design.** A companion may opt
+  into the host's on-device AI (`ai_request`/`ai_response`). When it does, it
+  sends its own message text to the host's model. That text is content the host
+  device reads. It is gated three ways: the companion must AUTHenticate to the
+  hub first (an unauthenticated `ai_request` is refused), the egress firewall
+  redacts contact names to codenames before the text leaves (default on), and
+  the off-device-AI **consent alert fires for the `hub` backend** just as for a
+  cloud provider — so a companion is told its words go to another device before
+  any are sent. This is the one place the "host never sees content" guarantee
+  does not hold, and it holds nowhere else on the hub.
+
 ### 2.10 Open inbox is an explicit reachability trade
 By default, first contact from an unknown sender waits in Message Requests
 and nothing renders (or is even fetched) until the user accepts. Settings →

@@ -76,9 +76,15 @@ final class AppModel {
 
     private var pumpTask: Task<Void, Never>?
 
-    init(runtime: PersonaRuntime, personaName: String) {
+    /// The unlocked silo this model belongs to — namespaces local-only UI state
+    /// (read receipts) so accounts never share or accumulate it at rest (A33).
+    /// Empty/distinct for the demo universe's in-memory personas.
+    let siloID: String
+
+    init(runtime: PersonaRuntime, personaName: String, siloID: String = "") {
         self.runtime = runtime
         self.personaName = personaName
+        self.siloID = siloID
     }
 
     func start(
@@ -236,13 +242,14 @@ final class AppModel {
 
     // MARK: - Read state (local-only; D5 — no remote receipts of any kind)
 
+    private var lastReadKey: String { AppSession.siloDefaultsKey("lastReadAt", siloID) }
     private var lastReadAt: [String: Int64] {
         get {
-            ((UserDefaults.standard.dictionary(forKey: "lastReadAt") as? [String: Int]) ?? [:])
+            ((UserDefaults.standard.dictionary(forKey: lastReadKey) as? [String: Int]) ?? [:])
                 .mapValues(Int64.init)
         }
         set {
-            UserDefaults.standard.set(newValue.mapValues(Int.init), forKey: "lastReadAt")
+            UserDefaults.standard.set(newValue.mapValues(Int.init), forKey: lastReadKey)
         }
     }
 

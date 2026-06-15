@@ -11,7 +11,7 @@ struct SettingsView: View {
     @State private var wipeConfirmStage = 0
     @AppStorage("ephemeralReceivingKeys") private var ephemeralKeys = false
     @AppStorage("localLinkEnabled") private var localLinkEnabled = AppSession.localLinkEnabled
-    @State private var relayURLs: [String] = AppSession.configuredRelayURLs
+    @State private var relayURLs: [String] = []
     @State private var newRelayURL = ""
     @State private var relayError: String?
     @State private var needsReconnect = false
@@ -56,7 +56,9 @@ struct SettingsView: View {
                 }
             }
             .onAppear {
-                myAlias = UserDefaults.standard.string(forKey: "displayName") ?? ""
+                relayURLs = AppSession.configuredRelayURLs(siloID: model.siloID)
+                myAlias =
+                    UserDefaults.standard.string(forKey: AppSession.displayNameKey(model.siloID)) ?? ""
                 biometricOn = session.hasBiometricUnlock
                 Task {
                     openInboxUntil = await model.runtime.openInboxActiveUntil()
@@ -107,7 +109,10 @@ struct SettingsView: View {
 
     private func saveAlias() {
         let trimmed = myAlias.trimmingCharacters(in: .whitespacesAndNewlines)
-        UserDefaults.standard.set(trimmed.isEmpty ? nil : trimmed, forKey: "displayName")
+        // Per-silo, matching the key `bootSilo` reads — a flat `displayName` write
+        // was both dead (never read at boot) and a cross-account leak (A33).
+        UserDefaults.standard.set(
+            trimmed.isEmpty ? nil : trimmed, forKey: AppSession.displayNameKey(model.siloID))
         Task { await model.setMyAlias(trimmed.isEmpty ? nil : trimmed) }
     }
 
@@ -276,7 +281,7 @@ struct SettingsView: View {
     }
 
     private func saveRelays() {
-        UserDefaults.standard.set(relayURLs, forKey: "relayURLs")
+        AppSession.setRelayURLs(relayURLs, siloID: model.siloID)
         needsReconnect = true
     }
 
@@ -368,7 +373,7 @@ struct SettingsView: View {
                 republishingPrekeys = true
                 Task {
                     try? await model.runtime.republishBundle(
-                        relayURLs: AppSession.configuredRelayURLs)
+                        relayURLs: AppSession.configuredRelayURLs(siloID: model.siloID))
                     model.prekeyCount = await model.runtime.oneTimePrekeyCount()
                     republishingPrekeys = false
                 }
