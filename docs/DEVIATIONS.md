@@ -623,6 +623,48 @@ and affects interop; `[app-only]` — client behavior, no wire impact;
   ACP stays explicitly out of v1; if ever wanted it is a parallel `PQRCACP`
   client following the same read-only-then-window-gated discipline.
 
+- **A36 — ACP AGENT (EldrChat's self-hosted LLM pilots Xcode)** `[app-only]`
+  (2026-06-15): the dual of A35. Where the MCP server exposes secure chat *to* a
+  harness (EldrChat as data source), this lets EldrChat's local model *act* as a
+  coding agent that an ACP client (Xcode 27) spawns over stdio to write code,
+  build, and run simulator tests. Decision was again **adopt, don't invent**:
+  standard **Agent Client Protocol** (JSON-RPC 2.0 over stdio), EldrChat as the
+  **agent**; Xcode is the client. New SPM package `Packages/PQRCACP` (library
+  `PQRCACP` + executable `eldr-acp` + tests; Swift 6 strict concurrency; no
+  app/crypto/SwiftUI deps; `swift test` headless, network-free via a mock LLM).
+  Ambiguities resolved:
+  • **No `authenticate`** — we advertise `authMethods: []` (a locally-spawned
+    subprocess is already trusted; auth would add friction with no security gain).
+  • **`loadSession: false`, no `session/load`** — sessions are in-memory per run.
+  • **Permission model:** mutating tools (`write_file`, `run_shell`) call
+    `session/request_permission` first; read tools don't. If the client doesn't
+    answer (transport failure), we DEFAULT TO ALLOW — the client deliberately
+    spawned us to act, and a hung prompt shouldn't wedge the turn. (Privacy note:
+    this agent runs entirely on the developer's own machine against their own
+    files/Xcode and a local model; no secure-chat content or Nostr wire is
+    involved, so the §13 autonomous-send invariant is not in scope here — there is
+    no relay path. The permission default trades a hard fail-closed for usability
+    *within that local-dev blast radius only*.)
+  • **`run_shell` honors `DEVELOPER_DIR`** from env (and `ELDR_WORKDIR` for cwd) so
+    `xcodebuild`/`xcrun simctl` target Xcode 27 beta; commands run via
+    `/bin/zsh -lc`. Prefers the client's `terminal/*` (so commands show in Xcode),
+    falls back to Foundation `Process`. `write_file`/`read_file` prefer the
+    client's `fs/*` (edits show in the editor), fall back to `FileManager`.
+  • **`String.strippingReasoningTrace()` VENDORED**, not imported from PQRCAgent:
+    depending on PQRCAgent drags in PQRCCore + PQRCNostr → swift-crypto +
+    swift-secp256k1 (a heavy C build with a build-tool plugin, cf. T6) into an
+    otherwise dependency-free CLI agent, for a ~40-line string helper. The two
+    copies must be kept in sync (noted in the vendored file's header).
+  • **BRAIN behind an `LLMClient` protocol** (OpenAI-compatible Chat Completions
+    *with* tool/function calling); config via `ELDR_LLM_URL` (default
+    `http://127.0.0.1:1337/v1`), `ELDR_LLM_TOKEN`, `ELDR_LLM_MODEL`
+    (default `local-model`). Tests inject a mock; `ELDR_ACP_FAKE_LLM=1` selects a
+    built-in echo LLM so the executable runs with no model server.
+  The turn loop caps at 20 tool iterations and honors `session/cancel`. Verified:
+  35 headless tests (handshake, streamed `agent_message_chunk` + `stopReason`, a
+  `read_file` tool round-trip to `tool_call_update: completed`, cancel, the
+  bidirectional outbound-request correlation) + a piped stdio smoke test.
+
 ### Tech debt `[tech-debt]`
 
 - **T1 — Secure Enclave fallback.** Where `SecureEnclave.isAvailable == false`

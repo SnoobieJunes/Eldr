@@ -1,0 +1,93 @@
+import Foundation
+import PQRCACP
+
+// EldrChat ACP agent over stdio. An ACP client (Xcode 27) spawns this binary and
+// drives it with newline-delimited JSON-RPC on stdin; the agent writes responses
+// and streams session/update notifications on stdout. Diagnostics go to stderr so
+// they never corrupt the protocol stream.
+//
+// The BRAIN is a self-hosted OpenAI-compatible LLM (LM Studio / Ollama / vLLM)
+// configured via ELDR_LLM_URL / ELDR_LLM_TOKEN / ELDR_LLM_MODEL. Set
+// ELDR_ACP_FAKE_LLM=1 to use a built-in echo "LLM" (no server needed) for smoke
+// tests. Shell commands honor DEVELOPER_DIR (select Xcode) and ELDR_WORKDIR.
+
+/// Tracks the in-flight per-line Tasks so the process can drain them before exit
+/// (piped stdin hits EOF fast; without this the program would exit before the
+/// async handlers flush their stdout writes).
+actor InFlight {
+    private var tasks: [Task<Void, Never>] = []
+    func add(_ task: Task<Void, Never>) { tasks.append(task) }
+    func drain() async {
+        // Snapshot-and-await in waves: awaiting a turn can spawn more reads/tasks.
+        while !tasks.isEmpty {
+            let wave = tasks
+            tasks.removeAll()
+            for t in wave { await t.value }
+        }
+    }
+}
+
+@main
+struct EldrACPMain {
+    static func main() async {
+        let environment = ProcessInfo.processInfo.environment
+
+        func log(_ message: String) {
+            FileHandle.standardError.write(Data("eldr-acp: \(message)\n".utf8))
+        }
+
+        // Choose the brain.
+        let llm: any LLMClient
+        if environment["ELDR_ACP_FAKE_LLM"] == "1" {
+            llm = EchoLLMClient()
+            log("using built-in echo LLM (ELDR_ACP_FAKE_LLM=1)")
+        } else {
+            let config = LLMConfig.fromEnvironment(environment)
+            llm = OpenAICompatibleLLMClient(config: config)
+            log("LLM url=\(config.url) model=\(config.model)")
+        }
+
+        let sink = FileHandleOutputSink(FileHandle.standardOutput)
+        let connection = ClientConnection(sink: sink)
+        let agent = ACPAgent(
+            connection: connection,
+            llm: llm,
+            toolEnvironment: .fromEnvironment(environment))
+        let inFlight = InFlight()
+
+        log("ready on stdio")
+
+        // Read loop. CRUCIAL routing: a line that is a RESPONSE to one of our
+        // outbound requests (no "method", has "id") goes STRAIGHT to the
+        // ClientConnection actor, NOT through the agent — the agent may be awaiting
+        // that very response inside session/prompt, so routing it through the agent
+        // would deadlock. Each line is handled on its own Task so a long-running
+        // prompt turn doesn't block delivery of the responses it awaits; the tasks
+        // are tracked and drained before exit.
+        while let line = readLine(strippingNewline: true) {
+            let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
+            if trimmed.isEmpty { continue }
+
+            if let message = JSONValue.parse(trimmed), message["method"] == nil,
+                message["id"] != nil
+            {
+                let task = Task<Void, Never> {
+                    _ = await connection.deliver(response: message)
+                }
+                await inFlight.add(task)
+                continue
+            }
+
+            let task = Task {
+                if let response = await agent.handle(line: trimmed) {
+                    await sink.write(line: response)
+                }
+            }
+            await inFlight.add(task)
+        }
+
+        // stdin closed — let outstanding turns finish writing before we exit.
+        await inFlight.drain()
+        log("stdin closed; exiting")
+    }
+}
