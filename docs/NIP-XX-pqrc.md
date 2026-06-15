@@ -215,9 +215,13 @@ The fuzzed timestamp is drawn once per message — uniform in
 [now − 172800, now], never the future — and reused as `created_at` on BOTH the
 seal and the wrap.
 
-**Decrypted body** (inside `ciphertext`): `{"text", "sent_at", "group": {"id"},
-"thread": {"id"}, "group_create", "thread_create", "ai_invite", "is_context"}` —
-true send time and all routing live inside the encryption.
+**Decrypted body** (inside `ciphertext`): `{"text", "sent_at", "message_id",
+"group": {"id"}, "thread": {"id"}, "group_create", "thread_create", "ai_invite",
+"is_context"}` — true send time and all routing live inside the encryption.
+`message_id` is the sender's stable id for this message; the recipient stores it
+verbatim so both parties key the same message identically (older clients omit it
+and mint their own). It is what lets a later `ai_context_mark` resolve the peer's
+copy of a message. Optional and ignored by clients that don't recognize it (§12).
 
 ## 8. Agent authenticity (`agent_sig`)
 

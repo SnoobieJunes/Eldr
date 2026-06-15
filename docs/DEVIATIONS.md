@@ -419,21 +419,24 @@ and affects interop; `[app-only]` — client behavior, no wire impact;
   account exists). A wrong passphrase derives a different, non-existent silo,
   indistinguishable from "no account". Isolation is CRYPTOGRAPHIC, not
   OS-enforced — iOS gives one app a single sandbox (no Android secure island).
-- **A24 — Biometric convenience tier (OFF by default)** (2026-06-15, revised):
-  the primary account *may* store its {siloID, KEK} behind a `.userPresence`
-  Keychain item (Face ID / Touch ID / device passcode) for glance-unlock, but
-  this is **opt-in** — Settings ▸ Account, off by default (user request: "the
-  passcode stuff should be disabled by default … allow the user to save said
-  passkey and login to their keychain if they want"). Defaulting off keeps the
-  deniable posture (nothing on disk implies an account exists) and never enrolls
-  Face ID unasked. When on, the lock screen auto-prompts Face ID at launch
-  (`AccountGateView.task`, silent on cancel so a hidden account's passphrase can
-  still be typed) — the earlier build saved the item but never auto-triggered it,
-  which read as "Face ID is broken". Enabling now surfaces failures (e.g. no
-  device passcode set → a `.userPresence` item can't be created) instead of
-  swallowing them. The passphrase always works regardless; lose it = data lost
-  forever (honest no-recovery, SPEC §0). Additional/hidden silos are never stored
-  biometrically, so they stay passphrase-only and deniable.
+- **A24 — Biometric convenience tier (Face ID first, ON by default)** (2026-06-15,
+  revised twice): the primary account stores its {siloID, KEK} behind a
+  `.userPresence` Keychain item (Face ID / Touch ID / device passcode) and that is
+  the **default** unlock — the lock screen shows Face ID first and auto-prompts it
+  at launch (`AccountGateView.task`); the passphrase is the labelled-secondary
+  path ("Or use a passphrase"), always available and the only way into a hidden
+  account. (Product owner chose Face-ID-first convenience over launch-time
+  deniability; an earlier same-day pass had defaulted it OFF, now flipped back per
+  "we want faceID first and passphrase if you enable".) Settings ▸ Account toggles
+  it OFF → passphrase-only high-security. Auto-enable on account creation is
+  silent best-effort: if the device has no passcode/biometric the account simply
+  stays passphrase-only (the failure surfaces only when the user enables it
+  manually in Settings). The launch auto-prompt is silent on cancel, so a hidden
+  account's passphrase can still be typed. The passphrase always works regardless;
+  lose it = data lost forever (honest no-recovery, SPEC §0). The deniability
+  tradeoff is bounded: only the FIRST account is ever stored biometrically, so
+  additional/hidden silos remain passphrase-only and deniable even though the
+  primary's existence is now implied by the Face ID prompt.
 - **A27 — OpenRouter as a tethered-AI backend** (2026-06-15): added `openrouter`
   alongside Claude/OpenAI/Gemini — one API key, many models (OpenAI-compatible
   `chat/completions` at `openrouter.ai/api/v1`, model slugs like
@@ -450,6 +453,19 @@ and affects interop; `[app-only]` — client behavior, no wire impact;
   ingest from creation; without this the context filter started at `Int64.max`
   and the AI replied while *seeing nothing you typed* ("AI context is weird").
   Adding a real human later reverts it to a normal window/invite-gated group.
+- **A29 — Stable cross-device `message_id` (fixes marked-context sharing)**
+  (2026-06-15) `[upstream-NIP]`: the decrypted `MessageBody` now carries an
+  optional `message_id` (the sender's local id), and the recipient stores it
+  verbatim instead of minting its own UUID. Before this, the same message had a
+  DIFFERENT id on each device, so the `ai_context_mark` retro-flag (N25) — which
+  references a message by id — could never resolve the peer's copy: curated
+  "Add to AI Context" sharing was silently broken across devices (found by the
+  new two-device E2E test). The id lives INSIDE the ciphertext (relays never see
+  it), is a random UUID (encodes nothing), and is optional/back-compatible (older
+  senders omit it → receiver falls back to a fresh id; frozen vectors unchanged
+  since nil is omitted). Bonus: it makes own-message/relay-echo dedup id-stable.
+  Live-window/thread AI context never depended on this (it reads by activation
+  time, not marks) and already worked; this fixes the curated-marking path.
 - **A25 — Duress = decoy account** (2026-06-14): because every passphrase opens
   its own separate silo, a duress/decoy account needs no special code — create an
   account with a memorable "duress" passphrase, stock it with innocuous chats,

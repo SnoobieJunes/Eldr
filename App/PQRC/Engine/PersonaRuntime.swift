@@ -740,8 +740,12 @@ actor PersonaRuntime {
         let isLocalGroup = groupRosters[conversationID]?.members.contains(identityHex) ?? false
         guard !recipients.isEmpty || isLocalGroup else { throw PQRCError.sessionNotEstablished }
 
+        // One stable id for this message, carried inside the ciphertext so the
+        // recipient stores the SAME id (cross-device controls like the
+        // ai_context_mark retro-flag reference a message by id — DEVIATIONS N25).
+        let messageID = UUID().uuidString
         var body = MessageBody(
-            text: text, sentAt: clock.now(),
+            text: text, sentAt: clock.now(), messageID: messageID,
             group: groupRosters[conversationID].map { _ in RumorContent.GroupRef(id: conversationID) },
             thread: threadID.map { RumorContent.ThreadRef(id: $0) },
             groupCreate: groupCreate, threadCreate: threadCreate, aiInvite: aiInvite,
@@ -772,7 +776,7 @@ actor PersonaRuntime {
         // depend on the relay round-trip succeeding. Status is local-only and
         // never claims "delivered" (D5).
         let message = StoredMessage(
-            id: UUID().uuidString, conversationID: conversationID,
+            id: messageID, conversationID: conversationID,
             senderIdentity: identityHex, participantType: participantType,
             text: body.text, sentAt: body.sentAt, threadID: threadID,
             isContext: isContext, aiContext: aiContext,
@@ -1490,7 +1494,10 @@ actor PersonaRuntime {
             received.aiWindow != nil || received.aiContextGrant != nil
             || body.groupCreate != nil || body.threadCreate != nil
         let message = StoredMessage(
-            id: UUID().uuidString, conversationID: conversationID,
+            // Reuse the sender's stable id so both devices key this message the
+            // same way (older senders omit it → fall back to a fresh id). This is
+            // what lets a later ai_context_mark from the peer resolve our copy.
+            id: body.messageID ?? UUID().uuidString, conversationID: conversationID,
             senderIdentity: senderHex, participantType: received.participantType,
             text: text, sentAt: body.sentAt, threadID: body.thread?.id,
             isContext: body.isContext ?? false, aiContext: body.aiContext ?? false,

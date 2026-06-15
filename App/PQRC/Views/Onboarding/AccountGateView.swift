@@ -56,14 +56,24 @@ struct AccountGateView: View {
 
     private var unlockSection: some View {
         Group {
+            // Face ID first: when this device's primary account is stored behind
+            // biometrics it's the prominent, default way in (and it auto-prompts
+            // at launch). The passphrase is the secondary path below — always
+            // available, and the only way into a hidden/different account.
             if session.hasBiometricUnlock {
                 Section {
                     Button {
                         run { await session.biometricUnlock() }
                     } label: {
                         Label("Unlock with Face ID", systemImage: "faceid")
+                            .font(.headline)
+                            .frame(maxWidth: .infinity)
+                            .padding(.vertical, 4)
                     }
+                    .buttonStyle(.borderedProminent)
                     .accessibilityIdentifier("biometric-unlock")
+                } footer: {
+                    Text("This device's account unlocks with Face ID. Use a passphrase below for a different or hidden account.")
                 }
             }
             Section {
@@ -76,9 +86,9 @@ struct AccountGateView: View {
                     .disabled(passphrase.isEmpty)
                     .accessibilityIdentifier("unlock-button")
             } header: {
-                Text("Unlock")
+                Text(session.hasBiometricUnlock ? "Or use a passphrase" : "Unlock")
             } footer: {
-                Text("Enter your passphrase to open that account. Each passphrase opens its own private, separate account on this device — nothing reveals how many exist.")
+                Text("Each passphrase opens its own private, separate account on this device — nothing reveals how many exist.")
             }
             Section {
                 Button("Create a new account") {

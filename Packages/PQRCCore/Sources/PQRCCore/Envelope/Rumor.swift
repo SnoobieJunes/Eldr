@@ -411,6 +411,13 @@ public struct RumorContent: Codable, Equatable, Sendable {
 public struct MessageBody: Codable, Equatable, Sendable {
     public var text: String
     public var sentAt: Int64
+    /// Sender-assigned stable id for THIS message, so both parties store the same
+    /// id for the same message (the sender's local id travels inside the
+    /// ciphertext). Without it each side minted its own UUID and cross-device
+    /// controls that reference a message by id — the `ai_context_mark` retro-flag
+    /// (DEVIATIONS N25) — could never resolve the peer's copy. Optional and
+    /// ignored by older clients (SPEC §12); the receiver falls back to a fresh id.
+    public var messageID: String?
     public var group: RumorContent.GroupRef?
     public var thread: RumorContent.ThreadRef?
     public var groupCreate: GroupCreate?
@@ -440,6 +447,7 @@ public struct MessageBody: Codable, Equatable, Sendable {
     enum CodingKeys: String, CodingKey {
         case text
         case sentAt = "sent_at"
+        case messageID = "message_id"
         case group
         case thread
         case groupCreate = "group_create"
@@ -454,7 +462,7 @@ public struct MessageBody: Codable, Equatable, Sendable {
     }
 
     public init(
-        text: String, sentAt: Int64,
+        text: String, sentAt: Int64, messageID: String? = nil,
         group: RumorContent.GroupRef? = nil, thread: RumorContent.ThreadRef? = nil,
         groupCreate: GroupCreate? = nil, threadCreate: ThreadCreate? = nil,
         aiInvite: AIInvite? = nil, isContext: Bool? = nil,
@@ -464,6 +472,7 @@ public struct MessageBody: Codable, Equatable, Sendable {
     ) {
         self.text = text
         self.sentAt = sentAt
+        self.messageID = messageID
         self.group = group
         self.thread = thread
         self.groupCreate = groupCreate

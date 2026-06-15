@@ -405,7 +405,7 @@ struct SettingsView: View {
         } header: {
             Text("Account")
         } footer: {
-            Text("Off by default: this account opens only with its passphrase. Turn this on to also save its key to the device Keychain behind Face ID / Touch ID, so you can unlock with a glance — your passphrase keeps working either way. The saved key never syncs or leaves this device, and only this primary account is stored (hidden accounts stay passphrase-only). If you lose the passphrase there is no recovery. Lock & switch returns to the passphrase screen, where a different passphrase opens (or creates) a fully separate account.")
+            Text("On by default: this account unlocks with Face ID / Touch ID, so you don't type the passphrase every time (it auto-prompts at launch). Turn it OFF for high-security mode — then only your passphrase opens this account. The saved key never syncs or leaves this device, and only this primary account is stored (hidden accounts stay passphrase-only either way). If you lose the passphrase there is no recovery. Lock & switch returns to the passphrase screen, where a different passphrase opens (or creates) a fully separate account.")
         }
     }
 

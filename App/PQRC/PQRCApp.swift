@@ -267,10 +267,13 @@ final class AppSession {
         UserDefaults.standard.set(
             displayName.isEmpty ? "Me" : displayName, forKey: Self.displayNameKey(derived.siloID))
         await bootSilo(derived)
-        // Biometric unlock is OFF by default (passphrase-only): the user opts in
-        // from Settings ▸ Account if they want Face ID / Touch ID convenience.
-        // Defaulting off keeps the deniable posture (nothing on disk reveals an
-        // account exists) and avoids enrolling Face ID without being asked.
+        // Face ID is the default for the primary account: save its key behind
+        // Face ID / Touch ID so the next launch unlocks with a glance. Best-effort
+        // and silent — if the device has no biometric/passcode enrolled we just
+        // stay passphrase-only (turn it on later in Settings). Only the FIRST
+        // account is stored biometrically; hidden accounts stay passphrase-only
+        // and deniable.
+        enableBiometricByDefault()
     }
 
     /// Migrate a pre-silo (legacy, Secure-Enclave-wrapped) account into a
@@ -325,7 +328,17 @@ final class AppSession {
         UserDefaults.standard.removeObject(forKey: "displayName")
         legacy.deleteAll()
         await bootSilo(derived)
-        // Biometric stays opt-in here too (Settings ▸ Account).
+        enableBiometricByDefault()
+    }
+
+    /// Onboarding default: turn on Face ID unlock for the first account, silently.
+    /// A failure here (no device passcode/biometric) is NOT surfaced — the
+    /// passphrase always works and the user can enable it later from Settings.
+    /// Only the first account is stored; hidden accounts stay passphrase-only.
+    private func enableBiometricByDefault() {
+        guard !hasBiometricUnlock else { return }
+        _ = enableBiometricUnlock()
+        biometricError = nil
     }
 
     private func bootSilo(_ derived: SiloKey.Derived) async {
