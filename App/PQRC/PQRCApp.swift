@@ -1,3 +1,4 @@
+import CryptoKit
 import PQRCAgent
 import PQRCCore
 import PQRCNostr
@@ -263,6 +264,9 @@ final class AppSession {
         UserDefaults.standard.set(
             displayName.isEmpty ? "Me" : displayName, forKey: Self.displayNameKey(derived.siloID))
         await bootSilo(derived)
+        // Face ID by default for the FIRST account; additional silos stay
+        // passphrase-only (deniable) since biometrics can't choose between them.
+        if !hasBiometricUnlock { enableBiometricUnlock() }
     }
 
     /// Migrate a pre-silo (legacy, Secure-Enclave-wrapped) account into a
@@ -317,6 +321,7 @@ final class AppSession {
         UserDefaults.standard.removeObject(forKey: "displayName")
         legacy.deleteAll()
         await bootSilo(derived)
+        if !hasBiometricUnlock { enableBiometricUnlock() }
     }
 
     private func bootSilo(_ derived: SiloKey.Derived) async {
@@ -350,6 +355,56 @@ final class AppSession {
         }
         activeSilo = nil
         mode = .locked
+    }
+
+    // MARK: - Biometric convenience unlock (one primary silo)
+
+    /// Holds {siloID, kek} for the one silo unlockable by Face ID / Touch ID.
+    /// Its presence reveals only that A primary account exists — hidden silos are
+    /// never stored here, so they stay passphrase-only and deniable.
+    private struct BiometricSilo: Codable {
+        let siloID: String
+        let kek: Data
+    }
+    private static let biometricService = "chat.pqrc.biometric"
+    private static let biometricAccount = "primary"
+
+    var hasBiometricUnlock: Bool {
+        KeychainStore(service: Self.biometricService).contains(account: Self.biometricAccount)
+    }
+
+    /// Convenience: store the unlocked silo's key behind biometrics. Called
+    /// automatically for the first account (Face ID by default); the
+    /// high-security toggle removes it (passphrase-only).
+    func enableBiometricUnlock() {
+        guard let derived = activeSilo else { return }
+        let record = BiometricSilo(
+            siloID: derived.siloID, kek: derived.kek.withUnsafeBytes { Data($0) })
+        if let blob = try? JSONEncoder().encode(record) {
+            try? KeychainStore(service: Self.biometricService)
+                .saveBiometric(blob, account: Self.biometricAccount)
+        }
+    }
+
+    func disableBiometricUnlock() {
+        KeychainStore(service: Self.biometricService).delete(account: Self.biometricAccount)
+    }
+
+    func biometricUnlock() async {
+        unlockError = nil
+        let service = Self.biometricService
+        let account = Self.biometricAccount
+        let blob = await Task.detached {
+            KeychainStore(service: service).loadBiometric(
+                account: account, prompt: "Unlock EldrChat")
+        }.value
+        guard let blob, let record = try? JSONDecoder().decode(BiometricSilo.self, from: blob),
+            Self.siloExists(record.siloID)
+        else {
+            unlockError = "Face ID unlock didn't work. Enter your passphrase."
+            return
+        }
+        await bootSilo(SiloKey.Derived(siloID: record.siloID, kek: SymmetricKey(data: record.kek)))
     }
 
     /// Move a SwiftData store plus its SQLite -wal/-shm sidecars.

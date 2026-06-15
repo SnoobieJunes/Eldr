@@ -42,6 +42,16 @@ struct AccountGateView: View {
 
     private var unlockSection: some View {
         Group {
+            if session.hasBiometricUnlock {
+                Section {
+                    Button {
+                        run { await session.biometricUnlock() }
+                    } label: {
+                        Label("Unlock with Face ID", systemImage: "faceid")
+                    }
+                    .accessibilityIdentifier("biometric-unlock")
+                }
+            }
             Section {
                 SecureField("Passphrase", text: $passphrase)
                     .textContentType(.password)

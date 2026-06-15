@@ -357,6 +357,12 @@ struct SettingsView: View {
 
     private var accountSection: some View {
         Section {
+            Toggle("Unlock with Face ID / Touch ID", isOn: Binding(
+                get: { session.hasBiometricUnlock },
+                set: { on in
+                    if on { session.enableBiometricUnlock() } else { session.disableBiometricUnlock() }
+                }))
+                .accessibilityIdentifier("biometric-toggle")
             Button {
                 dismiss()
                 Task { await session.lockSilo() }
@@ -367,7 +373,7 @@ struct SettingsView: View {
         } header: {
             Text("Account")
         } footer: {
-            Text("Locks this account and returns to the passphrase screen. Enter a different passphrase to open (or create) another, fully separate account on this device.")
+            Text("Face ID is the convenient default for this account. Turn it OFF for high-security mode — then only your passphrase opens this account, and if you lose that passphrase the account and all its messages are gone forever (no recovery). Lock & switch returns to the passphrase screen, where a different passphrase opens (or creates) a fully separate account.")
         }
     }
 

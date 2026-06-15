@@ -410,6 +410,36 @@ and affects interop; `[app-only]` — client behavior, no wire impact;
   Effective relay retention is 5–7 days (the fuzz is up to 2 days into the past).
   `PQRCConstants.expirationWindowSeconds`; the frozen `giftwrap.json` vector was
   regenerated for the new tag.
+- **A23 — Deniable multi-account silos** (2026-06-14): one device holds N
+  passphrase-isolated accounts. `passphrase → PBKDF2 (fixed app salt) → siloID +
+  KEK` (`SiloKey.swift`); each silo's Keychain secrets are AES-GCM-sealed under
+  the KEK and its store master key is wrapped under it, so a silo is unreadable —
+  and its existence unprovable — without the passphrase. The app always launches
+  to a bare passphrase screen and never auto-boots (auto-booting would reveal an
+  account exists). A wrong passphrase derives a different, non-existent silo,
+  indistinguishable from "no account". Isolation is CRYPTOGRAPHIC, not
+  OS-enforced — iOS gives one app a single sandbox (no Android secure island).
+- **A24 — Biometric convenience tier** (2026-06-14): the first/primary account
+  may store its {siloID, KEK} behind a `.userPresence` Keychain item (Face ID /
+  Touch ID / device passcode) for one-tap unlock — ON by default. The
+  high-security toggle deletes it, leaving the account passphrase-only (lose it =
+  data lost forever; honest no-recovery, SPEC §0). Additional/hidden silos are
+  never stored biometrically, so they stay passphrase-only and deniable.
+- **A25 — Duress = decoy account** (2026-06-14): because every passphrase opens
+  its own separate silo, a duress/decoy account needs no special code — create an
+  account with a memorable "duress" passphrase, stock it with innocuous chats,
+  and reveal that passphrase under coercion. A *destructive* duress (wipe on a
+  trigger passphrase) is intentionally NOT shipped — accidental-wipe risk
+  outweighs the benefit when a plausible decoy already exists.
+- **A26 — Known limit: silo COUNT is not yet hidden** `[tech-debt]` (2026-06-14):
+  v1 hides each silo's contents, keys, and (via the unprovable-passphrase
+  property) whether a *given* passphrase maps to data. But a full forensic image
+  can still infer the NUMBER of accounts from the count of `silo-*.store` files /
+  Keychain item-groups. Robust count-hiding needs a single POOLED store of opaque
+  per-silo records (the only approach that doesn't leak count); naive decoy files
+  are distinguishable (a real store has a valid SQLite header, random padding
+  doesn't), so they are deliberately NOT shipped — false deniability is worse
+  than a documented limit. Tracked for Phase 2.
 
 ### Tech debt `[tech-debt]`
 
