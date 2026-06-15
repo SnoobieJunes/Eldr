@@ -57,14 +57,31 @@ struct EldrACPMain {
 
         log("ready on stdio")
 
-        // Read loop. CRUCIAL routing: a line that is a RESPONSE to one of our
-        // outbound requests (no "method", has "id") goes STRAIGHT to the
-        // ClientConnection actor, NOT through the agent — the agent may be awaiting
-        // that very response inside session/prompt, so routing it through the agent
-        // would deadlock. Each line is handled on its own Task so a long-running
-        // prompt turn doesn't block delivery of the responses it awaits; the tasks
-        // are tracked and drained before exit.
-        while let line = readLine(strippingNewline: true) {
+        // Read stdin on a DEDICATED queue, NEVER on a Swift-concurrency thread: a
+        // blocking `readLine()` on a cooperative thread starves the writer, so the
+        // agent's computed response doesn't reach the OS pipe until the NEXT read
+        // returns. Against a conformant request/response client (Xcode 27) that
+        // deadlocks on the very first `initialize` (the client waits for a reply
+        // that won't flush until it sends another line — which it never does). The
+        // queue yields lines into an AsyncStream the async main drains, so no
+        // blocking read runs on a concurrency thread and each response flushes at once.
+        let lines = AsyncStream<String> { continuation in
+            let reader = DispatchQueue(label: "chat.pqrc.acp.stdin")
+            reader.async {
+                while let line = readLine(strippingNewline: true) {
+                    continuation.yield(line)
+                }
+                continuation.finish()
+            }
+        }
+
+        // CRUCIAL routing: a line that is a RESPONSE to one of our outbound requests
+        // (no "method", has "id") goes STRAIGHT to the ClientConnection actor, NOT
+        // through the agent — the agent may be awaiting that very response inside
+        // session/prompt, so routing it through the agent would deadlock. Each line
+        // is handled on its own Task so a long-running prompt turn doesn't block
+        // delivery of the responses it awaits; the tasks are drained before exit.
+        for await line in lines {
             let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
             if trimmed.isEmpty { continue }
 
