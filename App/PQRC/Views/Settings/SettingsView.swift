@@ -18,6 +18,7 @@ struct SettingsView: View {
     @State private var myAlias = ""
     @State private var openInboxUntil: Int64?
     @State private var checkingRelays = false
+    @State private var republishingPrekeys = false
     @State private var now = Int64(Date().timeIntervalSince1970)
 
     private let ticker = Timer.publish(every: 1, on: .main, in: .common).autoconnect()
@@ -53,7 +54,12 @@ struct SettingsView: View {
             }
             .onAppear {
                 myAlias = UserDefaults.standard.string(forKey: "displayName") ?? ""
-                Task { openInboxUntil = await model.runtime.openInboxActiveUntil() }
+                Task {
+                    openInboxUntil = await model.runtime.openInboxActiveUntil()
+                    // Refresh the live prekey count so the Prekeys section isn't
+                    // showing a stale number from launch.
+                    model.prekeyCount = await model.runtime.oneTimePrekeyCount()
+                }
             }
             // Server status is checked once at app launch and only re-checked
             // when the user taps "Check connection" — re-pinging on every
@@ -333,15 +339,35 @@ struct SettingsView: View {
     // MARK: Prekeys / privacy / data / about
 
     private var prekeysSection: some View {
-        Section("Prekeys") {
-            LabeledContent("One-time prekeys", value: "\(model.prekeyCount)")
-            Button("Republish bundle") {
+        Section {
+            LabeledContent("Unused one-time prekeys") {
+                Text("\(model.prekeyCount)")
+                    .foregroundStyle(model.prekeyCount == 0 ? .orange : .primary)
+                    .monospacedDigit()
+                    .accessibilityIdentifier("prekey-count")
+            }
+            LabeledContent("Bundle on relay") { keyPublishIndicator }
+                .font(.callout)
+            Button {
+                republishingPrekeys = true
                 Task {
                     try? await model.runtime.republishBundle(
                         relayURLs: AppSession.configuredRelayURLs)
                     model.prekeyCount = await model.runtime.oneTimePrekeyCount()
+                    republishingPrekeys = false
+                }
+            } label: {
+                HStack {
+                    Label("Replenish & republish bundle", systemImage: "arrow.clockwise")
+                    if republishingPrekeys { Spacer(); ProgressView() }
                 }
             }
+            .disabled(republishingPrekeys)
+            .accessibilityIdentifier("republish-prekeys")
+        } header: {
+            Text("Prekeys")
+        } footer: {
+            Text("One-time prekeys let new contacts open an encrypted conversation with you even while you're offline — each first handshake uses one up. They refill automatically (back up to 10 whenever they drop to 3 or fewer), so a low number is normal and not a problem. If they ever hit 0, peers fall back to your reusable key — still encrypted, just slightly more linkable. Republish after changing relays so peers can fetch a fresh bundle right away.")
         }
     }
 
@@ -363,6 +389,12 @@ struct SettingsView: View {
                     if on { session.enableBiometricUnlock() } else { session.disableBiometricUnlock() }
                 }))
                 .accessibilityIdentifier("biometric-toggle")
+            if let error = session.biometricError {
+                Text(error)
+                    .font(.caption)
+                    .foregroundStyle(.orange)
+                    .accessibilityIdentifier("biometric-error")
+            }
             Button {
                 dismiss()
                 Task { await session.lockSilo() }
@@ -373,7 +405,7 @@ struct SettingsView: View {
         } header: {
             Text("Account")
         } footer: {
-            Text("Face ID is the convenient default for this account. Turn it OFF for high-security mode — then only your passphrase opens this account, and if you lose that passphrase the account and all its messages are gone forever (no recovery). Lock & switch returns to the passphrase screen, where a different passphrase opens (or creates) a fully separate account.")
+            Text("Off by default: this account opens only with its passphrase. Turn this on to also save its key to the device Keychain behind Face ID / Touch ID, so you can unlock with a glance — your passphrase keeps working either way. The saved key never syncs or leaves this device, and only this primary account is stored (hidden accounts stay passphrase-only). If you lose the passphrase there is no recovery. Lock & switch returns to the passphrase screen, where a different passphrase opens (or creates) a fully separate account.")
         }
     }
 

@@ -6,6 +6,16 @@ enum KeychainError: Error {
     case notFound
 }
 
+/// Outcome of a biometric-gated read, so the caller can message precisely:
+/// a missing item, a user cancel, and a real auth failure are all different
+/// (and only the last should look like an error to the user).
+enum BiometricLoad {
+    case success(Data)
+    case missing
+    case cancelled
+    case failed(OSStatus)
+}
+
 /// Keychain access for long-term secrets (SPEC §3.1, APP-SPEC §3).
 /// Every item: `kSecAttrAccessibleWhenUnlockedThisDeviceOnly`, never
 /// iCloud-synced, never exported. Enforced by the security test suite.
@@ -91,9 +101,11 @@ struct KeychainStore: Sendable {
     }
 
     /// Reads a biometric-gated secret, presenting `prompt` in the Face ID sheet.
-    /// Returns nil if the item is absent or the user cancels/fails auth. Call off
-    /// the main thread (the biometric prompt blocks).
-    func loadBiometric(account: String, prompt: String) -> Data? {
+    /// Distinguishes a missing item, a user cancel, and a real auth failure so
+    /// the caller can message accordingly (a cancel is not an error — the user
+    /// may want to type a different account's passphrase). Call off the main
+    /// thread (the biometric prompt blocks).
+    func loadBiometric(account: String, prompt: String) -> BiometricLoad {
         let query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: service,
@@ -103,10 +115,19 @@ struct KeychainStore: Sendable {
             kSecUseOperationPrompt as String: prompt,
         ]
         var result: CFTypeRef?
-        guard SecItemCopyMatching(query as CFDictionary, &result) == errSecSuccess else {
-            return nil
+        let status = SecItemCopyMatching(query as CFDictionary, &result)
+        switch status {
+        case errSecSuccess:
+            if let data = result as? Data { return .success(data) }
+            return .failed(status)
+        case errSecItemNotFound:
+            return .missing
+        // -128: the user tapped Cancel in the Face ID / passcode sheet.
+        case errSecUserCanceled:
+            return .cancelled
+        default:
+            return .failed(status)
         }
-        return result as? Data
     }
 
     func contains(account: String) -> Bool {

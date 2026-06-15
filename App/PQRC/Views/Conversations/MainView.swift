@@ -413,7 +413,12 @@ struct NewGroupView: View {
                     TextField("Name", text: $name)
                         .accessibilityIdentifier("group-name")
                 }
-                Section("Members") {
+                Section {
+                    if candidates.isEmpty {
+                        Text("No contacts yet. Leave this empty to make a private group with just you and your AIs — add people later from the group.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
                     ForEach(candidates, id: \.id) { candidate in
                         Button {
                             if selected.contains(candidate.id) {
@@ -432,14 +437,18 @@ struct NewGroupView: View {
                         }
                         .accessibilityIdentifier("group-member-\(candidate.name)")
                     }
+                } header: {
+                    Text("Members")
+                } footer: {
+                    Text("Optional. With no one else selected this is a solo group — just you and your tethered AIs, where they reply to you and to each other. Add people anytime.")
                 }
-                Button("Create group") {
+                Button(selected.isEmpty ? "Create solo AI group" : "Create group") {
                     Task {
                         _ = await model.createGroup(name: name, members: Array(selected))
                         dismiss()
                     }
                 }
-                .disabled(name.isEmpty || selected.isEmpty)
+                .disabled(name.isEmpty)
                 .accessibilityIdentifier("group-create")
             }
             .navigationTitle("New Group")

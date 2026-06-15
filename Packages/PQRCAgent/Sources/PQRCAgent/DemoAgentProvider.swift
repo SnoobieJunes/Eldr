@@ -30,6 +30,7 @@ public struct DemoAgentProvider: AgentProvider {
     /// shows that it's using it, so the context-sharing path is observable
     /// without dumping the transcript. Always one or two sentences.
     static func reply(to context: AgentContext, inThread: Bool) -> String {
+        let last = context.transcript.last
         let lastHuman = context.transcript.last { $0.participantType == .human }
         let shared = context.transcript.filter(\.isSharedContext)
         let marked = context.transcript.filter { $0.isContext && !$0.isSharedContext }
@@ -43,6 +44,13 @@ public struct DemoAgentProvider: AgentProvider {
         }
 
         let preface = inThread ? "🤖 (demo AI)" : "🤖 Demo AI"
+        // If the most recent message came from ANOTHER AI, build on it. This is
+        // how two tethered AIs visibly talk to each other: each one runs after
+        // the previous posted, sees it as the latest entry, and responds to it
+        // (instead of every AI answering only the human).
+        if let last, last.participantType == .agent {
+            return "\(preface): Building on the other AI's take — “\(snippet(last.text))”. Here's a second angle to add.\(note)"
+        }
         guard let human = lastHuman else {
             return "\(preface): I'm your simulated assistant — set up Apple Intelligence or an API key in Settings ▸ AI for real replies. What can I help with?"
         }

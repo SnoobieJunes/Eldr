@@ -9,7 +9,8 @@ struct ConfiguredAI: Identifiable, Codable, Equatable, Sendable {
     var id: String
     /// Friendly, user-editable display name (a friendly codename by default).
     var name: String
-    /// Inference backend: "ondevice" | "claude" | "openai" | "gemini" | "demo".
+    /// Inference backend: "ondevice" | "claude" | "openai" | "gemini" |
+    /// "openrouter" | "demo".
     var kind: String
 
     /// The selectable backends and their labels.
@@ -18,6 +19,7 @@ struct ConfiguredAI: Identifiable, Codable, Equatable, Sendable {
         ("claude", "Claude (Anthropic)"),
         ("openai", "OpenAI"),
         ("gemini", "Gemini"),
+        ("openrouter", "OpenRouter (many models)"),
         ("demo", "Demo (simulated)"),
     ]
 
@@ -28,7 +30,7 @@ struct ConfiguredAI: Identifiable, Codable, Equatable, Sendable {
     /// Backends that send conversation content off-device — require explicit
     /// consent and a Keychain API key.
     static func isRemote(_ kind: String) -> Bool {
-        ["claude", "openai", "gemini"].contains(kind)
+        ["claude", "openai", "gemini", "openrouter"].contains(kind)
     }
 
     /// Keychain account holding the API key for a remote backend, if any.
@@ -37,6 +39,7 @@ struct ConfiguredAI: Identifiable, Codable, Equatable, Sendable {
         case "claude": return "anthropic-api-key"
         case "openai": return "openai-api-key"
         case "gemini": return "gemini-api-key"
+        case "openrouter": return "openrouter-api-key"
         default: return nil
         }
     }

@@ -142,6 +142,7 @@ final class AppSession {
         "claude": "anthropic-api-key",
         "openai": "openai-api-key",
         "gemini": "gemini-api-key",
+        "openrouter": "openrouter-api-key",
     ]
 
     /// Provider per the Settings picker. Token-based providers (Claude/OpenAI/
@@ -167,6 +168,8 @@ final class AppSession {
             return key(for: "openai").map { OpenAIAPIProvider(apiKey: $0) } ?? DemoAgentProvider()
         case "gemini":
             return key(for: "gemini").map { GeminiAPIProvider(apiKey: $0) } ?? DemoAgentProvider()
+        case "openrouter":
+            return key(for: "openrouter").map { OpenRouterAPIProvider(apiKey: $0) } ?? DemoAgentProvider()
         case "demo":
             return DemoAgentProvider()
         default:  // "ondevice"
@@ -264,9 +267,10 @@ final class AppSession {
         UserDefaults.standard.set(
             displayName.isEmpty ? "Me" : displayName, forKey: Self.displayNameKey(derived.siloID))
         await bootSilo(derived)
-        // Face ID by default for the FIRST account; additional silos stay
-        // passphrase-only (deniable) since biometrics can't choose between them.
-        if !hasBiometricUnlock { enableBiometricUnlock() }
+        // Biometric unlock is OFF by default (passphrase-only): the user opts in
+        // from Settings ▸ Account if they want Face ID / Touch ID convenience.
+        // Defaulting off keeps the deniable posture (nothing on disk reveals an
+        // account exists) and avoids enrolling Face ID without being asked.
     }
 
     /// Migrate a pre-silo (legacy, Secure-Enclave-wrapped) account into a
@@ -321,7 +325,7 @@ final class AppSession {
         UserDefaults.standard.removeObject(forKey: "displayName")
         legacy.deleteAll()
         await bootSilo(derived)
-        if !hasBiometricUnlock { enableBiometricUnlock() }
+        // Biometric stays opt-in here too (Settings ▸ Account).
     }
 
     private func bootSilo(_ derived: SiloKey.Derived) async {
@@ -369,42 +373,75 @@ final class AppSession {
     private static let biometricService = "chat.pqrc.biometric"
     private static let biometricAccount = "primary"
 
+    /// Surfaced in Settings when enabling Face ID unlock fails (e.g. no device
+    /// passcode set, so a `.userPresence` Keychain item can't be created).
+    var biometricError: String?
+
     var hasBiometricUnlock: Bool {
         KeychainStore(service: Self.biometricService).contains(account: Self.biometricAccount)
     }
 
-    /// Convenience: store the unlocked silo's key behind biometrics. Called
-    /// automatically for the first account (Face ID by default); the
-    /// high-security toggle removes it (passphrase-only).
-    func enableBiometricUnlock() {
-        guard let derived = activeSilo else { return }
+    /// Opt-in convenience: save the unlocked silo's key to the Keychain behind
+    /// Face ID / Touch ID, so the next launch can unlock with a glance instead of
+    /// the passphrase. Off by default; turned on from Settings ▸ Account. Returns
+    /// false (and sets `biometricError`) if the system refuses to store it.
+    @discardableResult
+    func enableBiometricUnlock() -> Bool {
+        guard let derived = activeSilo else { return false }
         let record = BiometricSilo(
             siloID: derived.siloID, kek: derived.kek.withUnsafeBytes { Data($0) })
-        if let blob = try? JSONEncoder().encode(record) {
-            try? KeychainStore(service: Self.biometricService)
+        guard let blob = try? JSONEncoder().encode(record) else { return false }
+        do {
+            try KeychainStore(service: Self.biometricService)
                 .saveBiometric(blob, account: Self.biometricAccount)
+            biometricError = nil
+            return true
+        } catch {
+            // Almost always: no device passcode / no enrolled biometric, which
+            // a `.userPresence` item requires. Say so instead of failing silently.
+            biometricError =
+                "Couldn't turn on Face ID unlock. Set a device passcode (and enroll Face ID / Touch ID) in iOS Settings first, then try again."
+            return false
         }
     }
 
     func disableBiometricUnlock() {
+        biometricError = nil
         KeychainStore(service: Self.biometricService).delete(account: Self.biometricAccount)
     }
 
-    func biometricUnlock() async {
+    /// Try to unlock via the Keychain-saved key behind Face ID / Touch ID.
+    /// `autoTriggered` is the silent launch attempt: a cancel/failure there must
+    /// not show a scary error (the user may simply want to type a hidden
+    /// account's passphrase). An explicit tap reports a real failure.
+    func biometricUnlock(autoTriggered: Bool = false) async {
         unlockError = nil
         let service = Self.biometricService
         let account = Self.biometricAccount
-        let blob = await Task.detached {
-            KeychainStore(service: service).loadBiometric(
-                account: account, prompt: "Unlock EldrChat")
+        let outcome = await Task.detached {
+            KeychainStore(service: service).loadBiometric(account: account, prompt: "Unlock EldrChat")
         }.value
-        guard let blob, let record = try? JSONDecoder().decode(BiometricSilo.self, from: blob),
-            Self.siloExists(record.siloID)
-        else {
-            unlockError = "Face ID unlock didn't work. Enter your passphrase."
+        switch outcome {
+        case .success(let blob):
+            guard let record = try? JSONDecoder().decode(BiometricSilo.self, from: blob),
+                Self.siloExists(record.siloID)
+            else {
+                if !autoTriggered {
+                    unlockError = "That account is no longer on this device. Enter your passphrase."
+                }
+                return
+            }
+            await bootSilo(
+                SiloKey.Derived(siloID: record.siloID, kek: SymmetricKey(data: record.kek)))
+        case .cancelled, .missing:
+            // Quiet: the user cancelled, or nothing is enrolled — fall back to
+            // the passphrase field that's always on screen.
             return
+        case .failed:
+            if !autoTriggered {
+                unlockError = "Face ID didn't work. Enter your passphrase, or try Face ID again."
+            }
         }
-        await bootSilo(SiloKey.Derived(siloID: record.siloID, kek: SymmetricKey(data: record.kek)))
     }
 
     /// Move a SwiftData store plus its SQLite -wal/-shm sidecars.

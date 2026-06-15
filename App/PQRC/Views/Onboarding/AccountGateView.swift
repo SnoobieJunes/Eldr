@@ -15,6 +15,9 @@ struct AccountGateView: View {
     @State private var creating = false
     @State private var acknowledged = false
     @State private var working = false
+    /// Fire the launch Face ID attempt at most once (it's a convenience, not a
+    /// gate — the passphrase field is always available as the fallback).
+    @State private var autoTriedBiometric = false
 
     var body: some View {
         NavigationStack {
@@ -35,6 +38,17 @@ struct AccountGateView: View {
             .navigationTitle(session.hasLegacyAccount ? "Protect your account" : "EldrChat")
             .disabled(working)
             .overlay { if working { ProgressView() } }
+            .task {
+                // Opt-in Face ID convenience: if the user turned it on, prompt
+                // automatically on launch so unlocking is a glance, not a tap.
+                // Silent on cancel/failure — the passphrase field stays available
+                // (including for hidden accounts not stored behind biometrics).
+                guard !session.hasLegacyAccount, !creating, session.hasBiometricUnlock,
+                    !autoTriedBiometric
+                else { return }
+                autoTriedBiometric = true
+                await session.biometricUnlock(autoTriggered: true)
+            }
         }
     }
 

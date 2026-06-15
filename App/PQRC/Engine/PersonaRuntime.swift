@@ -894,9 +894,9 @@ actor PersonaRuntime {
     /// engage by default. People can be added later (it becomes a normal group).
     /// The AI is "on" from creation, so it ingests messages from here forward.
     func createSelfChat() async throws -> String {
-        let id = try await createGroup(name: "My AI", memberIdentityHexes: [])
-        aiActiveSince[id] = clock.now()
-        return id
+        // createGroup turns the AI on for a member-less group, so this is just a
+        // named solo group.
+        try await createGroup(name: "My AI", memberIdentityHexes: [])
     }
 
     /// Adds verified contacts to a group/solo conversation (the "add people at
@@ -949,6 +949,14 @@ actor PersonaRuntime {
         let create = GroupCreate(groupID: groupID, name: name, members: members, revision: 1)
         groupRosters[groupID] = GroupRoster(create: create, assertedBy: identityHex)
         persistRoster(groupID)
+        // A group with no other humans is a solo AI space: turn my AIs "on" from
+        // creation so they ingest messages from here forward (without this the
+        // context filter starts at Int64.max and the AI sees an empty transcript
+        // until a window is opened — the "AI replied but ignored what I said"
+        // bug). A group WITH other humans stays gated behind a window/invite.
+        if memberIdentityHexes.isEmpty {
+            aiActiveSince[groupID] = clock.now()
+        }
         try await sendMessage(
             "created the group \"\(name)\"", conversationID: groupID, groupCreate: create,
             asSystemRow: true)

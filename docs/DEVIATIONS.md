@@ -419,12 +419,37 @@ and affects interop; `[app-only]` — client behavior, no wire impact;
   account exists). A wrong passphrase derives a different, non-existent silo,
   indistinguishable from "no account". Isolation is CRYPTOGRAPHIC, not
   OS-enforced — iOS gives one app a single sandbox (no Android secure island).
-- **A24 — Biometric convenience tier** (2026-06-14): the first/primary account
-  may store its {siloID, KEK} behind a `.userPresence` Keychain item (Face ID /
-  Touch ID / device passcode) for one-tap unlock — ON by default. The
-  high-security toggle deletes it, leaving the account passphrase-only (lose it =
-  data lost forever; honest no-recovery, SPEC §0). Additional/hidden silos are
-  never stored biometrically, so they stay passphrase-only and deniable.
+- **A24 — Biometric convenience tier (OFF by default)** (2026-06-15, revised):
+  the primary account *may* store its {siloID, KEK} behind a `.userPresence`
+  Keychain item (Face ID / Touch ID / device passcode) for glance-unlock, but
+  this is **opt-in** — Settings ▸ Account, off by default (user request: "the
+  passcode stuff should be disabled by default … allow the user to save said
+  passkey and login to their keychain if they want"). Defaulting off keeps the
+  deniable posture (nothing on disk implies an account exists) and never enrolls
+  Face ID unasked. When on, the lock screen auto-prompts Face ID at launch
+  (`AccountGateView.task`, silent on cancel so a hidden account's passphrase can
+  still be typed) — the earlier build saved the item but never auto-triggered it,
+  which read as "Face ID is broken". Enabling now surfaces failures (e.g. no
+  device passcode set → a `.userPresence` item can't be created) instead of
+  swallowing them. The passphrase always works regardless; lose it = data lost
+  forever (honest no-recovery, SPEC §0). Additional/hidden silos are never stored
+  biometrically, so they stay passphrase-only and deniable.
+- **A27 — OpenRouter as a tethered-AI backend** (2026-06-15): added `openrouter`
+  alongside Claude/OpenAI/Gemini — one API key, many models (OpenAI-compatible
+  `chat/completions` at `openrouter.ai/api/v1`, model slugs like
+  `openai/gpt-4o-mini`). It is `isRemote`, so it inherits the full remote-AI
+  treatment unchanged: explicit consent gate, Keychain-stored key
+  (`openrouter-api-key`, per-silo service), egress firewall (name redaction +
+  byte bound) on by default, and Demo-stub fallback when no key is set. Only
+  the optional `HTTP-Referer`/`X-Title` ranking headers differ from the OpenAI
+  provider; they carry no conversation content.
+- **A28 — Solo group = AI on from creation** (2026-06-15): New Group no longer
+  requires picking another member — a member-less group is a private "solo AI
+  group" (you + your tethered AIs), the same staging ground as the brain-icon AI
+  chat. `createGroup` sets `aiActiveSince` for a member-less group so the AIs
+  ingest from creation; without this the context filter started at `Int64.max`
+  and the AI replied while *seeing nothing you typed* ("AI context is weird").
+  Adding a real human later reverts it to a normal window/invite-gated group.
 - **A25 — Duress = decoy account** (2026-06-14): because every passphrase opens
   its own separate silo, a duress/decoy account needs no special code — create an
   account with a memorable "duress" passphrase, stock it with innocuous chats,
