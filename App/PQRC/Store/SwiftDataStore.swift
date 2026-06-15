@@ -232,6 +232,12 @@ actor SwiftDataMessageStore: MessageStore {
         try modelContext.save()
     }
 
+    func deleteMessage(messageID: String) async throws {
+        try modelContext.delete(
+            model: MessageModel.self, where: #Predicate { $0.id == messageID })
+        try modelContext.save()
+    }
+
     func deleteConversation(_ conversationID: String) async throws {
         try modelContext.delete(
             model: MessageModel.self,

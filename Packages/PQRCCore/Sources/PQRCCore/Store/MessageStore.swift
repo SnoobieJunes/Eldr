@@ -70,6 +70,9 @@ public protocol MessageStore: Sendable {
     func updateStatus(messageID: String, status: String) async throws
     /// Flip the "Add to AI Context" marker on a stored message.
     func setAIContext(messageID: String, value: Bool) async throws
+    /// Removes a single message (used by "Not sent" tap-to-retry: drop the
+    /// failed copy, then send fresh).
+    func deleteMessage(messageID: String) async throws
     func deleteConversation(_ conversationID: String) async throws
     func wipeAll() async throws
 }
@@ -110,6 +113,11 @@ public actor InMemoryMessageStore: MessageStore {
         guard var message = storage[messageID] else { throw PQRCError.recordNotFound }
         message.aiContext = value
         storage[messageID] = message
+    }
+
+    public func deleteMessage(messageID: String) async throws {
+        storage[messageID] = nil
+        order.removeAll { $0 == messageID }
     }
 
     public func deleteConversation(_ conversationID: String) async throws {

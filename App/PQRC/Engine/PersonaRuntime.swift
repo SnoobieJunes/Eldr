@@ -676,6 +676,11 @@ actor PersonaRuntime {
         }
     }
 
+    /// Removes a stored message (tap-to-retry drops the failed copy first).
+    func deleteMessage(_ id: String) async {
+        try? await store.deleteMessage(messageID: id)
+    }
+
     private func recipientsFor(conversationID: String) -> [String] {
         if let roster = groupRosters[conversationID] {
             return roster.members.filter { $0 != identityHex && verifiedContacts[$0] != nil }

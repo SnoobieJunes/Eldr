@@ -13,6 +13,8 @@ struct MessageBubble: View {
     var onToggleAIContext: (() -> Void)? = nil
     /// Opens this message's markdown/HTML in the full-screen reader. nil hides it.
     var onFullScreen: ((String) -> Void)? = nil
+    /// Re-sends a message that failed to publish ("Not sent"). nil hides retry.
+    var onRetry: (() -> Void)? = nil
 
     /// Whether this message has document structure worth opening full screen.
     private var isRich: Bool { MessageContent.isRich(message.text) }
@@ -125,15 +127,21 @@ struct MessageBubble: View {
                     expandButton
                     if isMine {
                         // Local-only status; copy says "sent to relay", never "delivered" (D5).
-                        // A publish that never reached the relay shows "Not sent" so a
-                        // send failure is visible (not silently dropped).
-                        Text(
-                            message.localStatus == "failed"
-                                ? "Not sent"
-                                : message.localStatus == "queued" ? "Queued" : "Sent to relay"
-                        )
-                        .font(.caption2)
-                        .foregroundStyle(message.localStatus == "failed" ? .red : .secondary)
+                        // A publish that never reached the relay shows "Not sent ·
+                        // Tap to retry" — a tappable recovery path, not a dead end.
+                        if message.localStatus == "failed", let onRetry {
+                            Button(action: onRetry) {
+                                Label("Not sent · Tap to retry", systemImage: "arrow.clockwise")
+                                    .font(.caption2)
+                                    .foregroundStyle(.red)
+                            }
+                            .buttonStyle(.plain)
+                            .accessibilityIdentifier("retry-message")
+                        } else {
+                            Text(message.localStatus == "queued" ? "Queued" : "Sent to relay")
+                                .font(.caption2)
+                                .foregroundStyle(.secondary)
+                        }
                     }
                 }
             }

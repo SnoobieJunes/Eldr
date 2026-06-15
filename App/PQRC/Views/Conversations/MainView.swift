@@ -274,6 +274,8 @@ struct NewChatView: View {
     @State private var npub = ""
     @State private var firstMessage = ""
     @State private var error: String?
+    /// Shown when the contact simply hasn't joined yet — offer to invite them.
+    @State private var offerInvite = false
 
     var body: some View {
         NavigationStack {
@@ -295,8 +297,17 @@ struct NewChatView: View {
                 }
                 if let error {
                     Text(error).foregroundStyle(.red)
+                    if offerInvite {
+                        ShareLink(
+                            item:
+                                "Let's talk privately on PQRC — end-to-end encrypted. Open the app, then add me: \(model.myNpub)"
+                        ) {
+                            Label("Invite them to PQRC", systemImage: "square.and.arrow.up")
+                        }
+                    }
                 }
                 Button("Start encrypted conversation") {
+                    offerInvite = false
                     Task {
                         do {
                             _ = try await model.runtime.startConversation(
@@ -305,7 +316,8 @@ struct NewChatView: View {
                         } catch PQRCError.relayUnreachable {
                             self.error = "Can't reach your relay right now. Check your connection or your relay in Settings — or use Nearby below to connect in person, no server needed."
                         } catch PQRCError.peerKeysNotPublished {
-                            self.error = "Connected to the relay, but this contact hasn't published their keys here yet. Ask them to open the app on the same relay, then try again — or use Nearby below if you're together."
+                            self.error = "You're connected, but this contact hasn't opened PQRC on this relay yet, so their keys aren't here to start the encrypted chat. Ask them to open the app on the same relay, then try again — or use Nearby below if you're together."
+                            offerInvite = true
                         } catch {
                             self.error = "Couldn't start the conversation. If you're together in person, use Nearby below — no server needed."
                         }

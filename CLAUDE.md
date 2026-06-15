@@ -22,6 +22,29 @@ This repository contains the v1 iOS client and test suite for **PQRC (Post-Quant
 - **Persistence:** SwiftData in the app layer behind a `MessageStore` protocol defined in core; sensitive fields envelope-encrypted at the application layer per SPEC §3.4 (see APP-SPEC §3).
 - **Testing:** Swift Testing (`@Test`, `#expect`) for all logic; XCTest only where required (XCUITest UI tests, `measure`/XCTMetric performance tests).
 
+## Platform expansion roadmap (iPad / Mac) — planned, not yet built
+
+The product is text-only and privacy-first (AI/Human context sharing; NOT a media
+platform — images/video stay out of scope, "use iMessage for that"). It is meant
+to **expand to iPad and Mac via native runtime** (Mac Catalyst, or "Designed for
+iPad" / native macOS), with the UI **responsive to screen size and fully usable in
+landscape** — do NOT lock to portrait. When building UI:
+- Adopt **`NavigationSplitView`** (conversation list + detail) so wide screens
+  (iPad/Mac/landscape) show list-and-detail side by side, and compact widths
+  (iPhone portrait) collapse to a stack. The current iPhone-only `NavigationStack`
+  in `MainView` is the thing to evolve here.
+- Constrain reading-width content (`.frame(maxWidth:)`) so chat bubbles/forms don't
+  sprawl edge-to-edge on a 27" display; let lists/detail use the extra width.
+- Verify every primary screen (conversation list, ConversationView, ThreadView,
+  Settings, Onboarding) in **landscape and at iPad/Mac widths** — they were built
+  iPhone-portrait-first and need a responsive pass.
+- The full-screen markdown reader (`FullScreenReaderView`) already supports
+  landscape + zoom — use it as the reference for responsive behavior.
+- Keep it SwiftUI-only; reuse the existing `AppModel`/`PersonaRuntime` engine (it's
+  platform-agnostic). Mac/iPad get the same engine, only the View layer adapts.
+Orientations are already enabled app-wide in project settings; the work is the
+adaptive layout, not enabling rotation.
+
 ## Repository layout (target)
 
 ```

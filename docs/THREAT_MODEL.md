@@ -43,6 +43,27 @@ keys. Fetching a contact's keys holds the subscription only long enough to
 collect them (seconds), then drops it, bounding how long a relay sees your
 interest in that pubkey.
 
+### 2.1b Other relay-observable patterns we DON'T hide (honest disclosure)
+Three behaviors are visible to a relay (or a network observer of one) and are
+**not** mitigated in v1 — disclosed here per the cardinal rule (SPEC §0):
+- **WebSocket keepalive ping.** While a subscription is active, the client sends
+  a zero-payload ping every ~30 s (so an intermediary like Cloudflare doesn't
+  drop the idle connection). A relay can infer *you are online with an active
+  subscription* from the ping cadence — a low-rate liveness signal. It reveals
+  nothing about *which* conversations or *when* messages flow (one subscription
+  covers all your gift wraps). Mitigation if this matters to you: a VPN/Tor in
+  front. (A future build may jitter the interval.)
+- **NIP-11 fetch.** When a relay is added/first used, the client makes one HTTP
+  GET to its NIP-11 document (to size chunks to the relay's content limit). A
+  network observer can correlate that request's timing with the connection. It's
+  one-time per relay and cached.
+- **Chunking reveals message *count*, not size.** A large message is split into
+  several gift-wrapped envelopes; a relay sees N envelopes arrive in a burst and
+  can infer "a large message was sent" and roughly how large from N. The chunk
+  *metadata* (id/index/total) stays inside the ciphertext, and chunk size is set
+  to the **strictest** relay in your set so every relay sees the same N — but the
+  burst itself is observable. (DEVIATIONS N26, A25.)
+
 ### 2.2 Recipient `p`-tag against a global passive observer
 Every gift wrap carries the recipient's Nostr pubkey in a `p` tag — necessary
 for delivery. AUTH-gated relays stop *non-recipients querying* for your

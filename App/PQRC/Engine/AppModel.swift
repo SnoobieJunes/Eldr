@@ -270,6 +270,17 @@ final class AppModel {
         try? await runtime.sendMessage(text, conversationID: conversationID, threadID: threadID)
     }
 
+    /// Tap-to-retry a "Not sent" message: drop the failed copy (UI + store),
+    /// then send the same text fresh (re-uses the full optimistic-echo path).
+    func retry(_ message: StoredMessage) async {
+        if var list = messagesByConversation[message.conversationID] {
+            list.removeAll { $0.id == message.id }
+            messagesByConversation[message.conversationID] = list
+        }
+        await runtime.deleteMessage(message.id)
+        await send(message.text, conversationID: message.conversationID, threadID: message.threadID)
+    }
+
     func sendAsAI(_ text: String, conversationID: String) async {
         try? await runtime.sendAsMyAI(text, conversationID: conversationID)
     }

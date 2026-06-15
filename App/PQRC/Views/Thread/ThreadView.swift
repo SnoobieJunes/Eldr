@@ -140,7 +140,8 @@ struct ThreadView: View {
                                         conversationID: thread.conversationID)
                                 }
                             },
-                            onFullScreen: { fullScreenContent = FullScreenContent(text: $0) })
+                            onFullScreen: { fullScreenContent = FullScreenContent(text: $0) },
+                            onRetry: { Task { await model.retry(message) } })
                     }
                 }
                 .padding()

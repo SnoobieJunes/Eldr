@@ -223,7 +223,8 @@ struct ConversationView: View {
                             conversationID: conversationID)
                     }
                 },
-            onFullScreen: selecting ? nil : { fullScreenContent = FullScreenContent(text: $0) })
+            onFullScreen: selecting ? nil : { fullScreenContent = FullScreenContent(text: $0) },
+            onRetry: selecting ? nil : { Task { await model.retry(message) } })
         if selecting {
             HStack(spacing: 8) {
                 Image(systemName: selection.contains(message.id) ? "checkmark.circle.fill" : "circle")
@@ -319,15 +320,15 @@ struct ConversationView: View {
                         Color(.secondarySystemBackground),
                         in: RoundedRectangle(cornerRadius: 20, style: .continuous))
                     .accessibilityIdentifier("composer-field")
-                    .onChange(of: draftText) { _, newValue in
-                        // Multi-KB content collapses into the chip (APP-SPEC
-                        // §6.3). The threshold is deliberately low: a big block
-                        // of text left live in the field makes the system
-                        // keyboard's QuickType engine thrash (Auto Layout spam,
-                        // lag), so we move it out of the field early. Still well
-                        // under the inline/chunk limit, so it sends as one
-                        // message.
-                        if newValue.utf8.count > 4096 {
+                    .onChange(of: draftText) { oldValue, newValue in
+                        // Collapse big PASTES into the chip — detected as a large
+                        // jump in a single change — so the keyboard's QuickType
+                        // engine doesn't thrash on a big block left live in the
+                        // field. Gradual typing never triggers this, so a long
+                        // message you're writing is never ejected mid-sentence.
+                        // A very large total is a backstop for incremental paste.
+                        let delta = newValue.utf8.count - oldValue.utf8.count
+                        if delta > 4096 || newValue.utf8.count > 16384 {
                             largePaste = newValue
                             draftText = ""
                         }
@@ -370,13 +371,37 @@ struct ConversationView: View {
     /// Ask the AI to draft a reply from the conversation + "AI context" messages
     /// and inject it into the composer (editable, NOT sent). Errors surface via
     /// the existing `agentError` alert.
+    private enum DraftOutcome { case text(String), failed, timedOut }
+
     private func draftWithAI() {
         guard !aiDrafting else { return }
         aiDrafting = true
         Task {
-            let drafted = await model.draft(conversationID: conversationID)
+            // Race the draft against a timeout so the button can't spin forever
+            // (a wedged provider / network would otherwise leave it stuck).
+            let outcome = await withTaskGroup(of: DraftOutcome.self) { group -> DraftOutcome in
+                group.addTask {
+                    if let text = await model.draft(conversationID: conversationID) {
+                        return .text(text)
+                    }
+                    return .failed  // model.draft already set agentError
+                }
+                group.addTask {
+                    try? await Task.sleep(for: .seconds(25))
+                    return .timedOut
+                }
+                let first = await group.next() ?? .failed
+                group.cancelAll()
+                return first
+            }
             aiDrafting = false
-            if let drafted { insertIntoComposer(drafted) }
+            switch outcome {
+            case .text(let drafted): insertIntoComposer(drafted)
+            case .failed: break  // the agentError alert already explains why
+            case .timedOut:
+                model.agentError =
+                    "The AI took too long to respond. Check your connection or your AI provider in Settings, then try again."
+            }
         }
     }
 
