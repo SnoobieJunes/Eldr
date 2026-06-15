@@ -161,12 +161,56 @@ actor PersonaRuntime {
     var npub: String { nostrKeypair.npub }
 
     /// The primary AI used for private drafts and the Settings probe.
+    private var primaryAI: TetheredAI { ais[0] }
     private var primaryProvider: any AgentProvider { ais[0].provider }
+    /// Egress firewall: when on, context handed to a REMOTE AI is name-redacted
+    /// (real names → local codenames) and byte-bounded before it leaves the
+    /// device. On-device AIs always bypass it.
+    private var firewallEnabled = true
 
     func setAIs(_ newAIs: [TetheredAI]) {
         ais = newAIs.isEmpty
             ? [TetheredAI(id: "demo", name: "demo-otter-naps-000", provider: DemoAgentProvider())]
             : newAIs
+    }
+
+    func setFirewallEnabled(_ enabled: Bool) {
+        firewallEnabled = enabled
+    }
+
+    /// Builds the context for one AI: the normal (byte-bounded) context for an
+    /// on-device AI, or the firewalled (name-redacted) context for a remote AI
+    /// when the firewall is on. This is the single boundary every byte crosses
+    /// before reaching an off-device model.
+    private func contextFor(
+        _ ai: TetheredAI, conversationID: String, threadID: String?
+    ) async -> AgentContext {
+        let ctx = await agentContext(conversationID: conversationID, threadID: threadID)
+        guard ai.isRemote, firewallEnabled else { return ctx }
+        return redactedForRemote(ctx)
+    }
+
+    /// Replaces real display names with each identity's LOCAL codename (and self
+    /// with "you"), so a remote vendor never receives a labeled social graph
+    /// (DEVIATIONS A19/A20: names are device-local). Text/flags are unchanged;
+    /// the byte bound was already applied in `agentContext`.
+    private func redactedForRemote(_ context: AgentContext) -> AgentContext {
+        let entries = context.transcript.map { entry -> TranscriptEntry in
+            let codename =
+                entry.senderIdentityHex == identityHex
+                ? "you"
+                : (contactRecords[entry.senderIdentityHex]?.autoName ?? "a contact")
+            return TranscriptEntry(
+                senderIdentityHex: entry.senderIdentityHex,
+                senderDisplayName: codename,
+                participantType: entry.participantType,
+                text: entry.text,
+                isContext: entry.isContext,
+                isSharedContext: entry.isSharedContext)
+        }
+        return AgentContext(
+            myIdentityHex: context.myIdentityHex, myDisplayName: "you",
+            transcript: entries, threadID: context.threadID, threadTitle: context.threadTitle)
     }
 
     // MARK: - Bootstrap
@@ -776,7 +820,7 @@ actor PersonaRuntime {
         var posted = 0
         var lastError: String?
         for ai in ais {
-            let context = await agentContext(conversationID: conversationID, threadID: nil)
+            let context = await contextFor(ai, conversationID: conversationID, threadID: nil)
             do {
                 // Race generation against a timeout so a wedged/slow on-device
                 // model can't leave the chat hanging forever (also frees the
@@ -939,7 +983,7 @@ actor PersonaRuntime {
     func draftReply(conversationID: String, threadID: String? = nil) async throws -> Draft {
         try await engine.draft(
             provider: primaryProvider,
-            context: await agentContext(conversationID: conversationID, threadID: threadID))
+            context: await contextFor(primaryAI, conversationID: conversationID, threadID: threadID))
     }
 
     /// Diagnostic for Settings "Test AI now": run the active provider against a
@@ -1023,7 +1067,7 @@ actor PersonaRuntime {
             aiActive = windowLive || isSoloConversation(conversationID)
         }
         let since = aiActiveSince[threadID ?? conversationID] ?? Int64.max
-        let visible = stored.filter { message in
+        let recent = stored.filter { message in
             // While the AI is on, it reads the LIVE conversation from the moment
             // it was turned on (the window/invite/solo state is the authorization
             // to participate) — but never messages from before that.
@@ -1034,7 +1078,19 @@ actor PersonaRuntime {
                 return message.senderIdentity == identityHex || sharingAuthorized
             }
             return false
-        }.suffix(20).map { $0 }
+        }.suffix(20)
+        // Byte-bound the window: keep the most recent entries whose combined text
+        // fits a budget, so a few multi-MB pastes can't balloon memory or a remote
+        // payload (the AI-to-AI OOM cap). Always keep at least the newest message.
+        var budget = 64 * 1024
+        var bounded: [StoredMessage] = []
+        for message in recent.reversed() {
+            let cost = message.text.utf8.count
+            if !bounded.isEmpty, budget - cost < 0 { break }
+            bounded.append(message)
+            budget -= cost
+        }
+        let visible = Array(bounded.reversed())
 
         let transcript = visible.map { message -> TranscriptEntry in
             let isMine = message.senderIdentity == identityHex
@@ -1068,7 +1124,7 @@ actor PersonaRuntime {
         for ai in ais {
             _ = await engine.runThreadTurn(
                 provider: ai.provider,
-                context: await agentContext(conversationID: conversationID, threadID: threadID),
+                context: await contextFor(ai, conversationID: conversationID, threadID: threadID),
                 threadID: threadID,
                 agentName: ai.name)
         }
@@ -1411,7 +1467,7 @@ actor PersonaRuntime {
             for ai in ais {
                 _ = await engine.runWindowReply(
                     provider: ai.provider,
-                    context: await agentContext(conversationID: conversationID, threadID: nil),
+                    context: await contextFor(ai, conversationID: conversationID, threadID: nil),
                     agentName: ai.name)
             }
         }

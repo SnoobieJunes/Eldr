@@ -89,4 +89,51 @@ struct MultiAIBehaviorTests {
         await alice.shutdown()
         await bob.shutdown()
     }
+
+    /// Egress firewall ON (default): a REMOTE AI must never receive my real
+    /// display name — only the local "you"/codename.
+    @Test func firewall_redactsRealNamesForRemoteAI() async throws {
+        let spy = SpyProvider()
+        let runtime = await makeRuntime(
+            "Alice", ais: [TetheredAI(id: "r", name: "remote-ai", provider: spy, isRemote: true)])
+        await runtime.keychain.deleteAll()
+        _ = try await runtime.bootstrap(inMemoryStore: true)
+        let chatID = try await runtime.createSelfChat()
+        try await runtime.sendMessage("secret plan", conversationID: chatID)
+        try await Task.sleep(for: .milliseconds(400))
+
+        let names = await spy.capturedNames
+        #expect(names.contains("you"), "my real name is replaced with 'you' for a remote AI")
+        #expect(!names.contains("Alice"), "real display name must NOT leave the device to a remote AI")
+    }
+
+    /// Egress firewall OFF: the real display name is passed through (the warned
+    /// trade-off). On-device AIs are unaffected either way.
+    @Test func firewall_off_passesRealNames() async throws {
+        let spy = SpyProvider()
+        let runtime = await makeRuntime(
+            "Alice", ais: [TetheredAI(id: "r", name: "remote-ai", provider: spy, isRemote: true)])
+        await runtime.keychain.deleteAll()
+        _ = try await runtime.bootstrap(inMemoryStore: true)
+        await runtime.setFirewallEnabled(false)
+        let chatID = try await runtime.createSelfChat()
+        try await runtime.sendMessage("hi", conversationID: chatID)
+        try await Task.sleep(for: .milliseconds(400))
+
+        let names = await spy.capturedNames
+        #expect(names.contains("Alice"), "with the firewall off, the real display name is sent")
+    }
+}
+
+/// Records the transcript display names of the last context it was handed, so
+/// tests can assert exactly what would leave the device for a remote AI.
+actor SpyProvider: AgentProvider {
+    private(set) var capturedNames: [String] = []
+    func draftReply(context: AgentContext) async throws -> Draft {
+        capturedNames = context.transcript.map(\.senderDisplayName)
+        return Draft(text: "ok")
+    }
+    func threadTurn(context: AgentContext) async throws -> AgentTurn? {
+        AgentTurn(messages: [AgentMessage(text: "ok")])
+    }
 }

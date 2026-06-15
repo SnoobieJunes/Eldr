@@ -48,6 +48,10 @@ struct TetheredAI: Sendable {
     let id: String
     let name: String
     let provider: any AgentProvider
+    /// True for token-API backends (Claude/OpenAI/Gemini) that send context
+    /// off-device. The egress firewall (name redaction + byte bound) applies only
+    /// to these; on-device AIs bypass it entirely.
+    var isRemote: Bool = false
 }
 
 /// One line of the read-only "what your AI sees" context preview (Settings).

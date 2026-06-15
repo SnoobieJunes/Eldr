@@ -16,6 +16,9 @@ struct AISettingsView: View {
     @State private var aiTestResult: String?
     /// The AI (by id) awaiting remote-consent confirmation.
     @State private var pendingRemote: ConfiguredAI?
+    /// Egress firewall: ON by default. Disabling is gated behind a warning.
+    @AppStorage("egressFirewallEnabled") private var firewallEnabled = true
+    @State private var showFirewallWarning = false
 
     private let keychain = KeychainStore(service: "chat.pqrc.keys")
 
@@ -74,6 +77,25 @@ struct AISettingsView: View {
                 Text("Runs the first AI against a sample so you see a real reply or the exact failure reason.")
             }
 
+            Section {
+                Toggle("Egress firewall", isOn: $firewallEnabled)
+                    .accessibilityIdentifier("egress-firewall-toggle")
+                    .onChange(of: firewallEnabled) { _, on in
+                        if on {
+                            Task { await session.applyAIProvider() }
+                        } else {
+                            // Re-arm the toggle until the user confirms via the
+                            // warning, so it can't be disabled by accident.
+                            firewallEnabled = true
+                            showFirewallWarning = true
+                        }
+                    }
+            } header: {
+                Text("Egress firewall")
+            } footer: {
+                Text("On by default. When on, anything sent to a REMOTE AI is stripped of real names (replaced with your private codenames) and trimmed to a safe size before it leaves your device. On-device AI is never affected. Disabling it is not recommended.")
+            }
+
             Section("What your AI sees") {
                 NavigationLink {
                     AIContextView(model: model)
@@ -85,6 +107,15 @@ struct AISettingsView: View {
         }
         .navigationTitle("AI")
         .navigationBarTitleDisplayMode(.inline)
+        .alert("Turn off the egress firewall?", isPresented: $showFirewallWarning) {
+            Button("Turn off — send raw context", role: .destructive) {
+                firewallEnabled = false
+                Task { await session.applyAIProvider() }
+            }
+            Button("Keep it on", role: .cancel) {}
+        } message: {
+            Text("With the firewall off, a remote AI provider will receive your contacts' real names and your full recent conversation, unredacted and unbounded. On-device AI is unaffected either way. Only do this if you fully trust that provider.")
+        }
         .alert("Send conversations to a remote API?", isPresented: showConsent) {
             Button("Enable remote AI", role: .destructive) {
                 pendingRemote = nil

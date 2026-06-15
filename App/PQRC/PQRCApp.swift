@@ -194,8 +194,17 @@ final class AppSession {
     /// The configured AIs bound to live providers — the runtime's tethered AIs.
     static func makeRuntimeAIs() -> [TetheredAI] {
         loadConfiguredAIs().map {
-            TetheredAI(id: $0.id, name: $0.name, provider: makeProvider(kind: $0.kind))
+            TetheredAI(
+                id: $0.id, name: $0.name, provider: makeProvider(kind: $0.kind),
+                isRemote: ConfiguredAI.isRemote($0.kind))
         }
+    }
+
+    /// The egress firewall (redact names + byte-bound context sent to remote AIs)
+    /// is ON by default; the user can disable it in Settings ▸ AI after the
+    /// implications warning.
+    static var firewallEnabled: Bool {
+        UserDefaults.standard.object(forKey: "egressFirewallEnabled") as? Bool ?? true
     }
 
     /// Multipeer local link: user-toggleable (Settings → Nearby), OFF by
@@ -218,6 +227,7 @@ final class AppSession {
             ais: Self.makeRuntimeAIs(),
             keychainService: "chat.pqrc.keys",
             enableLocalLink: Self.localLinkEnabled)
+        await runtime.setFirewallEnabled(Self.firewallEnabled)
         let model = AppModel(
             runtime: runtime,
             personaName: UserDefaults.standard.string(forKey: "displayName") ?? "Me")
@@ -239,10 +249,12 @@ final class AppSession {
         await bootSingle()
     }
 
-    /// Re-resolves the tethered AIs after a Settings change (no reboot needed).
+    /// Re-resolves the tethered AIs + egress-firewall state after a Settings
+    /// change (no reboot needed).
     func applyAIProvider() async {
         guard case .single(let model) = mode else { return }
         await model.runtime.setAIs(Self.makeRuntimeAIs())
+        await model.runtime.setFirewallEnabled(Self.firewallEnabled)
     }
 
     /// `pqrc:add?npub=npub1…` — from a scanned QR. Opens New Conversation
