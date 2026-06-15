@@ -617,11 +617,47 @@ and affects interop; `[app-only]` — client behavior, no wire impact;
   `read_conversation`, `search_messages`, `get_context_preview`. A
   `DemoSecureChatBridge` + `pqrc-mcp` executable let any MCP client connect today
   (verified: 9 protocol tests + a full stdio handshake + a live Goose session
-  driven by the local LM Studio model). **Still to build (Phase 2):** the real
-  `PersonaRuntime`-backed bridge + an OFF-by-default Settings toggle + a
-  pairing-token consent gate; and (Phase 3, opt-in) window-gated action tools.
-  ACP stays explicitly out of v1; if ever wanted it is a parallel `PQRCACP`
-  client following the same read-only-then-window-gated discipline.
+  driven by the local LM Studio model). ACP stays explicitly out of v1; if ever
+  wanted it is a parallel `PQRCACP` client following the same
+  read-only-then-window-gated discipline.
+
+- **A35-Phase2 — Local MCP server now serves the user's REAL secure chat**
+  `[app-only]` (2026-06-15): wires the demo-only Phase 1 to live data without
+  weakening the firewall. Because EldrChat's store key lives ONLY in the unlocked
+  app's RAM (wrapped under the silo KEK), a standalone `pqrc-mcp` process can never
+  read real chat — so the **app HOSTS the MCP server in-process** and a tiny stdio
+  **shim** bridges the editor to it. Pieces:
+  • `RuntimeSecureChatBridge` (app) implements `SecureChatBridge` over
+    `AppModel`/`PersonaRuntime`, returning ONLY firewall-redacted data: sender →
+    local codename (`autoName`; self → "you"; never identity hex), text byte-bounded
+    ≤64 KB, role honest. New READ-ONLY `PersonaRuntime` accessors
+    (`mcpMessages`/`mcpSearch`/`mcpContextPreview`) apply the SAME redaction as
+    `redactedForRemote` — no crypto/engine change.
+  • `LocalMCPServer` (app) is an `actor` that, only while a silo is unlocked AND a
+    new Settings toggle is ON, binds a **loopback Unix-domain socket** under the app
+    temp dir and pumps each connection's newline-delimited lines through
+    `MCPServer.handle(line:)`. It requires a **pairing token** (32 random bytes,
+    silo-Keychain-stored) as the FIRST line and drops the connection otherwise.
+    **NEVER binds a non-loopback interface** (UDS has no network interface at all;
+    there is no TCP fallback in the app). Blocking `accept`/`read` run on
+    `nonisolated` methods (off the actor executor) so `stop()` is never wedged.
+    Stops on lock / toggle-off.
+  • `pqrc-mcp-bridge` (new executable in `Packages/PQRCMCP`, kept alongside the demo
+    `pqrc-mcp`): ~110 lines, NO MCP logic. Reads `PQRC_MCP_SOCKET` (or
+    `PQRC_MCP_PORT`+`PQRC_MCP_TOKEN`), connects, sends the token line, then pipes
+    stdin→socket / socket→stdout. This is what Goose/Xcode spawn. A 127.0.0.1
+    fallback exists in the shim for clients that can't do UDS, but the app only ever
+    publishes a UDS path.
+  • Settings ▸ "Local agent access (MCP)" Section: OFF by default behind a consent
+    explanation (this exposes your redacted chat to local agents on this machine).
+    On → generate/store the token, start the server, and SHOW the exact shim
+    command + token + env to paste into the MCP client. Off/lock → stop.
+  • `PQRCMCP` linked into the **app target** via `project.pbxproj`
+    (`XCLocalSwiftPackageReference` + `XCSwiftPackageProductDependency` +
+    Frameworks build-file), mirroring how PQRCCore/Nostr/Agent are referenced.
+  Privacy: read-only, redacted, loopback-only, token-gated, off by default, stops on
+  lock — the cardinal rule resolved at every tie. **Still open (Phase 3, opt-in):**
+  window-gated action tools.
 
 - **A36 — ACP AGENT (EldrChat's self-hosted LLM pilots Xcode)** `[app-only]`
   (2026-06-15): the dual of A35. Where the MCP server exposes secure chat *to* a

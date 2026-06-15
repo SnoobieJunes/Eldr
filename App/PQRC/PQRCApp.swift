@@ -1,8 +1,23 @@
 import CryptoKit
 import PQRCAgent
 import PQRCCore
+import PQRCMCP
 import PQRCNostr
+import Security
 import SwiftUI
+
+/// Connection details for a running local MCP server, shown in Settings so the
+/// user can configure their MCP client (the exact shim command + token + env).
+struct LocalMCPConnection: Equatable {
+    let socketPath: String
+    let token: String
+
+    /// The environment a user pastes into their MCP client's server config so the
+    /// `pqrc-mcp-bridge` shim can reach this in-app server.
+    var env: [String: String] {
+        ["PQRC_MCP_SOCKET": socketPath, "PQRC_MCP_TOKEN": token]
+    }
+}
 
 @main
 struct PQRCApp: App {
@@ -555,6 +570,9 @@ final class AppSession {
 
     /// Lock the current silo and return to the lock screen ("swap accounts").
     func lockSilo() async {
+        // Tear the MCP server down FIRST: the redacted store it serves is about to
+        // become unreadable, and nothing local-agent-facing may outlive the unlock.
+        await stopLocalMCP()
         if case .single(let model) = mode {
             await model.runtime.shutdown()
         }
@@ -564,6 +582,78 @@ final class AppSession {
         relayClient = nil
         activeSilo = nil
         mode = .locked
+    }
+
+    // MARK: - Local agent access (in-process MCP server, A35 Phase 2)
+
+    /// The in-process MCP server, alive only while a silo is unlocked AND the
+    /// Settings toggle is on. Loopback-only, token-gated, read-only, redacted.
+    private var mcpServer: LocalMCPServer?
+    /// Last-published connection details, surfaced in Settings so the user can
+    /// paste the shim command/token/env into their MCP client. nil when stopped.
+    var localMCPConnection: LocalMCPConnection?
+    /// Surfaced in Settings if the loopback socket couldn't be bound.
+    var localMCPError: String?
+
+    /// Local agent access is a live, in-session state only — there is NO persisted
+    /// "expose me" flag and the server is NEVER auto-started on launch (the
+    /// cardinal rule: a fresh launch must not silently re-expose chat to local
+    /// agents). It is OFF until the user explicitly toggles it on, and stops on
+    /// lock. The UI reads this live state, so it stays accurate.
+    var isLocalMCPRunning: Bool { mcpServer != nil }
+
+    /// Turn local agent access ON: generate/persist a pairing token, bind a
+    /// loopback Unix socket under the app container, host the MCP server over it,
+    /// and publish the connection details for Settings to display. Requires an
+    /// unlocked silo. Idempotent — a second call republishes the same details.
+    func startLocalMCP() async {
+        guard case .single(let model) = mode, let siloID = activeSilo?.siloID else {
+            localMCPError = "Unlock an account first."
+            return
+        }
+        guard mcpServer == nil else { return }
+        localMCPError = nil
+
+        let token = Self.pairingToken(siloID: siloID)
+        // A short, unguessable socket path UNDER the app's temp dir (inside the
+        // container) — a UDS path has a ~104-byte limit, so keep it short.
+        let socketPath = NSTemporaryDirectory() + "eldr-mcp-\(UUID().uuidString.prefix(8)).sock"
+        let bridge = RuntimeSecureChatBridge(model: model)
+        let server = LocalMCPServer(bridge: bridge, token: token, socketPath: socketPath)
+        do {
+            try await server.start()
+            mcpServer = server
+            localMCPConnection = LocalMCPConnection(socketPath: socketPath, token: token)
+        } catch {
+            localMCPError = "Couldn't start the local MCP server: \(error)."
+            localMCPConnection = nil
+        }
+    }
+
+    /// Turn local agent access OFF: stop the server and clear the published
+    /// details. Called on the toggle and on lock.
+    func stopLocalMCP() async {
+        await mcpServer?.stop()
+        mcpServer = nil
+        localMCPConnection = nil
+        localMCPError = nil
+    }
+
+    /// A random pairing token for this silo, persisted in its Keychain so it's
+    /// stable across launches (and protected at rest), generated on first use.
+    private static func pairingToken(siloID: String) -> String {
+        let keychain = KeychainStore(service: siloService(siloID))
+        let account = "mcp-pairing-token"
+        if let existing = keychain.loadIfPresent(account: account),
+            let value = String(data: existing, encoding: .utf8), !value.isEmpty
+        {
+            return value
+        }
+        var bytes = [UInt8](repeating: 0, count: 32)
+        _ = SecRandomCopyBytes(kSecRandomDefault, bytes.count, &bytes)
+        let token = Data(bytes).base64EncodedString()
+        try? keychain.save(Data(token.utf8), account: account)
+        return token
     }
 
     // MARK: - Biometric convenience unlock (one primary silo)
@@ -676,6 +766,9 @@ final class AppSession {
     /// relay-list and Nearby changes from Settings (reuses the unlocked key).
     func rebootSingle() async {
         guard let derived = activeSilo else { return }
+        // Stop the MCP server: its bridge points at the model we're about to
+        // replace, so it must not outlive the reboot (the user re-enables it).
+        await stopLocalMCP()
         if case .single(let model) = mode {
             await model.runtime.shutdown()
         }

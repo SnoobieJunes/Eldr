@@ -993,6 +993,98 @@ actor PersonaRuntime {
         }
     }
 
+    // MARK: - Egress-firewall-redacted accessors for the local MCP server (A35 Phase 2)
+
+    /// The SAME egress firewall the remote-AI path uses (`redactedForRemote`),
+    /// reduced to the codename rule a local MCP client may see: my messages →
+    /// "you", a peer's → that contact's LOCAL `autoName` (never a real display
+    /// name, NEVER identity hex), and text byte-bounded to the 64 KB cap so no
+    /// single multi-MB paste can leave the device unbounded. Read-only: no engine
+    /// or crypto state is touched. Backs `RuntimeSecureChatBridge`.
+    private func mcpCodename(for senderIdentityHex: String) -> String {
+        senderIdentityHex == identityHex
+            ? "you"
+            : (contactRecords[senderIdentityHex]?.autoName ?? "a contact")
+    }
+
+    /// At most 64 KB of UTF-8 (invariant 4 bound), truncated on a code-point
+    /// boundary so the firewall never emits a torn scalar.
+    private func mcpBounded(_ text: String) -> String {
+        let cap = 64 * 1024
+        guard text.utf8.count > cap else { return text }
+        var truncated = ""
+        var used = 0
+        for character in text {
+            let cost = String(character).utf8.count
+            if used + cost > cap { break }
+            truncated.append(character)
+            used += cost
+        }
+        return truncated
+    }
+
+    /// One firewall-redacted message for the MCP bridge (codename sender, honest
+    /// role, byte-bounded text). Already egress-safe.
+    struct MCPRedactedLine: Sendable {
+        let conversationID: String
+        let sender: String
+        let role: String
+        let text: String
+        let sentAt: Int64
+    }
+
+    /// Recent top-level (non-thread) messages of a conversation, firewall-redacted.
+    func mcpMessages(conversationID: String, limit: Int) async -> [MCPRedactedLine] {
+        let stored = ((try? await store.messages(conversationID: conversationID)) ?? [])
+            .filter { $0.threadID == nil }
+            .suffix(max(0, limit))
+        return stored.map { message in
+            MCPRedactedLine(
+                conversationID: conversationID,
+                sender: mcpCodename(for: message.senderIdentity),
+                role: message.participantType.rawValue,
+                text: mcpBounded(message.text),
+                sentAt: message.sentAt)
+        }
+    }
+
+    /// Case-insensitive substring search across every persisted conversation,
+    /// firewall-redacted, newest first, capped at `limit`.
+    func mcpSearch(query: String, limit: Int) async -> [MCPRedactedLine] {
+        guard limit > 0, !query.isEmpty else { return [] }
+        var hits: [MCPRedactedLine] = []
+        for conversationID in (try? await store.conversationIDsWithMessages()) ?? [] {
+            let stored = ((try? await store.messages(conversationID: conversationID)) ?? [])
+                .filter { $0.threadID == nil && $0.text.localizedCaseInsensitiveContains(query) }
+            for message in stored {
+                hits.append(
+                    MCPRedactedLine(
+                        conversationID: conversationID,
+                        sender: mcpCodename(for: message.senderIdentity),
+                        role: message.participantType.rawValue,
+                        text: mcpBounded(message.text),
+                        sentAt: message.sentAt))
+            }
+        }
+        return Array(hits.sorted { $0.sentAt > $1.sentAt }.prefix(limit))
+    }
+
+    /// Exactly what the user's AI sees for a conversation, run through the SAME
+    /// redaction (`redactedForRemote`) the remote-AI egress path applies — the
+    /// "what your AI sees" preview, codename-redacted and already byte-bounded.
+    func mcpContextPreview(conversationID: String) async -> [MCPRedactedLine] {
+        let context = redactedForRemote(
+            await agentContext(conversationID: conversationID, threadID: nil))
+        return context.transcript.map { entry in
+            MCPRedactedLine(
+                conversationID: conversationID,
+                sender: entry.senderDisplayName,  // already "you" / autoName via redaction
+                role: entry.participantType.rawValue,
+                text: entry.text,  // agentContext already applied the 64 KB bound
+                sentAt: 0)
+        }
+    }
+
     /// Removes a stored message (tap-to-retry drops the failed copy first).
     func deleteMessage(_ id: String) async {
         try? await store.deleteMessage(messageID: id)

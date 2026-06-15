@@ -10,6 +10,7 @@
 		AA0000000000000000000101 /* PQRCCore in Frameworks */ = {isa = PBXBuildFile; productRef = AA0000000000000000000201 /* PQRCCore */; };
 		AA0000000000000000000102 /* PQRCNostr in Frameworks */ = {isa = PBXBuildFile; productRef = AA0000000000000000000202 /* PQRCNostr */; };
 		AA0000000000000000000103 /* PQRCAgent in Frameworks */ = {isa = PBXBuildFile; productRef = AA0000000000000000000203 /* PQRCAgent */; };
+		AA0000000000000000000107 /* PQRCMCP in Frameworks */ = {isa = PBXBuildFile; productRef = AA0000000000000000000207 /* PQRCMCP */; };
 		AA0000000000000000000104 /* PQRCCore in Frameworks */ = {isa = PBXBuildFile; productRef = AA0000000000000000000204 /* PQRCCore */; };
 		AA0000000000000000000105 /* PQRCNostr in Frameworks */ = {isa = PBXBuildFile; productRef = AA0000000000000000000205 /* PQRCNostr */; };
 		AA0000000000000000000106 /* PQRCAgent in Frameworks */ = {isa = PBXBuildFile; productRef = AA0000000000000000000206 /* PQRCAgent */; };
@@ -64,6 +65,7 @@
 				AA0000000000000000000101 /* PQRCCore in Frameworks */,
 				AA0000000000000000000102 /* PQRCNostr in Frameworks */,
 				AA0000000000000000000103 /* PQRCAgent in Frameworks */,
+				AA0000000000000000000107 /* PQRCMCP in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -130,6 +132,7 @@
 				AA0000000000000000000201 /* PQRCCore */,
 				AA0000000000000000000202 /* PQRCNostr */,
 				AA0000000000000000000203 /* PQRCAgent */,
+				AA0000000000000000000207 /* PQRCMCP */,
 			);
 			productName = PQRC;
 			productReference = AA0000000000000000000701 /* EldrChat.app */;
@@ -208,6 +211,7 @@
 				AA0000000000000000000C01 /* XCLocalSwiftPackageReference "../Packages/PQRCCore" */,
 				AA0000000000000000000C02 /* XCLocalSwiftPackageReference "../Packages/PQRCNostr" */,
 				AA0000000000000000000C03 /* XCLocalSwiftPackageReference "../Packages/PQRCAgent" */,
+				AA0000000000000000000C04 /* XCLocalSwiftPackageReference "../Packages/PQRCMCP" */,
 			);
 			preferredProjectObjectVersion = 77;
 			productRefGroup = AA0000000000000000000602 /* Products */;
@@ -550,6 +554,10 @@
 			isa = XCLocalSwiftPackageReference;
 			relativePath = ../Packages/PQRCAgent;
 		};
+		AA0000000000000000000C04 /* XCLocalSwiftPackageReference "../Packages/PQRCMCP" */ = {
+			isa = XCLocalSwiftPackageReference;
+			relativePath = ../Packages/PQRCMCP;
+		};
 /* End XCLocalSwiftPackageReference section */
 
 /* Begin XCSwiftPackageProductDependency section */
@@ -564,6 +572,10 @@
 		AA0000000000000000000203 /* PQRCAgent */ = {
 			isa = XCSwiftPackageProductDependency;
 			productName = PQRCAgent;
+		};
+		AA0000000000000000000207 /* PQRCMCP */ = {
+			isa = XCSwiftPackageProductDependency;
+			productName = PQRCMCP;
 		};
 		AA0000000000000000000204 /* PQRCCore */ = {
 			isa = XCSwiftPackageProductDependency;

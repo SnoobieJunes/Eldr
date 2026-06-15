@@ -16,10 +16,17 @@ let package = Package(
     products: [
         .library(name: "PQRCMCP", targets: ["PQRCMCP"]),
         .executable(name: "pqrc-mcp", targets: ["pqrc-mcp"]),
+        // The stdio↔in-app-server SHIM (A35 Phase 2): the binary Goose/Xcode
+        // actually spawn to read REAL secure chat. NO MCP logic — it just bridges
+        // the editor's stdio to the loopback socket the unlocked app is hosting.
+        .executable(name: "pqrc-mcp-bridge", targets: ["pqrc-mcp-bridge"]),
     ],
     targets: [
         .target(name: "PQRCMCP"),
         .executableTarget(name: "pqrc-mcp", dependencies: ["PQRCMCP"]),
+        // Deliberately depends on NOTHING (not even PQRCMCP): it carries no
+        // protocol knowledge, only raw byte plumbing.
+        .executableTarget(name: "pqrc-mcp-bridge"),
         .testTarget(name: "PQRCMCPTests", dependencies: ["PQRCMCP"]),
     ]
 )

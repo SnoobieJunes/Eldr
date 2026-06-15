@@ -2,6 +2,7 @@ import CoreImage.CIFilterBuiltins
 import PQRCCore
 import PQRCNostr
 import SwiftUI
+import UIKit
 
 /// Settings (APP-SPEC §10).
 struct SettingsView: View {
@@ -22,6 +23,9 @@ struct SettingsView: View {
     /// Mirrors `session.hasBiometricUnlock` (a Keychain read, which @Observable
     /// can't track) so the Face ID toggle actually re-renders when flipped.
     @State private var biometricOn = false
+    /// Local agent access (in-process MCP server) toggle state. Mirrors the live
+    /// server, OFF by default; flipping it starts/stops the loopback server.
+    @State private var localMCPOn = false
     @State private var now = Int64(Date().timeIntervalSince1970)
 
     private let ticker = Timer.publish(every: 1, on: .main, in: .common).autoconnect()
@@ -37,6 +41,7 @@ struct SettingsView: View {
                 aiSection
                 prekeysSection
                 privacySection
+                localAgentSection
                 accountSection
                 dataSection
                 aboutSection
@@ -60,6 +65,7 @@ struct SettingsView: View {
                 myAlias =
                     UserDefaults.standard.string(forKey: AppSession.displayNameKey(model.siloID)) ?? ""
                 biometricOn = session.hasBiometricUnlock
+                localMCPOn = session.isLocalMCPRunning
                 Task {
                     openInboxUntil = await model.runtime.openInboxActiveUntil()
                     // Refresh the live prekey count so the Prekeys section isn't
@@ -398,6 +404,70 @@ struct SettingsView: View {
                 .disabled(true)
             Text("Experimental — hides your address from relay observers per conversation. Off in this build; see THREAT_MODEL.md.")
                 .font(.caption)
+                .foregroundStyle(.secondary)
+        }
+    }
+
+    // MARK: Local agent access (in-process MCP server, A35 Phase 2)
+
+    private var localAgentSection: some View {
+        Section {
+            Toggle("Local agent access (MCP)", isOn: Binding(
+                get: { localMCPOn },
+                set: { on in
+                    localMCPOn = on
+                    Task {
+                        if on { await session.startLocalMCP() } else { await session.stopLocalMCP() }
+                        // Snap back if the server refused to bind.
+                        localMCPOn = session.isLocalMCPRunning
+                    }
+                }))
+                .accessibilityIdentifier("local-mcp-toggle")
+            if let error = session.localMCPError {
+                Text(error)
+                    .font(.caption)
+                    .foregroundStyle(.orange)
+                    .accessibilityIdentifier("local-mcp-error")
+            }
+            if localMCPOn, let connection = session.localMCPConnection {
+                localMCPInstructions(connection)
+            }
+        } header: {
+            Text("Local agent access")
+        } footer: {
+            Text("OFF by default. When ON, a local AI agent on THIS machine (Goose, Xcode, Claude, …) can READ your conversations through a loopback-only connection — sender names are local codenames, message text is firewall-redacted and size-capped, and there is NO way for it to send or post anything. Nothing is ever exposed off this device, and the connection needs the one-time pairing token below. Turning this off, or locking, stops it immediately. Only enable it if you want a local agent to see your redacted chat.")
+        }
+    }
+
+    /// The exact shim command + token + env a user pastes into their MCP client.
+    @ViewBuilder
+    private func localMCPInstructions(_ connection: LocalMCPConnection) -> some View {
+        let block = """
+            command: pqrc-mcp-bridge
+            env:
+              PQRC_MCP_SOCKET=\(connection.socketPath)
+              PQRC_MCP_TOKEN=\(connection.token)
+            """
+        VStack(alignment: .leading, spacing: 6) {
+            Text("Point your MCP client at the bridge shim with this env:")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            Text(block)
+                .font(.caption.monospaced())
+                .textSelection(.enabled)
+                .padding(8)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(.quaternary, in: RoundedRectangle(cornerRadius: 8))
+                .accessibilityIdentifier("local-mcp-config")
+            Button {
+                UIPasteboard.general.string = block
+            } label: {
+                Label("Copy configuration", systemImage: "doc.on.doc")
+            }
+            .font(.caption)
+            .accessibilityIdentifier("local-mcp-copy")
+            Text("`pqrc-mcp-bridge` is built from Packages/PQRCMCP (`swift build`). The socket lives in this app's container and changes each time you turn this on.")
+                .font(.caption2)
                 .foregroundStyle(.secondary)
         }
     }
