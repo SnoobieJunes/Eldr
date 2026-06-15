@@ -85,7 +85,7 @@ struct SettingsView: View {
                 TextField("Alias shown to your contacts", text: $myAlias)
                     .accessibilityIdentifier("my-alias")
                     .onSubmit { saveAlias() }
-                Text("Sent only over your encrypted conversations — people you haven't connected with never see it.")
+                Text("Sent only over your encrypted conversations — people you haven't connected with never see it. If you've turned on a remote AI, your alias is also included in prompts sent to that provider.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }

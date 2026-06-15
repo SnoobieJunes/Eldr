@@ -248,7 +248,11 @@ Only the x-coordinate enters HKDF (lifting x-only keys can negate the shared
 point between directions; x is invariant). Seal: conversation key between the
 sender's real key and the recipient. Wrap: between a FRESH one-time key and the
 recipient. `created_at` on seal and wrap = the fuzzed timestamp from §7. The
-wrap's only tag is `["p", recipient]`. Interop with NIP-44 clients is deferred.
+wrap's tags are `["p", recipient]` and a NIP-40 `["expiration", created_at + 7
+days]` so an expiration-aware relay auto-deletes the event (≈5–7 days effective
+retention; the value is anchored to the fuzzed `created_at`, so `expiration −
+7 days == created_at` and it reveals no timing the public `created_at` doesn't).
+The seal carries no tags. Interop with NIP-44 clients is deferred.
 
 ## 10. Relays
 

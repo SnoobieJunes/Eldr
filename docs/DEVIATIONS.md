@@ -402,6 +402,14 @@ and affects interop; `[app-only]` — client behavior, no wire impact;
   peer's only under an active bilateral grant). It never auto-ingests the rest of
   the conversation. Ties to privacy (SPEC §0) at the cost of a less-informed
   default draft.
+- **A22 — NIP-40 expiration on gift-wraps (7-day retention)** (2026-06-14): every
+  kind-1059 wrap carries `["expiration", created_at + 7d]` so a NIP-40 relay
+  auto-deletes it (minimized server footprint; privacy SPEC §0). The value is
+  anchored to the FUZZED `created_at`, not real now, so it reveals no timing the
+  public `created_at` doesn't already (`expiration − window == created_at`).
+  Effective relay retention is 5–7 days (the fuzz is up to 2 days into the past).
+  `PQRCConstants.expirationWindowSeconds`; the frozen `giftwrap.json` vector was
+  regenerated for the new tag.
 
 ### Tech debt `[tech-debt]`
 

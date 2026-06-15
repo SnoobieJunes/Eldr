@@ -58,6 +58,14 @@ public enum PQRCConstants {
     /// `created_at` fuzz window: up to 2 days into the PAST, never the future (SPEC §8.4).
     public static let timestampFuzzWindowSeconds: Int64 = 2 * 24 * 60 * 60
 
+    /// NIP-40 expiration window: gift-wraps carry an `expiration` tag this far
+    /// past their (fuzzed) `created_at`, so a NIP-40 relay auto-deletes them.
+    /// Anchored to the FUZZED timestamp, not real now, so the tag leaks no timing
+    /// the public `created_at` doesn't already (expiration − window == created_at).
+    /// Effective relay retention is therefore 5–7 days (the fuzz is up to 2 days
+    /// into the past). Privacy + minimized server footprint (SPEC §0).
+    public static let expirationWindowSeconds: Int64 = 7 * 24 * 60 * 60
+
     /// HKDF salts and info strings (SPEC §3.2, §4.2, §6.2).
     public static let agentHKDFSalt = "pqrc-v1"
     public static let agentHKDFInfoPrefix = "pqrc-agent-v1"

@@ -26,7 +26,7 @@ struct ConversationDetailsView: View {
                                 conversationID, nickname: nickname.isEmpty ? nil : nickname)
                         }
                     }
-                    Text("Only you see this name. If they've chosen an alias, it shows when you clear this.")
+                    Text("Only you see this name — local to your device, never broadcast. If you've turned on a remote AI, a name you set here is included in prompts sent to that provider. If they've chosen an alias, it shows when you clear this.")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }

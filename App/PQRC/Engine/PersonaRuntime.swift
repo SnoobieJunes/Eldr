@@ -20,6 +20,9 @@ enum RuntimeEvent: Sendable {
     case aiContextGrantChanged(scopeTag: String, identityHex: String, activeUntil: Int64?)
     case threadCreated(conversationID: String, threadID: String, title: String)
     case loopGuardChanged(threadID: String, paused: Bool)
+    /// An autonomous AI reply (solo chat / window) failed for every tethered AI —
+    /// surfaced so the user sees WHY instead of silence (the Bug-2 philosophy).
+    case agentError(String)
     case safetyCodeChanged(identityHex: String)
     /// A co-present peer was discovered + binding-verified over the local link
     /// (SPEC §10, Nearby setting) — startable with no relay.
@@ -92,6 +95,14 @@ actor PersonaRuntime {
     private var threadTitles: [String: String] = [:]
     /// Conversation my active ai_window was started in (window replies route here).
     private var myWindowConversationID: String?
+    /// conversationID / threadID -> when MY AI was turned on here. The AI only
+    /// ingests messages from this point forward — NEVER prior chat history — plus
+    /// any message the human manually marked "Add to AI Context" (b7: stream
+    /// context only from on→off; privacy-first SPEC §0).
+    private var aiActiveSince: [String: Int64] = [:]
+    /// Conversations with a solo self-reply run currently in flight — coalesces
+    /// rapid sends so tethered AIs don't stack overlapping reply storms.
+    private var soloRepliesInFlight: Set<String> = []
     /// Reassembly buffers for chunked large messages (relay chunking). Keyed by
     /// chunk id; an entry holds the parts seen so far plus a template body (the
     /// first-arriving chunk, text cleared) used to rebuild the whole message
@@ -741,8 +752,9 @@ actor PersonaRuntime {
         // Detached so inference never blocks the send. Threads use the invite
         // path instead.
         if participantType == .human, !asSystemRow, threadID == nil,
-            isSoloConversation(conversationID)
+            isSoloConversation(conversationID), !soloRepliesInFlight.contains(conversationID)
         {
+            soloRepliesInFlight.insert(conversationID)
             Task { [weak self] in await self?.runSelfAIReplies(conversationID: conversationID) }
         }
     }
@@ -760,20 +772,50 @@ actor PersonaRuntime {
     /// context). Stays entirely local: a solo conversation has no recipients, so
     /// nothing is published.
     private func runSelfAIReplies(conversationID: String) async {
+        defer { soloRepliesInFlight.remove(conversationID) }
+        var posted = 0
+        var lastError: String?
         for ai in ais {
             let context = await agentContext(conversationID: conversationID, threadID: nil)
-            guard let draft = try? await ai.provider.draftReply(context: context) else { continue }
-            let text = draft.text.trimmingCharacters(in: .whitespacesAndNewlines)
-            guard !text.isEmpty else { continue }
-            try? await sendMessage(
-                text, conversationID: conversationID, participantType: .agent, agentName: ai.name)
+            do {
+                // Race generation against a timeout so a wedged/slow on-device
+                // model can't leave the chat hanging forever (also frees the
+                // in-flight guard). 30 s matches the user-draft timeout budget.
+                let draft = try await withThrowingTimeout(seconds: 30) {
+                    try await ai.provider.draftReply(context: context)
+                }
+                let text = draft.text.trimmingCharacters(in: .whitespacesAndNewlines)
+                guard !text.isEmpty else { continue }
+                try await sendMessage(
+                    text, conversationID: conversationID, participantType: .agent, agentName: ai.name)
+                posted += 1
+            } catch {
+                // Keep the precise reason from the provider (e.g. the on-device
+                // "Resource unavailable" or a bad API key) for the user.
+                if case AgentProviderError.unavailable(let detail) = error {
+                    lastError = detail
+                } else if case TimeoutError.timedOut = error {
+                    lastError = "Your AI took too long to respond. Check Settings ▸ AI."
+                } else {
+                    lastError = (error as NSError).localizedDescription
+                }
+            }
+        }
+        // Don't leave the user staring at silence when every AI failed — the
+        // whole point of Bug-2's fix is that the AI never claims to work and then
+        // does nothing.
+        if posted == 0, let lastError {
+            eventContinuation?.yield(.agentError(lastError))
         }
     }
 
     /// Creates a solo AI chat: a group with only me, where my tethered AIs
     /// engage by default. People can be added later (it becomes a normal group).
+    /// The AI is "on" from creation, so it ingests messages from here forward.
     func createSelfChat() async throws -> String {
-        try await createGroup(name: "My AI", memberIdentityHexes: [])
+        let id = try await createGroup(name: "My AI", memberIdentityHexes: [])
+        aiActiveSince[id] = clock.now()
+        return id
     }
 
     /// Adds verified contacts to a group/solo conversation (the "add people at
@@ -917,6 +959,8 @@ actor PersonaRuntime {
     func startAIWindow(conversationID: String, durationSeconds: Int64) async throws {
         let announcement = try await engine.startMyWindow(durationSeconds: durationSeconds)
         myWindowConversationID = conversationID
+        // AI is on as of now: it ingests messages from here forward, not history.
+        aiActiveSince[conversationID] = clock.now()
         try await sendMessage(
             "enabled always-on AI", conversationID: conversationID, aiWindow: announcement,
             asSystemRow: true)
@@ -930,6 +974,7 @@ actor PersonaRuntime {
         guard let conversationID = threadConversations[threadID] else { return }
         let invite = try await engine.startMyInvite(
             threadID: threadID, durationSeconds: durationSeconds)
+        aiActiveSince[threadID] = clock.now()
         try await sendMessage(
             "invited their AI to the thread", conversationID: conversationID,
             threadID: threadID, aiInvite: invite)
@@ -962,10 +1007,12 @@ actor PersonaRuntime {
             threadID.map { AIContextGrant.Scope.thread($0) } ?? .conversation(conversationID)
         let sharingAuthorized = await engine.contextSharingAuthorized(scope: scope)
 
-        // Is my AI actively engaged here? Only then may it auto-ingest the whole
-        // conversation. Otherwise (the DEFAULT) it sees ONLY messages the human
-        // explicitly marked "Add to AI Context" — never the rest of the chat
-        // (DEVIATIONS A21, user request, privacy-first SPEC §0).
+        // Is my AI actively engaged here? Only then does it ingest live messages
+        // — and even then ONLY from the moment it was turned on (aiActiveSince),
+        // never prior chat history. When off (the DEFAULT) it sees ONLY messages
+        // the human explicitly marked "Add to AI Context". Either way, a peer's
+        // message is included only when a bilateral grant authorizes it
+        // (DEVIATIONS A21, b7 user request, privacy-first SPEC §0).
         let aiActive: Bool
         if let threadID {
             aiActive = await engine.activeInvite(threadID: threadID, identityHex: identityHex) != nil
@@ -975,14 +1022,19 @@ actor PersonaRuntime {
                 && myWindowConversationID == conversationID
             aiActive = windowLive || isSoloConversation(conversationID)
         }
-        // Default view: only explicitly-marked context (mine always; a peer's
-        // only under an active bilateral grant). Active view: the recent window.
-        let visible =
-            aiActive
-            ? Array(stored.suffix(20))
-            : stored.filter {
-                $0.aiContext && ($0.senderIdentity == identityHex || sharingAuthorized)
-            }.suffix(20).map { $0 }
+        let since = aiActiveSince[threadID ?? conversationID] ?? Int64.max
+        let visible = stored.filter { message in
+            // While the AI is on, it reads the LIVE conversation from the moment
+            // it was turned on (the window/invite/solo state is the authorization
+            // to participate) — but never messages from before that.
+            if aiActive, message.sentAt >= since { return true }
+            // Otherwise only manually-marked context: mine always; a peer's only
+            // under an active bilateral grant.
+            if message.aiContext {
+                return message.senderIdentity == identityHex || sharingAuthorized
+            }
+            return false
+        }.suffix(20).map { $0 }
 
         let transcript = visible.map { message -> TranscriptEntry in
             let isMine = message.senderIdentity == identityHex
@@ -1465,4 +1517,23 @@ extension PersonaRuntime {
 
 func hexToData(_ hex: String) -> Data {
     Data(hexString: hex) ?? Data()
+}
+
+enum TimeoutError: Error { case timedOut }
+
+/// Runs `operation`, throwing `TimeoutError.timedOut` if it doesn't finish in
+/// `seconds`. Used to bound autonomous on-device generation so a wedged model
+/// can't hang a detached reply task (and keep an in-flight guard stuck).
+func withThrowingTimeout<T: Sendable>(
+    seconds: Double, _ operation: @Sendable @escaping () async throws -> T
+) async throws -> T {
+    try await withThrowingTaskGroup(of: T.self) { group in
+        group.addTask { try await operation() }
+        group.addTask {
+            try await Task.sleep(nanoseconds: UInt64(seconds * 1_000_000_000))
+            throw TimeoutError.timedOut
+        }
+        defer { group.cancelAll() }
+        return try await group.next()!
+    }
 }

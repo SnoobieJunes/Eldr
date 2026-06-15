@@ -58,6 +58,11 @@ struct ConversationView: View {
             messageList
             if selecting { selectionBar } else { composer }
         }
+        // Reading-width cap so chat doesn't sprawl edge-to-edge on iPad/Mac/
+        // landscape detail panes (CLAUDE.md responsive roadmap); centered, with
+        // no effect on compact iPhone widths.
+        .frame(maxWidth: 760)
+        .frame(maxWidth: .infinity)
         .navigationTitle(model.contactNames[conversationID] ?? "Conversation")
         .navigationBarTitleDisplayMode(.inline)
         // Opaque bar: the title fails the contrast audit over scrolled content.

@@ -184,6 +184,8 @@ final class AppModel {
                     ThreadVM(id: threadID, conversationID: conversationID, title: title, messageCount: 0))
                 threadsByConversation[conversationID] = threads
             }
+        case .agentError(let message):
+            agentError = message
         case .loopGuardChanged(let threadID, let paused):
             if paused {
                 loopGuardPaused.insert(threadID)
