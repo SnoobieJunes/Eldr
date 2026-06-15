@@ -281,3 +281,19 @@ Wi-Fi/Bluetooth:
 
 That's it. Message someone, try drafting with AI, open the full-screen reader on
 a long note, and tell us what feels rough. Thank you for testing EldrChat.
+
+---
+
+### For developers & power users
+
+Two integrations are available if you run EldrChat on a Mac:
+
+- **Let an AI agent (Goose, Xcode, Claude) read your secure chat** — turn on
+  **Settings ▸ Local agent access**; EldrChat shows a one-line command + token to
+  paste into your MCP client. It's read-only and your contacts' names are replaced
+  with codenames before anything leaves the app.
+- **Let EldrChat's self-hosted LLM pilot Xcode 27** (write code, build, run on
+  simulators) via the `eldr-acp` Agent Client Protocol agent.
+
+Both are off by default and documented step-by-step in **docs/SETUP-GUIDE.md §9**
+(Xcode 27 registration) and the in-app Settings.

@@ -293,3 +293,50 @@ xcodebuild test -project App/EldrChat.xcodeproj -scheme EldrChat \
   -destination 'platform=iOS Simulator,name=iPhone 17 Pro,OS=26.5' \
   -skipPackagePluginValidation
 ```
+
+## 9. Driving Xcode 27 with the ACP agent (`eldr-acp`)
+
+EldrChat ships an **Agent Client Protocol** agent so a self-hosted LLM can pilot
+Xcode 27 (write code, build, run on simulators). Xcode 27 is the ACP *client*;
+`eldr-acp` is the *agent* it spawns over stdio (A36).
+
+**1. Build + install the agent**
+```bash
+swift build -c release --package-path Packages/PQRCACP
+cp "$(swift build -c release --package-path Packages/PQRCACP --show-bin-path)/eldr-acp" ~/.local/bin/eldr-acp
+```
+
+**2. Create a launcher.** Xcode 27's "Add an Agent" dialog has **no
+environment-variable field**, so a one-line wrapper supplies the LLM config and
+selects the beta toolchain. `~/.local/bin/eldr-acp-xcode`:
+```zsh
+#!/bin/zsh
+[ -f "$HOME/.config/eldr-acp/env" ] && source "$HOME/.config/eldr-acp/env"
+export ELDR_LLM_URL="${ELDR_LLM_URL:-http://127.0.0.1:1337/v1}"   # LM Studio / Ollama
+export ELDR_LLM_TOKEN="${ELDR_LLM_TOKEN:-<your LM Studio token>}"
+export ELDR_LLM_MODEL="${ELDR_LLM_MODEL:-<your model id, e.g. an instruct model>}"
+export DEVELOPER_DIR="${DEVELOPER_DIR:-/Applications/Xcode-beta.app/Contents/Developer}"
+exec "$HOME/.local/bin/eldr-acp"
+```
+`chmod +x ~/.local/bin/eldr-acp-xcode`. Put the token in `~/.config/eldr-acp/env`
+(`ELDR_LLM_TOKEN=…`) so it survives token rotation without editing the script.
+
+**3. Register in Xcode 27** → Settings ▸ Intelligence ▸ **Add an Agent**:
+
+| Field | Value |
+|---|---|
+| **Name** | `Eldr` |
+| **Executable** | `/Users/<you>/.local/bin/eldr-acp-xcode` (full path) |
+| **Interpreter** | *(blank — the launcher has a shebang and is executable)* |
+| **Arguments** | *(none)* |
+
+Click **Add**. The agent uses the working directory Xcode hands it per session
+(your open project), so `ELDR_WORKDIR` is only a fallback.
+
+**Notes**
+- The LLM must support OpenAI **tool/function calling** (LM Studio does). Prefer an
+  **instruct** model over a reasoning model for snappy, low-confusion tool use.
+- Smoke-test with no model server: `ELDR_ACP_FAKE_LLM=1 ~/.local/bin/eldr-acp-xcode`
+  then type an `initialize` line — it must reply immediately.
+- `run_shell` honors `DEVELOPER_DIR`, so `xcodebuild`/`xcrun simctl` target the
+  Xcode 27 beta toolchain even though your default `xcode-select` may be stable.
