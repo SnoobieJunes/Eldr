@@ -73,4 +73,20 @@ struct APIProviderTests {
             CustomOpenAIProvider(baseURL: "http://localhost:1337", apiKey: "", model: "m")
                 .endpoint()?.absoluteString == "http://localhost:1337/v1/chat/completions")
     }
+
+    /// A reasoning model's `<think>` scratchpad is stripped from the answer that
+    /// reaches the chat (qwen3 / DeepSeek-R1 over a self-hosted server), including
+    /// a truncated, unclosed block — so the bubble never shows raw chain-of-thought.
+    @Test func strippingReasoningTrace_removesThinkBlocks() {
+        // Well-formed block: only the answer survives.
+        #expect("<think>plan the reply</think>\n\nHello!".strippingReasoningTrace() == "Hello!")
+        // Answer can precede the trace too.
+        #expect("Answer: 42 <think>double-check</think>".strippingReasoningTrace() == "Answer: 42")
+        // Unclosed (length-truncated mid-thought) → nothing usable remains.
+        #expect("<think>still reasoning and cut off".strippingReasoningTrace().isEmpty)
+        // Alternate spellings and case.
+        #expect("<Thinking>x</Thinking>done".strippingReasoningTrace() == "done")
+        // A normal model with no trace is returned trimmed, unchanged.
+        #expect("  just a normal reply  ".strippingReasoningTrace() == "just a normal reply")
+    }
 }

@@ -574,6 +574,21 @@ and affects interop; `[app-only]` — client behavior, no wire impact;
   must not surface in a cover silo's Settings). Tests/demo use the bare
   (empty-siloID) keys, so the existing suite is unchanged; the residual
   count-leak from the `.<siloID>` suffixes is folded into A26.
+- **A34 — Reasoning-model output is cleaned for the chat** `[app-only]`
+  (2026-06-15): self-hosted and OpenAI-compatible servers increasingly run
+  *reasoning* models (qwen3, DeepSeek-R1) that emit a private `<think>…</think>`
+  chain-of-thought before the answer. Two consequences EldrChat now handles:
+  (1) the trace is **stripped** from every OpenAI-compatible provider's reply
+  (`String.strippingReasoningTrace`, applied in Custom/OpenAI/OpenRouter/Groq),
+  including an unclosed block left by a length-truncated response — so a chat
+  bubble never shows raw scratchpad; and (2) the **self-hosted** (`custom`)
+  provider's token budget is raised 512 → 1024, because a reasoning model can
+  spend the whole budget thinking and never reach its answer (observed: a 35B
+  qwen3 burned 681 reasoning tokens before answering). Hosted providers stay at
+  512 (they're metered/paid; the user picks a model). Verified live against an
+  LM Studio server + a `strippingReasoningTrace` unit test. NOTE: a reasoning
+  model is still a poor fit for short-message chat — an instruct model is the
+  better self-hosted choice; this just keeps the output sane either way.
 
 ### Tech debt `[tech-debt]`
 

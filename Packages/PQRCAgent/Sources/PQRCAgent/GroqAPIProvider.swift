@@ -66,6 +66,6 @@ public struct GroqAPIProvider: AgentProvider {
         else {
             throw AgentProviderError.unavailable("unexpected API response shape")
         }
-        return text
+        return text.strippingReasoningTrace()
     }
 }

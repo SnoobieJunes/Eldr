@@ -72,7 +72,10 @@ public struct CustomOpenAIProvider: AgentProvider {
         request.setValue("application/json", forHTTPHeaderField: "content-type")
         let payload: [String: Any] = [
             "model": model,
-            "max_tokens": 512,
+            // Self-hosted reasoning models (qwen3, DeepSeek-R1) spend tokens on a
+            // `<think>` scratchpad before answering, so give them more room than
+            // the hosted (paid) providers — then strip the trace below.
+            "max_tokens": 1024,
             "messages": [
                 ["role": "system", "content": system],
                 ["role": "user", "content": user],
@@ -95,6 +98,6 @@ public struct CustomOpenAIProvider: AgentProvider {
         else {
             throw AgentProviderError.unavailable("unexpected response shape from the server")
         }
-        return text
+        return text.strippingReasoningTrace()
     }
 }
