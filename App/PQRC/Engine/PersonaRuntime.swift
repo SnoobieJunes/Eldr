@@ -1007,6 +1007,16 @@ actor PersonaRuntime {
             : (contactRecords[senderIdentityHex]?.autoName ?? "a contact")
     }
 
+    /// A redacted conversation TITLE for the MCP bridge — a group's name or the
+    /// contact's local codename, NEVER an identity-hex fallback. The UI's
+    /// `displayName` can degrade to "Contact <hex>", and the bridge's "never
+    /// identity hex" guarantee must be absolute (security audit, 2026-06-15). Uses
+    /// the same source as `mcpCodename` for consistency with sender redaction.
+    func mcpConversationTitle(_ conversationID: String) -> String {
+        if let group = groupRosters[conversationID]?.name, !group.isEmpty { return group }
+        return contactRecords[conversationID]?.autoName ?? "a contact"
+    }
+
     /// At most 64 KB of UTF-8 (invariant 4 bound), truncated on a code-point
     /// boundary so the firewall never emits a torn scalar.
     private func mcpBounded(_ text: String) -> String {

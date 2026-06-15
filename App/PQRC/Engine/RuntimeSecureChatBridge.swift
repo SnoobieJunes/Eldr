@@ -31,18 +31,22 @@ struct RuntimeSecureChatBridge: SecureChatBridge {
     init(model: AppModel) { self.model = model }
 
     func conversations() async -> [MCPConversation] {
-        await MainActor.run {
-            guard let model else { return [] }
-            return model.conversations.map { row in
+        guard let runtime = await runtime() else { return [] }
+        let rows = await MainActor.run { model?.conversations ?? [] }
+        var result: [MCPConversation] = []
+        for row in rows {
+            // Route the title through the runtime's redaction — the UI's
+            // `displayName` can degrade to "Contact <hex>", and the bridge must
+            // never emit identity hex (security audit). `mcpConversationTitle`
+            // yields a group name or the contact codename, never a key.
+            result.append(
                 MCPConversation(
                     id: row.id,
-                    // `ConversationVM.title` is already a local name (group name or
-                    // a contact's resolved local display name) — never identity hex.
-                    title: row.title,
+                    title: await runtime.mcpConversationTitle(row.id),
                     lastActivity: row.lastActivity,
-                    unread: row.unread)
-            }
+                    unread: row.unread))
         }
+        return result
     }
 
     func messages(conversationID: String, limit: Int) async -> [MCPMessage] {
