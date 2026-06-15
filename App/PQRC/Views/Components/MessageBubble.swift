@@ -270,11 +270,16 @@ struct MessageBubble: View {
 }
 
 /// Wraps message content so a LARGE block (long markdown / HTML / plain text)
-/// collapses to a compact preview by default with a clear "Expand" affordance,
-/// while small messages render unchanged (APP-SPEC §6.2 readability pass). The
-/// preview shows the first few lines; tapping "Show more" opens the EXISTING
-/// `FullScreenReaderView` (landscape + pinch-zoom) via `onFullScreen`, which is
-/// the right home for a big document — the bubble stays a glanceable summary.
+/// collapses to a compact preview by default with a clear, HONEST affordance,
+/// while small messages render unchanged (APP-SPEC §6.2 readability pass).
+///
+/// Affordance honesty (the fix): "Show more" expands the message **inline, in
+/// place** — exactly what the words promise — instead of yanking the reader into
+/// a separate screen. Expanded, a "Show less" folds it back, and a quiet "Open
+/// full screen" remains for the landscape + pinch-zoom reader (the right home for
+/// a genuinely huge document). Only content past a hard ceiling (a chunked multi-
+/// hundred-KB paste, where inline layout would thrash) skips inline expansion and
+/// goes straight to the reader — and there the button SAYS so.
 ///
 /// "Large" is measured on the raw text length + line count (cheap and safe even
 /// for a 200 KB paste). A modest threshold keeps ordinary multi-line replies
@@ -282,9 +287,14 @@ struct MessageBubble: View {
 struct CollapsibleMessageContent: View {
     let text: String
     /// Opens the full-screen reader. When nil (e.g. no reader wired up) large
-    /// content still collapses but the affordance is hidden and we just show the
-    /// preview — never the unbounded block.
+    /// content still expands inline; only the optional "Open full screen" escape
+    /// is hidden (and over-ceiling content stays a bounded preview).
     var onFullScreen: ((String) -> Void)? = nil
+
+    /// Inline expand/collapse state. Defaults collapsed; the preview + "Show more"
+    /// is what you see first, so a long paste never blows out the scroll on entry.
+    @State private var expanded = false
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     /// A block is "large" past EITHER bound. Tuned so a normal paragraph or a
     /// short list stays inline, but a long document/code dump collapses.
@@ -293,6 +303,10 @@ struct CollapsibleMessageContent: View {
     nonisolated private static let previewLineLimit = 10
     nonisolated private static let largeCharThreshold = 700
     nonisolated private static let largeLineThreshold = 14
+    /// Above this, inline rendering would round-trip a huge block through the
+    /// markdown pipeline every layout pass (pathological for a chunked paste), so
+    /// we keep the cheap preview and route expansion to the purpose-built reader.
+    nonisolated private static let inlineExpandCeiling = 20_000
 
     /// Whether `text` is large enough to collapse. Static + `nonisolated` so the
     /// bubble can ask the same question (to suppress its duplicate expand glyph)
@@ -311,47 +325,115 @@ struct CollapsibleMessageContent: View {
         return lines > largeLineThreshold
     }
 
+    /// True when this block is too big to render inline and must use the reader.
+    private var exceedsInlineCeiling: Bool { text.count > Self.inlineExpandCeiling }
+
     var body: some View {
         if Self.isLarge(text) {
-            // Pay for markup stripping ONLY now, and bound the input first so a
-            // multi-hundred-KB block never round-trips its whole length — the
-            // preview only needs the first lines. The full styled `text` is what
-            // we hand the reader on expand.
-            let plain = MessageContent.plain(String(text.prefix(2000)))
-            let preview = plain.split(separator: "\n", omittingEmptySubsequences: false)
-                .prefix(Self.previewLineLimit)
-                .joined(separator: "\n")
             VStack(alignment: .leading, spacing: 6) {
-                // Plain-text preview (no per-block layout cost) with a soft fade
-                // at the cut so it reads as "there's more".
-                Text(verbatim: preview)
-                    .lineLimit(Self.previewLineLimit)
-                    .multilineTextAlignment(.leading)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .mask(
-                        LinearGradient(
-                            colors: [.black, .black, .black.opacity(0.15)],
-                            startPoint: .top, endPoint: .bottom))
-                if let onFullScreen {
-                    Button {
-                        onFullScreen(text)
-                    } label: {
-                        Label("Show more · \(Self.sizeLabel(text.count))",
-                              systemImage: "arrow.up.left.and.arrow.down.right")
-                            .font(.caption.weight(.semibold))
-                    }
-                    .buttonStyle(.plain)
-                    .accessibilityIdentifier("expand-collapsed-content")
-                    .accessibilityLabel("Show full message, \(text.count) characters, opens full-screen reader")
+                if expanded && !exceedsInlineCeiling {
+                    // Honest "Show more": the full, richly-rendered message, in
+                    // place. Paid for only on demand (collapsed by default), and
+                    // never for an over-ceiling paste (handled below).
+                    MessageContent(text: text)
+                        .frame(maxWidth: .infinity, alignment: .leading)
                 } else {
-                    Text("⋯ long message · \(Self.sizeLabel(text.count))")
-                        .font(.caption2)
-                        .foregroundStyle(.secondary)
+                    preview
                 }
+                affordance
             }
             .accessibilityElement(children: .contain)
         } else {
             MessageContent(text: text)
+        }
+    }
+
+    /// Faded plain-text preview. No per-block layout cost — and the input is
+    /// bounded first so a multi-hundred-KB block never round-trips its whole
+    /// length just to show the first lines.
+    private var preview: some View {
+        let plain = MessageContent.plain(String(text.prefix(2000)))
+        let lines = plain.split(separator: "\n", omittingEmptySubsequences: false)
+            .prefix(Self.previewLineLimit)
+            .joined(separator: "\n")
+        return Text(verbatim: lines)
+            .lineLimit(Self.previewLineLimit)
+            .multilineTextAlignment(.leading)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            // Soft fade at the cut so it reads as "there's more below".
+            .mask(
+                LinearGradient(
+                    colors: [.black, .black, .black.opacity(0.15)],
+                    startPoint: .top, endPoint: .bottom))
+    }
+
+    /// The expand/collapse control — and, when relevant, the full-screen escape.
+    @ViewBuilder private var affordance: some View {
+        if exceedsInlineCeiling {
+            // Too big to inline: the only honest action is the reader, so the
+            // label says exactly that (no "Show more" promise we can't keep).
+            if let onFullScreen {
+                expandStyleButton(
+                    title: "Open full screen · \(Self.sizeLabel(text.count))",
+                    systemImage: "arrow.up.left.and.arrow.down.right",
+                    a11y: "Open full message, \(text.count) characters, in the full-screen reader",
+                    id: "expand-collapsed-content"
+                ) { onFullScreen(text) }
+            } else {
+                Text("⋯ long message · \(Self.sizeLabel(text.count))")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+            }
+        } else if expanded {
+            HStack(spacing: 14) {
+                expandStyleButton(
+                    title: "Show less", systemImage: "chevron.up",
+                    a11y: "Collapse message", id: "collapse-content"
+                ) { setExpanded(false) }
+                // Keep the reader available for landscape + pinch-zoom, but as a
+                // clearly-secondary action now that the text is already in view.
+                if let onFullScreen {
+                    Button { onFullScreen(text) } label: {
+                        Label("Open full screen", systemImage: "arrow.up.left.and.arrow.down.right")
+                            .font(.caption.weight(.medium))
+                            .foregroundStyle(.secondary)
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityIdentifier("open-fullscreen-content")
+                    .accessibilityLabel("Open full message in the full-screen reader")
+                }
+            }
+        } else {
+            // Collapsed: "Show more" honestly expands inline (chevron, not the
+            // expand-corner glyph that means "go full screen").
+            expandStyleButton(
+                title: "Show more · \(Self.sizeLabel(text.count))",
+                systemImage: "chevron.down",
+                a11y: "Show the full message inline, \(text.count) characters",
+                id: "expand-collapsed-content"
+            ) { setExpanded(true) }
+        }
+    }
+
+    /// Shared styling for the primary expand/collapse buttons.
+    private func expandStyleButton(
+        title: String, systemImage: String, a11y: String, id: String,
+        action: @escaping () -> Void
+    ) -> some View {
+        Button(action: action) {
+            Label(title, systemImage: systemImage)
+                .font(.caption.weight(.semibold))
+        }
+        .buttonStyle(.plain)
+        .accessibilityIdentifier(id)
+        .accessibilityLabel(a11y)
+    }
+
+    private func setExpanded(_ value: Bool) {
+        if reduceMotion {
+            expanded = value
+        } else {
+            withAnimation(.easeInOut(duration: 0.2)) { expanded = value }
         }
     }
 

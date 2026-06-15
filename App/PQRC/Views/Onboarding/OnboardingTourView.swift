@@ -58,8 +58,17 @@ struct OnboardingTourView: View {
                 .labelStyle(.titleAndIcon)
                 .accessibilityHidden(true)
             Spacer()
+            // Visible "where am I / how much is left" cue: a 10-card tour with no
+            // count reads as endless and invites a premature Skip. A monospaced-
+            // digit counter keeps the number from jittering as it ticks up.
+            Text("\(index + 1) of \(steps.count)")
+                .font(.subheadline.weight(.medium))
+                .monospacedDigit()
+                .foregroundStyle(.secondary)
+                .accessibilityHidden(true)  // the rail already announces step N of M
             Button("Skip") { onFinish() }
                 .font(.body.weight(.medium))
+                .padding(.leading, 12)
                 .accessibilityIdentifier("tour-skip")
                 .accessibilityHint("Closes the tour. You can replay it later from Settings, About.")
         }
@@ -120,22 +129,34 @@ struct OnboardingTourView: View {
     private var progressRail: some View {
         HStack(spacing: 7) {
             ForEach(steps) { step in
-                Capsule()
-                    .fill(
-                        step.id == index
-                            ? AnyShapeStyle(
-                                LinearGradient(
-                                    colors: current.gradient, startPoint: .leading,
-                                    endPoint: .trailing))
-                            : AnyShapeStyle(Color.secondary.opacity(0.3))
-                    )
-                    .frame(width: step.id == index ? 26 : 7, height: 7)
+                Button {
+                    advance(to: step.id)
+                } label: {
+                    Capsule()
+                        .fill(
+                            step.id == index
+                                ? AnyShapeStyle(
+                                    LinearGradient(
+                                        colors: current.gradient, startPoint: .leading,
+                                        endPoint: .trailing))
+                                : AnyShapeStyle(Color.secondary.opacity(0.3))
+                        )
+                        .frame(width: step.id == index ? 26 : 7, height: 7)
+                        // A comfortable touch target around the small dot without
+                        // changing its visual size (the rail must stay slim).
+                        .contentShape(Rectangle().inset(by: -8))
+                }
+                .buttonStyle(.plain)
+                // Now interactive, so each dot is its own a11y element — this also
+                // lets VoiceOver users jump straight to any topic instead of only
+                // swiping the pager. The current step is marked selected.
+                .accessibilityLabel("Step \(step.id + 1) of \(steps.count): \(step.title)")
+                .accessibilityAddTraits(step.id == index ? [.isButton, .isSelected] : .isButton)
+                .accessibilityHint(step.id == index ? "" : "Jumps to this step")
+                .accessibilityIdentifier("tour-dot-\(step.id)")
             }
         }
         .animation(reduceMotion ? nil : .spring(response: 0.4, dampingFraction: 0.8), value: index)
-        .accessibilityElement()
-        .accessibilityLabel("Step \(index + 1) of \(steps.count)")
-        .accessibilityValue(current.title)
     }
 
     private func advance(to newIndex: Int) {
