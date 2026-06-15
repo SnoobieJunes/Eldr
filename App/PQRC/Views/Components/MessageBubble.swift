@@ -13,6 +13,14 @@ struct MessageBubble: View {
     /// agent bubble shows it instead of "<sender>'s AI" so several AIs in one
     /// conversation are distinguishable. Local-only, never from the wire.
     var agentName: String? = nil
+    /// Per-party color coding (APP-SPEC §6.2 readability pass). When supplied,
+    /// the HUMAN bubble fills with `palette.solid` and an AGENT bubble uses the
+    /// matched tint + on-hue outline/label, so an AI reads as a faded cousin of
+    /// its owner. nil keeps the original accent/purple styling (e.g. AI threads,
+    /// which are AI-centric and don't color by party). Color is NEVER the sole
+    /// signal — agent bubbles always carry the outline + sparkles glyph too
+    /// (SPEC §8.2 / colorblind safety), regardless of palette.
+    var palette: PartyColor.Palette? = nil
     /// Toggles the "Add to AI Context" marker (Feature 3). nil hides the action.
     var onToggleAIContext: (() -> Void)? = nil
     /// Opens this message's markdown/HTML in the full-screen reader. nil hides it.
@@ -22,6 +30,11 @@ struct MessageBubble: View {
 
     /// Whether this message has document structure worth opening full screen.
     private var isRich: Bool { MessageContent.isRich(message.text) }
+
+    /// Whether the body is large enough that `CollapsibleMessageContent` collapses
+    /// it (and thus already shows its own "Show more" affordance). When true we
+    /// suppress the small footer expand glyph so there's a single, clear control.
+    private var isLargeContent: Bool { CollapsibleMessageContent.isLarge(message.text) }
 
     var body: some View {
         if message.localStatus == "violation" {
@@ -55,9 +68,10 @@ struct MessageBubble: View {
         }
     }
 
-    /// Small expand glyph shown on rich bubbles for discoverability.
+    /// Small expand glyph shown on rich bubbles for discoverability. Hidden for
+    /// large bubbles — those already collapse with their own "Show more".
     @ViewBuilder private var expandButton: some View {
-        if isRich, let onFullScreen {
+        if isRich, !isLargeContent, let onFullScreen {
             Button {
                 onFullScreen(message.text)
             } label: {
@@ -108,24 +122,40 @@ struct MessageBubble: View {
     /// outgoing. Backgrounds stay opaque — translucent materials under busy
     /// content fail the contrast audit.
     private var humanBubble: some View {
-        HStack {
+        // Party color (APP-SPEC §6.2): each human gets a deterministic SOLID
+        // fill. With a palette we color BOTH sides (mine and the peer's) by
+        // identity; white text reads on every solid here (≥ 5.8:1, PartyColor).
+        // A FLAT opaque fill (not a gradient) is deliberate: the accessibility
+        // auditor needs a determinable background, and a flat color is the most
+        // unambiguous one. Without a palette we keep the original accent-for-mine
+        // gradient / neutral-for-theirs scheme.
+        let solidFill: AnyShapeStyle = {
+            if let palette {
+                return AnyShapeStyle(palette.solid)
+            }
+            return AnyShapeStyle(
+                LinearGradient(
+                    colors: [Color.accentColor, Color.accentColor.mix(with: .black, by: 0.18)],
+                    startPoint: .top, endPoint: .bottom))
+        }()
+        // A palette colors the peer's bubble too (solid, white text); the old
+        // path left incoming bubbles neutral with primary text.
+        let isFilled = isMine || palette != nil
+        return HStack {
             if isMine { Spacer(minLength: 48) }
             VStack(alignment: isMine ? .trailing : .leading, spacing: 2) {
-                MessageContent(text: message.text)
+                CollapsibleMessageContent(text: message.text, onFullScreen: onFullScreen)
                     .padding(.horizontal, 14)
                     .padding(.vertical, 9)
                     .background(
-                        isMine
-                            // Gradient runs darker, never lighter: the accent
-                            // asset is already the darkest white-text-safe
-                            // shade the audit accepts (A7).
-                            ? AnyShapeStyle(
-                                LinearGradient(
-                                    colors: [Color.accentColor, Color.accentColor.mix(with: .black, by: 0.18)],
-                                    startPoint: .top, endPoint: .bottom))
+                        isFilled
+                            // Opaque white-text-safe fill: the flat party solid
+                            // (palette) or the accent gradient, which only ever
+                            // runs darker than the white-safe accent asset (A7).
+                            ? solidFill
                             : AnyShapeStyle(Color(.secondarySystemBackground)),
                         in: RoundedRectangle(cornerRadius: 20, style: .continuous))
-                    .foregroundStyle(isMine ? .white : .primary)
+                    .foregroundStyle(isFilled ? .white : .primary)
                 HStack(spacing: 6) {
                     aiContextBadge
                     expandButton
@@ -157,10 +187,24 @@ struct MessageBubble: View {
         .accessibilityLabel("\(isMine ? "You" : senderName): \(Self.accessibleText(message.text))")
     }
 
-    /// Agent accent darkened for small-text contrast (≥ 4.5:1 on both schemes;
-    /// the audit fails plain system purple at caption sizes).
+    /// Agent OUTLINE accent (the colored border — a non-color AI signal). On-hue
+    /// stroke with a palette; purple without (ThreadView).
     private var agentAccent: Color {
-        Color.purple.mix(with: .primary, by: 0.45)
+        palette?.aiStroke ?? Color.purple.mix(with: .primary, by: 0.45)
+    }
+
+    /// Agent LABEL / glyph color. The "⟡ name" caption sits on the light AI fill,
+    /// so it needs near-`.primary` contrast: the palette supplies a high-contrast
+    /// hue-tinted color; without one we keep the darkened purple (ThreadView).
+    private var agentLabelColor: Color {
+        palette?.aiLabel ?? Color.purple.mix(with: .primary, by: 0.45)
+    }
+
+    /// AI bubble FILL: the owner's faded tint when colored by party, else the
+    /// original opaque purple wash. Opaque either way — translucent fills give
+    /// the contrast auditor no determinable background over bars (A7).
+    private var agentFill: Color {
+        palette?.aiFill ?? Color.purple.mix(with: Color(.systemBackground), by: 0.94)
     }
 
     /// What the agent bubble's header reads: the AI's own friendly codename when
@@ -172,32 +216,38 @@ struct MessageBubble: View {
             if isMine { Spacer(minLength: 48) }
             VStack(alignment: isMine ? .trailing : .leading, spacing: 3) {
                 HStack(spacing: 6) {
+                    // ⟡ + sparkles + label: the NON-color signal that this is an
+                    // AI (holds in grayscale / for colorblind users, SPEC §8.2).
                     Label("⟡ \(agentLabel)", systemImage: "sparkles")
                         .font(.caption2.weight(.semibold))
-                        .foregroundStyle(agentAccent)
+                        .foregroundStyle(agentLabelColor)
                     expandButton
                 }
                 HStack(alignment: .top, spacing: 6) {
                     if message.isContext {
                         Image(systemName: "folder")
                             .font(.caption)
-                            .foregroundStyle(agentAccent)
+                            .foregroundStyle(agentLabelColor)
                             .accessibilityLabel("Context contribution")
                     }
-                    MessageContent(text: message.text)
+                    CollapsibleMessageContent(text: message.text, onFullScreen: onFullScreen)
                     aiContextBadge
                 }
                 .padding(.horizontal, 14)
                 .padding(.vertical, 9)
-                // Opaque purple-tinted fill (visually identical to the old
-                // 6% overlay): translucent fills give the contrast auditor no
-                // determinable background when rows overlap bars (A7).
                 .background(
-                    Color.purple.mix(with: Color(.systemBackground), by: 0.94),
+                    agentFill,
                     in: RoundedRectangle(cornerRadius: 18))
+                // Outline is load-bearing as a non-color AI signal: keep it
+                // visible (on-hue with a palette, purple without). 1.5pt at the
+                // party stroke / 0.6 purple both clear the audit.
                 .overlay(
                     RoundedRectangle(cornerRadius: 18)
-                        .strokeBorder(.purple.opacity(0.6), lineWidth: 1.5))
+                        .strokeBorder(
+                            palette != nil
+                                ? AnyShapeStyle(agentAccent.opacity(0.85))
+                                : AnyShapeStyle(.purple.opacity(0.6)),
+                            lineWidth: 1.5))
             }
             if !isMine { Spacer(minLength: 48) }
         }
@@ -216,6 +266,100 @@ struct MessageBubble: View {
             .padding(.vertical, 6)
             .id(message.id)
             .accessibilityIdentifier("protocol-violation-row")
+    }
+}
+
+/// Wraps message content so a LARGE block (long markdown / HTML / plain text)
+/// collapses to a compact preview by default with a clear "Expand" affordance,
+/// while small messages render unchanged (APP-SPEC §6.2 readability pass). The
+/// preview shows the first few lines; tapping "Show more" opens the EXISTING
+/// `FullScreenReaderView` (landscape + pinch-zoom) via `onFullScreen`, which is
+/// the right home for a big document — the bubble stays a glanceable summary.
+///
+/// "Large" is measured on the raw text length + line count (cheap and safe even
+/// for a 200 KB paste). A modest threshold keeps ordinary multi-line replies
+/// fully inline; only genuinely big blocks collapse.
+struct CollapsibleMessageContent: View {
+    let text: String
+    /// Opens the full-screen reader. When nil (e.g. no reader wired up) large
+    /// content still collapses but the affordance is hidden and we just show the
+    /// preview — never the unbounded block.
+    var onFullScreen: ((String) -> Void)? = nil
+
+    /// A block is "large" past EITHER bound. Tuned so a normal paragraph or a
+    /// short list stays inline, but a long document/code dump collapses.
+    /// `nonisolated` so the `nonisolated` `isLarge(_:)` (callable off the main
+    /// actor) can read them under Swift 6 strict concurrency.
+    nonisolated private static let previewLineLimit = 10
+    nonisolated private static let largeCharThreshold = 700
+    nonisolated private static let largeLineThreshold = 14
+
+    /// Whether `text` is large enough to collapse. Static + `nonisolated` so the
+    /// bubble can ask the same question (to suppress its duplicate expand glyph)
+    /// without building the view.
+    ///
+    /// Judged on the RAW text (length + newline count), NOT the markdown-stripped
+    /// plain text: stripping round-trips through `AttributedString` per block and
+    /// is pathological on a huge paste (a 200 KB block would re-parse every
+    /// render — exactly the case that must collapse). Raw length is an upper
+    /// bound on the stripped length, so everything worth collapsing is still
+    /// caught, just faster and without the markdown cost.
+    nonisolated static func isLarge(_ text: String) -> Bool {
+        if text.count > largeCharThreshold { return true }
+        var lines = 1
+        for ch in text where ch == "\n" { lines += 1 }
+        return lines > largeLineThreshold
+    }
+
+    var body: some View {
+        if Self.isLarge(text) {
+            // Pay for markup stripping ONLY now, and bound the input first so a
+            // multi-hundred-KB block never round-trips its whole length — the
+            // preview only needs the first lines. The full styled `text` is what
+            // we hand the reader on expand.
+            let plain = MessageContent.plain(String(text.prefix(2000)))
+            let preview = plain.split(separator: "\n", omittingEmptySubsequences: false)
+                .prefix(Self.previewLineLimit)
+                .joined(separator: "\n")
+            VStack(alignment: .leading, spacing: 6) {
+                // Plain-text preview (no per-block layout cost) with a soft fade
+                // at the cut so it reads as "there's more".
+                Text(verbatim: preview)
+                    .lineLimit(Self.previewLineLimit)
+                    .multilineTextAlignment(.leading)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .mask(
+                        LinearGradient(
+                            colors: [.black, .black, .black.opacity(0.15)],
+                            startPoint: .top, endPoint: .bottom))
+                if let onFullScreen {
+                    Button {
+                        onFullScreen(text)
+                    } label: {
+                        Label("Show more · \(Self.sizeLabel(text.count))",
+                              systemImage: "arrow.up.left.and.arrow.down.right")
+                            .font(.caption.weight(.semibold))
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityIdentifier("expand-collapsed-content")
+                    .accessibilityLabel("Show full message, \(text.count) characters, opens full-screen reader")
+                } else {
+                    Text("⋯ long message · \(Self.sizeLabel(text.count))")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                }
+            }
+            .accessibilityElement(children: .contain)
+        } else {
+            MessageContent(text: text)
+        }
+    }
+
+    /// Compact human-readable size for the affordance ("1.2k chars" / "740 chars").
+    private static func sizeLabel(_ n: Int) -> String {
+        n >= 1000
+            ? String(format: "%.1fk chars", Double(n) / 1000)
+            : "\(n) chars"
     }
 }
 

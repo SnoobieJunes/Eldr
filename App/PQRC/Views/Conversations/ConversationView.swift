@@ -266,11 +266,18 @@ struct ConversationView: View {
     }
 
     @ViewBuilder private func messageRow(_ message: StoredMessage) -> some View {
+        let isMine = message.senderIdentity == model.myIdentityHex
+        // Party color (APP-SPEC §6.2): an AI's OWNER is its sender identity, so
+        // BOTH human and agent messages key off `senderIdentity` — my AIs map to
+        // me (the accent), a peer's AI maps to that peer's deterministic color.
+        // The agent bubble then renders the matched tint+outline; color is never
+        // the sole AI signal (the sparkles glyph + outline always carry it).
         let bubble = MessageBubble(
             message: message,
-            isMine: message.senderIdentity == model.myIdentityHex,
+            isMine: isMine,
             senderName: model.contactNames[message.senderIdentity] ?? "Contact",
             agentName: message.agentName ?? model.aiNames[message.senderIdentity],
+            palette: PartyColor.palette(forIdentity: message.senderIdentity, isSelf: isMine),
             onToggleAIContext: selecting
                 ? nil
                 : {
