@@ -750,6 +750,53 @@ and affects interop; `[app-only]` — client behavior, no wire impact;
   two agent-level integration tests proving a 40 KB read is truncated before
   feedback and a long loop's history is turn-bounded) + the piped stdio smoke test.
 
+- **A38 — ACP skills (slash-commands) + cross-client compatibility** `[app-only]`
+  (2026-06-15): follow-up to A36/A37. Adds three advertised, executable **skills**
+  and closes the one ACP conformance gap found when driving `eldr-acp` from a mock
+  client harness over the full `initialize → session/new → session/prompt` handshake.
+  • **Skills as ACP available-commands.** ACP advertises slash-commands via an
+    `available_commands_update` `session/update` (`availableCommands: [{name,
+    description, input:{hint}}]`) and a client invokes one by sending `session/prompt`
+    with `/<name> <text>` — there is NO dedicated invoke method (per
+    agentclientprotocol.com /protocol/v1/slash-commands + /schema). So "commands" —
+    not custom tools — are the right primitive; implemented exactly that way. New
+    `Skills.swift`: `AgentSkill` (name/description/hint + a focused system
+    instruction) and `AgentSkillSet` (catalog + enable/disable policy + `/name`
+    invocation parser). The three built-ins: `/spec` (well-structured Markdown
+    spec), `/snippet` (minimal, language-aware, runnable code in one fenced block),
+    `/html` (self-contained, offline, single-file HTML visualization; may `write_file`
+    the page). Each is model-agnostic — it only prepends a skill-specific system
+    instruction to that turn (appended AFTER the base prompt and any user override,
+    so it wins on output-shape conflicts while the base facts — cwd, tools, "report
+    real results" — still apply) — so it works against any OpenAI-compatible model.
+  • **Advertisement in two places.** Canonically the post-`session/new`
+    `available_commands_update`; additionally `agentCapabilities.availableCommands`
+    in the `initialize` result (an upward-compatible hint for a client that reads
+    commands at init or shows its menu before opening a session).
+  • **Enable/disable/tune** via one overloaded env var (matching the A37 pattern):
+    `ELDR_ACP_SKILLS` — a boolean (`off`/`0`/`false`/`none` → advertise none, treat
+    `/cmd` as plain text; `on`/`1`/`all` → all) OR a name list (`"spec html"` → that
+    subset). Also a `skills` file in the config dir; env wins. Backward-compatible:
+    default is all three on, and a plain prompt (or an unknown `/command`, or a
+    leading-slash path) is unchanged.
+  • **Conformance fix.** The mock-client harness confirmed the prior transport was
+    already correct (initialize/version echo, session/new, prompt turn with valid
+    `stopReason`, streamed `agent_message_chunk`, graceful `session/load` error under
+    `loadSession:false`, survival of optional methods) — the ONLY gap was that no
+    commands were advertised. That is now fixed; `session/new` became `async` to emit
+    the advertisement notification. No other client-required shape was missing.
+  • **Client compatibility notes.** Any ACP client launches an agent by
+    command/args/env, so the existing `eldr-acp-xcode` launcher drops into Zed-style
+    `agent_servers` and OpenClaw's `acpx` agent registry unchanged (SETUP-GUIDE §9).
+    `eldr-acp` needs no auth (empty `authMethods`), so acpx's credential plumbing is a
+    no-op. Goose's `goose acp` makes Goose an *agent*, not a client, so it can't drive
+    `eldr-acp`; the `swift test` suite IS the network-free client-side conformance
+    check. Verified: 85 headless tests (was 67; +18 covering catalog/allowlist policy,
+    `ELDR_ACP_SKILLS` boolean+list parsing, `/name` invocation parsing, advertisement
+    in both initialize and the session/update, skill-instruction injection + prefix
+    stripping for `/spec` and `/html`, and plain-prompt unchanged) + a real-LLM E2E
+    that produced a Markdown spec, a Swift snippet, and a standalone HTML chart.
+
 ### Tech debt `[tech-debt]`
 
 - **T1 — Secure Enclave fallback.** Where `SecureEnclave.isAvailable == false`

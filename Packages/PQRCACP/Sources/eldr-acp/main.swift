@@ -54,6 +54,12 @@ struct EldrACPMain {
             "context budget: maxToolResultBytes=\(config.maxToolResultBytes == Int.max ? "∞" : String(config.maxToolResultBytes)) "
                 + "maxHistoryTurns=\(config.maxHistoryTurns) maxContextChars=\(config.maxContextChars) tools=\(toolList)")
 
+        let skillSet = AgentSkillSet.from(config: config)
+        let skillList =
+            skillSet.isEmpty
+            ? "none (disabled)" : skillSet.skills.map { "/\($0.name)" }.joined(separator: " ")
+        log("skills: \(skillList)")
+
         let sink = FileHandleOutputSink(FileHandle.standardOutput)
         let connection = ClientConnection(sink: sink)
         let agent = ACPAgent(

@@ -69,6 +69,19 @@ enum ACPWire {
         ])
     }
 
+    /// `{ sessionId, update: { sessionUpdate:"available_commands_update", availableCommands:[…] } }`
+    /// Advertises the agent's slash-commands/skills to the client (it surfaces them
+    /// in its command menu). Each entry is `{ name, description, input:{hint} }`.
+    static func availableCommandsUpdate(sessionId: String, commands: [JSONValue]) -> JSONValue {
+        .object([
+            "sessionId": .string(sessionId),
+            "update": .object([
+                "sessionUpdate": .string("available_commands_update"),
+                "availableCommands": .array(commands),
+            ]),
+        ])
+    }
+
     // MARK: session/request_permission
 
     /// `{ sessionId, toolCall: { toolCallId, title, kind, status }, options:[…] }`.

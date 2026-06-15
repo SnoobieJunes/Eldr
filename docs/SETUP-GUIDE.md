@@ -373,3 +373,67 @@ the active budget to stderr (`context budget: …`) so you can confirm what's in
   hold more of the codebase, e.g.
   `ELDR_ACP_MAX_TOOL_RESULT_BYTES=32768 ELDR_ACP_MAX_HISTORY_TURNS=40 ELDR_ACP_MAX_CONTEXT_CHARS=262144`
   (leave tools at the default full set).
+
+### Skills (slash-commands) & other ACP clients — A38
+
+`eldr-acp` advertises three **skills** as ACP *available commands* (slash-commands):
+the client surfaces them in its command menu, and invoking one steers that turn's
+output without changing anything else. A skill is invoked the standard ACP way —
+the client sends `session/prompt` with the text `/<name> <your text>` (there is no
+separate invoke method), so you can also just type the slash-command yourself.
+
+| Command | Does | Example |
+|---|---|---|
+| `/spec <what>` | Produces a single, well-structured **Markdown specification** (title, Overview, Goals/Non-Goals, testable MUST/SHOULD requirements, edge cases). | `/spec a REST API for a todo list` |
+| `/snippet <what>` | Produces **one minimal, runnable, language-aware code snippet** in a fenced block (infers the language; defaults to Swift). | `/snippet a Swift function that debounces a closure` |
+| `/html <what>` | Produces a **self-contained, single-file HTML visualization** (inline CSS/JS, no CDNs, renders offline). On request it `write_file`s the `.html`. | `/html a bar chart of three fruit counts` |
+
+Skills are model-agnostic (they only swap in a focused system instruction) so they
+work against any OpenAI-compatible model behind `LLMClient`. The agent's normal
+tools stay available during a skill turn, so `/html … and save it to chart.html`
+will write the file. Discovery is advertised in **two** places: the `initialize`
+response (`agentCapabilities.availableCommands`) and, canonically, an
+`available_commands_update` `session/update` sent right after `session/new`.
+
+**Enable / disable / tune** (same env+config-file mechanism as the budget knobs):
+
+| Env var | Default | Effect |
+|---|---|---|
+| `ELDR_ACP_SKILLS` | *(all on)* | Overloaded toggle. A **boolean** turns all skills on/off: `off`/`0`/`false`/`none` advertises none and treats a `/cmd` prompt as ordinary text; `on`/`1`/`all` is the default. A **name list** narrows to a subset, e.g. `ELDR_ACP_SKILLS="spec html"`. Also a `skills` file in the config dir. |
+
+On startup the agent logs the active skills to stderr (`skills: /spec /snippet /html`,
+or `skills: none (disabled)`).
+
+#### Using other ACP clients (Zed, OpenClaw, Goose-style)
+
+Any ACP client launches an agent the same way Xcode does — by **command + args +
+env** — so `eldr-acp` (via the `eldr-acp-xcode` launcher that carries the LLM env)
+drops into all of them. Configure the launcher as the agent command:
+
+- **Zed-style** `agent_servers` (the format Zed, and tools that copy it, use):
+  ```json
+  { "agent_servers": { "eldr": { "command": "/Users/<you>/.local/bin/eldr-acp-xcode", "args": [] } } }
+  ```
+- **OpenClaw** (its `acpx` plugin registers external ACP harnesses by `command`/`args`):
+  ```json
+  { "plugins": { "entries": { "acpx": { "enabled": true,
+      "config": { "agents": { "eldr": {
+        "command": "/Users/<you>/.local/bin/eldr-acp-xcode", "args": [] } } } } } } }
+  ```
+  `eldr-acp` requires **no authentication** (empty `authMethods`), so acpx's
+  credential plumbing is a no-op. It advertises `loadSession:false`, so a client
+  that tries `session/load`/`session/resume` on reconnect gets a clean JSON-RPC
+  error (not a crash) and simply opens a fresh session; optional methods the agent
+  doesn't implement (`session/set_mode`, `session/set_config_option`,
+  `session/list`, `authenticate`) return `-32601` without affecting the live session.
+- **Goose**: note that `goose acp` makes **Goose the ACP *agent***, not a client —
+  so Goose doesn't drive `eldr-acp`. To exercise `eldr-acp` headlessly (the way a
+  client would), drive it with a small stdio harness over
+  `initialize → session/new → session/prompt` (set `ELDR_ACP_FAKE_LLM=1` for a
+  network-free protocol check, or point `ELDR_LLM_*` at your local server for a real
+  run). The `swift test --package-path Packages/PQRCACP` suite is exactly this
+  conformance check, network-free, in-process.
+
+Compatibility was validated by driving the binary through a mock ACP client
+exercising the full handshake plus the three skills, against both the built-in echo
+LLM and a real local model.

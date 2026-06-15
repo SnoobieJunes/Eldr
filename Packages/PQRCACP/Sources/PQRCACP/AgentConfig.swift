@@ -47,19 +47,29 @@ public struct AgentConfig: Sendable, Equatable {
     /// `ELDR_ACP_SYSTEM_PROMPT`, or a `system-prompt` file in the config dir. Takes
     /// precedence over `promptPreamble`.
     public var systemPromptOverride: String?
+    /// Whether the agent advertises + executes its skills (ACP slash-commands:
+    /// `/spec`, `/snippet`, `/html`). Default true. Set `ELDR_ACP_SKILLS=0`/`off`/
+    /// `false` to advertise none and treat a `/skill` prompt as ordinary text.
+    public var skillsEnabled: Bool
+    /// Optional allowlist of skill command names to advertise (subset of the
+    /// built-ins, e.g. `spec,html`). nil/empty → all built-ins. Env:
+    /// `ELDR_ACP_SKILLS` when it names skills rather than a boolean.
+    public var skillAllowlist: [String]?
 
     /// Defaults preserve/improve prior behavior: 8 KB per tool result (the loop
     /// previously fed back whole files unbounded and only capped shell at 64 KB),
     /// keep the last 12 turns, a 48k-char total ceiling (~12k tokens of history,
     /// comfortably under a 16k-token model once the reply budget is reserved), all
-    /// tools, no prompt changes.
+    /// tools, no prompt changes, all skills advertised.
     public static let `default` = AgentConfig(
         maxToolResultBytes: 8 * 1024,
         maxHistoryTurns: 12,
         maxContextChars: 48 * 1024,
         toolAllowlist: [],
         promptPreamble: nil,
-        systemPromptOverride: nil)
+        systemPromptOverride: nil,
+        skillsEnabled: true,
+        skillAllowlist: nil)
 
     public init(
         maxToolResultBytes: Int = 8 * 1024,
@@ -67,7 +77,9 @@ public struct AgentConfig: Sendable, Equatable {
         maxContextChars: Int = 48 * 1024,
         toolAllowlist: [String] = [],
         promptPreamble: String? = nil,
-        systemPromptOverride: String? = nil
+        systemPromptOverride: String? = nil,
+        skillsEnabled: Bool = true,
+        skillAllowlist: [String]? = nil
     ) {
         // Clamp to sane floors: a non-positive byte cap would truncate everything to
         // nothing (worse than no cap), so treat ≤0 as "effectively unbounded".
@@ -77,6 +89,8 @@ public struct AgentConfig: Sendable, Equatable {
         self.toolAllowlist = toolAllowlist
         self.promptPreamble = promptPreamble
         self.systemPromptOverride = systemPromptOverride
+        self.skillsEnabled = skillsEnabled
+        self.skillAllowlist = skillAllowlist
     }
 
     /// Build from the process environment, falling back to an optional config
@@ -112,13 +126,44 @@ public struct AgentConfig: Sendable, Equatable {
                 .map(Self.parseToolList)
             ?? d.toolAllowlist
 
+        // ELDR_ACP_SKILLS is overloaded: a boolean toggles ALL skills, while a
+        // name list narrows to a subset (and implies enabled). Env, else a `skills`
+        // file, else default (enabled, all).
+        let skillsRaw =
+            stringEnv("ELDR_ACP_SKILLS")
+            ?? configDir.flatMap { Self.readConfigFile(dir: $0, name: "skills") }
+        let (skillsEnabled, skillAllowlist) = Self.parseSkills(skillsRaw)
+
         return AgentConfig(
             maxToolResultBytes: intEnv("ELDR_ACP_MAX_TOOL_RESULT_BYTES", default: d.maxToolResultBytes),
             maxHistoryTurns: intEnv("ELDR_ACP_MAX_HISTORY_TURNS", default: d.maxHistoryTurns),
             maxContextChars: intEnv("ELDR_ACP_MAX_CONTEXT_CHARS", default: d.maxContextChars),
             toolAllowlist: tools,
             promptPreamble: textEnvOrFile("ELDR_ACP_PROMPT_PREAMBLE", file: "prompt-preamble"),
-            systemPromptOverride: textEnvOrFile("ELDR_ACP_SYSTEM_PROMPT", file: "system-prompt"))
+            systemPromptOverride: textEnvOrFile("ELDR_ACP_SYSTEM_PROMPT", file: "system-prompt"),
+            skillsEnabled: skillsEnabled,
+            skillAllowlist: skillAllowlist)
+    }
+
+    /// Interpret the overloaded `ELDR_ACP_SKILLS` value.
+    ///  - nil / empty → (enabled: true, allowlist: nil)  [default: all skills]
+    ///  - a falsey boolean (`0`, `off`, `false`, `no`, `none`, `disable(d)`) →
+    ///    (enabled: false, allowlist: nil)  [advertise none]
+    ///  - a truthy boolean (`1`, `on`, `true`, `yes`, `all`) →
+    ///    (enabled: true, allowlist: nil)   [all skills]
+    ///  - anything else → a name list → (enabled: true, allowlist: [names])
+    static func parseSkills(_ raw: String?) -> (Bool, [String]?) {
+        guard let raw = raw?.trimmingCharacters(in: .whitespacesAndNewlines), !raw.isEmpty
+        else { return (true, nil) }
+        switch raw.lowercased() {
+        case "0", "off", "false", "no", "none", "disable", "disabled":
+            return (false, nil)
+        case "1", "on", "true", "yes", "all", "enable", "enabled":
+            return (true, nil)
+        default:
+            let names = parseToolList(raw)  // same comma/space splitter
+            return names.isEmpty ? (true, nil) : (true, names)
+        }
     }
 
     /// `$ELDR_ACP_CONFIG_DIR`, else `$XDG_CONFIG_HOME/eldr-acp`, else

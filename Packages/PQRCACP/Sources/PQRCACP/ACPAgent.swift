@@ -21,6 +21,9 @@ public actor ACPAgent {
     private let toolEnvironment: ToolEnvironment
     private let config: AgentConfig
     private let maxIterations: Int
+    /// The advertised, executable skills (ACP slash-commands). Derived from config
+    /// once at init; empty when skills are disabled.
+    private let skills: AgentSkillSet
 
     /// Negotiated at `initialize`. Defaults to "everything off" until then (so a
     /// stray prompt before initialize still works via Foundation fallbacks).
@@ -43,6 +46,7 @@ public actor ACPAgent {
         self.toolEnvironment = toolEnvironment
         self.config = config
         self.maxIterations = maxIterations
+        self.skills = AgentSkillSet.from(config: config)
     }
 
     struct RPCError: Error { let code: Int; let message: String }
@@ -89,7 +93,7 @@ public actor ACPAgent {
     private func dispatch(method: String, params: JSONValue) async throws -> JSONValue {
         switch method {
         case "initialize": return initializeResult(params: params)
-        case "session/new": return newSessionResult(params: params)
+        case "session/new": return await newSessionResult(params: params)
         case "session/prompt": return try await promptResult(params: params)
         // session/load and authenticate are intentionally not implemented — we
         // require no auth and advertise loadSession:false (see initialize).
@@ -113,18 +117,26 @@ public actor ACPAgent {
         // Echo the client's MAJOR version if we speak it; otherwise our own.
         let requested = params["protocolVersion"]?.intValue ?? Self.protocolVersion
         let version = requested == Self.protocolVersion ? requested : Self.protocolVersion
+        var agentCapabilities: [String: JSONValue] = [
+            // We don't persist sessions across runs.
+            "loadSession": .bool(false),
+            // Text in, text out — no image/audio/embedded context yet.
+            "promptCapabilities": .object([
+                "image": .bool(false),
+                "audio": .bool(false),
+                "embeddedContext": .bool(false),
+            ]),
+        ]
+        // Advertise skills here too (in addition to the post-session/new
+        // available_commands_update), so a client that reads commands at initialize
+        // — or never opens a session before showing its menu — still sees them. The
+        // canonical place is the session/update; this is an upward-compatible hint.
+        if !skills.isEmpty {
+            agentCapabilities["availableCommands"] = .array(skills.availableCommandsJSON)
+        }
         return .object([
             "protocolVersion": .int(version),
-            "agentCapabilities": .object([
-                // We don't persist sessions across runs.
-                "loadSession": .bool(false),
-                // Text in, text out — no image/audio/embedded context yet.
-                "promptCapabilities": .object([
-                    "image": .bool(false),
-                    "audio": .bool(false),
-                    "embeddedContext": .bool(false),
-                ]),
-            ]),
+            "agentCapabilities": .object(agentCapabilities),
             "agentInfo": .object([
                 "name": .string(Self.agentName),
                 "version": .string(Self.agentVersion),
@@ -136,13 +148,27 @@ public actor ACPAgent {
 
     // MARK: - session/new
 
-    private func newSessionResult(params: JSONValue) -> JSONValue {
+    private func newSessionResult(params: JSONValue) async -> JSONValue {
         sessionCounter += 1
         let sessionId = "eldr-session-\(sessionCounter)"
         // Per-session cwd: the client's `cwd`, else the agent's configured workdir.
         let cwd = params["cwd"]?.stringValue ?? toolEnvironment.effectiveWorkdir
         sessions[sessionId] = cwd
+        // Advertise the agent's skills for this session. ACP's canonical channel for
+        // command discovery is an available_commands_update session/update; clients
+        // (Zed, OpenClaw) surface these as slash-commands in their menu.
+        await advertiseSkills(sessionId: sessionId)
         return .object(["sessionId": .string(sessionId)])
+    }
+
+    /// Emit an `available_commands_update` for `sessionId` listing the active skills.
+    /// No-op when skills are disabled (nothing to advertise).
+    private func advertiseSkills(sessionId: String) async {
+        guard !skills.isEmpty else { return }
+        await connection.notify(
+            method: "session/update",
+            params: ACPWire.availableCommandsUpdate(
+                sessionId: sessionId, commands: skills.availableCommandsJSON))
     }
 
     // MARK: - session/prompt (the turn)
@@ -154,8 +180,14 @@ public actor ACPAgent {
         // Fresh cancel state for this turn.
         cancelledSessions.remove(sessionId)
 
-        let userText = Self.extractPromptText(params["prompt"])
-        let stopReason = await runTurn(sessionId: sessionId, userText: userText)
+        let rawText = Self.extractPromptText(params["prompt"])
+        // A leading `/skill …` invokes a skill: the rest is the user's text and the
+        // skill contributes a focused system instruction for this turn only. Plain
+        // prompts (and unknown /commands) run with the default system prompt.
+        let invocation = skills.invocation(for: rawText)
+        let userText = invocation?.argument ?? rawText
+        let stopReason = await runTurn(
+            sessionId: sessionId, userText: userText, skill: invocation?.skill)
         return .object(["stopReason": .string(stopReason.rawValue)])
     }
 
@@ -176,7 +208,9 @@ public actor ACPAgent {
     /// on tool_calls, streams + executes each (permission-gated for mutating tools),
     /// feeds results back, and loops (≤ maxIterations). On a final assistant message,
     /// streams it as agent_message_chunk and returns end_turn.
-    private func runTurn(sessionId: String, userText: String) async -> StopReason {
+    private func runTurn(
+        sessionId: String, userText: String, skill: AgentSkill? = nil
+    ) async -> StopReason {
         let cwd = sessions[sessionId] ?? toolEnvironment.effectiveWorkdir
         var perTurnEnvironment = toolEnvironment
         perTurnEnvironment.workdir = cwd
@@ -187,7 +221,9 @@ public actor ACPAgent {
         let tools = ToolExecutor.toolDefinitions(allowlist: config.toolAllowlist)
 
         var messages: [LLMMessage] = [
-            LLMMessage(role: .system, content: Self.systemPrompt(cwd: cwd, config: config)),
+            LLMMessage(
+                role: .system,
+                content: Self.systemPrompt(cwd: cwd, config: config, skill: skill)),
             LLMMessage(role: .user, content: userText),
         ]
 
@@ -325,12 +361,25 @@ public actor ACPAgent {
     // MARK: - System prompt
 
     /// The turn's system prompt. A user override (`ELDR_ACP_SYSTEM_PROMPT` / config
-    /// file) replaces it wholesale ({cwd} substituted); otherwise the built-in
+    /// file) replaces the BASE wholesale ({cwd} substituted); otherwise the built-in
     /// prompt is used and any preamble (`ELDR_ACP_PROMPT_PREAMBLE`) is appended so a
     /// user can nudge a finicky model's tool-calling without forking the binary.
-    static func systemPrompt(cwd: String, config: AgentConfig = .default) -> String {
+    ///
+    /// When a `skill` is active (a `/spec`, `/snippet`, `/html` invocation), its
+    /// focused instruction is appended LAST so it steers this turn's output format
+    /// while the base prompt's facts (cwd, the tool list, "report real results")
+    /// still apply. The skill text wins on any output-shape conflict because it
+    /// comes last.
+    static func systemPrompt(
+        cwd: String, config: AgentConfig = .default, skill: AgentSkill? = nil
+    ) -> String {
+        func withSkill(_ base: String) -> String {
+            guard let skill else { return base }
+            let instruction = skill.systemInstruction.replacingOccurrences(of: "{cwd}", with: cwd)
+            return base + "\n\n--- Skill: /\(skill.name) ---\n" + instruction
+        }
         if let override = config.systemPromptOverride {
-            return override.replacingOccurrences(of: "{cwd}", with: cwd)
+            return withSkill(override.replacingOccurrences(of: "{cwd}", with: cwd))
         }
         var prompt = """
             You are EldrChat's coding agent, embedded in an iOS/macOS developer's editor \
@@ -358,7 +407,7 @@ public actor ACPAgent {
         if let preamble = config.promptPreamble, !preamble.isEmpty {
             prompt += "\n\n" + preamble
         }
-        return prompt
+        return withSkill(prompt)
     }
 
     // MARK: - Helpers
