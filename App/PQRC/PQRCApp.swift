@@ -19,17 +19,87 @@ struct LocalMCPConnection: Equatable {
     }
 }
 
+/// Cross-cutting UI intents raised by the macOS menu-bar `.commands` (which live
+/// at Scene level) and consumed by `MainView` (which owns the sheets/selection).
+/// SwiftUI's command closures can't reach a View's `@State` directly, so this
+/// small observable is the seam: a command bumps a counter or flips a flag here,
+/// `MainView` observes it. Harmless on iPhone/iPad (no menu bar fires them).
+@MainActor
+@Observable
+final class AppCommands {
+    /// Bumped by ⌘N — MainView opens New Conversation.
+    var newConversationTick = 0
+    /// Bumped by ⇧⌘N — MainView opens New Group.
+    var newGroupTick = 0
+    /// Bumped by ⌥⌘N — MainView starts a new AI (self) chat.
+    var newAIChatTick = 0
+    /// Bumped by ⌘, — MainView opens Settings.
+    var openSettingsTick = 0
+    /// Bumped by ⌘F — MainView focuses the conversation search field.
+    var findTick = 0
+    /// Bumped by ⌃⌘S — MainView toggles the sidebar.
+    var toggleSidebarTick = 0
+
+    func newConversation() { newConversationTick += 1 }
+    func newGroup() { newGroupTick += 1 }
+    func newAIChat() { newAIChatTick += 1 }
+    func openSettings() { openSettingsTick += 1 }
+    func find() { findTick += 1 }
+    func toggleSidebar() { toggleSidebarTick += 1 }
+}
+
 @main
 struct PQRCApp: App {
     @State private var session = AppSession()
+    @State private var commands = AppCommands()
 
     var body: some Scene {
         WindowGroup {
             RootView()
                 .environment(session)
+                .environment(commands)
+                // Mac (and Catalyst): give the window a sane minimum so it can't
+                // be squeezed to a phone sliver, and let it grow to use a big
+                // display. On iPhone/iPad these are inert — there is no resizable
+                // window and `idealWidth/minWidth` on a full-screen root is a
+                // no-op, so iOS layout is untouched.
+                .frame(minWidth: 760, idealWidth: 1100, minHeight: 520, idealHeight: 760)
                 .onOpenURL { url in
                     session.handleDeepLink(url)
                 }
+        }
+        // Window starts at a comfortable desktop size and is freely resizable to
+        // fit its content's min/ideal frame (above). iOS ignores both.
+        .defaultSize(width: 1100, height: 760)
+        .windowResizability(.contentMinSize)
+        .commands {
+            // Menu-bar commands — the single biggest "feels native on Mac" win.
+            // Each maps to a standard shortcut and routes through `AppCommands`.
+            // `replacing: .newItem` puts our New items in the File menu where Mac
+            // users expect ⌘N; CommandGroup is a no-op on iOS.
+            CommandGroup(replacing: .newItem) {
+                Button("New Conversation") { commands.newConversation() }
+                    .keyboardShortcut("n", modifiers: .command)
+                Button("New Group") { commands.newGroup() }
+                    .keyboardShortcut("n", modifiers: [.command, .shift])
+                Button("New AI Chat") { commands.newAIChat() }
+                    .keyboardShortcut("n", modifiers: [.command, .option])
+            }
+            // ⌘F Find lives in a standard place under the (empty) text-editing menu.
+            CommandGroup(after: .textEditing) {
+                Button("Find Conversation") { commands.find() }
+                    .keyboardShortcut("f", modifiers: .command)
+            }
+            // Sidebar toggle in the View menu (matches Mail / Messages).
+            CommandGroup(after: .sidebar) {
+                Button("Toggle Sidebar") { commands.toggleSidebar() }
+                    .keyboardShortcut("s", modifiers: [.command, .control])
+            }
+            // ⌘, Settings in the app menu, replacing the disabled default.
+            CommandGroup(replacing: .appSettings) {
+                Button("Settings…") { commands.openSettings() }
+                    .keyboardShortcut(",", modifiers: .command)
+            }
         }
     }
 }
