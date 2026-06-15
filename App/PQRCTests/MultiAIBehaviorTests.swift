@@ -325,6 +325,38 @@ struct MultiAIBehaviorTests {
             prompt?.contains("tech-spec") == true,
             "the pinned skill's contract reached the AI's thread-turn prompt")
     }
+
+    /// Tier 2 companion side: an AI set to the "Nearby host's AI" backend runs its
+    /// inference on a nearby HOST over the Multipeer link (no cloud, no key).
+    @Test func nearbyHubAIProvider_runsOnHostOverLink() async throws {
+        let relay = LocalRelaySimulator()
+        let hub = LocalLinkSimulator()
+        let host = NearbyRelayHost(
+            link: await hub.makeLink(name: "host"), relay: relay,
+            randomSource: SeededRandomSource(seed: 1),
+            aiAnswer: { _, prompt in "host replied to: \(prompt)" })
+        let client = MultipeerRelayClient(
+            link: await hub.makeLink(name: "client"), randomSource: SeededRandomSource(seed: 2))
+        try await host.start()
+        try await client.start()
+        try await Task.sleep(for: .milliseconds(150))
+
+        let provider = NearbyHubAIProvider(client: client)
+        let draft = try await provider.draftReply(
+            context: AgentContext(
+                myIdentityHex: "x", myDisplayName: "Me",
+                transcript: [
+                    TranscriptEntry(
+                        senderIdentityHex: "x", senderDisplayName: "Me",
+                        participantType: .human, text: "hello there")
+                ]))
+        #expect(
+            draft.text.contains("host replied to:") && draft.text.contains("hello there"),
+            "the companion's AI ran on the nearby host's model over Multipeer")
+
+        await client.stop()
+        await host.stop()
+    }
 }
 
 /// Deniable silos: a silo created under one passphrase persists and reopens with

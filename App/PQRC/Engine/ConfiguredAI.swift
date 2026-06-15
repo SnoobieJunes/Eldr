@@ -70,7 +70,10 @@ struct ConfiguredAI: Identifiable, Codable, Equatable, Sendable {
     /// one. nil for backends that need no key (on-device / demo). The legacy
     /// shared account (`keyAccount(for:)`) is still read as a fallback so keys
     /// saved by older builds keep working.
-    var apiKeyAccount: String? { Self.isRemote(kind) ? "apikey.\(id)" : nil }
+    var apiKeyAccount: String? {
+        // "hub" is remote but needs no key (the host runs the model).
+        (Self.isRemote(kind) && kind != "hub") ? "apikey.\(id)" : nil
+    }
 
     /// The selectable backends and their labels.
     static let kinds: [(tag: String, label: String)] = [
@@ -81,6 +84,7 @@ struct ConfiguredAI: Identifiable, Codable, Equatable, Sendable {
         ("openrouter", "OpenRouter (many models)"),
         ("groq", "Groq (fast)"),
         ("custom", "Custom / self-hosted (OpenAI-compatible)"),
+        ("hub", "Nearby host's AI (Multipeer)"),
         ("demo", "Demo (simulated)"),
     ]
 
@@ -106,8 +110,14 @@ struct ConfiguredAI: Identifiable, Codable, Equatable, Sendable {
     /// firewall/consent default applies (the user can turn the firewall off for
     /// a server they fully control).
     static func isRemote(_ kind: String) -> Bool {
-        ["claude", "openai", "gemini", "openrouter", "groq", "custom"].contains(kind)
+        // "hub" sends content off-device too (to a nearby host), so the egress
+        // firewall applies; it just needs no API key and no consent gate.
+        ["claude", "openai", "gemini", "openrouter", "groq", "custom", "hub"].contains(kind)
     }
+
+    /// Backends whose enablement shows the "send to a remote API" consent alert.
+    /// "hub" is excluded — its peer is a trusted nearby device, not a cloud API.
+    static func requiresConsent(_ kind: String) -> Bool { isRemote(kind) && kind != "hub" }
 
     /// Keychain account holding the API key for a remote backend, if any.
     static func keyAccount(for kind: String) -> String? {

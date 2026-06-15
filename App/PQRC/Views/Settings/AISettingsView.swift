@@ -185,8 +185,8 @@ struct AISettingsView: View {
                 }
             }
             .onChange(of: ai.kind.wrappedValue) { _, newKind in
-                if ConfiguredAI.isRemote(newKind) {
-                    pendingRemote = ai.wrappedValue  // gate behind consent
+                if ConfiguredAI.requiresConsent(newKind) {
+                    pendingRemote = ai.wrappedValue  // gate cloud backends behind consent
                 } else {
                     persist()
                 }
@@ -286,6 +286,11 @@ struct AISettingsView: View {
 
     /// What this AI will actually use, surfacing the Demo fallback.
     private func statusLine(for ai: ConfiguredAI) -> String {
+        if ai.kind == "hub" {
+            return AppSession.configuredRelayURLs.contains("nearby")
+                ? "Uses a nearby host's AI over Multipeer — stay near the host."
+                : "Set this device's relay to `nearby` (Settings ▸ Servers) to use a host's shared AI."
+        }
         if ai.kind == "custom" {
             let base = (ai.baseURL ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
             return base.isEmpty
@@ -307,6 +312,7 @@ struct AISettingsView: View {
     }
 
     private func statusOK(for ai: ConfiguredAI) -> Bool {
+        if ai.kind == "hub" { return AppSession.configuredRelayURLs.contains("nearby") }
         if ai.kind == "custom" {
             return !(ai.baseURL ?? "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
         }

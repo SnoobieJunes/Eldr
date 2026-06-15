@@ -144,10 +144,15 @@ final class AppSession {
     /// Retained while this device hosts a Multipeer relay (`host` in the relay
     /// list). Stopped before re-resolving and on lock.
     private var relayHost: NearbyRelayHost?
+    /// Retained while this device is JOINED to a nearby relay (`nearby`), so the
+    /// "Nearby host's AI" backend can route inference through the same link.
+    private var relayClient: MultipeerRelayClient?
 
     private func makeRelayTransports() async -> [any RelayTransport] {
         await relayHost?.stop()
         relayHost = nil
+        await relayClient?.stop()
+        relayClient = nil
         var transports: [any RelayTransport] = []
         for configured in Self.configuredRelayURLs {
             switch configured {
@@ -173,6 +178,7 @@ final class AppSession {
                     let client = MultipeerRelayClient(
                         link: MultipeerNearbyLink(serviceType: "pqrc-relay"))
                     try? await client.start()
+                    relayClient = client
                     transports.append(client)
                 #else
                     transports.append(await LocalRelaySimulator().connect())
@@ -219,7 +225,9 @@ final class AppSession {
     /// available, Demo otherwise.
     /// Builds a live provider for one backend kind, reading API keys from THIS
     /// silo's Keychain service so accounts never share AI credentials.
-    static func makeProvider(config: ConfiguredAI, siloID: String) -> any AgentProvider {
+    static func makeProvider(
+        config: ConfiguredAI, siloID: String, hubClient: MultipeerRelayClient?
+    ) -> any AgentProvider {
         let keychain = KeychainStore(service: siloService(siloID))
         func read(_ account: String?) -> String? {
             guard let account, let data = keychain.loadIfPresent(account: account) else { return nil }
@@ -255,6 +263,10 @@ final class AppSession {
             let base = (config.baseURL ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
             guard !base.isEmpty else { return DemoAgentProvider() }
             return CustomOpenAIProvider(baseURL: base, apiKey: key(for: "custom") ?? "", model: model)
+        case "hub":
+            // Borrow a nearby host's AI over the Multipeer link. Needs an active
+            // `nearby` relay client; otherwise fall back to the Demo stub.
+            return hubClient.map { NearbyHubAIProvider(client: $0) } ?? DemoAgentProvider()
         case "demo":
             return DemoAgentProvider()
         default:  // "ondevice"
@@ -325,11 +337,11 @@ final class AppSession {
     }
 
     /// The configured AIs bound to live providers — the runtime's tethered AIs.
-    static func makeRuntimeAIs(siloID: String) -> [TetheredAI] {
+    static func makeRuntimeAIs(siloID: String, hubClient: MultipeerRelayClient?) -> [TetheredAI] {
         loadConfiguredAIs(siloID: siloID).filter(\.isEnabled).map { config in
             TetheredAI(
                 id: config.id, name: config.name,
-                provider: makeProvider(config: config, siloID: siloID),
+                provider: makeProvider(config: config, siloID: siloID, hubClient: hubClient),
                 isRemote: ConfiguredAI.isRemote(config.kind),
                 instructions: config.instructions,
                 contextPolicy: config.effectivePolicy,
@@ -473,7 +485,7 @@ final class AppSession {
             displayName: name,
             transports: transports,
             blobStore: LocalBlossomSimulator(),
-            ais: Self.makeRuntimeAIs(siloID: derived.siloID),
+            ais: Self.makeRuntimeAIs(siloID: derived.siloID, hubClient: relayClient),
             keychainService: Self.siloService(derived.siloID),
             siloKEK: derived.kek,
             enableLocalLink: Self.localLinkEnabled)
@@ -496,6 +508,8 @@ final class AppSession {
         }
         await relayHost?.stop()
         relayHost = nil
+        await relayClient?.stop()
+        relayClient = nil
         activeSilo = nil
         mode = .locked
     }
@@ -624,7 +638,7 @@ final class AppSession {
     /// change (no reboot needed).
     func applyAIProvider() async {
         guard case .single(let model) = mode, let siloID = activeSilo?.siloID else { return }
-        await model.runtime.setAIs(Self.makeRuntimeAIs(siloID: siloID))
+        await model.runtime.setAIs(Self.makeRuntimeAIs(siloID: siloID, hubClient: relayClient))
         await model.runtime.setFirewallEnabled(Self.firewallEnabled)
     }
 

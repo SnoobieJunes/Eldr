@@ -103,7 +103,7 @@ public struct FoundationModelsAgentProvider: AgentProvider {
         #endif
     }
 
-    static func renderTranscript(_ context: AgentContext) -> String {
+    public static func renderTranscript(_ context: AgentContext) -> String {
         context.transcript.suffix(20).map { entry in
             let role = entry.participantType == .agent ? "\(entry.senderDisplayName)'s AI" : entry.senderDisplayName
             return "\(role): \(entry.text)"
