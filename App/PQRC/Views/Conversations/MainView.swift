@@ -76,6 +76,15 @@ struct MainView: View {
                 }
                 ToolbarItemGroup(placement: .topBarTrailing) {
                     Button {
+                        Task {
+                            if let id = await model.createSelfChat() { path.append(id) }
+                        }
+                    } label: {
+                        Image(systemName: "brain")
+                    }
+                    .accessibilityLabel("New AI chat")
+                    .accessibilityIdentifier("new-ai-chat")
+                    Button {
                         showNewGroup = true
                     } label: {
                         Image(systemName: "person.3")

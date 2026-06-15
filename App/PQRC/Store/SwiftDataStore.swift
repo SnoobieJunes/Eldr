@@ -128,13 +128,21 @@ struct ContactRecord: Codable, Sendable {
     var blocked: Bool
     /// Session-restore fidelity: the lrp unlinkability caveat sticks.
     var usedLastResortPrekey: Bool
+    /// Locally-generated friendly codename (adjective-noun-verb-###). PURELY
+    /// LOCAL — invented on this device and NEVER broadcast (SPEC §0). Replaces
+    /// the ugly truncated-key fallback so every contact reads as a real name.
+    /// Optional → tolerant decode of records written before this field existed.
+    var autoName: String? = nil
+    /// Locally-generated friendly codename for this contact's AI (so a peer's
+    /// assistant reads as a name, not "Contact …'s AI"). Also never broadcast.
+    var autoAIName: String? = nil
 
     var identityHex: String { binding.identityPubkey.hexString }
 
     /// Display-name resolution, one rule everywhere:
-    /// local rename > peer's self-chosen alias > truncated key.
+    /// local rename > peer's self-chosen alias > local friendly name > key.
     var displayName: String {
-        localNickname ?? peerAlias ?? "Contact \(String(identityHex.prefix(8)))"
+        localNickname ?? peerAlias ?? autoName ?? "Contact \(String(identityHex.prefix(8)))"
     }
 }
 

@@ -465,9 +465,20 @@ enum HTMLToMarkdown {
         var href: String?
         var linkText = ""
         var capturingLink = false
+        // Inside a <pre> block the bytes ARE the content: tags must survive as
+        // literal text (e.g. an HTML snippet shown as code), not be parsed and
+        // stripped. Only </pre> and the structural <code> wrapper are special.
+        var inPre = false
 
         func emit(_ s: String) {
             if capturingLink { linkText += s } else { out += s }
+        }
+
+        func tagName(_ tagContent: String) -> String {
+            var t = tagContent.trimmingCharacters(in: .whitespaces)
+            if t.hasSuffix("/") { t.removeLast() }
+            if t.hasPrefix("/") { t.removeFirst() }
+            return String(t.prefix { !$0.isWhitespace }).lowercased()
         }
 
         func handle(_ tagContent: String) {
@@ -481,8 +492,13 @@ enum HTMLToMarkdown {
             switch name {
             case "b", "strong": emit("**")
             case "i", "em": emit("*")
-            case "code", "tt": emit("`")
-            case "pre": out += closing ? "\n```\n" : "\n```\n"
+            // A <code> directly wrapping a <pre> block is the structural code
+            // element — swallow it; the fence already marks the block. Outside
+            // pre it's inline code.
+            case "code", "tt": if !inPre { emit("`") }
+            case "pre":
+                inPre = !closing
+                out += "\n```\n"
             case "h1", "h2", "h3", "h4", "h5", "h6":
                 if !closing {
                     let level = Int(String(name.dropFirst())) ?? 1
@@ -519,9 +535,19 @@ enum HTMLToMarkdown {
         while i < src.endIndex {
             let ch = src[i]
             if ch == "<", let close = src[i...].firstIndex(of: ">") {
-                emit(decodeEntities(buffer))
-                buffer = ""
-                handle(String(src[src.index(after: i)..<close]))
+                let tagContent = String(src[src.index(after: i)..<close])
+                let name = tagName(tagContent)
+                // Inside <pre>, only </pre> and the structural <code> wrapper are
+                // tags; everything else is literal code (keep the brackets).
+                if inPre, name != "pre", name != "code" {
+                    emit(decodeEntities(buffer))
+                    buffer = ""
+                    emit("<\(tagContent)>")
+                } else {
+                    emit(decodeEntities(buffer))
+                    buffer = ""
+                    handle(tagContent)
+                }
                 i = src.index(after: close)
             } else {
                 buffer.append(ch)
@@ -638,7 +664,12 @@ struct FullScreenReaderView: View {
 
     @ViewBuilder private var content: some View {
         if showSource {
-            Text(verbatim: MessageContent.normalized(text))
+            // Source/code view shows EXACTLY what the sender wrote — the raw
+            // HTML or markdown, not the markdown we derive from HTML for the
+            // rendered view. Normalizing here used to convert HTML to markdown,
+            // so a pasted HTML document's actual code was missing from the code
+            // view. Raw `text` is the literal source.
+            Text(verbatim: text)
                 .font(.system(.callout, design: .monospaced))
                 .textSelection(.enabled)
         } else {

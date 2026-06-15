@@ -53,7 +53,10 @@ actor PersonaRuntime {
     private(set) var nostrKeypair: NostrKeypair!
     private var messenger: PQRCMessenger!
     private var engine: AgentEngine!
-    private var provider: any AgentProvider
+    /// The human's tethered AIs (multi-AI tethering). At least one; the first is
+    /// the "primary" used for private drafts and the Settings probe. All of them
+    /// take a turn in the solo chat, in active windows, and in invited threads.
+    private var ais: [TetheredAI]
     private let clock: any Clock
     private let randomSource: any RandomSource
     private let nonceSource: any NonceSource
@@ -122,7 +125,7 @@ actor PersonaRuntime {
         displayName: String,
         transports: [any RelayTransport],
         blobStore: any BlobStore,
-        provider: any AgentProvider,
+        ais: [TetheredAI],
         clock: any Clock = SystemClock(),
         randomSource: any RandomSource = SystemRandomSource(),
         nonceSource: any NonceSource = SystemNonceSource(),
@@ -132,7 +135,10 @@ actor PersonaRuntime {
         self.displayName = displayName
         self.transports = transports
         self.blobStore = blobStore
-        self.provider = provider
+        // Always keep at least one AI so drafting never crashes on an empty list.
+        self.ais = ais.isEmpty
+            ? [TetheredAI(id: "demo", name: "demo-otter-naps-000", provider: DemoAgentProvider())]
+            : ais
         self.clock = clock
         self.randomSource = randomSource
         self.nonceSource = nonceSource
@@ -143,8 +149,13 @@ actor PersonaRuntime {
     var identityHex: String { identity.publicKeyData.hexString }
     var npub: String { nostrKeypair.npub }
 
-    func setProvider(_ newProvider: any AgentProvider) {
-        provider = newProvider
+    /// The primary AI used for private drafts and the Settings probe.
+    private var primaryProvider: any AgentProvider { ais[0].provider }
+
+    func setAIs(_ newAIs: [TetheredAI]) {
+        ais = newAIs.isEmpty
+            ? [TetheredAI(id: "demo", name: "demo-otter-naps-000", provider: DemoAgentProvider())]
+            : newAIs
     }
 
     // MARK: - Bootstrap
@@ -237,6 +248,9 @@ actor PersonaRuntime {
             if record.blocked {
                 await messenger.setBlocked(contact.identityHex, blocked: true)
             }
+            // Backfill friendly codenames for contacts saved before this field
+            // existed, so they stop showing as "Contact 1a2b3c4d".
+            ensureFriendlyNames(contact.identityHex)
         }
         for (peerIdentityHex, snapshot) in (try? await store.sessions()) ?? [] {
             guard let contact = verifiedContacts[peerIdentityHex] else { continue }
@@ -333,7 +347,48 @@ actor PersonaRuntime {
                 verified: false, blocked: false, usedLastResortPrekey: false)
         }
         await messenger.addContact(contact)
+        ensureFriendlyNames(contact.identityHex)
         persistContact(contact.identityHex)
+    }
+
+    /// Assigns local, never-broadcast friendly codenames to a contact and their
+    /// AI if they don't have any yet. The deterministic local name is set
+    /// instantly (so the UI never shows a raw key), then an on-device Core AI
+    /// name is attempted off the critical path and swapped in if it succeeds —
+    /// never blocking, never leaving the device.
+    private func ensureFriendlyNames(_ identityHex: String) {
+        guard var record = contactRecords[identityHex] else { return }
+        var changed = false
+        if record.autoName == nil {
+            record.autoName = FriendlyName.local(seed: identityHex)
+            changed = true
+        }
+        if record.autoAIName == nil {
+            record.autoAIName = FriendlyName.local(seed: identityHex + ":ai")
+            changed = true
+        }
+        guard changed else { return }
+        contactRecords[identityHex] = record
+        persistContact(identityHex)
+        // Upgrade to on-device AI codenames when the model is available. Stays
+        // on device (FriendlyName.generate never calls a remote API).
+        Task { [weak self] in
+            guard let self else { return }
+            let person = await FriendlyName.generate(seed: identityHex)
+            let ai = await FriendlyName.generate(seed: identityHex + ":ai")
+            await self.applyAutoNames(identityHex, person: person, ai: ai)
+        }
+    }
+
+    /// Swaps in upgraded auto-names (from the on-device model). A user rename
+    /// always wins, so we never clobber an explicit `localNickname`.
+    private func applyAutoNames(_ identityHex: String, person: String, ai: String) {
+        guard var record = contactRecords[identityHex] else { return }
+        record.autoName = person
+        record.autoAIName = ai
+        contactRecords[identityHex] = record
+        persistContact(identityHex)
+        eventContinuation?.yield(.conversationChanged(identityHex))
     }
 
     private func persistContact(_ identityHex: String) {
@@ -584,10 +639,14 @@ actor PersonaRuntime {
         aiWindow: AIWindowAnnouncement? = nil, aiInvite: AIInvite? = nil,
         aiContextGrant: AIContextGrant? = nil,
         threadCreate: ThreadCreate? = nil, groupCreate: GroupCreate? = nil,
-        asSystemRow: Bool = false
+        asSystemRow: Bool = false, agentName: String? = nil
     ) async throws {
         let recipients = recipientsFor(conversationID: conversationID)
-        guard !recipients.isEmpty else { throw PQRCError.sessionNotEstablished }
+        // A group I'm a member of with no other humans (the "solo AI chat") is a
+        // valid local-only conversation: store and render, just publish to no
+        // one. Only a 1:1 with no established session is a hard error.
+        let isLocalGroup = groupRosters[conversationID]?.members.contains(identityHex) ?? false
+        guard !recipients.isEmpty || isLocalGroup else { throw PQRCError.sessionNotEstablished }
 
         var body = MessageBody(
             text: text, sentAt: clock.now(),
@@ -625,7 +684,7 @@ actor PersonaRuntime {
             senderIdentity: identityHex, participantType: participantType,
             text: body.text, sentAt: body.sentAt, threadID: threadID,
             isContext: isContext, aiContext: aiContext,
-            localStatus: asSystemRow ? "system" : "sent")
+            localStatus: asSystemRow ? "system" : "sent", agentName: agentName)
         try await store.save(message)
         if let threadID {
             await engine.recordThreadMessage(threadID: threadID, participantType: participantType)
@@ -668,11 +727,82 @@ actor PersonaRuntime {
         // Surface a total publish failure (no recipient reached the relay) as a
         // visible "Not sent" status instead of a silent drop — so the user (and
         // diagnostics) can tell a send failure from a receive failure.
-        if !reachedRelay, !asSystemRow {
+        if !reachedRelay, !asSystemRow, !isLocalGroup {
             try? await store.updateStatus(messageID: message.id, status: "failed")
             if let updated = try? await store.message(id: message.id) {
                 eventContinuation?.yield(.messageChanged(updated))
             }
+        }
+
+        // Solo AI chat: when I (the tethered human) post into a conversation with
+        // no other humans, my AIs reply to me by default — no window needed,
+        // because there is no other human to gate against (SPEC §13: the gate
+        // protects OTHER people from an unbidden agent; here there are none).
+        // Detached so inference never blocks the send. Threads use the invite
+        // path instead.
+        if participantType == .human, !asSystemRow, threadID == nil,
+            isSoloConversation(conversationID)
+        {
+            Task { [weak self] in await self?.runSelfAIReplies(conversationID: conversationID) }
+        }
+    }
+
+    /// A group I belong to that currently has no other reachable humans — the
+    /// "solo AI chat". Becomes a normal group the moment a real contact is added
+    /// (then my AIs revert to the window/invite rules).
+    private func isSoloConversation(_ conversationID: String) -> Bool {
+        groupRosters[conversationID] != nil
+            && recipientsFor(conversationID: conversationID).isEmpty
+    }
+
+    /// Each tethered AI replies to me in turn, rebuilding context each time so a
+    /// later AI sees what an earlier one just said (Claude + on-device sharing
+    /// context). Stays entirely local: a solo conversation has no recipients, so
+    /// nothing is published.
+    private func runSelfAIReplies(conversationID: String) async {
+        for ai in ais {
+            let context = await agentContext(conversationID: conversationID, threadID: nil)
+            guard let draft = try? await ai.provider.draftReply(context: context) else { continue }
+            let text = draft.text.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !text.isEmpty else { continue }
+            try? await sendMessage(
+                text, conversationID: conversationID, participantType: .agent, agentName: ai.name)
+        }
+    }
+
+    /// Creates a solo AI chat: a group with only me, where my tethered AIs
+    /// engage by default. People can be added later (it becomes a normal group).
+    func createSelfChat() async throws -> String {
+        try await createGroup(name: "My AI", memberIdentityHexes: [])
+    }
+
+    /// Adds verified contacts to a group/solo conversation (the "add people at
+    /// any time" path). Once a real human is in, my AIs stop auto-replying and
+    /// the window/invite rules apply again.
+    func addMembers(conversationID: String, add identityHexes: [String]) async throws {
+        guard let roster = groupRosters[conversationID] else { return }
+        let members = Array(Set(roster.members + identityHexes))
+        try await reviseRoster(groupID: conversationID, name: roster.name, members: members)
+    }
+
+    /// Names of my tethered AIs, for the Settings "AI context" view.
+    func tetheredAINames() -> [String] { ais.map(\.name) }
+
+    /// A peer's locally-generated AI codename, if known (never broadcast).
+    func contactAIName(_ identityHex: String) -> String? {
+        contactRecords[identityHex]?.autoAIName
+    }
+
+    /// The exact transcript the tethered LLM(s) receive for a conversation —
+    /// surfaced read-only in Settings so the user can see what their AI sees.
+    func contextPreview(conversationID: String, threadID: String? = nil) async -> [ContextPreviewLine] {
+        let context = await agentContext(conversationID: conversationID, threadID: threadID)
+        return context.transcript.map { entry in
+            ContextPreviewLine(
+                role: entry.participantType == .agent
+                    ? "\(entry.senderDisplayName)'s AI" : entry.senderDisplayName,
+                text: entry.text,
+                shared: entry.isSharedContext)
         }
     }
 
@@ -766,7 +896,8 @@ actor PersonaRuntime {
 
     func draftReply(conversationID: String, threadID: String? = nil) async throws -> Draft {
         try await engine.draft(
-            provider: provider, context: await agentContext(conversationID: conversationID, threadID: threadID))
+            provider: primaryProvider,
+            context: await agentContext(conversationID: conversationID, threadID: threadID))
     }
 
     /// Diagnostic for Settings "Test AI now": run the active provider against a
@@ -780,7 +911,7 @@ actor PersonaRuntime {
                     senderIdentityHex: "sample", senderDisplayName: "Test",
                     participantType: .human, text: "Hi! Are you working? Reply in one short sentence.")
             ])
-        return try await engine.draft(provider: provider, context: sample).text
+        return try await engine.draft(provider: primaryProvider, context: sample).text
     }
 
     func startAIWindow(conversationID: String, durationSeconds: Int64) async throws {
@@ -830,7 +961,30 @@ actor PersonaRuntime {
         let scope: AIContextGrant.Scope =
             threadID.map { AIContextGrant.Scope.thread($0) } ?? .conversation(conversationID)
         let sharingAuthorized = await engine.contextSharingAuthorized(scope: scope)
-        let transcript = stored.suffix(20).map { message -> TranscriptEntry in
+
+        // Is my AI actively engaged here? Only then may it auto-ingest the whole
+        // conversation. Otherwise (the DEFAULT) it sees ONLY messages the human
+        // explicitly marked "Add to AI Context" — never the rest of the chat
+        // (DEVIATIONS A21, user request, privacy-first SPEC §0).
+        let aiActive: Bool
+        if let threadID {
+            aiActive = await engine.activeInvite(threadID: threadID, identityHex: identityHex) != nil
+        } else {
+            let windowLive =
+                await engine.activeWindow(for: identityHex) != nil
+                && myWindowConversationID == conversationID
+            aiActive = windowLive || isSoloConversation(conversationID)
+        }
+        // Default view: only explicitly-marked context (mine always; a peer's
+        // only under an active bilateral grant). Active view: the recent window.
+        let visible =
+            aiActive
+            ? Array(stored.suffix(20))
+            : stored.filter {
+                $0.aiContext && ($0.senderIdentity == identityHex || sharingAuthorized)
+            }.suffix(20).map { $0 }
+
+        let transcript = visible.map { message -> TranscriptEntry in
             let isMine = message.senderIdentity == identityHex
             // A message flagged "Add to AI Context" is elevated to shared
             // context the agent treats specially: my own marked messages always
@@ -852,14 +1006,20 @@ actor PersonaRuntime {
             threadTitle: threadID.flatMap { threadTitles[$0] })
     }
 
-    /// Runs my agent's turn in a thread (gated entirely by the engine).
+    /// Runs my agents' turns in a thread (gated entirely by the engine). Each of
+    /// my tethered AIs takes a turn in order, rebuilding the context each time so
+    /// a later AI sees what an earlier one just posted — that's how multiple AIs
+    /// share context back and forth in a thread.
     func takeAgentThreadTurn(threadID: String) async {
         let conversationID = threadConversations[threadID] ?? ""
         guard !conversationID.isEmpty else { return }
-        _ = await engine.runThreadTurn(
-            provider: provider,
-            context: await agentContext(conversationID: conversationID, threadID: threadID),
-            threadID: threadID)
+        for ai in ais {
+            _ = await engine.runThreadTurn(
+                provider: ai.provider,
+                context: await agentContext(conversationID: conversationID, threadID: threadID),
+                threadID: threadID,
+                agentName: ai.name)
+        }
         eventContinuation?.yield(
             .loopGuardChanged(
                 threadID: threadID, paused: await engine.loopGuardActive(threadID: threadID)))
@@ -1194,10 +1354,14 @@ actor PersonaRuntime {
                     threadID: threadID, paused: await engine.loopGuardActive(threadID: threadID)))
             await takeAgentThreadTurn(threadID: threadID)
         } else if received.participantType == .human, senderHex != identityHex {
-            // Conversation scope: only during MY active ai_window.
-            _ = await engine.runWindowReply(
-                provider: provider,
-                context: await agentContext(conversationID: conversationID, threadID: nil))
+            // Conversation scope: only during MY active ai_window. Each tethered
+            // AI replies in turn (the engine gate fails closed when no window).
+            for ai in ais {
+                _ = await engine.runWindowReply(
+                    provider: ai.provider,
+                    context: await agentContext(conversationID: conversationID, threadID: nil),
+                    agentName: ai.name)
+            }
         }
     }
 
@@ -1275,21 +1439,21 @@ actor PersonaRuntime {
 private struct RuntimeSink: AgentMessageSink {
     let runtime: PersonaRuntime
 
-    func postAgentMessage(_ body: MessageBody, threadID: String) async throws {
+    func postAgentMessage(_ body: MessageBody, threadID: String, agentName: String?) async throws {
         guard let info = await runtime.threadInfo(threadID: threadID) else {
             throw PQRCError.sessionNotEstablished
         }
         try await runtime.sendMessage(
             body.text, conversationID: info.conversationID, participantType: .agent,
-            threadID: threadID, isContext: body.isContext ?? false)
+            threadID: threadID, isContext: body.isContext ?? false, agentName: agentName)
     }
 
-    func postAgentReply(_ body: MessageBody) async throws {
+    func postAgentReply(_ body: MessageBody, agentName: String?) async throws {
         // The engine only calls this during MY active window; the reply goes to
         // the conversation the window was started in (single scope in v1).
         guard let conversationID = await runtime.windowConversation() else { return }
         try await runtime.sendMessage(
-            body.text, conversationID: conversationID, participantType: .agent)
+            body.text, conversationID: conversationID, participantType: .agent, agentName: agentName)
     }
 }
 

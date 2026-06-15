@@ -17,11 +17,11 @@ actor SpySink: AgentMessageSink {
     private(set) var threadPosts: [(body: MessageBody, threadID: String)] = []
     private(set) var conversationPosts: [MessageBody] = []
 
-    func postAgentMessage(_ body: MessageBody, threadID: String) async throws {
+    func postAgentMessage(_ body: MessageBody, threadID: String, agentName: String?) async throws {
         threadPosts.append((body, threadID))
     }
 
-    func postAgentReply(_ body: MessageBody) async throws {
+    func postAgentReply(_ body: MessageBody, agentName: String?) async throws {
         conversationPosts.append(body)
     }
 

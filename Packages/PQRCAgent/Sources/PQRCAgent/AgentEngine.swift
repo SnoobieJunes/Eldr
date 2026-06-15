@@ -17,8 +17,10 @@ public enum AgentEngineError: Error, Equatable, Sendable {
 /// turns ONLY through this sink with the thread id set — there is no other
 /// output path in the API (the recording guarantee, APP-SPEC §8).
 public protocol AgentMessageSink: Sendable {
-    func postAgentMessage(_ body: MessageBody, threadID: String) async throws
-    func postAgentReply(_ body: MessageBody) async throws  // conversation scope (ai_window)
+    /// `agentName` is the local friendly codename of the producing AI (multi-AI
+    /// tethering); it is stored locally for labeling and NEVER put on the wire.
+    func postAgentMessage(_ body: MessageBody, threadID: String, agentName: String?) async throws
+    func postAgentReply(_ body: MessageBody, agentName: String?) async throws  // conversation scope (ai_window)
 }
 
 /// Enforcement core for AI participation (SPEC §13, APP-SPEC §8–9).
@@ -220,7 +222,8 @@ public actor AgentEngine {
     /// provider stays silent).
     @discardableResult
     public func runThreadTurn(
-        provider: any AgentProvider, context: AgentContext, threadID: String
+        provider: any AgentProvider, context: AgentContext, threadID: String,
+        agentName: String? = nil
     ) async -> Int {
         do {
             try authorizeAutonomousSend(threadID: threadID)
@@ -245,7 +248,7 @@ public actor AgentEngine {
                 isContext: message.isContext
             )
             do {
-                try await sink.postAgentMessage(body, threadID: threadID)
+                try await sink.postAgentMessage(body, threadID: threadID, agentName: agentName)
                 recordThreadMessage(threadID: threadID, participantType: .agent)
                 posted += 1
             } catch {
@@ -258,7 +261,7 @@ public actor AgentEngine {
     /// Conversation-scope autonomous reply during MY active ai_window.
     @discardableResult
     public func runWindowReply(
-        provider: any AgentProvider, context: AgentContext
+        provider: any AgentProvider, context: AgentContext, agentName: String? = nil
     ) async -> Bool {
         do {
             try authorizeAutonomousSend(threadID: nil)
@@ -271,7 +274,7 @@ public actor AgentEngine {
         do {
             try authorizeAutonomousSend(threadID: nil)
             try await sink.postAgentReply(
-                MessageBody(text: message.text, sentAt: clock.now()))
+                MessageBody(text: message.text, sentAt: clock.now()), agentName: agentName)
             return true
         } catch {
             return false

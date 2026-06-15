@@ -133,6 +133,7 @@ struct ThreadView: View {
                             message: message,
                             isMine: message.senderIdentity == model.myIdentityHex,
                             senderName: model.contactNames[message.senderIdentity] ?? "Contact",
+                            agentName: message.agentName ?? model.aiNames[message.senderIdentity],
                             onToggleAIContext: {
                                 Task {
                                     await model.markAIContext(

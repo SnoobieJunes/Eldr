@@ -9,6 +9,10 @@ struct MessageBubble: View {
     let message: StoredMessage
     let isMine: Bool
     let senderName: String
+    /// Friendly codename of the authoring AI (multi-AI tethering). When set, the
+    /// agent bubble shows it instead of "<sender>'s AI" so several AIs in one
+    /// conversation are distinguishable. Local-only, never from the wire.
+    var agentName: String? = nil
     /// Toggles the "Add to AI Context" marker (Feature 3). nil hides the action.
     var onToggleAIContext: (() -> Void)? = nil
     /// Opens this message's markdown/HTML in the full-screen reader. nil hides it.
@@ -159,12 +163,16 @@ struct MessageBubble: View {
         Color.purple.mix(with: .primary, by: 0.45)
     }
 
+    /// What the agent bubble's header reads: the AI's own friendly codename when
+    /// known, otherwise "<sender>'s AI".
+    private var agentLabel: String { agentName ?? "\(senderName)'s AI" }
+
     private var agentBubble: some View {
         HStack {
             if isMine { Spacer(minLength: 48) }
             VStack(alignment: isMine ? .trailing : .leading, spacing: 3) {
                 HStack(spacing: 6) {
-                    Label("⟡ \(senderName)'s AI", systemImage: "sparkles")
+                    Label("⟡ \(agentLabel)", systemImage: "sparkles")
                         .font(.caption2.weight(.semibold))
                         .foregroundStyle(agentAccent)
                     expandButton
@@ -196,7 +204,7 @@ struct MessageBubble: View {
         .id(message.id)
         .privacySensitive()
         .accessibilityElement(children: .combine)
-        .accessibilityLabel("AI message from \(senderName)'s assistant: \(Self.accessibleText(message.text))")
+        .accessibilityLabel("AI message from \(agentLabel): \(Self.accessibleText(message.text))")
         .accessibilityIdentifier("agent-bubble")
     }
 

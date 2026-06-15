@@ -380,6 +380,28 @@ and affects interop; `[app-only]` — client behavior, no wire impact;
   green-check / red-x per relay reflects socket health surfaced from the
   transports; it never gates delivery (the messenger outbox remains the recovery
   path) and adds no metadata to the wire.
+- **A19 — Local friendly codenames, never broadcast** (2026-06-14): every person
+  AND their AI gets a locally-generated `adjective-noun-verb-###` codename so the
+  UI never shows a raw key. Generation is on-device Core AI when available, else a
+  deterministic FNV-seeded local generator — it NEVER goes off device. The name is
+  stored only in the encrypted local `ContactRecord` (`autoName` / `autoAIName`)
+  and is NEVER written to the wire (SPEC §0; "DO NOT broadcast the names"). Display
+  order: local rename > peer's self-chosen alias > friendly codename > key.
+- **A20 — Multi-AI tethering + solo AI chat** (2026-06-14): a person can tether
+  several AIs at once (on-device + token API). Each AI's reply is labeled with its
+  own local codename via a LOCAL-ONLY `StoredMessage.agentName` (never on the
+  wire). A "solo AI chat" is a group with only me; my AIs reply to me there by
+  default *without* a window, because there is no other human for the autonomous-
+  send gate to protect (SPEC §13.3 gate is unchanged for any conversation that has
+  other humans — verified green by the full AgentIntegrity suite). Adding a real
+  contact turns it into a normal group and the window/invite rules resume.
+- **A21 — AI ingests only marked context by default** (2026-06-14): unless my AI
+  is actively engaged in a conversation (my `ai_window` / thread `ai_invite` is
+  live, or it's the solo AI chat), the context handed to the provider contains
+  ONLY messages the human explicitly marked "Add to AI Context" (mine always; a
+  peer's only under an active bilateral grant). It never auto-ingests the rest of
+  the conversation. Ties to privacy (SPEC §0) at the cost of a less-informed
+  default draft.
 
 ### Tech debt `[tech-debt]`
 

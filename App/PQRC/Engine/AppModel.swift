@@ -63,6 +63,10 @@ final class AppModel {
     var safetyCodeChangedFor: Set<String> = []
     var prekeyCount = 0
     var contactNames: [String: String] = [:]
+    /// identityHex -> a peer's locally-generated AI codename (never broadcast),
+    /// used to label their assistant's bubbles. My own AIs label via the
+    /// message's stored `agentName`.
+    var aiNames: [String: String] = [:]
     /// Nearby peers discovered over the local link (SPEC §10) — startable with
     /// no relay. Populated only when the Nearby setting is on.
     var nearbyContacts: [NearbyVM] = []
@@ -207,6 +211,7 @@ final class AppModel {
             let info = await runtime.contactInfo(id)
             title = info.name
             verified = info.verified
+            if let aiName = await runtime.contactAIName(id) { aiNames[id] = aiName }
         }
         contactNames[id] = title
         var row = conversations.first { $0.id == id }
@@ -291,8 +296,17 @@ final class AppModel {
 
     func draft(conversationID: String, threadID: String? = nil) async -> String? {
         do {
-            return try await runtime.draftReply(
+            let text = try await runtime.draftReply(
                 conversationID: conversationID, threadID: threadID).text
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            // A blank draft (some providers return "" instead of erroring) would
+            // insert nothing and read as "the AI silently did nothing". Treat it
+            // as a failure with a visible reason.
+            guard !text.isEmpty else {
+                agentError = "The AI returned an empty reply. Try again, or check your provider in Settings ▸ AI."
+                return nil
+            }
+            return text
         } catch {
             agentError = Self.describeAgentError(error)
             return nil
@@ -370,6 +384,31 @@ final class AppModel {
 
     func createGroup(name: String, members: [String]) async -> String? {
         try? await runtime.createGroup(name: name, memberIdentityHexes: members)
+    }
+
+    /// Creates a solo AI chat (just you + your tethered AIs). Refreshes the row
+    /// so it appears immediately, then returns its id for navigation.
+    func createSelfChat() async -> String? {
+        guard let id = try? await runtime.createSelfChat() else { return nil }
+        await refreshConversationRow(id, lastMessage: nil)
+        return id
+    }
+
+    /// Adds verified contacts to a group/solo conversation at any time.
+    func addMembers(_ conversationID: String, add identityHexes: [String]) async {
+        try? await runtime.addMembers(conversationID: conversationID, add: identityHexes)
+        await refreshConversationRow(conversationID, lastMessage: nil)
+    }
+
+    /// The transcript the tethered LLM(s) currently see for a conversation
+    /// (read-only, for the Settings "AI context" view).
+    func contextPreview(conversationID: String) async -> [ContextPreviewLine] {
+        await runtime.contextPreview(conversationID: conversationID)
+    }
+
+    /// Names of the AIs tethered to me right now.
+    func tetheredAINames() async -> [String] {
+        await runtime.tetheredAINames()
     }
 
     func block(_ identityHex: String) async {

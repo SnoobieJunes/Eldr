@@ -39,7 +39,7 @@ final class LocalUniverse {
                 displayName: name,
                 transports: [await relay.connect()],
                 blobStore: blossom,
-                provider: scripted,
+                ais: [TetheredAI(id: "demo", name: "\(name)'s AI", provider: scripted)],
                 randomSource: SeededRandomSource(seed: UInt64(9000 + index)),
                 nonceSource: SeededRandomSource(seed: UInt64(9100 + index)),
                 keychainService: "chat.pqrc.universe.\(name.lowercased())")

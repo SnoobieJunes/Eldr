@@ -135,7 +135,9 @@ final class AppSession {
     /// the Demo provider so the AI still visibly responds instead of going
     /// silent. The on-device default uses Core AI (FoundationModels) when
     /// available, Demo otherwise.
-    static func makeAgentProvider() -> any AgentProvider {
+    /// Builds a live provider for one backend kind. Token-based backends with no
+    /// key fall back to the Demo provider so the AI still visibly responds.
+    static func makeProvider(kind: String) -> any AgentProvider {
         let keychain = KeychainStore(service: "chat.pqrc.keys")
         func key(for provider: String) -> String? {
             guard let account = apiKeyAccounts[provider],
@@ -144,17 +146,7 @@ final class AppSession {
             let value = String(decoding: data, as: UTF8.self)
             return value.isEmpty ? nil : value
         }
-
-        // Migrate the pre-multi-provider tags: "remote" was Anthropic, "mock"
-        // was the deterministic stub now superseded by the Demo provider.
-        let selected: String
-        switch UserDefaults.standard.string(forKey: "aiProvider") ?? "ondevice" {
-        case "remote": selected = "claude"
-        case "mock": selected = "demo"
-        case let other: selected = other
-        }
-
-        switch selected {
+        switch kind {
         case "claude":
             return key(for: "claude").map { AnthropicAPIProvider(apiKey: $0) } ?? DemoAgentProvider()
         case "openai":
@@ -163,9 +155,46 @@ final class AppSession {
             return key(for: "gemini").map { GeminiAPIProvider(apiKey: $0) } ?? DemoAgentProvider()
         case "demo":
             return DemoAgentProvider()
-        default:
+        default:  // "ondevice"
             return FoundationModelsAgentProvider.isAvailable
                 ? FoundationModelsAgentProvider() : DemoAgentProvider()
+        }
+    }
+
+    /// The user's configured AIs (multi-AI tethering), migrating the legacy
+    /// single-provider setting on first read so existing installs keep working.
+    static func loadConfiguredAIs() -> [ConfiguredAI] {
+        if let data = UserDefaults.standard.data(forKey: "configuredAIs"),
+            let list = try? JSONDecoder().decode([ConfiguredAI].self, from: data),
+            !list.isEmpty
+        {
+            return list
+        }
+        // Migrate the pre-multi-provider tag: "remote" was Anthropic, "mock" the
+        // deterministic stub now superseded by Demo.
+        let kind: String
+        switch UserDefaults.standard.string(forKey: "aiProvider") ?? "ondevice" {
+        case "remote": kind = "claude"
+        case "mock": kind = "demo"
+        case let other: kind = other
+        }
+        let migrated = [
+            ConfiguredAI(id: UUID().uuidString, name: FriendlyName.local(seed: "ai:" + kind), kind: kind)
+        ]
+        saveConfiguredAIs(migrated)
+        return migrated
+    }
+
+    static func saveConfiguredAIs(_ list: [ConfiguredAI]) {
+        if let data = try? JSONEncoder().encode(list) {
+            UserDefaults.standard.set(data, forKey: "configuredAIs")
+        }
+    }
+
+    /// The configured AIs bound to live providers — the runtime's tethered AIs.
+    static func makeRuntimeAIs() -> [TetheredAI] {
+        loadConfiguredAIs().map {
+            TetheredAI(id: $0.id, name: $0.name, provider: makeProvider(kind: $0.kind))
         }
     }
 
@@ -186,7 +215,7 @@ final class AppSession {
             displayName: UserDefaults.standard.string(forKey: "displayName") ?? "Me",
             transports: transports,
             blobStore: blossom,
-            provider: Self.makeAgentProvider(),
+            ais: Self.makeRuntimeAIs(),
             keychainService: "chat.pqrc.keys",
             enableLocalLink: Self.localLinkEnabled)
         let model = AppModel(
@@ -210,10 +239,10 @@ final class AppSession {
         await bootSingle()
     }
 
-    /// Re-resolves the AI provider after a Settings change (no reboot needed).
+    /// Re-resolves the tethered AIs after a Settings change (no reboot needed).
     func applyAIProvider() async {
         guard case .single(let model) = mode else { return }
-        await model.runtime.setProvider(Self.makeAgentProvider())
+        await model.runtime.setAIs(Self.makeRuntimeAIs())
     }
 
     /// `pqrc:add?npub=npub1…` — from a scanned QR. Opens New Conversation
