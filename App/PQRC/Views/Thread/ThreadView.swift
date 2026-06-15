@@ -64,6 +64,7 @@ struct ThreadView: View {
                         systemImage: "puzzlepiece.extension")
                 }
                 .accessibilityIdentifier("thread-skills")
+                .help("Pin shared skills — a common vocabulary (plan-sync, tech-spec, code-debug…) so each person's AI can hand off work the other can act on, instead of free-form chatter.")
             }
         }
         .sheet(isPresented: $showSkills) {
@@ -116,6 +117,7 @@ struct ThreadView: View {
                     }
                     .buttonStyle(.borderedProminent)
                     .accessibilityIdentifier("invite-ai")
+                    .help("Let your AI converse in this thread for a set time. Everything it says is recorded here; it can never join on its own.")
                 }
                 if model.iGrantedContext(scope: threadScope, now: now) {
                     Button("Stop sharing context") {

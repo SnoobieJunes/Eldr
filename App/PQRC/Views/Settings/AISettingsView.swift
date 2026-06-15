@@ -51,6 +51,7 @@ struct AISettingsView: View {
                 .accessibilityIdentifier("add-ai")
             } header: {
                 Text("Tethered AIs")
+                    .helpInfo("Bring your own AI into your chats — openly and on your terms. Pick on-device Core AI (nothing leaves your phone), a cloud provider via your own API key, or a model on your own machine. Add several and they can collaborate. No one ever talks to an AI without seeing it.")
             } footer: {
                 Text("Add several to let them share context with each other in a chat or thread. Each gets a local, private name you can edit; names are never broadcast.")
             }
@@ -103,6 +104,7 @@ struct AISettingsView: View {
                     .accessibilityIdentifier("egress-firewall-toggle")
             } header: {
                 Text("Egress firewall")
+                    .helpInfo("Your privacy guard for remote AI. Before anything reaches a cloud provider it swaps every real name for your private codename and trims the context to a safe size. On-device AI never leaves your phone, so it's untouched. On by default — turning it off is not recommended.")
             } footer: {
                 Text("On by default. When on, anything sent to a REMOTE AI is stripped of real names (replaced with your private codenames) and trimmed to a safe size before it leaves your device. On-device AI is never affected. Disabling it is not recommended.")
             }
@@ -120,13 +122,16 @@ struct AISettingsView: View {
                 Text("A short label of what THIS device brings to a shared AI thread (e.g. \"iOS / Xcode\" or \"backend / staging\"). Each person's AI advertises its domain so two of them divide work without dumping full context. Optional — used by the thread Skills feature.")
             }
 
-            Section("What your AI sees") {
+            Section {
                 NavigationLink {
                     AIContextView(model: model)
                 } label: {
                     Label("View tethered LLM context", systemImage: "doc.text.magnifyingglass")
                 }
                 .accessibilityIdentifier("view-ai-context")
+            } header: {
+                Text("What your AI sees")
+                    .helpInfo("Transparency first: open this to read the exact text each model receives, word for word. It's read-only and sent nowhere. By default your AI only sees messages you add to context — not your whole history.")
             }
         }
         .navigationTitle("AI")
@@ -232,6 +237,7 @@ struct AISettingsView: View {
                     .font(.caption.weight(.semibold))
                     .foregroundStyle(.secondary)
                     .accessibilityIdentifier("ai-context-behavior-header")
+                    .helpInfo("Three knobs per AI. Instructions give it a persona. Gathers sets what it can read: the live conversation while it's active, only messages you add to context, or nothing. Does sets whether it participates, drafts for your approval, or just summarizes. Depth is how many recent messages it sees.")
                 VStack(alignment: .leading, spacing: 2) {
                     Text("Instructions (custom persona)")
                         .font(.caption).foregroundStyle(.secondary)

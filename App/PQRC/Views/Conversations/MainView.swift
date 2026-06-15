@@ -62,7 +62,7 @@ struct MainView: View {
                     ContentUnavailableView(
                         "No conversation selected",
                         systemImage: "bubble.left.and.bubble.right",
-                        description: Text("Pick a conversation, or start a new one."))
+                        description: Text("Pick a conversation, or start a new one. The brain icon opens a private chat with just you and your AI."))
                 }
             }
         }
@@ -104,12 +104,15 @@ struct MainView: View {
     private var sidebar: some View {
         List(selection: $selection) {
             if !model.messageRequests.isEmpty {
-                Section("Message Requests") {
+                Section {
                     ForEach(model.messageRequests, id: \.self) { sender in
                         MessageRequestRow(model: model, sender: sender) { conversationID in
                             selection = conversationID
                         }
                     }
+                } header: {
+                    Text("Message Requests")
+                        .helpInfo("First messages from people you haven't talked to wait here — nothing is shown until you Accept. Decline to ignore them. Their identity is only confirmed after you accept and verify their safety code.")
                 }
             }
             Section {
@@ -190,7 +193,7 @@ struct MainView: View {
                 }
                 .accessibilityLabel("New AI chat")
                 .accessibilityIdentifier("new-ai-chat")
-                .help("New AI chat (⌥⌘N)")
+                .help("Open a private solo chat with just you and your AI(s) — a staging ground to brainstorm or draft. Add people later to make it a real conversation. (⌥⌘N)")
                 Button {
                     showNewGroup = true
                 } label: {

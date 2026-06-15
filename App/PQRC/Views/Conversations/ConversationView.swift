@@ -96,6 +96,7 @@ struct ConversationView: View {
                 }
                 .accessibilityLabel(selecting ? "Done selecting" : "Select messages")
                 .accessibilityIdentifier("select-messages-button")
+                .help("Select several messages at once to add them to your AI's context.")
                 Button {
                     showThreadSheet = true
                 } label: {
@@ -103,6 +104,7 @@ struct ConversationView: View {
                 }
                 .accessibilityLabel("Start AI thread")
                 .accessibilityIdentifier("thread-create-button")
+                .help("Start a thread where each person's AI can join and collaborate — everything they say is recorded right there.")
                 Button {
                     showWindowPicker = true
                 } label: {
@@ -110,12 +112,14 @@ struct ConversationView: View {
                 }
                 .accessibilityLabel("AI options")
                 .accessibilityIdentifier("ai-window-button")
+                .help("AI options: draft a reply privately, turn your AI on for everyone for a set time, or share AI context.")
                 Button {
                     showDetails = true
                 } label: {
                     Image(systemName: "info.circle")
                 }
                 .accessibilityLabel("Conversation details")
+                .help("Verify this contact's safety code, set a local name, control AI here, or block.")
             }
         }
         .confirmationDialog("Always-on AI", isPresented: $showWindowPicker) {
@@ -207,6 +211,10 @@ struct ConversationView: View {
                 + (aiSummary.mode != "off" && aiSummary.isRemote
                     ? (aiSummary.firewallOn ? ", egress firewall on" : ", egress firewall off")
                     : ""))
+        // What this chip means, at a glance on Mac (tap opens the same control on
+        // iOS). The shield/open-lock glyph reflects the egress firewall for a
+        // remote AI — shielded when on, an orange open lock when off.
+        .help("What your AI sees in this chat, at a glance. Tap to change it just here. The shield shows the egress firewall is on for a remote AI; an orange open lock means it's off.")
     }
 
     private var threadChips: some View {
@@ -563,16 +571,20 @@ struct ThreadCreateSheet: View {
     var body: some View {
         NavigationStack {
             Form {
-                TextField("Thread title", text: $title)
-                    .accessibilityIdentifier("thread-title")
-                Button("Create AI thread") {
-                    Task {
-                        _ = await model.createThread(conversationID: conversationID, title: title)
-                        dismiss()
+                Section {
+                    TextField("Thread title", text: $title)
+                        .accessibilityIdentifier("thread-title")
+                    Button("Create AI thread") {
+                        Task {
+                            _ = await model.createThread(conversationID: conversationID, title: title)
+                            dismiss()
+                        }
                     }
+                    .disabled(title.isEmpty)
+                    .accessibilityIdentifier("thread-create-confirm")
+                } footer: {
+                    Text("A thread is a focused space where each person's AI can be invited to collaborate for a set time. Everything the AIs say is recorded right here, and they pause after a few back-to-back turns until a human speaks.")
                 }
-                .disabled(title.isEmpty)
-                .accessibilityIdentifier("thread-create-confirm")
             }
             .navigationTitle("New AI Thread")
             .toolbar {

@@ -21,10 +21,17 @@ struct ContactsView: View {
                     systemImage: "person.crop.circle.badge.questionmark",
                     description: Text("Start a conversation from an npub or QR code and the verified contact appears here."))
             }
-            ForEach(contacts, id: \.identityHex) { contact in
-                ContactRow(model: model, contact: contact) {
-                    renameText = contact.localNickname ?? ""
-                    renaming = contact
+            if !contacts.isEmpty {
+                Section {
+                    ForEach(contacts, id: \.identityHex) { contact in
+                        ContactRow(model: model, contact: contact) {
+                            renameText = contact.localNickname ?? ""
+                            renaming = contact
+                        }
+                    }
+                } header: {
+                    Text("People")
+                        .helpInfo("Real identities are long keys, so each person gets a friendly codename invented privately on your device — never broadcast, so your name for someone differs from everyone else's. Tap a name to flip to their key (the npub you add and verify them by); your rename always wins.")
                 }
             }
         }

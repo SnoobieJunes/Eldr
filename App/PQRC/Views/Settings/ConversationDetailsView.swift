@@ -37,7 +37,7 @@ struct ConversationDetailsView: View {
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
-                Section("Verify \(model.contactNames[conversationID] ?? "contact")") {
+                Section {
                     Text(safetyCode.isEmpty ? "—" : safetyCode)
                         .font(.body.monospaced())
                         .accessibilityIdentifier("safety-code")
@@ -54,6 +54,9 @@ struct ConversationDetailsView: View {
                             // relaunch and clears safety-change warnings.
                             Task { await model.setVerified(conversationID, verified: newValue) }
                         }
+                } header: {
+                    Text("Verify \(model.contactNames[conversationID] ?? "contact")")
+                        .helpInfo("Confirm you're really talking to this person, not an impostor. Read the 60 digits aloud in person or over a trusted call — if they match on both phones, you're verified and get a green shield. If the code ever changes, a red banner warns you before you trust new messages.")
                 }
                 Section {
                     // Unified vocabulary (matches the per-AI "Gathers" picker and
