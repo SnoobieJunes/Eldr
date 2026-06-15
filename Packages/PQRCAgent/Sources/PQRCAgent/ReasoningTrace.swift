@@ -29,6 +29,34 @@ extension String {
                 }
             }
         }
+        // (2) Harmony / channel-tagged reasoning (gpt-oss; some Gemma QAT builds
+        //     emit "<|channel>thought … <channel|> ANSWER"; real Harmony uses
+        //     "<|channel|>final<|message|> ANSWER"). Keep only the final channel.
+        s = s.keepingFinalChannelOnly()
+        // (3) Strip any stray channel/control tokens that survived.
+        for token in [
+            "<|channel|>", "<|channel>", "<channel|>", "<|message|>", "<|start|>",
+            "<|end|>", "<|return|>",
+        ] {
+            s = s.replacingOccurrences(of: token, with: "")
+        }
         return s.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    /// Harmony / channel-tagged reasoning: the private reasoning sits in a
+    /// "thought"/"analysis" channel that precedes the answer's final channel. If a
+    /// channel marker is present, keep only the text after the final-answer
+    /// transition; if the only channel is an unfinished thought (no final
+    /// transition), there's no usable answer, so return empty.
+    private func keepingFinalChannelOnly() -> String {
+        guard contains("channel"), contains("<"), contains("|") else { return self }
+        if let r = range(of: "final<|message|>", options: [.caseInsensitive, .backwards]) {
+            return String(self[r.upperBound...])
+        }
+        if let r = range(of: "<channel|>", options: [.caseInsensitive, .backwards]) {
+            return String(self[r.upperBound...])
+        }
+        if range(of: "<|channel", options: .caseInsensitive) != nil { return "" }
+        return self
     }
 }

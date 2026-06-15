@@ -89,4 +89,19 @@ struct APIProviderTests {
         // A normal model with no trace is returned trimmed, unchanged.
         #expect("  just a normal reply  ".strippingReasoningTrace() == "just a normal reply")
     }
+
+    /// Channel/Harmony-tagged reasoning (gpt-oss, some Gemma QAT builds) — keep
+    /// only the final-answer channel, drop the thought/analysis channel.
+    @Test func strippingReasoningTrace_handlesChannelFormat() {
+        // Gemma-QAT variant: "<|channel>thought … <channel|> ANSWER".
+        #expect(
+            "<|channel>thought\nweighing options\n<channel|>How about 10am?"
+                .strippingReasoningTrace() == "How about 10am?")
+        // Real Harmony: analysis channel then final channel.
+        #expect(
+            "<|channel|>analysis<|message|>reasoning<|channel|>final<|message|>The answer."
+                .strippingReasoningTrace() == "The answer.")
+        // Thought-only, no final transition → no usable answer (don't dump it).
+        #expect("<|channel>thought\nstill thinking, truncated".strippingReasoningTrace().isEmpty)
+    }
 }
