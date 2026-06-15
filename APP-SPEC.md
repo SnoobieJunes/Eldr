@@ -29,8 +29,9 @@ this is the source of truth for the rapid build-out after the first pass):
 - **Agent-to-agent thread skills** — base PQRC guardrail injection + a pinned-skills
   catalog, pure prompt composition, no new wire format **[A32]** (§23).
 - A local **MCP server** exposing secure chat read-only **[A35]** and an **ACP agent**
-  that lets the on-device model pilot Xcode **[A36]** — both standalone SPM packages
-  (`PQRCMCP`, `PQRCACP`); deeper in-app integration is **in progress** (§24).
+  that lets the on-device model pilot Xcode **[A36]** (`PQRCMCP`, `PQRCACP`). The MCP
+  server is now **hosted in-app** over a loopback Unix socket behind an OFF-by-default,
+  token-gated, stops-on-lock Settings toggle (Phase 2 shipped — §24).
 - **NIP-40 expiry** on gift-wraps **[A22]**, relay **chunking** for large text
   **[N26, A25]**, native markdown/HTML rendering + full-screen reader **[A17, A19, A22]**,
   friendly local codenames **[A19]**, and a responsive iPad/Mac `NavigationSplitView` pass.
@@ -372,9 +373,15 @@ network-free) that adopt existing open protocols rather than inventing one.
   `post`/`send`, so no MCP client can make EldrChat speak on the wire — the §13
   autonomous-send invariant holds with nothing new to enforce. Tools:
   `list_conversations`, `read_conversation`, `search_messages`, `get_context_preview`.
-  A `DemoSecureChatBridge` + `pqrc-mcp` executable let any client connect today.
-  **(In progress, Phase 2):** the real `PersonaRuntime`-backed bridge, an OFF-by-default
-  Settings toggle, and a pairing-token consent gate; (Phase 3) window-gated action tools.
+  A `DemoSecureChatBridge` + `pqrc-mcp` executable let any client connect to fixture data.
+  **Phase 2 SHIPPED:** the app hosts the MCP server **in-process** over a **loopback
+  Unix-domain socket** (never a TCP bind) while a silo is unlocked and the
+  OFF-by-default **Settings ▸ Local agent access (MCP)** toggle is on; a tiny external
+  `pqrc-mcp-bridge` shim is what the editor spawns and pipes stdio to that socket
+  (`RuntimeSecureChatBridge` reads the real `PersonaRuntime`, redacted). It is
+  **token-gated** (32-byte Keychain pairing token, required as the first line,
+  constant-time compared), has **no persisted "expose me" flag**, and **stops on lock**.
+  (Phase 3) window-gated action tools.
 - **`PQRCACP` — ACP agent [A36].** The dual: EldrChat's **on-device LLM acts as a coding
   agent** an ACP client (Xcode 27) spawns over stdio to write code, build, and run
   simulator tests. Standard **Agent Client Protocol** (JSON-RPC 2.0 over stdio),

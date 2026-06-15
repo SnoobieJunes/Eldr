@@ -89,6 +89,12 @@ the other side of the conversation.
 - **Rekeys:** keep a conversation going past 50 messages and the ML-KEM rekey
   rides along invisibly (header `pq` field; chaos suite exercises this under
   drops, duplicates, reordering and jitter).
+- **Per-party color (display-only):** in a group, each human gets a deterministic
+  solid color derived from their identity hex, and their tethered AI a lighter
+  tint of the same hue, so you can tell parties apart at a glance. It is **purely
+  local** — computed on-device, never stored, never on the wire — and color is
+  never the only AI signal (the outline + sparkles badge still mark every agent
+  bubble for colorblind/grayscale users). It does not affect codename redaction.
 
 ## Performance notes
 

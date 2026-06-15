@@ -235,22 +235,63 @@ off-device AI off to keep everything local. (The `hub` path additionally shares
 content with another *user's* device — see §2.9a.)
 
 ### 2.13 Local MCP server / ACP agent (developer-facing, opt-in)
-Two standalone packages let a **local** developer harness interact with EldrChat
-on a workstation; neither touches the Nostr wire or a network by itself
-(DEVIATIONS A35/A36):
-- **MCP server (`pqrc-mcp`/PQRCMCP).** Exposes secure chat **read-only** over stdio
-  to a local MCP client (Goose, Xcode, Claude). It returns **already
-  firewall-redacted** data (codenames, 64 KB-bounded); Phase 1 has **no
-  send/post tool by construction**, so it cannot make EldrChat speak — the §13
-  autonomous-send invariant needs nothing new. The data still leaves EldrChat to
-  whatever local client connects, so it is a read exposure of your chat to tools
-  you run. The in-app bridge, an OFF-by-default toggle, and a pairing-token
-  consent gate are **(in progress)** for Phase 2.
+Two surfaces let a **local** agent on the same machine interact with EldrChat;
+neither touches the Nostr wire or a network by itself (DEVIATIONS A35/A36):
+
+- **In-app MCP server (A35 Phase 2 — now shipped).** When a silo is unlocked AND
+  you turn on **Settings ▸ Local agent access (MCP)** (OFF by default), the app
+  hosts a Model Context Protocol server **in-process** so a local MCP client
+  (Goose, Xcode, Claude, …) can **read** your real conversations. This is a
+  genuine **read exposure of your chat to whatever local agent you point at it** —
+  the deliberate threat-model boundary, mitigated as follows:
+  - **Loopback only.** The server binds a **Unix-domain socket** under the app
+    container (no network interface at all — filesystem-namespaced, same-machine).
+    It **never** falls back to a TCP bind, so nothing is reachable off-box. (The
+    external `pqrc-mcp-bridge` shim *also* understands a `127.0.0.1` TCP fallback,
+    but the app side only ever offers the UDS, so the TCP path is unreachable in
+    practice.)
+  - **Token-gated.** A client's **first line** must equal a 32-byte random pairing
+    token (kept in the silo Keychain, `WhenUnlockedThisDeviceOnly`, surfaced in
+    Settings); a mismatch/missing token drops the connection before any method
+    runs. The comparison is length-checked and constant-time.
+  - **Read-only + firewall-redacted.** The bridge serves the **same egress-firewall
+    output** the remote-AI path produces — message senders are **local codenames,
+    never identity hex or real display names**, text is **byte-bounded to 64 KB**
+    (invariant 4), and the participant role is honest (an AI message is labeled
+    AI). There is **no `post`/`send` tool** in the protocol, so an MCP client
+    cannot make EldrChat speak on the wire — §13 holds by construction.
+    *Honest nuance:* the conversation **title** (not message senders) is the
+    contact's resolved local name; for a normal contact that is the
+    auto-generated friendly codename, but the underlying name type retains a
+    last-resort `"Contact <first-8-hex>"` fallback used only if a contact has no
+    nickname, no peer alias, and no codename yet. Codenames are assigned
+    synchronously on contact load/accept, so a *full or partial identity-key
+    prefix as a title is not reachable in normal operation*; we call it out for
+    completeness. Message bodies/senders never carry it.
+  - **OFF by default; stops on lock.** There is **no persisted "expose me" flag** —
+    a fresh launch never auto-re-exposes chat. Locking the silo or toggling off
+    **tears the server down first** (before the redacted store becomes
+    unreadable), hanging up every in-flight connection.
+
 - **ACP agent (`eldr-acp`/PQRCACP).** Lets EldrChat's on-device LLM act as a coding
-  agent for Xcode 27 against the developer's own files; it involves **no
-  secure-chat content and no relay path**, so §13 is out of scope. Within that
-  local-dev blast radius, mutating-tool permission prompts **default to ALLOW** if
-  the spawning client doesn't answer — a usability trade with no wire exposure.
+  agent an ACP client (Xcode 27) spawns over stdio to write code, build, and run
+  tests **on the developer's own machine**. It involves **no secure-chat content
+  and no relay path**, so §13 is out of scope — but note its real power within
+  that local-dev blast radius:
+  - It can **write files and run arbitrary shell** (`/bin/zsh -lc`) in its working
+    directory — by design, on the user's own dev box, via a binary the user
+    registers with their editor.
+  - Mutating tools (`write_file`, `run_shell`) call **`session/request_permission`
+    on the client first**. If the client answers, the user's decision is honored;
+    if the client can't prompt or the request fails, the agent **defaults to
+    ALLOW** (the client spawned it as a trusted local subprocess and the user
+    expects it to act). A non-conformant or permission-less client therefore gets
+    silent execution — a usability trade with no wire exposure, but a power worth
+    knowing before you register the agent.
+  - It **acts only on an explicit client `session/prompt` AND an LLM tool-call
+    decision** — it never runs tools autonomously. The LLM token
+    (`ELDR_LLM_TOKEN`) is sent only as the model endpoint's `Authorization`
+    header and is **never logged** (diagnostics log the URL and model name only).
 
 ## 3. Endpoint compromise
 
@@ -296,8 +337,12 @@ exactly as specified in NIP-XX.
 - Third-party audit (OTF Security Lab) before any non-demo deployment.
 - **Silo count-hiding (A26):** a forensic image can still count accounts; a pooled
   opaque-record store is the Phase-2 fix (§2.3a).
-- **MCP/ACP Phase 2 (A35):** the real `PersonaRuntime`-backed MCP bridge with an
-  OFF-by-default toggle + pairing-token consent gate (§2.13) is in progress.
+- **MCP server hardening (A35):** the in-app `PersonaRuntime`-backed MCP bridge
+  (loopback UDS, token-gated, OFF-by-default, redacted, stops-on-lock) now ships
+  (§2.13). Open follow-ups: tighten the conversation-title fallback so it can
+  never emit a key prefix even in a contrived state, and a peer-credential check
+  (`SO_PEERCRED`/`LOCAL_PEERPID`) on the UDS to bind connections to expected
+  local clients.
 - Ephemeral receiving keys on by default; Tor/mixnet transport; cryptographic
   *message* deniability; MLS groups; multi-device — all tracked for v2. (Account-
   *existence* deniability via silos now ships — §2.3a.)

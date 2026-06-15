@@ -289,11 +289,23 @@ a long note, and tell us what feels rough. Thank you for testing EldrChat.
 Two integrations are available if you run EldrChat on a Mac:
 
 - **Let an AI agent (Goose, Xcode, Claude) read your secure chat** — turn on
-  **Settings ▸ Local agent access**; EldrChat shows a one-line command + token to
-  paste into your MCP client. It's read-only and your contacts' names are replaced
-  with codenames before anything leaves the app.
+  **Settings ▸ Local agent access (MCP)**; EldrChat shows a one-line command + a
+  pairing token to paste into your MCP client. Be clear-eyed about what this does:
+  a local agent on *this machine* gets to **read your conversations**. It is
+  read-only (there is no way for it to send or post anything), it talks to the app
+  only over a **loopback socket** that never leaves the device, it needs the
+  pairing token to connect, and every contact's name is replaced with a **local
+  codename** (never a real name or key) with message text **size-capped** first.
+  It is **off by default**, there is **no remembered "leave it on" setting**, and
+  it **stops the moment you lock** or toggle it off. Only turn it on if you want a
+  local agent to see your redacted chat.
 - **Let EldrChat's self-hosted LLM pilot Xcode 27** (write code, build, run on
-  simulators) via the `eldr-acp` Agent Client Protocol agent.
+  simulators) via the `eldr-acp` Agent Client Protocol agent. This one can
+  **create/overwrite files and run shell commands** in its working directory — by
+  design, on your own dev machine. Your editor asks you to approve each
+  file-write / shell run when it supports permission prompts; a client that can't
+  prompt will let the agent act without asking, so only register it with an editor
+  you trust. It uses your conversations for nothing — it touches only your code.
 
 Both are off by default and documented step-by-step in **docs/SETUP-GUIDE.md §9**
 (Xcode 27 registration) and the in-app Settings.
