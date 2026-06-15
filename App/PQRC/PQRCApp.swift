@@ -62,6 +62,27 @@ final class AppSession {
         if arguments.contains("--local-universe") || arguments.contains("--uitest") {
             Task { await bootUniverse(runScript: arguments.contains("--demo-script")) }
         }
+        #if DEBUG
+            if arguments.contains("--uitest-biometric") {
+                // Deterministic Face ID harness: wipe the test silo, create it
+                // fresh (which auto-enables Face ID when the device/Simulator has
+                // it enrolled), then lock — landing on the lock screen, which
+                // auto-prompts Face ID at launch. Lets a UI driver verify the
+                // glance-unlock path end to end.
+                let derived = SiloKey.derive(passphrase: "faceid-test-pass")
+                KeychainStore(service: Self.siloService(derived.siloID)).deleteAll()
+                disableBiometricUnlock()
+                Self.deleteAllStoreFiles()
+                Task {
+                    await createAccount(
+                        passphrase: "faceid-test-pass", displayName: "FaceID Test")
+                    // Present the lock screen directly (a full lockSilo/shutdown
+                    // races the still-in-flight startup in this harness); the
+                    // running runtime just leaks for the duration of the test.
+                    mode = .locked
+                }
+            }
+        #endif
         // Otherwise stay `.locked`: the user must enter a passphrase. We NEVER
         // auto-boot an account — that would reveal one exists.
     }
@@ -111,7 +132,9 @@ final class AppSession {
         // Test launches stay hermetic: launch args only exist in dev/test
         // contexts, and a UI test must never depend on a live relay.
         let arguments = ProcessInfo.processInfo.arguments
-        if arguments.contains("--uitest") || arguments.contains("--reset") {
+        if arguments.contains("--uitest") || arguments.contains("--reset")
+            || arguments.contains("--uitest-biometric")
+        {
             return ["local"]
         }
         let saved = UserDefaults.standard.stringArray(forKey: "relayURLs") ?? []
