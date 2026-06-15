@@ -7,41 +7,84 @@ What to build. This document is subordinate to `pqrc-SPEC-v1_1.md` (protocol) an
 1. **Privacy is the number one priority, without exception** (SPEC §0). Ties resolve toward privacy.
 2. **Transparency of AI is a privacy property.** No one is ever unknowingly talking to an AI. Agent authorship is always visible, always verifiable.
 3. **iMessage-grade feel.** Native, fluid, instant. The cryptography is invisible; the trust signals are not.
-4. **Honest limitations.** What PQRC does not protect (IP metadata, recipient `p`-tag against a global observer, no deniability, single device) is stated plainly in-app, not hidden.
+4. **Honest limitations.** What PQRC does not protect (IP metadata, recipient `p`-tag against a global observer, no *message* deniability, single device) is stated plainly in-app, not hidden. (Account-*existence* deniability — multiple passphrase silos with no observable count from the running app — now ships; see §19 and THREAT_MODEL §2.3a/§2.12.)
 
 ## 1. Scope
 
-**In v1:** onboarding/key generation, 1:1 conversations, group conversations **[D1]**, shared AI threads, AI drafting + `ai_window`, large content via simulated Blossom, message requests, contact verification, block & report, Local Universe demo mode, full test suite.
+**In v1:** onboarding/key generation, 1:1 conversations, group conversations **[D1]**, shared AI threads, AI drafting + `ai_window`, large content via relay chunking, message requests, contact verification, block & report, Local Universe demo mode, full test suite.
 
-**Out (documented in THREAT_MODEL/DEVIATIONS):** multi-device, key backup/recovery, push notifications **[D6]**, read/delivery receipts **[D5]**, NIP-17 fallback, real MLS groups, Tor/IP privacy, deniability, published profiles (kind 0) **[D11]**. BLE/Multipeer local-first transport (SPEC §10) is stretch goal **[S1]** — implement the `LocalLinkTransport` protocol seam regardless, so the payload path is transport-agnostic from day one.
+**Shipped since the original v1 cut** (detailed in §§19–24 below and in DEVIATIONS;
+this is the source of truth for the rapid build-out after the first pass):
+- Deniable multi-account **silos** — passphrase→KEK, bare lock screen, account swap,
+  legacy migration, biometric/Face-ID convenience tier, duress decoy **[A23–A26, A33]** (§19).
+- **Multi-AI tethering**: several AIs per account, each with a per-AI on/off toggle,
+  per-AI Keychain key, and a context profile (instructions / gather-policy / depth /
+  output mode); a "solo AI chat"; the in-chat **"AI here" context chip** and a unified
+  context vocabulary; backends Claude / OpenAI / Gemini / **OpenRouter** / **Groq** /
+  **self-hosted (OpenAI-compatible)**, with reasoning-trace stripping **[A20, A27, A30, A31, A34]** (§20).
+- The **egress firewall**: codename redaction + a 64 KB bound applied to everything
+  sent to an off-device AI (§21).
+- The **device-hosted relay hub** over Multipeer (a "pocket relay") plus host-AI
+  sharing (Tier 2 LLM over the radio) **[A31]** (§22).
+- **Agent-to-agent thread skills** — base PQRC guardrail injection + a pinned-skills
+  catalog, pure prompt composition, no new wire format **[A32]** (§23).
+- A local **MCP server** exposing secure chat read-only **[A35]** and an **ACP agent**
+  that lets the on-device model pilot Xcode **[A36]** — both standalone SPM packages
+  (`PQRCMCP`, `PQRCACP`); deeper in-app integration is **in progress** (§24).
+- **NIP-40 expiry** on gift-wraps **[A22]**, relay **chunking** for large text
+  **[N26, A25]**, native markdown/HTML rendering + full-screen reader **[A17, A19, A22]**,
+  friendly local codenames **[A19]**, and a responsive iPad/Mac `NavigationSplitView` pass.
+
+**Out (documented in THREAT_MODEL/DEVIATIONS):** multi-device, key backup/recovery,
+push notifications **[D6]**, read/delivery receipts **[D5]**, NIP-17 fallback, real MLS
+groups, Tor/IP privacy, cryptographic *message* deniability (account-existence
+deniability via silos now ships — §19), published profiles (kind 0) **[D11]**, and
+images/video (text-only by design — "use iMessage for that"). The BLE/Multipeer
+local-first transport (SPEC §10), once a stretch goal **[S1]**, is now **implemented**
+and user-toggleable (Settings → Nearby).
 
 ## 2. Architecture
 
 ```
-┌────────────────────────── App (SwiftUI) ──────────────────────────┐
+┌──────────────── AccountGate (lock screen, §19) ───────────────────┐
+│ passphrase → PBKDF2 → {siloID, KEK} · Face-ID convenience tier    │
+│ never auto-boots; a wrong passphrase = a different (empty) silo    │
+└──────────────┬────────────────────────────────────────────────────┘
+┌──────────────▼─────────────── App (SwiftUI) ──────────────────────┐
 │ ConversationList · ConversationView · ThreadView · Composer       │
+│ "My AI" solo chat · "AI here" context chip · Skills picker        │
 │ Onboarding · Settings · Verification · Debug/LocalUniverse        │
+│ EgressFirewall (codename redaction + 64 KB bound, §21) on off-    │
+│ device-AI calls · PersonaRuntime (per-silo engine) · AppModel     │
 └──────────────┬────────────────────────────────────────────────────┘
                │ @Observable view models (MainActor)
 ┌──────────────▼───────────── PQRCAgent ────────────────────────────┐
-│ AgentProvider (protocol) → Mock | FoundationModels | AnthropicAPI │
-│ AgentEngine: silent-by-default gate, ai_window/ai_invite          │
-│ enforcement, thread turn loop + loop guard                        │
+│ AgentProvider → Mock | FoundationModels | Anthropic | OpenAI |    │
+│   Gemini | OpenRouter | Groq | Custom(self-hosted) | hub          │
+│ AgentEngine: silent-by-default gate, ai_window/ai_invite/grant    │
+│   enforcement, thread turn loop + loop guard · AgentSkills (§23)  │
+│ ConfiguredAI: per-AI profile (instructions/policy/depth/output)   │
 └──────────────┬────────────────────────────────────────────────────┘
 ┌──────────────▼───────────── PQRCCore (actors) ────────────────────┐
 │ IdentityManager · AgentKeyDeriver · BindingVerifier (10420)       │
 │ PrekeyManager (10421) · PQXDH · DoubleRatchet · PQRekey           │
 │ Padding · Envelope codec (rumor→seal→gift wrap) · SessionStore    │
+│ SiloKey (passphrase→KEK derivation, §19)                          │
 └──────┬──────────────────────────────┬─────────────────────────────┘
 ┌──────▼──────── PQRCNostr ────┐ ┌────▼──────── Persistence ────────┐
 │ NostrEvent (NIP-01) · BIP340 │ │ MessageStore (protocol)          │
 │ RelayTransport (protocol)    │ │  → SwiftData impl (app)          │
 │  → LocalRelaySimulator       │ │  → InMemory impl (tests)         │
-│  → (future) NostrNetwork     │ │ EncryptedStore: AES-GCM blobs    │
-│ BlobStore (protocol)         │ │ under SE-wrapped master key      │
-│  → LocalBlossomSimulator     │ │ (SPEC §3.4)                      │
-│ LocalLinkTransport (seam)    │ └──────────────────────────────────┘
+│  → NostrWebSocketTransport   │ │ EncryptedStore: AES-GCM blobs    │
+│  → MultipeerRelayClient      │ │ under per-silo SE/KEK-wrapped    │
+│ NearbyRelayHub / Host (§22)  │ │ master key (SPEC §3.4; §19)      │
+│ MultipeerLinkTransport (S1)  │ │ per-silo store file silo-*.store │
+│ pqrc-relay (dev exe)         │ └──────────────────────────────────┘
 └──────────────────────────────┘
+
+Standalone agent-interop packages (no app/crypto deps; §24):
+  PQRCMCP  — MCP server: EldrChat as a read-only secure-chat source (exe pqrc-mcp)
+  PQRCACP  — ACP agent: the on-device LLM pilots Xcode 27 (exe eldr-acp)
 ```
 
 **Send pipeline** (mirrors SPEC §0 diagram ①–⑥): compose → pad to bucket → ratchet-encrypt (AD per SPEC §8.3, with the fuzzed timestamp chosen *before* encryption and reused on the wrap) → rumor(1420, unsigned) → seal(13, sender Nostr key) → gift wrap(1059, fresh random key, fuzzed `created_at`) → outbox → `RelayTransport.publish` to recipient's kind-10050 relays. **Receive pipeline:** subscribe `{kinds:[1059], #p:[me]}` → dedupe by event id → unwrap → unseal → blocklist check on revealed sender **[D8]** → session lookup (or handshake / message-request path) → ratchet-decrypt → unpad → store → UI.
@@ -50,9 +93,11 @@ What to build. This document is subordinate to `pqrc-SPEC-v1_1.md` (protocol) an
 
 ## 3. Persistence & key custody
 
-Keychain items (`kSecAttrAccessibleWhenUnlockedThisDeviceOnly`, **never** iCloud-synced): Nostr private key, PQRC identity private key, prekey private halves, SE-wrapped master storage key, optional Anthropic API key. The agent seed is re-derived on demand (SPEC §3.2), never stored.
+Keychain items (`kSecAttrAccessibleWhenUnlockedThisDeviceOnly`, **never** iCloud-synced): Nostr private key, PQRC identity private key, prekey private halves, SE-wrapped master storage key, and per-AI provider API keys (`apikey.<id>`, with a legacy shared account read as fallback — A31). The agent seed is re-derived on demand (SPEC §3.2), never stored.
 
-`EncryptedStore` **[D9]**: a 256-bit master key wrapped via Secure Enclave P-256 key agreement (SPEC §3.4), unwrapped into memory after first unlock. Message plaintext, session/ratchet state, skipped-key cache, and thread records are stored as AES-256-GCM blobs under per-record derived keys (HKDF over master key + record UUID). The SwiftData container additionally uses `completeFileProtection`. SwiftData models: `Contact` (npub, identity pub, agent pub, local nickname, verified flag, blocked flag), `Conversation` (type 1to1|group, group meta), `Message`, `Thread`, `ThreadMessage`, `OutboxEnvelope`, `ProcessedEventID`, `SessionRecord` (opaque encrypted blob), `PrekeyState`.
+**Per-silo isolation (§19, A23/A33).** Everything above is scoped to the active account ("silo"). Each silo's Keychain secrets are AES-GCM-sealed under that silo's KEK (`passphrase → PBKDF2 → {siloID, KEK}`), its store master key is wrapped under the KEK, and its store file is `silo-<siloID>.store`. Per-account *preferences* (relay list, AI context domain, per-conversation context mode, per-thread skills, contact-activity map, display name) are namespaced `<base>.<siloID>` in UserDefaults so a second silo's runtime can't read the first's and a forensic image can't correlate them; `bootSilo` migrates any legacy flat keys into the booting silo and deletes the originals. A wrong passphrase derives a different, non-existent silo — indistinguishable from "no account". (Residual: the *count* of silos is still inferable from a forensic image — tracked as A26.)
+
+`EncryptedStore` **[D9]**: a 256-bit master key wrapped via Secure Enclave P-256 key agreement (SPEC §3.4) **and, in the silo model, additionally wrapped under the silo KEK**, unwrapped into memory after the silo unlocks. Message plaintext, session/ratchet state, skipped-key cache, and thread records are stored as AES-256-GCM blobs under per-record derived keys (HKDF over master key + record UUID). The SwiftData container additionally uses `completeUntilFirstUserAuthentication` file protection (A15 — downgraded from `.complete`, which made the DB unreadable while locked; the envelope encryption under the wrapped key is the actual at-rest guarantee). SwiftData models: `Contact` (npub, identity pub, agent pub, local nickname, friendly codename, verified flag, blocked flag), `Conversation` (type 1to1|group, group meta), `Message`, `Thread`, `ThreadMessage`, `OutboxEnvelope`, `ProcessedEventID`, `SessionRecord` (opaque encrypted blob), `PrekeyState`.
 
 ## 4. Transport
 
@@ -64,11 +109,13 @@ Keychain items (`kSecAttrAccessibleWhenUnlockedThisDeviceOnly`, **never** iCloud
 
 ## 5. Identity & onboarding
 
-First launch: generate Nostr key + PQRC identity key → derive agent key → friendly explainer screens (no phone/email/wallet; keys live only on this device) → **explicit, unskippable warning that losing the device loses the identity** (recovery is a non-goal, SPEC §0) → publish kind 10420 binding + kind 10421 bundle + kind 10050 relay list to the configured relays (simulator in v1) → set a **local-only** display name **[D11]** → land on empty conversation list. Settings exposes my npub as text + QR. New chats: paste npub or scan QR (camera permission requested just-in-time); client fetches peer's 10420/10421, verifies the binding **both directions**, and verifies prekey signatures before any handshake. Peer without a valid 10420/10421 → "hasn't set up PQRC yet" invite state, no fallback **[scope]**.
+**Lock screen first (§19).** The app **always** launches to a bare passphrase screen (`AccountGateView`) and **never auto-boots** — auto-booting would reveal an account exists. Face ID / Touch ID is the default convenience unlock for the *first* account (auto-prompted at launch); the passphrase is the labelled-secondary path and the only way into a hidden account. A correct passphrase derives `{siloID, KEK}` and boots that silo; a wrong one derives a different, non-existent silo (looks like "no account yet").
+
+Account creation (a new passphrase that maps to an empty silo): pick a **display name** and that **passphrase** → generate Nostr key + PQRC identity key → derive agent key → friendly explainer screens (no phone/email/wallet; keys live only on this device) → **explicit, unskippable "No recovery — by design" warning** (lose the passphrase = that account and all its history are gone forever; recovery is a non-goal, SPEC §0) → publish kind 10420 binding + kind 10421 bundle + kind 10050 relay list to the configured relays → land on empty conversation list. Face ID is silently best-effort enabled on creation (no device passcode/biometric → the account stays passphrase-only). Settings exposes my npub as text + QR and an account **swap** (lock + return to the gate to open a different silo). New chats: paste npub or scan QR (camera permission requested just-in-time); client fetches peer's 10420/10421, verifies the binding **both directions**, and verifies prekey signatures before any handshake. Peer without a valid 10420/10421 → "hasn't set up PQRC yet" invite state, no fallback **[scope]**.
 
 ## 6. Conversations
 
-**6.1 List** — iMessage-style rows: avatar (generated identicon from identity pub), name, last message preview, relative time, unread badge, swipe to pin/delete, pull-to-refresh syncs relays. A separate **Message Requests** section holds handshakes from unknown senders; nothing from an unknown sender renders as a conversation until accepted **[D12]**.
+**6.1 List** — iMessage-style rows: avatar (generated identicon from identity pub), name, last message preview, relative time, unread badge, swipe to pin/delete, pull-to-refresh syncs relays. A separate **Message Requests** section holds handshakes from unknown senders; nothing from an unknown sender renders as a conversation until accepted **[D12]**. Displayed names use a **local friendly codename** (A19) — `adjective-noun-verb-###`, generated on-device (Core AI when available, else a deterministic FNV seed), stored only in the encrypted `ContactRecord`, **never** sent on the wire — so the UI never shows a raw key. Display order: local rename > peer's self-chosen alias (N21, channel-private) > friendly codename > key. A separate **brain icon** opens "My AI" — the solo AI chat (§20).
 
 **6.2 Message view** — bubbles:
 - Outgoing human: filled accent, trailing. Incoming human: secondary fill, leading.
@@ -76,7 +123,7 @@ First launch: generate Nostr key + PQRC identity key → derive agent key → fr
 - Local-only status on outgoing: Queued → Sent to relay (on OK). No remote delivery/read state exists **[D5]**, and UI copy says "sent to relay", never "delivered".
 - System rows: ai_window start/expiry, safety-code change warnings (peer republished 10420/10421 with different keys → persistent warning banner until re-verified), thread anchors.
 
-**6.3 Composer** — multiline field, PhotosPicker attachments (out-of-process; no photo-library permission string needed), AI button (§9). **Large paste:** pasting text whose UTF-8 size exceeds 16 KB collapses into an inline chip — "Large text · 218 KB · sends as encrypted attachment" — and routes through the blob path; the field never visibly chokes. Anything > 64 KB MUST take the `ptr` path (SPEC §11); the bucket/inline decision is invisible to the user.
+**6.3 Composer** — multiline field, AI controls (§9: a **Draft with AI** sparkles button and, in any conversation, the AI-window / thread / Skills entry points). **Large paste:** pasting a big block collapses into an inline chip — "Large text · 218 KB" — so the field never visibly chokes. Large text sends via **relay chunking** (N26/A25), not a blob server: the message is split across several ratcheted gift-wrap envelopes (each a one-time key) and rejoined on receipt; relays see only bucket-padded per-envelope sizes. Chunk budget is **adaptive** — derived from the relay set's smallest NIP-11 `max_content_length` and lowered if a relay rejects "content too large" — so a permissive relay uses the full 64 KB bucket and strict relays stay at 16 KB; the in-process/offline relay reports no limit, so over Nearby the full 64 KB bucket is used. (This is the text-only product's answer to SPEC §11; the `ptr`/Blossom path is reserved for binary attachments once a networked blob server lands — not in scope for v1's text-only design.)
 
 **6.4 Verification** — per-contact screen showing a 60-digit safety code in 12 groups (SHA-256 over the two PQRC identity pubkeys, sorted) plus QR compare; "Mark as verified" sets a shield on the conversation **[D13, app-level]**.
 
@@ -110,21 +157,28 @@ A human can spin up an embedded thread (Discord-style) inside any 1:1 or group c
 
 ## 9. AI integration
 
-`AgentProvider` protocol: `draftReply(context:) async throws -> Draft` and `threadTurn(context:) async throws -> AgentTurn?` (where `AgentTurn` is zero or more messages — the only way agent output enters the world).
+`AgentProvider` protocol: `draftReply(context:) async throws -> Draft` and `threadTurn(context:) async throws -> AgentTurn?` (where `AgentTurn` is zero or more messages — the only way agent output enters the world). The provider list and per-AI profiles have grown substantially since the original cut — see **§20 (multi-AI)** for the full backend list, the per-AI profile model, the solo-AI chat, the "AI here" context chip, and the default-context rules; **§21** for the egress firewall; **§23** for thread skills. The protocol-level gating below is unchanged.
 
-- **MockAgentProvider** — deterministic, scriptable; used by tests and Local Universe.
-- **FoundationModelsAgentProvider** — on-device via the iOS 26 FoundationModels framework, availability-gated (`SystemLanguageModel` availability check); graceful "AI unavailable on this device" state. Default when available.
-- **AnthropicAPIProvider [D3]** — optional, **off by default**. Enabling shows an explicit consent screen: *"Decrypted conversation context will be sent to a remote API for inference. Your signing keys never leave this device (SPEC §13.5), but message content does. This trades privacy for capability."* Key stored in Keychain; provider sends only the minimal context window.
+Providers in v1: **MockAgentProvider** (deterministic, for tests + Local Universe) · **FoundationModelsAgentProvider** (on-device iOS 26, availability-gated, default when available) · **AnthropicAPIProvider [D3]** and the other remote/self-hosted backends in §20. Every `isRemote` provider is **off by default** behind an explicit consent screen (*"Decrypted conversation context will be sent to a remote API … message content does [leave the device]. This trades privacy for capability."*); its key lives only in the Keychain; it sends only the firewall-redacted, bounded context window.
 
-**Silent by default (SPEC §13.2):** outside an active window/invite, providers may be consulted only to produce private drafts for their own human; nothing is ever sent autonomously. Drafting UX: AI button → "Draft a reply" → preview sheet → **Send as my AI** (signed by agent key, `participant_type:"agent"`) or **Edit & send as me** (the human's own message, human-signed). **ai_window (conversation-scope):** toggle with bounded durations; broadcasts the SPEC §13.3 rumor; all clients pin a banner "Alice's AI is active until 3:45 PM" with countdown; expiry clears it and closes the autonomous-send gate (fail-closed, test-enforced).
+**Silent by default (SPEC §13.2):** outside an active window/invite, providers may be consulted only to produce private drafts for their own human; nothing is ever sent autonomously. Drafting UX: composer **Draft with AI** (sparkles) → the AI writes an editable reply into the box — **never auto-sent**, and local-only (drafting needs no window; only *sending as AI* does). From there: **Send as my AI** (signed by agent key, `participant_type:"agent"`) or **Edit & send as me** (human-signed). **ai_window (conversation-scope):** toggle with bounded durations; broadcasts the SPEC §13.3 rumor; all clients pin a banner "Alice's AI is active until 3:45 PM" with countdown; expiry clears it and closes the autonomous-send gate (fail-closed, test-enforced). **Context grants (N24):** a peer's marked context reaches your AI only when **both** humans hold a live `ai_context_grant` in scope (bidirectional default, a tie broken toward privacy).
 
 ## 10. Settings
 
-Identity (npub + QR, safety-code explainer, **no key export — by design**), Relays (list, add/remove, AUTH status; Debug: simulator chaos sliders), Prekeys (one-time count, "Republish bundle"), AI (provider picker, consent flow, default invite duration), Privacy (ephemeral receiving keys toggle — present, **off, marked experimental** per SPEC §9.3; blocklist management), Data (delete conversation, wipe identity with double confirm), About (version, AGPL-3.0 license, THREAT_MODEL summary — one honest screen: "Relays can see your IP and that *someone* messaged you. They cannot see who sent it or what it says.").
+- **Account (§19)** — Face ID / Touch ID toggle (ON by default; OFF = passphrase-only high-security), account **swap** (lock + return to the gate).
+- **Identity** — npub + QR + Share, safety-code explainer, **no key export — by design**.
+- **Contacts** — rename anyone (your name always wins), copy key, message, block management; every person and their AI carries a local friendly **codename** (§6.2, never broadcast).
+- **Servers / Relays** — add/remove any `ws(s)://` URL (per-account, namespaced per silo), live socket status; the keywords **`local`** (in-process simulator), **`host`** (run a pocket relay, §22) and **`nearby`** (join one) are accepted here; Debug: chaos sliders.
+- **Nearby** — the Multipeer local-first link (default ON in Debug, OFF in Release); the Local Network prompt only fires when on.
+- **Prekeys** — one-time count, "Republish bundle".
+- **AI (§20–21)** — tethered-AI list (add/remove, per-AI **on/off**, per-AI key, backend picker), per-AI **Context & behavior** profile (instructions / gather-policy / depth / output mode), the **egress firewall** toggle, the off-device-AI **consent flow**, default invite duration, **This workstation's context domain** (§23), and transparency views — **What your AI sees / View tethered LLM context** + **Test primary AI now**.
+- **Privacy** — ephemeral receiving keys toggle (present, **off, marked experimental** per SPEC §9.3); blocklist; Reachability (open inbox for a bounded window, A12).
+- **Data** — delete conversation, wipe identity (double confirm).
+- **About** — version, AGPL-3.0 license, THREAT_MODEL summary: "Relays can see your IP and that *someone* messaged you. They cannot see who sent it or what it says."
 
 ## 11. Visual & interaction design
 
-iOS 26 Liquid Glass via standard components (toolbars, tab-free `NavigationSplitView` for iPad readiness); reserve explicit `glassEffect` for the ai-window banner and thread header so "AI is present" reads as a distinct material. SF Symbols: `sparkles` (agent), `key.viewfinder` (verify), `shield.checkered` (verified), `clock.badge.exclamationmark` (window expiring). Spring-default motion with Reduce Motion variants; haptics on send, on window start/expiry, on safety-code change. Dynamic Type through accessibility sizes; 44 pt minimum targets; both color schemes; agent styling must survive grayscale (shape + badge, not color alone). Run `performAccessibilityAudit()` in UI tests.
+iOS 26 Liquid Glass via standard components; the app uses a **`NavigationSplitView`** (conversation list + detail) so iPad / Mac / iPhone-landscape show list-and-detail side by side and iPhone-portrait collapses to a stack — reading-width content is constrained so bubbles/forms don't sprawl on a wide display. Orientations are enabled app-wide; `FullScreenReaderView` (markdown/HTML, pinch-zoom, landscape) is the reference for responsive behavior. Reserve explicit `glassEffect` for the ai-window banner and thread header so "AI is present" reads as a distinct material. SF Symbols: `sparkles` (agent), `key.viewfinder` (verify), `shield.checkered` (verified), `clock.badge.exclamationmark` (window expiring). Spring-default motion with Reduce Motion variants; haptics on send, on window start/expiry, on safety-code change. Dynamic Type through accessibility sizes; 44 pt minimum targets; both color schemes; agent styling must survive grayscale (shape + badge, not color alone). Run `performAccessibilityAudit()` in UI tests.
 
 ## 12. Performance budgets
 
@@ -150,11 +204,200 @@ No third-party SDKs, no analytics, no ads. OSLog `privacy: .private` on payload-
 
 ## 15. Local Universe (demo mode, Debug)
 
-Seeded personas Alice & Bob (+ derived agents) over an in-process simulator with a persona switcher, plus a scripted demo: greeting exchange → AI-drafted reply → 30-min ai_window with banner → shared AI thread where both agents exchange two context messages and hit the loop guard → 200 KB paste via blob path → group of 4 fan-out. Document in `docs/DEMO.md`; UI tests replay this script.
+Seeded personas Alice & Bob (+ derived agents) over an in-process simulator with a persona switcher, plus a scripted demo: greeting exchange → AI-drafted reply → 30-min ai_window with banner → shared AI thread where both agents exchange two context messages and hit the loop guard → large paste (now via the relay-chunking path, §6.3) → group of 4 fan-out. Document in `docs/DEMO.md`; UI tests replay this script. (The Local Universe predates silos: it boots a fixed test silo with the bare empty-siloID keys, so the demo and existing suite are unaffected by the multi-account work.)
 
 ## 16–17. (reserved)
 
+---
+
+# Sections added after the original v1 cut
+
+These document features built during the rapid post-v1 push. Each is grounded in
+`docs/DEVIATIONS.md` (the per-change changelog, the source of truth) and the code;
+the relevant DEVIATIONS IDs are cited inline. Where a feature is only partially
+landed it is marked **(in progress)**.
+
+## 19. Deniable multi-account silos  [A23–A26, A33]
+
+One device holds **N passphrase-isolated accounts** ("silos"). The mechanism:
+`passphrase → PBKDF2 (fixed app salt) → siloID + KEK` (`SiloKey.swift` in PQRCCore).
+Each silo's Keychain secrets are AES-GCM-sealed under its KEK, and its store master
+key is wrapped under it (§3), so a silo is unreadable — **and its existence
+unprovable** — without the passphrase. Isolation is **cryptographic, not OS-enforced**
+(iOS gives one app a single sandbox; there is no Android-style secure island).
+
+- **Lock screen, never auto-boot (§5).** The app always launches to `AccountGateView`.
+  A wrong passphrase maps to a *different, non-existent* silo — indistinguishable from
+  "no account". This is what makes the count/contents of accounts deniable from the
+  running app.
+- **Biometric convenience tier [A24].** Face ID / Touch ID is ON by default and the
+  primary unlock — but **only for the FIRST account**, whose `{siloID, KEK}` sits
+  behind a `.userPresence` Keychain item. Additional/hidden silos stay passphrase-only
+  and fully deniable. The passphrase is always available (the only way into a hidden
+  account) and always works; **lose it = data lost forever** (honest no-recovery,
+  SPEC §0). Toggle OFF in Settings ▸ Account for passphrase-only high-security. (The
+  tradeoff: a Face-ID prompt at launch implies the *primary* account exists; the
+  product owner chose this convenience over launch-time deniability for the primary.)
+- **Account swap.** Lock and return to the gate to open a different silo.
+- **Duress = decoy [A25].** Because every passphrase opens its own silo, a duress
+  account needs no special code: create one with a memorable passphrase, stock it with
+  innocuous chats, reveal that passphrase under coercion. A *destructive* duress (wipe
+  on a trigger) is intentionally **not** shipped (accidental-wipe risk > benefit when a
+  plausible decoy exists).
+- **Per-silo namespacing [A33].** Per-account preferences are keyed `<base>.<siloID>`
+  (§3) so a cover silo never surfaces a hidden silo's relays/contacts; `bootSilo`
+  migrates legacy flat keys in and deletes the originals.
+- **Known limit [A26] (tech-debt):** the *number* of silos is still inferable from a
+  forensic image (per-silo `silo-*.store` files / `.<siloID>` UserDefaults suffixes).
+  Robust count-hiding needs a single pooled store of opaque records (Phase 2); naive
+  decoy files are distinguishable, so they are deliberately not shipped.
+
+## 20. Multi-AI tethering, profiles, and context control  [A20, A27, A28, A30, A31, A34]
+
+An account can **tether several AIs at once** (on-device + token APIs + self-hosted),
+each independently configured.
+
+**Backends.** On-device **Core AI** (FoundationModels) · **Claude** (Anthropic) ·
+**OpenAI** · **Gemini** · **OpenRouter** (one key, many model slugs, A27) · **Groq**
+(fast, A30) · **Custom / self-hosted** — *any* OpenAI-compatible server (Ollama /
+LM Studio / vLLM or another vendor; API key OPTIONAL, base URL required; the URL
+builder accepts a bare `host:port`, a `…/v1`, or a full path, A30/A31) · **hub** (the
+nearby host's shared AI, §22) · **Demo** (stub replies). Local plaintext `http://` is
+permitted to private addresses only via `NSAllowsLocalNetworking`; the public internet
+still requires HTTPS. **Reasoning-trace stripping [A34]:** `<think>…</think>` and
+Harmony/channel-tagged chain-of-thought (gpt-oss, Gemma QAT, qwen3/DeepSeek-R1) are
+stripped from every reply so a bubble never shows raw scratchpad; the self-hosted
+token budget is raised 512→1024 so a reasoning model still reaches its answer.
+
+**Per-AI controls.**
+- Independent **on/off** `enabled` toggle per AI; per-AI Keychain key (`apikey.<id>`)
+  so two AIs of the *same* provider can hold different keys (A31).
+- A **context profile** on each `ConfiguredAI` (all fields optional, so old configs
+  still decode — A30): custom **`instructions`** (a persona, *augmenting* not replacing
+  the draft/PASS conventions); a **gather `contextPolicy`** (`active` | `strict` =
+  marked-only-even-when-active | `off`); a **`contextDepth`**; and an **`outputMode`**
+  (`participate` | `draft-only` = never auto-posts | `summarize`).
+- A **per-conversation override** (`off` | `marked` | `full`) wins over the per-AI
+  policy; `off` suppresses ALL AI activity in that conversation (loop guards + empty
+  context).
+
+**Solo AI chat [A20, A28].** The **brain icon** (and a member-less **New Group**) opens
+a private chat with just **you + your tethered AIs**. Your AIs reply there **without a
+window**, because there is no other human for the autonomous-send gate to protect
+(SPEC §13.3 is unchanged for any conversation that has other humans — verified by the
+AgentIntegrity suite). `aiActiveSince` is set at creation so the AIs ingest from the
+start. Adding a real human reverts it to a normal window/invite-gated group.
+
+**Default context rules [A21].** Unless an AI is *actively engaged* (a live `ai_window`
+/ thread `ai_invite`, or the solo chat), the context handed to a provider contains
+**only** messages the human explicitly marked "Add to AI Context" (mine always; a
+peer's only under an active bilateral grant, N24). It never auto-ingests the rest of
+the conversation — a tie broken toward privacy at the cost of a less-informed default
+draft. Marking travels inside the ciphertext (`ai_context`, N23) and is resolvable
+cross-device via the stable `message_id` (A29).
+
+**Transparency UI.** An in-chat **"AI here" context chip** surfaces which AI is present
+and what it can see; **Settings ▸ AI ▸ What your AI sees / View tethered LLM context**
+shows the exact (read-only) context, and **Test primary AI now** runs a live round-trip
+showing the real reply or the exact error. Each AI's reply is labeled with its own
+local codename via a LOCAL-ONLY `StoredMessage.agentName` (never on the wire).
+
+## 21. The egress firewall  [firewall]
+
+Everything sent to an **off-device** AI passes an egress firewall (`EgressFirewall`,
+applied in `PersonaRuntime`; default ON, toggle in Settings ▸ AI):
+- **Codename redaction** — contact names/aliases are replaced with their local
+  codenames before the text leaves the device, so a provider never receives a raw
+  human identity.
+- **64 KB bound** — the outbound context is hard-capped, bounding how much conversation
+  any single call can exfiltrate.
+
+The firewall covers every `isRemote` backend (Claude/OpenAI/Gemini/OpenRouter/Groq/
+custom) **and** the `hub` path (§22), and the off-device-AI consent alert fires before
+any of them is used. (UI fix in A30: the toggle re-arms only on OFF via a custom
+binding, so confirming the warning no longer wedges it permanently on.)
+
+## 22. Device-hosted relay hub (pocket relay) + host-AI sharing  [A31]
+
+For crowded places with no trusted network, a device can act as a **pocket relay**
+(`NearbyRelayHub` in PQRCNostr) over Multipeer — no router, no public relay, no third
+party. One device types **`host`** in Settings ▸ Servers (it runs the existing
+`LocalRelaySimulator` engine and bridges it over a `NearbyLink` via `NearbyRelayHost`,
+a distinct `_pqrc-relay` Bonjour service); companions type **`nearby`**
+(`MultipeerRelayClient`, a `RelayTransport` over the radio).
+
+- **Delivery path is content-free.** The kind-1059 anchor-relay rule still holds over
+  the hub (a wrap is served only to the AUTHed, p-tagged recipient), so the host — a
+  trusted peer's device — sees only sealed ciphertext + p-tags, exactly what any relay
+  sees. Strictly better than café Wi-Fi or a public relay.
+- **Host-AI sharing is the one content exception (Tier 2).** The host can **share its
+  on-device AI** via `ai_request`/`ai_response` frames (the "Tier 2 LLM over Multipeer"
+  goal, realized iPhone-to-iPhone). A companion that opts in sends its own
+  (firewall-redacted) message text to the host's model — content, by the companion's
+  **explicit consent** (the off-device-AI consent alert fires for the `hub` backend
+  too), AUTH-gated so only an authenticated companion can request it. The delivery path
+  stays content-free; only this opt-in path carries words.
+
+The whole protocol runs against `LocalLinkSimulator` (headless tests, `NearbyRelayHubTests`);
+only the MC radio adapter needs hardware. **(Honest-consent correction: an earlier pass
+let the hub AI see content without the same consent gate as a cloud provider; corrected
+so the `hub` backend now fires the consent alert — DEVIATIONS A31.)**
+
+## 23. Agent-to-agent thread skills  [A32]  (see docs/eldrchat-agent-skills.md)
+
+A thread-turn AI (§8) receives a fixed **base injection** of PQRC guardrails (channel /
+scope / scoped-context boundary / bounded autonomy / transparency / the shared `⟡⟡`
+envelope) plus any **skills** the humans pinned to that thread, from a 20-entry catalog
+(plan-sync, tech-spec, code-debug, context-export, conflict-resolve, …). It is **pure
+prompt composition** (`AgentSkills` in PQRCAgent): the runtime builds the thread-turn
+system prompt and passes it as `AgentContext.systemPromptOverride` — **no new wire
+format, event kind, or privacy exception** (the envelope is just message text recorded
+by the existing thread output path; `context-export` is the AI half of the existing
+`AIContextGrant`). UI: a **Skills** picker in the thread + a **context-domain** field in
+Settings ▸ AI (each side advertises what its workstation brings — "iOS / Xcode",
+"backend / staging" — so the two divide work without dumping private context). Per-thread
+pinned-skill lists and the per-account context domain live in (per-silo) UserDefaults.
+
+## 24. Agent-interop packages: MCP server & ACP agent  [A35, A36]
+
+Two **standalone SPM packages** (no app/crypto/SwiftUI deps; `swift test` headless,
+network-free) that adopt existing open protocols rather than inventing one.
+
+- **`PQRCMCP` — local MCP server [A35].** EldrChat as a **read-only secure-chat source**
+  for any spec-compliant MCP client (Goose, Xcode, Claude, …) over **stdio JSON-RPC**.
+  `MCPServer` exposes `initialize/ping/tools/list/tools/call/resources` behind a
+  `SecureChatBridge` the app implements over `PersonaRuntime`, returning
+  **already-firewall-redacted** data (codenames, 64 KB-bounded) — the server never sees
+  raw identities. **Phase 1 is read-only BY CONSTRUCTION:** the bridge has no
+  `post`/`send`, so no MCP client can make EldrChat speak on the wire — the §13
+  autonomous-send invariant holds with nothing new to enforce. Tools:
+  `list_conversations`, `read_conversation`, `search_messages`, `get_context_preview`.
+  A `DemoSecureChatBridge` + `pqrc-mcp` executable let any client connect today.
+  **(In progress, Phase 2):** the real `PersonaRuntime`-backed bridge, an OFF-by-default
+  Settings toggle, and a pairing-token consent gate; (Phase 3) window-gated action tools.
+- **`PQRCACP` — ACP agent [A36].** The dual: EldrChat's **on-device LLM acts as a coding
+  agent** an ACP client (Xcode 27) spawns over stdio to write code, build, and run
+  simulator tests. Standard **Agent Client Protocol** (JSON-RPC 2.0 over stdio),
+  EldrChat as the agent. Decisions: no `authenticate` (a locally-spawned subprocess is
+  already trusted); in-memory sessions; mutating tools (`write_file`, `run_shell`)
+  request permission first, **defaulting to ALLOW** if the client doesn't answer (the
+  client deliberately spawned us; this trades fail-closed for usability *within the
+  local-dev blast radius only* — no secure-chat content or Nostr wire is involved, so
+  §13 is out of scope here). `run_shell` honors `DEVELOPER_DIR`/`ELDR_WORKDIR`;
+  `String.strippingReasoningTrace()` is **vendored** (not imported) to keep the CLI
+  dependency-free; the brain is behind an `LLMClient` protocol (OpenAI-compatible,
+  configured via `ELDR_LLM_URL`/`ELDR_LLM_TOKEN`/`ELDR_LLM_MODEL`; `ELDR_ACP_FAKE_LLM=1`
+  for a model-free run). Library `PQRCACP` + executable `eldr-acp` + tests.
+  **(In progress):** end-to-end ACP testing driven from Xcode 27 is being exercised in a
+  separate worktree; the committed state is the standalone agent + its headless suite.
+
+---
+
 ## 18. Decisions registry → copy into docs/DEVIATIONS.md
+
+> Note: `docs/DEVIATIONS.md` is the live changelog (appended by the feature work) and is
+> now the authoritative registry, including all post-v1 entries (A19–A36, N17–N26).
+> The table below is the original seed; see DEVIATIONS for everything since.
 
 | ID | Decision | Tag |
 |---|---|---|

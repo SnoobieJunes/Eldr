@@ -73,10 +73,44 @@ Ephemeral receiving keys (SPEC §9.3) would mitigate this; in v1 the setting is
 present but disabled and marked experimental. Senders are hidden even from
 this observer (one-time outer keys).
 
-### 2.3 No deniability
+### 2.3 No *message* deniability
 v1 signs messages (PQ3 pattern): the seal is signed by your Nostr key and
 agent messages by your agent key. A recipient can cryptographically prove to a
-third party that you authored a message. Deniability is explicitly deferred.
+third party that you authored a message. Cryptographic *message* deniability is
+explicitly deferred. (Account-*existence* deniability — a different property — is
+addressed by the passphrase silos in §2.3a.)
+
+### 2.3a Deniable multi-account silos: what is and isn't hidden
+One device can hold several **passphrase-isolated accounts** ("silos";
+DEVIATIONS A23–A26, A33). `passphrase → PBKDF2 → siloID + KEK`; each silo's
+Keychain secrets and store master key are sealed under its KEK, and the app
+**never auto-boots** — it always opens to a bare passphrase screen. What this
+protects, and what it does not:
+
+- **Hidden from the running app:** with a wrong (or merely different) passphrase
+  the app derives a *different, non-existent* silo — indistinguishable from "no
+  account yet". So an adversary with the *unlocked phone* but not a passphrase
+  cannot show that a *given* passphrase maps to data, nor enumerate accounts
+  through the UI. A coerced user can reveal a **decoy** silo (A25) stocked with
+  innocuous chats.
+- **NOT hidden — biometric implies the primary exists (A24).** Face ID / Touch ID
+  is the default unlock and is stored **only for the FIRST account**. The launch
+  Face-ID prompt therefore implies *a* primary account exists (a deliberate
+  convenience-over-deniability call by the product owner). Additional/hidden silos
+  are passphrase-only and stay deniable. Turn Face ID off (Settings ▸ Account) for
+  passphrase-only launch with no such implication.
+- **NOT hidden — silo COUNT under forensic imaging (A26, tech-debt).** A full disk
+  image can infer the *number* of accounts from the per-silo `silo-*.store` files
+  and the `.<siloID>` UserDefaults suffixes. Contents and keys remain sealed, and
+  whether a passphrase maps to data stays unprovable — but the count leaks. Robust
+  count-hiding (a single pooled store of opaque records) is Phase 2; naive decoy
+  files are distinguishable from real SQLite, so they are deliberately not shipped
+  (false deniability is worse than a documented limit).
+- **Isolation is cryptographic, not OS-enforced.** iOS gives one app a single
+  sandbox; there is no secure-island separation between silos. The guarantee is the
+  per-silo KEK sealing, not a hardware boundary.
+- **No recovery.** Lose a silo's passphrase and that account is gone forever — there
+  is no backup or reset (SPEC §0).
 
 ### 2.4 Single device, no recovery
 Your identity lives in this device's Keychain/Secure Enclave and is never
@@ -180,6 +214,44 @@ anyone you accept can call themselves anything. Identity remains the key +
 the 60-digit safety code; your local rename always overrides the alias, and
 the UI shows the verified shield only after a safety-code verification.
 
+### 2.12 Off-device AI is a consented content-exfiltration channel
+Any **off-device** AI you enable (Claude/OpenAI/Gemini/OpenRouter/Groq, a
+self-hosted server, or the nearby host's `hub` AI) receives the **decrypted
+message content** of the conversations it is used in — by design, behind an
+explicit consent alert that fires before the first such call. Two mitigations
+bound it, neither is a confidentiality guarantee against the provider itself:
+- **Egress firewall (default ON, DEVIATIONS A21/firewall).** Contact names and
+  aliases are replaced with local **codenames** before text leaves the device,
+  and the outbound context is **hard-capped at 64 KB** — bounding both identity
+  leakage and how much any single call can exfiltrate. Your signing keys never
+  leave the device regardless.
+- **Default context minimization (A21).** Unless the AI is actively engaged (a
+  live window/invite or the solo chat), only messages you explicitly marked "Add
+  to AI Context" are sent — not the whole history.
+
+The provider still sees whatever content *is* sent. A self-hosted model on your
+own machine keeps content on your devices; a cloud provider does not. Leave
+off-device AI off to keep everything local. (The `hub` path additionally shares
+content with another *user's* device — see §2.9a.)
+
+### 2.13 Local MCP server / ACP agent (developer-facing, opt-in)
+Two standalone packages let a **local** developer harness interact with EldrChat
+on a workstation; neither touches the Nostr wire or a network by itself
+(DEVIATIONS A35/A36):
+- **MCP server (`pqrc-mcp`/PQRCMCP).** Exposes secure chat **read-only** over stdio
+  to a local MCP client (Goose, Xcode, Claude). It returns **already
+  firewall-redacted** data (codenames, 64 KB-bounded); Phase 1 has **no
+  send/post tool by construction**, so it cannot make EldrChat speak — the §13
+  autonomous-send invariant needs nothing new. The data still leaves EldrChat to
+  whatever local client connects, so it is a read exposure of your chat to tools
+  you run. The in-app bridge, an OFF-by-default toggle, and a pairing-token
+  consent gate are **(in progress)** for Phase 2.
+- **ACP agent (`eldr-acp`/PQRCACP).** Lets EldrChat's on-device LLM act as a coding
+  agent for Xcode 27 against the developer's own files; it involves **no
+  secure-chat content and no relay path**, so §13 is out of scope. Within that
+  local-dev blast radius, mutating-tool permission prompts **default to ALLOW** if
+  the spawning client doesn't answer — a usability trade with no wire exposure.
+
 ## 3. Endpoint compromise
 
 - **Before compromise**: FS holds — past messages' keys no longer exist
@@ -201,8 +273,10 @@ the UI shows the verified shield only after a safety-code verification.
 | Agent self-activating | windows/invites valid only with the HUMAN identity-key signature; engine rejects agent-signed announcements |
 | Stale windows | bounded durations (≤ 2 h), expiry enforced fail-closed at send time |
 | Agent loops | hard cap: 6 consecutive agent messages per thread, then pause until a human speaks |
-| Covert agent-to-agent channel | none exists: the engine's only output path posts signed, labeled thread messages (the recording guarantee); verified by the spy-sink suite |
+| Covert agent-to-agent channel | none exists: the engine's only output path posts signed, labeled thread messages (the recording guarantee); verified by the spy-sink suite. Thread "skills" (A32) are prompt composition only — no new channel |
 | Agent key exposure | derivation is one-way from the identity key; exposure of the agent key does not expose the identity key |
+| Off-device AI exfiltrating identities / bulk context | egress firewall (default ON): codename redaction + 64 KB outbound cap; default context = marked-only unless actively engaged; explicit consent before the first remote/hub call (§2.12) |
+| Reasoning model leaking its scratchpad into chat | `<think>`/Harmony chain-of-thought stripped from every reply before it renders (A34) |
 
 ## 5. Cryptographic assumptions
 
@@ -220,5 +294,10 @@ exactly as specified in NIP-XX.
   deferred-fold design (NIP-XX §6) was validated by adversarial chaos testing,
   not by machine-checked proof.
 - Third-party audit (OTF Security Lab) before any non-demo deployment.
-- Ephemeral receiving keys on by default; Tor/mixnet transport; deniability;
-  MLS groups; multi-device — all tracked for v2.
+- **Silo count-hiding (A26):** a forensic image can still count accounts; a pooled
+  opaque-record store is the Phase-2 fix (§2.3a).
+- **MCP/ACP Phase 2 (A35):** the real `PersonaRuntime`-backed MCP bridge with an
+  OFF-by-default toggle + pairing-token consent gate (§2.13) is in progress.
+- Ephemeral receiving keys on by default; Tor/mixnet transport; cryptographic
+  *message* deniability; MLS groups; multi-device — all tracked for v2. (Account-
+  *existence* deniability via silos now ships — §2.3a.)

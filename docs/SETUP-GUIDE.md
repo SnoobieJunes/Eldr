@@ -27,10 +27,17 @@ No third-party services are required for anything in this guide.
 git clone <repo> && cd Eldr
 
 # All protocol logic lives in SPM packages and tests headlessly:
-swift test --package-path Packages/PQRCCore     # crypto, ratchet, PQXDH, vectors
-swift test --package-path Packages/PQRCNostr    # envelope, transports, S1 local link, chaos matrix
-swift test --package-path Packages/PQRCAgent    # agent integrity suite
+swift test --package-path Packages/PQRCCore     # crypto, ratchet, PQXDH, vectors, SiloKey
+swift test --package-path Packages/PQRCNostr    # envelope, transports, S1 local link, NearbyRelayHub, chaos matrix
+swift test --package-path Packages/PQRCAgent    # agent integrity + AgentSkills + reasoning-trace stripping
+swift test --package-path Packages/PQRCMCP      # MCP server protocol suite (A35)
+swift test --package-path Packages/PQRCACP      # ACP agent suite (A36)
 ```
+
+The last two packages are **standalone agent-interop tools** with no app/crypto
+deps (DEVIATIONS A35/A36): `PQRCMCP` builds `pqrc-mcp` (EldrChat as a read-only
+MCP secure-chat source); `PQRCACP` builds `eldr-acp` (the on-device LLM as an ACP
+coding agent for Xcode 27). Both run their tests network-free.
 
 All three must be green. `PQRCNostr` includes the SPEC §10 local-link suite
 (`LocalLinkTests`) running against the deterministic `LocalLinkSimulator` —
@@ -41,12 +48,15 @@ hello adversarial cases. No network, no radios, no real clock.
 
 ```bash
 # Discover simulators if the destination below fails:
-xcodebuild -showdestinations -project App/PQRC.xcodeproj -scheme PQRC
+xcodebuild -showdestinations -project App/EldrChat.xcodeproj -scheme EldrChat
 
-xcodebuild test -project App/PQRC.xcodeproj -scheme PQRC \
+xcodebuild test -project App/EldrChat.xcodeproj -scheme EldrChat \
   -destination 'platform=iOS Simulator,name=iPhone 17 Pro,OS=26.5' \
   -skipPackagePluginValidation
 ```
+
+> The project/target/scheme is **EldrChat** (renamed from PQRC). The old `PQRC`
+> scheme is stale and won't resolve a destination — use `EldrChat`.
 
 `-skipPackagePluginValidation` is required (swift-secp256k1 ships a build
 plugin). If a simulator wedges with "Application failed preflight checks":
@@ -220,6 +230,26 @@ co-present.
 - Stale peers after force-quit → relaunch both; the hello exchange re-runs on
   every connection and reconnects map the newest proof.
 
+### 6.5 Device-hosted relay hub — `host` / `nearby` (A31)
+
+For a small group with no trusted network, one device can be a **pocket relay**
+(`NearbyRelayHub`, a distinct `_pqrc-relay` Bonjour service — not the direct-Nearby
+`_pqrc-local` of §6.1):
+
+1. On the host: **Settings ▸ Servers** → add the literal keyword **`host`** →
+   Apply. That device now runs the `LocalRelaySimulator` engine over Multipeer.
+2. On each companion: **Settings ▸ Servers** → add **`nearby`** → Apply. They
+   connect to the host over the radio (no router, no public relay).
+3. Send messages. The kind-1059 anchor-relay rule holds over the hub: the host
+   forwards **sealed ciphertext + p-tags only** and cannot read message content.
+4. Optionally enable the host's **shared AI** (a tethered AI with the **`hub`**
+   backend on a companion): the companion's (firewall-redacted) message text goes
+   to the host's on-device model behind the off-device-AI consent alert. This is
+   the one path where the host sees content — by the companion's explicit consent.
+
+The whole protocol is unit-tested against `LocalLinkSimulator`
+(`NearbyRelayHubTests`); the MC radio adapter itself needs two physical devices.
+
 ## 7. Deploying a production anchor relay (beyond `pqrc-relay`)
 
 `pqrc-relay` is for development. For a deployed relay (e.g.
@@ -246,16 +276,20 @@ strfry or khatru:
 swift test --package-path Packages/PQRCCore
 swift test --package-path Packages/PQRCNostr
 swift test --package-path Packages/PQRCAgent
+swift test --package-path Packages/PQRCMCP     # MCP server (A35)
+swift test --package-path Packages/PQRCACP     # ACP agent (A36)
 
 # Opt-in socket suites:
 PQRC_LOOPBACK_TESTS=1 swift test --package-path Packages/PQRCNostr --filter Loopback
 PQRC_RELAY_URL=wss://relay.lerants.com swift test --package-path Packages/PQRCNostr --filter deployedRelay
 
-# Relay server:
+# Relay server / agent-interop executables:
 swift run --package-path Packages/PQRCNostr pqrc-relay --port 7777
+swift run --package-path Packages/PQRCMCP pqrc-mcp          # MCP stdio server (DemoSecureChatBridge)
+ELDR_ACP_FAKE_LLM=1 swift run --package-path Packages/PQRCACP eldr-acp   # ACP agent, no model server
 
 # Full app suite:
-xcodebuild test -project App/PQRC.xcodeproj -scheme PQRC \
+xcodebuild test -project App/EldrChat.xcodeproj -scheme EldrChat \
   -destination 'platform=iOS Simulator,name=iPhone 17 Pro,OS=26.5' \
   -skipPackagePluginValidation
 ```
