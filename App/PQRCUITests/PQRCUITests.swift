@@ -89,9 +89,14 @@ final class PQRCUITests: XCTestCase {
         let app = XCUIApplication()
         app.launchArguments = ["--reset"]
         app.launch()
+        // New deniable-account flow: the lock screen opens first; create a new
+        // account (display name + passphrase + confirm + no-recovery ack).
+        tapWhenReady(app, button: "show-create-account")
         let nameField = app.textFields["onboarding-name"]
         XCTAssertTrue(nameField.waitForExistence(timeout: 20))
         type(app, into: nameField, "Tester")
+        type(app, into: app.secureTextFields["passphrase-field"], "test passphrase 123")
+        type(app, into: app.secureTextFields["passphrase-confirm"], "test passphrase 123")
         app.switches["onboarding-acknowledge"].firstMatch.switches.firstMatch.tap()
         let create = app.buttons["onboarding-create"]
         XCTAssertTrue(create.isEnabled)

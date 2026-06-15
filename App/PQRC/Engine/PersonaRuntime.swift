@@ -51,6 +51,12 @@ enum KeyPublishStatus: Sendable, Equatable {
 actor PersonaRuntime {
     let displayName: String
     let keychain: KeychainStore
+    /// When set, this is a passphrase-derived account "silo": every secret in the
+    /// Keychain is AES-GCM-sealed under this key, so the silo is unreadable (and
+    /// its content unprovable) without the passphrase (deniable multi-account).
+    /// nil = the legacy device-bound (Secure Enclave) path, used only to READ a
+    /// pre-silo account during migration.
+    private let siloKEK: SymmetricKey?
 
     private(set) var identity: PQRCIdentity!
     private(set) var nostrKeypair: NostrKeypair!
@@ -141,8 +147,10 @@ actor PersonaRuntime {
         randomSource: any RandomSource = SystemRandomSource(),
         nonceSource: any NonceSource = SystemNonceSource(),
         keychainService: String,
+        siloKEK: SymmetricKey? = nil,
         enableLocalLink: Bool = false
     ) {
+        self.siloKEK = siloKEK
         self.displayName = displayName
         self.transports = transports
         self.blobStore = blobStore
@@ -215,36 +223,65 @@ actor PersonaRuntime {
 
     // MARK: - Bootstrap
 
+    /// Loads a Keychain secret, AES-GCM-decrypting it under the silo key when in
+    /// silo mode (so secrets are unreadable without the passphrase). Returns nil
+    /// if absent or if it can't be opened with this silo's key.
+    private func loadSecret(_ account: String) -> Data? {
+        guard let raw = keychain.loadIfPresent(account: account) else { return nil }
+        guard let siloKEK else { return raw }
+        return try? SiloKey.open(raw, kek: siloKEK)
+    }
+
+    /// Saves a Keychain secret, AES-GCM-sealing it under the silo key in silo mode.
+    private func saveSecret(_ data: Data, account: String) throws {
+        if let siloKEK {
+            try keychain.save(SiloKey.seal(data, kek: siloKEK), account: account)
+        } else {
+            try keychain.save(data, account: account)
+        }
+    }
+
+    /// The wrapper that protects the store master key: passphrase-derived in silo
+    /// mode (AES-GCM under the silo KEK — deniable, device-portable), or the
+    /// device-bound Secure Enclave wrapper for a legacy account.
+    private func masterKeyWrapper() -> any MasterKeyWrapper {
+        if let siloKEK {
+            return SoftwareKeyWrapper(
+                keyEncryptionKey: siloKEK.withUnsafeBytes { Data($0) }, nonceSource: nonceSource)
+        }
+        return SecureEnclaveKeyWrapper(keychain: keychain)
+    }
+
     /// Creates or restores the identity and starts everything.
     /// First launch generates keys (SPEC §3.1) and publishes 10420/10421/10050.
     func bootstrap(
         inMemoryStore: Bool, storeURL: URL? = nil,
         relayURLs: [String] = ["local://relay"]
     ) async throws -> AsyncStream<RuntimeEvent> {
-        // Keys: load from Keychain or generate.
-        if let seed = keychain.loadIfPresent(account: "identity-seed") {
+        // Keys: load from Keychain (silo-sealed in silo mode) or generate.
+        if let seed = loadSecret("identity-seed") {
             identity = try PQRCIdentity(seed: seed)
         } else {
             identity = try PQRCIdentity(randomSource: randomSource)
-            try keychain.save(identity.privateKey.rawRepresentation, account: "identity-seed")
+            try saveSecret(identity.privateKey.rawRepresentation, account: "identity-seed")
         }
-        if let nostrPriv = keychain.loadIfPresent(account: "nostr-key") {
+        if let nostrPriv = loadSecret("nostr-key") {
             nostrKeypair = try NostrKeypair(privateKey: nostrPriv)
         } else {
             nostrKeypair = try NostrKeypair(randomSource: randomSource)
-            try keychain.save(nostrKeypair.privateKeyData, account: "nostr-key")
+            try saveSecret(nostrKeypair.privateKeyData, account: "nostr-key")
         }
         let identityDH: Curve25519.KeyAgreement.PrivateKey
-        if let dhSeed = keychain.loadIfPresent(account: "identity-dh") {
+        if let dhSeed = loadSecret("identity-dh") {
             identityDH = try Curve25519.KeyAgreement.PrivateKey(rawRepresentation: dhSeed)
         } else {
             identityDH = try Curve25519.KeyAgreement.PrivateKey(
                 rawRepresentation: randomSource.bytes(32))
-            try keychain.save(identityDH.rawRepresentation, account: "identity-dh")
+            try saveSecret(identityDH.rawRepresentation, account: "identity-dh")
         }
 
-        // Master storage key: unwrap via Secure Enclave or create fresh.
-        let wrapper = SecureEnclaveKeyWrapper(keychain: keychain)
+        // Master storage key: unwrap (silo KEK or Secure Enclave) or create fresh.
+        let wrapper = masterKeyWrapper()
         if let wrapped = keychain.loadIfPresent(account: "wrapped-master-key"),
             let masterKey = try? wrapper.unwrap(wrapped: wrapped)
         {
@@ -262,7 +299,7 @@ actor PersonaRuntime {
         // to a previously published bundle still resolve after relaunch, then
         // top the one-time pools back up before republishing.
         let prekeyManager: PrekeyManager
-        if let stateBlob = keychain.loadIfPresent(account: "prekey-state"),
+        if let stateBlob = loadSecret("prekey-state"),
             let state = try? JSONDecoder().decode(PrekeyState.self, from: stateBlob)
         {
             prekeyManager = try PrekeyManager(
@@ -284,10 +321,10 @@ actor PersonaRuntime {
         // Restore persisted state: contacts (bindings re-verified — invariant 7
         // survives persistence), ratchet sessions, group rosters, threads, and
         // the processed-envelope set (so relay replays don't re-process).
-        if let aliasData = keychain.loadIfPresent(account: "my-alias") {
+        if let aliasData = loadSecret("my-alias") {
             myAlias = String(decoding: aliasData, as: UTF8.self)
         }
-        if let untilData = keychain.loadIfPresent(account: "open-inbox-until"),
+        if let untilData = loadSecret("open-inbox-until"),
             let until = Int64(String(decoding: untilData, as: UTF8.self)), until > clock.now()
         {
             openInboxUntil = until
@@ -463,7 +500,7 @@ actor PersonaRuntime {
 
     private func persistPrekeyState() async {
         if let blob = try? JSONEncoder().encode(await messenger.prekeyManager.snapshot()) {
-            try? keychain.save(blob, account: "prekey-state")
+            try? saveSecret(blob, account: "prekey-state")
         }
     }
 
@@ -556,7 +593,7 @@ actor PersonaRuntime {
     func setMyAlias(_ alias: String?) async {
         myAlias = (alias?.isEmpty ?? true) ? nil : alias
         if let myAlias {
-            try? keychain.save(Data(myAlias.utf8), account: "my-alias")
+            try? saveSecret(Data(myAlias.utf8), account: "my-alias")
         } else {
             keychain.delete(account: "my-alias")
         }
@@ -626,7 +663,7 @@ actor PersonaRuntime {
     func setOpenInbox(until: Int64?) {
         openInboxUntil = until
         if let until {
-            try? keychain.save(Data(String(until).utf8), account: "open-inbox-until")
+            try? saveSecret(Data(String(until).utf8), account: "open-inbox-until")
         } else {
             keychain.delete(account: "open-inbox-until")
         }

@@ -11,7 +11,7 @@ struct AISettingsView: View {
     @Bindable var model: AppModel
     @Environment(AppSession.self) private var session
 
-    @State private var ais: [ConfiguredAI] = AppSession.loadConfiguredAIs()
+    @State private var ais: [ConfiguredAI] = []
     @State private var aiTesting = false
     @State private var aiTestResult: String?
     /// The AI (by id) awaiting remote-consent confirmation.
@@ -20,7 +20,10 @@ struct AISettingsView: View {
     @AppStorage("egressFirewallEnabled") private var firewallEnabled = true
     @State private var showFirewallWarning = false
 
-    private let keychain = KeychainStore(service: "chat.pqrc.keys")
+    /// AI config + API keys are scoped to the unlocked silo, so accounts never
+    /// share AI setup or credentials.
+    private var siloID: String { session.activeSiloID ?? "" }
+    private var keychain: KeychainStore { KeychainStore(service: AppSession.siloService(siloID)) }
 
     var body: some View {
         Form {
@@ -107,6 +110,7 @@ struct AISettingsView: View {
         }
         .navigationTitle("AI")
         .navigationBarTitleDisplayMode(.inline)
+        .task { ais = AppSession.loadConfiguredAIs(siloID: siloID) }
         .alert("Turn off the egress firewall?", isPresented: $showFirewallWarning) {
             Button("Turn off — send raw context", role: .destructive) {
                 firewallEnabled = false
@@ -226,7 +230,7 @@ struct AISettingsView: View {
 
     /// Persist the configured AIs and re-resolve the live providers.
     private func persist() {
-        AppSession.saveConfiguredAIs(ais)
+        AppSession.saveConfiguredAIs(ais, siloID: siloID)
         Task { await session.applyAIProvider() }
     }
 }

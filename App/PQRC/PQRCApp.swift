@@ -24,32 +24,45 @@ struct PQRCApp: App {
 @Observable
 final class AppSession {
     enum Mode {
+        /// Passphrase lock screen — the always-first state. Unlock an existing
+        /// silo, create a new one, or migrate a pre-silo account. No account list
+        /// is ever shown (deniable multi-account).
+        case locked
         case onboarding
         case single(AppModel)
         case universe(LocalUniverse, selected: Int)
     }
 
-    var mode: Mode = .onboarding
+    var mode: Mode = .locked
     var bootError: String?
+    /// Surfaced on the lock screen when a passphrase doesn't unlock anything.
+    var unlockError: String?
+    /// The currently-unlocked silo (so reboots reuse the same key/store).
+    private var activeSilo: SiloKey.Derived?
     /// Set when the user opens the demo from Settings or launch args.
     var demoRunning = false
     /// npub arriving via a `pqrc:add?npub=…` deep link (QR scan from the
     /// Camera app lands here instead of in a web browser).
     var pendingNpub: String?
 
+    /// A pre-silo account from an older build is present and must be migrated
+    /// (wrapped under a passphrase) before it can be unlocked.
+    var hasLegacyAccount: Bool {
+        KeychainStore(service: "chat.pqrc.keys").loadIfPresent(account: "identity-seed") != nil
+    }
+
     init() {
         let arguments = ProcessInfo.processInfo.arguments
         if arguments.contains("--reset") {
-            KeychainStore().deleteAll()
+            KeychainStore(service: "chat.pqrc.keys").deleteAll()
             UserDefaults.standard.removeObject(forKey: "displayName")
+            Self.deleteAllStoreFiles()
         }
         if arguments.contains("--local-universe") || arguments.contains("--uitest") {
             Task { await bootUniverse(runScript: arguments.contains("--demo-script")) }
-        } else if KeychainStore().loadIfPresent(account: "identity-seed") != nil,
-            !arguments.contains("--reset")
-        {
-            Task { await bootSingle() }
         }
+        // Otherwise stay `.locked`: the user must enter a passphrase. We NEVER
+        // auto-boot an account — that would reveal one exists.
     }
 
     /// UI-test hooks, applied after the universe boots.
@@ -135,10 +148,10 @@ final class AppSession {
     /// the Demo provider so the AI still visibly responds instead of going
     /// silent. The on-device default uses Core AI (FoundationModels) when
     /// available, Demo otherwise.
-    /// Builds a live provider for one backend kind. Token-based backends with no
-    /// key fall back to the Demo provider so the AI still visibly responds.
-    static func makeProvider(kind: String) -> any AgentProvider {
-        let keychain = KeychainStore(service: "chat.pqrc.keys")
+    /// Builds a live provider for one backend kind, reading API keys from THIS
+    /// silo's Keychain service so accounts never share AI credentials.
+    static func makeProvider(kind: String, siloID: String) -> any AgentProvider {
+        let keychain = KeychainStore(service: siloService(siloID))
         func key(for provider: String) -> String? {
             guard let account = apiKeyAccounts[provider],
                 let data = keychain.loadIfPresent(account: account)
@@ -161,41 +174,38 @@ final class AppSession {
         }
     }
 
-    /// The user's configured AIs (multi-AI tethering), migrating the legacy
-    /// single-provider setting on first read so existing installs keep working.
-    static func loadConfiguredAIs() -> [ConfiguredAI] {
-        if let data = UserDefaults.standard.data(forKey: "configuredAIs"),
+    private static func configuredAIsKey(_ siloID: String) -> String { "configuredAIs.\(siloID)" }
+
+    /// This silo's configured AIs (multi-AI tethering), stored per-silo so
+    /// accounts don't share AI setup. Defaults to a single on-device AI.
+    static func loadConfiguredAIs(siloID: String) -> [ConfiguredAI] {
+        if let data = UserDefaults.standard.data(forKey: configuredAIsKey(siloID)),
             let list = try? JSONDecoder().decode([ConfiguredAI].self, from: data),
             !list.isEmpty
         {
             return list
         }
-        // Migrate the pre-multi-provider tag: "remote" was Anthropic, "mock" the
-        // deterministic stub now superseded by Demo.
-        let kind: String
-        switch UserDefaults.standard.string(forKey: "aiProvider") ?? "ondevice" {
-        case "remote": kind = "claude"
-        case "mock": kind = "demo"
-        case let other: kind = other
-        }
-        let migrated = [
-            ConfiguredAI(id: UUID().uuidString, name: FriendlyName.local(seed: "ai:" + kind), kind: kind)
+        let def = [
+            ConfiguredAI(
+                id: UUID().uuidString,
+                name: FriendlyName.local(seed: "ai:ondevice:\(siloID)"), kind: "ondevice")
         ]
-        saveConfiguredAIs(migrated)
-        return migrated
+        saveConfiguredAIs(def, siloID: siloID)
+        return def
     }
 
-    static func saveConfiguredAIs(_ list: [ConfiguredAI]) {
+    static func saveConfiguredAIs(_ list: [ConfiguredAI], siloID: String) {
         if let data = try? JSONEncoder().encode(list) {
-            UserDefaults.standard.set(data, forKey: "configuredAIs")
+            UserDefaults.standard.set(data, forKey: configuredAIsKey(siloID))
         }
     }
 
     /// The configured AIs bound to live providers — the runtime's tethered AIs.
-    static func makeRuntimeAIs() -> [TetheredAI] {
-        loadConfiguredAIs().map {
+    static func makeRuntimeAIs(siloID: String) -> [TetheredAI] {
+        loadConfiguredAIs(siloID: siloID).map {
             TetheredAI(
-                id: $0.id, name: $0.name, provider: makeProvider(kind: $0.kind),
+                id: $0.id, name: $0.name,
+                provider: makeProvider(kind: $0.kind, siloID: siloID),
                 isRemote: ConfiguredAI.isRemote($0.kind))
         }
     }
@@ -217,43 +227,173 @@ final class AppSession {
         UserDefaults.standard.bool(forKey: "localLinkEnabled")
     }
 
-    func bootSingle() async {
+    // MARK: - Silos (deniable multi-account)
+
+    static func siloService(_ siloID: String) -> String { "chat.pqrc.silo.\(siloID)" }
+    static func siloStoreURL(_ siloID: String) -> URL {
+        URL.applicationSupportDirectory.appendingPathComponent("silo-\(siloID).store")
+    }
+    /// A silo exists iff its wrapped master key is present under its service.
+    static func siloExists(_ siloID: String) -> Bool {
+        KeychainStore(service: siloService(siloID)).loadIfPresent(account: "wrapped-master-key") != nil
+    }
+    private static func displayNameKey(_ siloID: String) -> String { "displayName.\(siloID)" }
+
+    /// Unlock an existing silo by passphrase. Wrong passphrase / no such silo is
+    /// reported generically — a typo and a non-existent account are
+    /// indistinguishable (deniable).
+    func unlock(passphrase: String) async {
+        unlockError = nil
+        let derived = SiloKey.derive(passphrase: passphrase)
+        guard Self.siloExists(derived.siloID) else {
+            unlockError = "Couldn't unlock. Check your passphrase, or create a new account."
+            return
+        }
+        await bootSilo(derived)
+    }
+
+    /// Create a brand-new silo for a passphrase that has none yet.
+    func createAccount(passphrase: String, displayName: String) async {
+        unlockError = nil
+        let derived = SiloKey.derive(passphrase: passphrase)
+        guard !Self.siloExists(derived.siloID) else {
+            unlockError = "An account already exists for that passphrase. Unlock it instead."
+            return
+        }
+        UserDefaults.standard.set(
+            displayName.isEmpty ? "Me" : displayName, forKey: Self.displayNameKey(derived.siloID))
+        await bootSilo(derived)
+    }
+
+    /// Migrate a pre-silo (legacy, Secure-Enclave-wrapped) account into a
+    /// passphrase silo, then unlock it. Re-wraps the SAME store master key under
+    /// the passphrase (so the store isn't re-encrypted) and moves the store file
+    /// to the silo's deterministic name.
+    func migrateLegacyAccount(passphrase: String) async {
+        unlockError = nil
+        let derived = SiloKey.derive(passphrase: passphrase)
+        let legacy = KeychainStore(service: "chat.pqrc.keys")
+        let silo = KeychainStore(service: Self.siloService(derived.siloID))
+        let kekData = derived.kek.withUnsafeBytes { Data($0) }
+        let nonce = SystemNonceSource()
+        // Identity + small secrets: raw → sealed under the silo key.
+        for account in [
+            "identity-seed", "nostr-key", "identity-dh", "prekey-state", "my-alias",
+            "open-inbox-until",
+        ] {
+            if let raw = legacy.loadIfPresent(account: account),
+                let sealed = try? SiloKey.seal(raw, kek: derived.kek)
+            {
+                try? silo.save(sealed, account: account)
+            }
+        }
+        // Store master key: unwrap from Secure Enclave, re-wrap under the kek.
+        let se = SecureEnclaveKeyWrapper(keychain: legacy)
+        if let wrapped = legacy.loadIfPresent(account: "wrapped-master-key"),
+            let master = try? se.unwrap(wrapped: wrapped),
+            let rewrapped = try? SoftwareKeyWrapper(keyEncryptionKey: kekData, nonceSource: nonce)
+                .wrap(masterKey: master)
+        {
+            try? silo.save(rewrapped, account: "wrapped-master-key")
+        }
+        // Carry AI API keys (raw, under the silo's service) and the configured-AI
+        // list across so the migrated account keeps its AI setup.
+        for account in Self.apiKeyAccounts.values {
+            if let raw = legacy.loadIfPresent(account: account) {
+                try? silo.save(raw, account: account)
+            }
+        }
+        if let aiData = UserDefaults.standard.data(forKey: "configuredAIs") {
+            UserDefaults.standard.set(aiData, forKey: Self.configuredAIsKey(derived.siloID))
+            UserDefaults.standard.removeObject(forKey: "configuredAIs")
+        }
+        // Move the store file (and SQLite sidecars) to the silo's name.
+        Self.moveStore(
+            from: URL.applicationSupportDirectory.appendingPathComponent("default.store"),
+            to: Self.siloStoreURL(derived.siloID))
+        // Carry the display name across, then erase the legacy footprint.
+        let name = UserDefaults.standard.string(forKey: "displayName") ?? "Me"
+        UserDefaults.standard.set(name, forKey: Self.displayNameKey(derived.siloID))
+        UserDefaults.standard.removeObject(forKey: "displayName")
+        legacy.deleteAll()
+        await bootSilo(derived)
+    }
+
+    private func bootSilo(_ derived: SiloKey.Derived) async {
+        activeSilo = derived
+        let name = UserDefaults.standard.string(forKey: Self.displayNameKey(derived.siloID)) ?? "Me"
         let transports = await makeRelayTransports()
-        let blossom = LocalBlossomSimulator()
         let runtime = PersonaRuntime(
-            displayName: UserDefaults.standard.string(forKey: "displayName") ?? "Me",
+            displayName: name,
             transports: transports,
-            blobStore: blossom,
-            ais: Self.makeRuntimeAIs(),
-            keychainService: "chat.pqrc.keys",
+            blobStore: LocalBlossomSimulator(),
+            ais: Self.makeRuntimeAIs(siloID: derived.siloID),
+            keychainService: Self.siloService(derived.siloID),
+            siloKEK: derived.kek,
             enableLocalLink: Self.localLinkEnabled)
         await runtime.setFirewallEnabled(Self.firewallEnabled)
-        let model = AppModel(
-            runtime: runtime,
-            personaName: UserDefaults.standard.string(forKey: "displayName") ?? "Me")
+        let model = AppModel(runtime: runtime, personaName: name)
         do {
-            try await model.start(inMemoryStore: false, relayURLs: Self.configuredRelayURLs)
+            try await model.start(
+                inMemoryStore: false, storeURL: Self.siloStoreURL(derived.siloID),
+                relayURLs: Self.configuredRelayURLs)
             mode = .single(model)
         } catch {
             bootError = String(describing: error)
         }
     }
 
-    /// Tears the single-persona session down and boots it again — the apply
-    /// path for relay-list and Nearby changes from Settings.
-    func rebootSingle() async {
+    /// Lock the current silo and return to the lock screen ("swap accounts").
+    func lockSilo() async {
         if case .single(let model) = mode {
             await model.runtime.shutdown()
         }
-        mode = .onboarding
-        await bootSingle()
+        activeSilo = nil
+        mode = .locked
     }
+
+    /// Move a SwiftData store plus its SQLite -wal/-shm sidecars.
+    private static func moveStore(from: URL, to: URL) {
+        let fm = FileManager.default
+        for suffix in ["", "-wal", "-shm"] {
+            let src = URL(fileURLWithPath: from.path + suffix)
+            let dst = URL(fileURLWithPath: to.path + suffix)
+            guard fm.fileExists(atPath: src.path) else { continue }
+            try? fm.removeItem(at: dst)
+            try? fm.moveItem(at: src, to: dst)
+        }
+    }
+
+    /// `--reset` only: nuke every on-disk store so a dev/test wipe is total.
+    private static func deleteAllStoreFiles() {
+        let fm = FileManager.default
+        guard let files = try? fm.contentsOfDirectory(
+            at: URL.applicationSupportDirectory, includingPropertiesForKeys: nil)
+        else { return }
+        for url in files where url.lastPathComponent.contains(".store") {
+            try? fm.removeItem(at: url)
+        }
+    }
+
+    /// Tears the current silo down and boots it again — the apply path for
+    /// relay-list and Nearby changes from Settings (reuses the unlocked key).
+    func rebootSingle() async {
+        guard let derived = activeSilo else { return }
+        if case .single(let model) = mode {
+            await model.runtime.shutdown()
+        }
+        mode = .locked
+        await bootSilo(derived)
+    }
+
+    /// The unlocked silo's id, for per-account AI settings (nil while locked).
+    var activeSiloID: String? { activeSilo?.siloID }
 
     /// Re-resolves the tethered AIs + egress-firewall state after a Settings
     /// change (no reboot needed).
     func applyAIProvider() async {
-        guard case .single(let model) = mode else { return }
-        await model.runtime.setAIs(Self.makeRuntimeAIs())
+        guard case .single(let model) = mode, let siloID = activeSilo?.siloID else { return }
+        await model.runtime.setAIs(Self.makeRuntimeAIs(siloID: siloID))
         await model.runtime.setFirewallEnabled(Self.firewallEnabled)
     }
 
@@ -293,7 +433,7 @@ final class AppSession {
 
     var activeModel: AppModel? {
         switch mode {
-        case .onboarding: return nil
+        case .locked, .onboarding: return nil
         case .single(let model): return model
         case .universe(let universe, let selected): return universe.models[selected]
         }
@@ -305,8 +445,8 @@ struct RootView: View {
 
     var body: some View {
         switch session.mode {
-        case .onboarding:
-            OnboardingView()
+        case .locked, .onboarding:
+            AccountGateView()
         case .single(let model):
             MainView(model: model)
         case .universe(let universe, let selected):

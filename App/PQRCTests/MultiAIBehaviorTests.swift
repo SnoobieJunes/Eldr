@@ -1,3 +1,4 @@
+import CryptoKit
 import Foundation
 import PQRCAgent
 import PQRCCore
@@ -122,6 +123,57 @@ struct MultiAIBehaviorTests {
 
         let names = await spy.capturedNames
         #expect(names.contains("Alice"), "with the firewall off, the real display name is sent")
+    }
+}
+
+/// Deniable silos: a silo created under one passphrase persists and reopens with
+/// that passphrase's derived key, and a different passphrase is a completely
+/// separate, isolated identity. (Each silo has its own keychain service + store,
+/// mirroring production where the service is derived from the passphrase, so a
+/// wrong passphrase resolves to a different — non-existent — silo, never the real
+/// one.)
+@Suite("Deniable account silos", .serialized)
+struct SiloRuntimeTests {
+    @Test func silo_persistsAndReopensWithItsKEK_isolatedFromOthers() async throws {
+        let a = SiloKey.derive(passphrase: "alpha-passphrase")
+        let b = SiloKey.derive(passphrase: "beta-passphrase")
+        let svcA = "chat.pqrc.test-silo-\(a.siloID)"
+        let svcB = "chat.pqrc.test-silo-\(b.siloID)"
+        let tmp = FileManager.default.temporaryDirectory
+        let storeA = tmp.appendingPathComponent("siloA-\(UUID().uuidString).store")
+        let storeB = tmp.appendingPathComponent("siloB-\(UUID().uuidString).store")
+        KeychainStore(service: svcA).deleteAll()
+        KeychainStore(service: svcB).deleteAll()
+        defer {
+            KeychainStore(service: svcA).deleteAll()
+            KeychainStore(service: svcB).deleteAll()
+            for url in [storeA, storeB] {
+                for suffix in ["", "-wal", "-shm"] {
+                    try? FileManager.default.removeItem(
+                        at: URL(fileURLWithPath: url.path + suffix))
+                }
+            }
+        }
+
+        func bootIdentity(service: String, kek: SymmetricKey, store: URL) async throws -> String {
+            let runtime = await PersonaRuntime(
+                displayName: "X", transports: [LocalRelaySimulator().connect()],
+                blobStore: LocalBlossomSimulator(),
+                ais: [TetheredAI(id: "d", name: "ai", provider: DemoAgentProvider())],
+                keychainService: service, siloKEK: kek)
+            _ = try await runtime.bootstrap(inMemoryStore: false, storeURL: store)
+            let hex = await runtime.identityHex
+            await runtime.shutdown()
+            return hex
+        }
+
+        let hexA1 = try await bootIdentity(service: svcA, kek: a.kek, store: storeA)
+        let hexB = try await bootIdentity(service: svcB, kek: b.kek, store: storeB)
+        let hexA2 = try await bootIdentity(service: svcA, kek: a.kek, store: storeA)
+
+        #expect(hexA1 == hexA2, "a silo reopens to the same identity with its passphrase key")
+        #expect(hexA1 != hexB, "different passphrases are separate, isolated identities")
+        #expect(!hexA1.isEmpty)
     }
 }
 

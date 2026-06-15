@@ -33,6 +33,7 @@ struct SettingsView: View {
                 aiSection
                 prekeysSection
                 privacySection
+                accountSection
                 dataSection
                 aboutSection
                 #if DEBUG
@@ -354,6 +355,22 @@ struct SettingsView: View {
         }
     }
 
+    private var accountSection: some View {
+        Section {
+            Button {
+                dismiss()
+                Task { await session.lockSilo() }
+            } label: {
+                Label("Lock & switch account", systemImage: "lock.rotation")
+            }
+            .accessibilityIdentifier("lock-switch-account")
+        } header: {
+            Text("Account")
+        } footer: {
+            Text("Locks this account and returns to the passphrase screen. Enter a different passphrase to open (or create) another, fully separate account on this device.")
+        }
+    }
+
     private var dataSection: some View {
         Section("Data") {
             Button(wipeConfirmStage == 0
@@ -364,7 +381,7 @@ struct SettingsView: View {
                 } else {
                     Task {
                         try? await model.runtime.wipeIdentity()
-                        session.mode = .onboarding
+                        session.mode = .locked
                     }
                 }
             }
