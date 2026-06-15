@@ -89,9 +89,13 @@ struct ConfiguredAI: Identifiable, Codable, Equatable, Sendable {
     ]
 
     /// Context-gather policies and output modes, for the Settings pickers.
+    /// Labels use the app-wide context vocabulary — Live / Marked only / Off —
+    /// shared with the per-conversation override (ConversationDetailsView, the
+    /// in-chat "AI here" chip). The TAGS ("active"/"strict"/"off") are the engine
+    /// vocabulary and are UNCHANGED; only the human labels are unified.
     static let policies: [(tag: String, label: String)] = [
-        ("active", "Live conversation while active"),
-        ("strict", "Only messages I add to context"),
+        ("active", "Live — full conversation while active"),
+        ("strict", "Marked only — messages I add to context"),
         ("off", "Off — this AI gathers nothing"),
     ]
     static let outputModes: [(tag: String, label: String)] = [

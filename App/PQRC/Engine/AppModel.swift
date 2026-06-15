@@ -420,6 +420,36 @@ final class AppModel {
         await runtime.tetheredAINames()
     }
 
+    /// Read-only summary of the PRIMARY AI's effective gather mode for a
+    /// conversation, for the in-chat "AI here" glance chip and the Details echo.
+    /// Resolves the per-conversation override over the AI's own policy exactly as
+    /// the engine does (PersonaRuntime.contextFor: override "off"/"marked"/"full"
+    /// maps the AI's "off"/"strict"/"active"). No engine/crypto state is touched —
+    /// it reads the same persisted settings (`loadConfiguredAIs`,
+    /// `conversationContextMode`, `firewallEnabled`) the runtime reads each turn,
+    /// so the chip and Details stay in lockstep with what the AI actually does.
+    ///
+    /// - `mode` is one of "off" | "strict" | "active" (engine vocabulary).
+    /// - `isRemote` is true when the primary AI sends context off-device.
+    /// - `firewallOn` is the egress-firewall state (name redaction + byte bound).
+    func primaryAIContextSummary(_ conversationID: String)
+        -> (mode: String, isRemote: Bool, firewallOn: Bool)
+    {
+        // The primary AI is the first ENABLED one, matching the runtime's
+        // `makeRuntimeAIs(...).filter(\.isEnabled)` → `ais[0]`.
+        let enabled = AppSession.loadConfiguredAIs(siloID: siloID).filter(\.isEnabled)
+        let primary = enabled.first
+        var mode = primary?.effectivePolicy ?? "off"
+        switch AppSession.conversationContextMode(conversationID, siloID: siloID) {
+        case "off": mode = "off"
+        case "marked": mode = "strict"
+        case "full": mode = "active"
+        default: break
+        }
+        let isRemote = primary.map { ConfiguredAI.isRemote($0.kind) } ?? false
+        return (mode, isRemote, AppSession.firewallEnabled)
+    }
+
     func block(_ identityHex: String) async {
         await runtime.setBlocked(identityHex, blocked: true)
     }

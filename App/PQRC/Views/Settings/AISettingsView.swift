@@ -224,32 +224,37 @@ struct AISettingsView: View {
                     .font(.caption2).foregroundStyle(.secondary)
             }
 
-            DisclosureGroup("Context & behavior") {
-                VStack(alignment: .leading, spacing: 8) {
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text("Instructions (custom persona)")
-                            .font(.caption).foregroundStyle(.secondary)
-                        TextField(
-                            "e.g. You're my terse scheduling assistant; never speculate.",
-                            text: optionalBinding(ai.instructions), axis: .vertical)
-                            .lineLimit(1...4)
-                            .accessibilityIdentifier("ai-instructions")
-                    }
-                    Picker("Gathers", selection: policyBinding(ai)) {
-                        ForEach(ConfiguredAI.policies, id: \.tag) { Text($0.label).tag($0.tag) }
-                    }
-                    .accessibilityIdentifier("ai-policy")
-                    Picker("Does", selection: outputBinding(ai)) {
-                        ForEach(ConfiguredAI.outputModes, id: \.tag) { Text($0.label).tag($0.tag) }
-                    }
-                    .accessibilityIdentifier("ai-output")
-                    Stepper(
-                        "Context depth: \(ai.wrappedValue.effectiveDepth) messages",
-                        value: depthBinding(ai), in: 1...100)
-                        .accessibilityIdentifier("ai-depth")
+            // Context & behavior — shown EXPANDED by default (was a collapsed
+            // DisclosureGroup, so almost nobody found the gather policy / depth).
+            // A labeled, always-visible group surfaces these for every AI.
+            VStack(alignment: .leading, spacing: 8) {
+                Label("Context & behavior", systemImage: "slider.horizontal.3")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(.secondary)
+                    .accessibilityIdentifier("ai-context-behavior-header")
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Instructions (custom persona)")
+                        .font(.caption).foregroundStyle(.secondary)
+                    TextField(
+                        "e.g. You're my terse scheduling assistant; never speculate.",
+                        text: optionalBinding(ai.instructions), axis: .vertical)
+                        .lineLimit(1...4)
+                        .accessibilityIdentifier("ai-instructions")
                 }
-                .padding(.vertical, 2)
+                Picker("Gathers", selection: policyBinding(ai)) {
+                    ForEach(ConfiguredAI.policies, id: \.tag) { Text($0.label).tag($0.tag) }
+                }
+                .accessibilityIdentifier("ai-policy")
+                Picker("Does", selection: outputBinding(ai)) {
+                    ForEach(ConfiguredAI.outputModes, id: \.tag) { Text($0.label).tag($0.tag) }
+                }
+                .accessibilityIdentifier("ai-output")
+                Stepper(
+                    "Context depth: \(ai.wrappedValue.effectiveDepth) messages",
+                    value: depthBinding(ai), in: 1...100)
+                    .accessibilityIdentifier("ai-depth")
             }
+            .padding(.top, 4)
 
             Text(statusLine(for: ai.wrappedValue))
                 .font(.caption2)
