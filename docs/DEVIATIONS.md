@@ -591,7 +591,37 @@ and affects interop; `[app-only]` — client behavior, no wire impact;
   512 (they're metered/paid; the user picks a model). Verified live against an
   LM Studio server + a `strippingReasoningTrace` unit test. NOTE: a reasoning
   model is still a poor fit for short-message chat — an instruct model is the
-  better self-hosted choice; this just keeps the output sane either way.
+  better self-hosted choice; this just keeps the output sane either way. **Update
+  (same day):** extended to also strip Harmony / channel-tagged reasoning
+  (`<|channel>thought … <channel|> ANSWER`, and real Harmony
+  `<|channel|>final<|message|>`) used by gpt-oss and some Gemma QAT builds — keep
+  only the final-answer channel, drop the thought/analysis channel (an unfinished
+  thought with no final transition → empty). Verified live against a Gemma-4-26B
+  LM Studio server. Also applied the strip to Anthropic + Gemini for uniformity.
+- **A35 — Local MCP server (EldrChat as an agent-readable secure-chat source)**
+  `[app-only]` (2026-06-15, per the architecture review): a developer running
+  EldrChat on their workstation can let a LOCAL agentic harness (Goose, Xcode,
+  Claude, OpenClaw — any spec-compliant MCP client) read their secure chat. The
+  decision was **adopt, don't invent**: standard **Model Context Protocol** over
+  **stdio JSON-RPC**, EldrChat as the **server**. NO custom agent protocol, NO
+  Nostr/wire change, NO new event kind, NO cloud exposure (ACP and remote/HTTP
+  MCP were considered and declined/deferred for v1). New SPM package
+  `Packages/PQRCMCP` (no app/crypto deps; `swift test` headless): `MCPServer`
+  (initialize/ping/tools/list/tools/call/resources, JSON-RPC errors) behind a
+  `SecureChatBridge` the app implements over `PersonaRuntime` returning
+  **already-firewall-redacted** data (codenames, 64 KB-bounded) — the server
+  never sees raw identities. **Phase 1 is read-only BY CONSTRUCTION:** the bridge
+  has no `post`/`send`, so an MCP client cannot make EldrChat speak on the wire —
+  the "no autonomous send outside a human-signed `ai_window`" invariant (SPEC §13)
+  holds with nothing new to enforce. Tools: `list_conversations`,
+  `read_conversation`, `search_messages`, `get_context_preview`. A
+  `DemoSecureChatBridge` + `pqrc-mcp` executable let any MCP client connect today
+  (verified: 9 protocol tests + a full stdio handshake + a live Goose session
+  driven by the local LM Studio model). **Still to build (Phase 2):** the real
+  `PersonaRuntime`-backed bridge + an OFF-by-default Settings toggle + a
+  pairing-token consent gate; and (Phase 3, opt-in) window-gated action tools.
+  ACP stays explicitly out of v1; if ever wanted it is a parallel `PQRCACP`
+  client following the same read-only-then-window-gated discipline.
 
 ### Tech debt `[tech-debt]`
 
