@@ -548,9 +548,12 @@ and affects interop; `[app-only]` — client behavior, no wire impact;
   A33:** per-account settings now carry a `.<siloID>` suffix in the (unencrypted)
   UserDefaults plist, so the *set of distinct siloID suffixes* there is one more
   place a forensic image can count accounts — the same count leak as the store
-  files, not a new content leak (the values are scoped, and a silo writes a
-  suffixed key only once it has non-default settings). The Phase-2 pooled-store
-  design subsumes this (opaque records, no siloID in the clear).
+  files, not a new content leak (the values are scoped per silo). In practice the
+  count is *certain*, not probabilistic: `configuredAIs.<siloID>` is written on
+  every boot and `displayName.<siloID>` at creation, so each account always leaves
+  at least one suffixed key — this matches the existing per-silo store-file count
+  leak exactly and adds nothing beyond it. The Phase-2 pooled-store design
+  subsumes it (opaque records, no siloID in the clear).
 - **A33 — Per-silo UserDefaults namespacing (deniable-account isolation)**
   `[app-only]` (2026-06-15): the deniable-silo work (A23–A26) sealed each
   account's *secrets* and *store* per-silo, but several app preferences were

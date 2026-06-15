@@ -410,7 +410,11 @@ final class AppSession {
     /// silo-specific conversation/thread id, so they never collided across silos).
     private static func migrateFlatDefaults(into siloID: String) {
         let defaults = UserDefaults.standard
-        for base in ["relayURLs", "aiContextDomain", "lastReadAt"] {
+        // `displayName` is included because an older build's buggy Settings alias
+        // editor wrote it flat; the normal `unlock()` path never cleaned it, so a
+        // stale alias could sit readable at rest (security audit, 2026-06-15).
+        // `siloDefaultsKey("displayName", siloID)` == `displayNameKey(siloID)`.
+        for base in ["relayURLs", "aiContextDomain", "lastReadAt", "displayName"] {
             let flatKey = base
             let scopedKey = siloDefaultsKey(base, siloID)
             if defaults.object(forKey: scopedKey) == nil,
