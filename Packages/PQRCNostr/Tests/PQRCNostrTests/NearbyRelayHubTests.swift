@@ -147,4 +147,45 @@ struct NearbyRelayHubTests {
         await client.stop()
         await host.stop()
     }
+
+    /// After a radio drop + reconnect the companion must keep receiving its
+    /// gift-wraps — it re-AUTHs against the host's fresh challenge and re-sends
+    /// its subscriptions automatically (the crowded-place reliability fix). Drives
+    /// the simulator's co-presence control to model the blip.
+    @Test func client_recoversAfterReconnect() async throws {
+        let relay = LocalRelaySimulator()
+        let hub = LocalLinkSimulator()
+        let host = NearbyRelayHost(
+            link: await hub.makeLink(name: "host"), relay: relay,
+            randomSource: SeededRandomSource(seed: 1))
+        let client = MultipeerRelayClient(
+            link: await hub.makeLink(name: "client"), randomSource: SeededRandomSource(seed: 2))
+        try await host.start()
+        try await client.start()
+        try await Task.sleep(for: .milliseconds(150))
+
+        let me = try keypair("dd")
+        try await client.authenticate(keypair: me, randomSource: SystemRandomSource())
+        let stream = await client.subscribe([NostrFilter(kinds: [PQRCConstants.giftWrapEventKind])])
+
+        // Radio drops, then comes back.
+        await hub.setCoPresent(NearbyPeerID("host"), NearbyPeerID("client"), false)
+        try await Task.sleep(for: .milliseconds(100))
+        await hub.setCoPresent(NearbyPeerID("host"), NearbyPeerID("client"), true)
+        try await Task.sleep(for: .milliseconds(350))  // hello → re-AUTH → re-subscribe
+
+        // A wrap published AFTER the reconnect still reaches the authed recipient.
+        let oneTime = try keypair("ee")
+        let wrap = try signed(
+            oneTime, kind: PQRCConstants.giftWrapEventKind, content: "after reconnect",
+            tags: [["p", me.publicKeyHex]])
+        _ = try await client.publish(wrap)
+        let received = await firstEvent(stream)
+        #expect(
+            received?.id == wrap.id,
+            "after reconnect the companion re-auths + re-subscribes and still gets its wraps")
+
+        await client.stop()
+        await host.stop()
+    }
 }

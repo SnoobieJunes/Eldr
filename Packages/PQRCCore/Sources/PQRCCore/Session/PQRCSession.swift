@@ -140,6 +140,16 @@ public actor PQRCSession {
         guard let header = rumor.header, let ciphertext = rumor.ciphertext else {
             throw PQRCError.malformedRumor
         }
+        // Reject out-of-range counters from the wire BEFORE building the AD: the
+        // AD serializes `n` as UInt32, and `UInt32(Int)` TRAPS (it does not
+        // truncate) on a negative or >2^32 value. A crafted header (`"n": -1`)
+        // from an accepted contact would otherwise crash the app — and re-crash
+        // on relaunch if the relay replays it. Garbage in known fields is never
+        // fatal (SPEC §12, invariant 12).
+        let maxCounter = Int(UInt32.max)
+        guard (0...maxCounter).contains(header.n), (0...maxCounter).contains(header.pn) else {
+            throw PQRCError.malformedRumor
+        }
         let ad = AssociatedData.build(
             participantType: rumor.participantType, n: header.n, fuzzedTimestamp: fuzzedTimestamp
         )

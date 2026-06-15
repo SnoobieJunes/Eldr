@@ -1,4 +1,5 @@
 import Foundation
+import LocalAuthentication
 import Security
 
 enum KeychainError: Error {
@@ -106,13 +107,15 @@ struct KeychainStore: Sendable {
     /// may want to type a different account's passphrase). Call off the main
     /// thread (the biometric prompt blocks).
     func loadBiometric(account: String, prompt: String) -> BiometricLoad {
+        let context = LAContext()
+        context.localizedReason = prompt
         let query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: service,
             kSecAttrAccount as String: account,
             kSecReturnData as String: true,
             kSecMatchLimit as String: kSecMatchLimitOne,
-            kSecUseOperationPrompt as String: prompt,
+            kSecUseAuthenticationContext as String: context,
         ]
         var result: CFTypeRef?
         let status = SecItemCopyMatching(query as CFDictionary, &result)

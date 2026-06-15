@@ -237,8 +237,16 @@ public actor MultipeerRelayClient: RelayTransport {
     private var challengeWaiters: [String: CheckedContinuation<String?, Never>] = [:]
     private var pendingPublish: [String: CheckedContinuation<PublishAck, Never>] = [:]
     private var pendingAI: [String: CheckedContinuation<String?, Never>] = [:]
-    private var authWaiter: CheckedContinuation<Bool, Never>?
+    // Token-keyed (NOT a single slot): concurrent / reconnect re-auths must not
+    // overwrite and LEAK each other's continuation (a debug trap, a release hang).
+    private var authWaiters: [String: CheckedContinuation<Bool, Never>] = [:]
     private var subStreams: [String: AsyncThrowingStream<NostrEvent, Error>.Continuation] = [:]
+    // Retained so the client SELF-HEALS after a radio drop: on reconnect the host
+    // issues a FRESH challenge, and we re-AUTH + re-subscribe automatically —
+    // otherwise the companion silently stops receiving (the crowded-place bug).
+    private var authKeypair: NostrKeypair?
+    private var authRandom: (any RandomSource)?
+    private var subFilters: [String: [NostrFilter]] = [:]
 
     public init(
         link: any NearbyLink, randomSource: any RandomSource = SystemRandomSource(),
@@ -272,12 +280,15 @@ public actor MultipeerRelayClient: RelayTransport {
             cont.resume(returning: PublishAck(eventID: id, accepted: false, message: "disconnected"))
         }
         pendingPublish = [:]
-        authWaiter?.resume(returning: false)
-        authWaiter = nil
+        authWaiters.values.forEach { $0.resume(returning: false) }
+        authWaiters = [:]
         pendingAI.values.forEach { $0.resume(returning: nil) }
         pendingAI = [:]
         subStreams.values.forEach { $0.finish() }
         subStreams = [:]
+        subFilters = [:]
+        authKeypair = nil
+        authRandom = nil
     }
 
     // MARK: RelayTransport
@@ -302,7 +313,8 @@ public actor MultipeerRelayClient: RelayTransport {
         let subID = randomSource.bytes(8).hexString
         let (stream, continuation) = AsyncThrowingStream<NostrEvent, Error>.makeStream()
         subStreams[subID] = continuation
-        continuation.onTermination = { _ in Task { await self.closeSub(subID) } }
+        subFilters[subID] = filters  // remembered so we can re-send REQ after a reconnect
+        continuation.onTermination = { [weak self] _ in Task { await self?.closeSub(subID) } }
         guard let host = await awaitHost(), let d = RelayHubFrame.encodeFilters(filters) else {
             continuation.finish(throwing: PQRCError.relayUnreachable)
             return stream
@@ -312,21 +324,20 @@ public actor MultipeerRelayClient: RelayTransport {
     }
 
     public func authenticate(keypair: NostrKeypair, randomSource: any RandomSource) async throws {
-        guard let host = await awaitHost() else { throw PQRCError.relayUnreachable }
+        // Retain so we can re-AUTH automatically after a radio reconnect.
+        authKeypair = keypair
+        authRandom = randomSource
         guard let challenge = await awaitChallenge() else { throw NostrError.notAuthenticated }
-        let authEvent = try keypair.sign(
-            NostrEvent(
-                pubkey: keypair.publicKeyHex, createdAt: 0, kind: 22242,
-                tags: [["relay", "nearby"], ["challenge", challenge]], content: ""),
-            randomSource: randomSource)
-        guard let d = RelayHubFrame.encodeEvent(authEvent) else { throw NostrError.notAuthenticated }
-        await send(.init(kind: .auth, event: d), to: host)
+        guard await sendAuth(keypair, challenge: challenge, randomSource: randomSource) else {
+            throw PQRCError.relayUnreachable
+        }
         let timeout = hostTimeout
+        let token = randomSource.bytes(8).hexString
         let ok = await withCheckedContinuation { (cont: CheckedContinuation<Bool, Never>) in
-            authWaiter = cont
+            authWaiters[token] = cont
             Task { [weak self] in
                 try? await Task.sleep(for: .seconds(timeout))
-                await self?.resolveAuthTimeout()
+                await self?.resolveAuthTimeout(token)
             }
         }
         guard ok else { throw NostrError.notAuthenticated }
@@ -365,7 +376,10 @@ public actor MultipeerRelayClient: RelayTransport {
         case .connected:
             break  // wait for the host's `hello` to identify which peer is the relay
         case .disconnected(let peer):
-            if hostPeer == peer { hostPeer = nil }
+            if hostPeer == peer {
+                hostPeer = nil
+                challenge = nil  // a fresh challenge is issued on reconnect; never reuse a stale one
+            }
         case .data(let data, let peer):
             guard let frame = try? WireJSON.decoder().decode(RelayHubFrame.self, from: data) else {
                 return
@@ -385,10 +399,26 @@ public actor MultipeerRelayClient: RelayTransport {
             challenge = frame.challenge
             let waiters = challengeWaiters
             challengeWaiters = [:]
-            waiters.values.forEach { $0.resume(returning: frame.challenge) }
+            if waiters.isEmpty {
+                // No pending authenticate() → the host RE-issued a challenge on
+                // reconnect. Re-AUTH automatically against the fresh one, else the
+                // host drops us and we silently stop receiving gift-wraps.
+                if let kp = authKeypair, let random = authRandom, let c = frame.challenge {
+                    Task { [weak self] in await self?.sendAuth(kp, challenge: c, randomSource: random) }
+                }
+            } else {
+                waiters.values.forEach { $0.resume(returning: frame.challenge) }
+            }
         case .authOK:
-            authWaiter?.resume(returning: true)
-            authWaiter = nil
+            if authWaiters.isEmpty {
+                // An auto-reauth (reconnect) just succeeded → re-send our active
+                // subscriptions so the host serves them again (incl. our wraps).
+                Task { [weak self] in await self?.resubscribeAll() }
+            } else {
+                let waiters = authWaiters
+                authWaiters = [:]
+                waiters.values.forEach { $0.resume(returning: true) }
+            }
         case .ok:
             if let id = frame.eventID, let cont = pendingPublish.removeValue(forKey: id) {
                 cont.resume(
@@ -414,6 +444,7 @@ public actor MultipeerRelayClient: RelayTransport {
 
     private func closeSub(_ subID: String) async {
         subStreams[subID] = nil
+        subFilters[subID] = nil
         guard let host = hostPeer else { return }
         await send(.init(kind: .close, subID: subID), to: host)
     }
@@ -456,12 +487,40 @@ public actor MultipeerRelayClient: RelayTransport {
         pendingPublish.removeValue(forKey: id)?
             .resume(returning: PublishAck(eventID: id, accepted: false, message: "no relay ack"))
     }
-    private func resolveAuthTimeout() {
-        authWaiter?.resume(returning: false)
-        authWaiter = nil
+    private func resolveAuthTimeout(_ token: String) {
+        authWaiters.removeValue(forKey: token)?.resume(returning: false)
     }
     private func resolveAITimeout(_ aiID: String) {
         pendingAI.removeValue(forKey: aiID)?.resume(returning: nil)
+    }
+
+    /// Sign the host's challenge and send a kind-22242 AUTH. Used by both the
+    /// first `authenticate()` and the automatic re-AUTH after a reconnect.
+    @discardableResult
+    private func sendAuth(
+        _ keypair: NostrKeypair, challenge: String, randomSource: any RandomSource
+    ) async -> Bool {
+        guard let host = await awaitHost(),
+            let authEvent = try? keypair.sign(
+                NostrEvent(
+                    pubkey: keypair.publicKeyHex, createdAt: 0, kind: 22242,
+                    tags: [["relay", "nearby"], ["challenge", challenge]], content: ""),
+                randomSource: randomSource),
+            let d = RelayHubFrame.encodeEvent(authEvent)
+        else { return false }
+        await send(.init(kind: .auth, event: d), to: host)
+        return true
+    }
+
+    /// Re-send REQ for every active subscription after a reconnect re-AUTH, so
+    /// the host re-creates them and resumes delivery (including our gift-wraps).
+    private func resubscribeAll() async {
+        guard let host = hostPeer else { return }
+        for (subID, filters) in subFilters {
+            if let d = RelayHubFrame.encodeFilters(filters) {
+                await send(.init(kind: .req, subID: subID, filters: d), to: host)
+            }
+        }
     }
 
     private func send(_ frame: RelayHubFrame, to peer: NearbyPeerID) async {
