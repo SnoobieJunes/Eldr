@@ -3,7 +3,8 @@ import Foundation
 /// A spec-compliant Model Context Protocol server, transport-agnostic: it turns a
 /// single JSON-RPC request line into a single response line (or nil for a
 /// notification). The executable wraps it in a stdio read/write loop; tests call
-/// `handle(line:)` directly. Read-only (Phase 1) — see `SecureChatBridge`.
+/// `handle(line:)` directly. Read + window-gated write (A35 Phase 3) — see
+/// `SecureChatBridge`.
 public struct MCPServer: Sendable {
     public static let serverName = "eldrchat"
     public static let serverVersion = "0.1.0"
@@ -67,16 +68,22 @@ public struct MCPServer: Sendable {
             ?? Self.defaultProtocolVersion
         return [
             "protocolVersion": version,
-            // Advertise only what we serve: read tools + read resources.
+            // Advertise read tools + read resources + (window-gated) write tools.
             "capabilities": [
                 "tools": [String: Any](),
                 "resources": [String: Any](),
             ],
             "serverInfo": ["name": Self.serverName, "version": Self.serverVersion],
             "instructions":
-                "Read-only access to the user's end-to-end-encrypted EldrChat conversations. "
-                + "Sender names are local codenames; content is firewall-redacted and byte-bounded. "
-                + "There are no write/send tools — you cannot make EldrChat post anything.",
+                "Read and (window-gated) write access to the user's end-to-end-encrypted "
+                + "EldrChat conversations. READS: sender names are local codenames, content is "
+                + "firewall-redacted and byte-bounded. WRITES: `draft_reply` creates a private "
+                + "DRAFT for the user (never sends) and `mark_ai_context` flags messages as AI "
+                + "context — both always safe. `send_as_my_ai` posts a message LABELED as the "
+                + "user's AI, but ONLY while the user has an AI window open for that conversation; "
+                + "with no active window it FAILS — you cannot make EldrChat speak to others "
+                + "unless the human first opens a visible AI window. You can never send a message "
+                + "labeled as the human.",
         ]
     }
 
@@ -107,6 +114,36 @@ public struct MCPServer: Sendable {
                     "get_context_preview",
                     "Show exactly what the user's AI sees as context for a conversation (the redacted, bounded transcript).",
                     properties: ["conversationID": ["type": "string"]], required: ["conversationID"]),
+                // --- Write tools (A35 Phase 3). draft/mark are always safe; send is
+                // window-gated and fails closed without an active AI window. ---
+                tool(
+                    "draft_reply",
+                    "Create a private DRAFT reply for the USER to review and send (or discard). This NEVER sends anything on its own — it only stages text for the human.",
+                    properties: [
+                        "conversationID": ["type": "string", "description": "id from list_conversations"],
+                        "text": ["type": "string", "description": "the draft body"],
+                    ], required: ["conversationID", "text"]),
+                tool(
+                    "mark_ai_context",
+                    "Mark (or unmark) specific messages as \"AI context\" so the user's AI may use them. Local marker change only — sends no message to anyone.",
+                    properties: [
+                        "conversationID": ["type": "string"],
+                        "messageIDs": [
+                            "type": "array", "items": ["type": "string"],
+                            "description": "message ids to (un)mark",
+                        ],
+                        "value": [
+                            "type": "boolean",
+                            "description": "true to mark as AI context, false to unmark",
+                        ],
+                    ], required: ["conversationID", "messageIDs", "value"]),
+                tool(
+                    "send_as_my_ai",
+                    "Post a message LABELED as the user's AI into a conversation. ONLY works while the user has an AI window OPEN for that conversation; with no active window this FAILS and sends nothing (the human must open an AI window first). You can never send a message labeled as the human.",
+                    properties: [
+                        "conversationID": ["type": "string"],
+                        "text": ["type": "string", "description": "the message body, posted as the user's AI"],
+                    ], required: ["conversationID", "text"]),
             ]
         ]
     }
@@ -138,6 +175,13 @@ public struct MCPServer: Sendable {
             return id
         }
 
+        func requireText() throws -> String {
+            guard let text = args["text"] as? String, !text.isEmpty else {
+                throw RPCError(code: -32602, message: "text is required")
+            }
+            return text
+        }
+
         let text: String
         switch name {
         case "list_conversations":
@@ -153,10 +197,38 @@ public struct MCPServer: Sendable {
         case "get_context_preview":
             let id = try requireConversationID()
             text = render(messages: await bridge.contextPreview(conversationID: id))
+
+        // --- Write tools. A `failedClosed` outcome (e.g. send with no active AI
+        // window) is reported as a tool ERROR — never a silent drop (invariant 9). ---
+        case "draft_reply":
+            let id = try requireConversationID()
+            return result(await bridge.draftReply(conversationID: id, text: try requireText()))
+        case "mark_ai_context":
+            let id = try requireConversationID()
+            let ids = (args["messageIDs"] as? [Any] ?? []).compactMap { $0 as? String }
+            guard !ids.isEmpty else {
+                throw RPCError(code: -32602, message: "messageIDs is required")
+            }
+            guard let value = args["value"] as? Bool else {
+                throw RPCError(code: -32602, message: "value (bool) is required")
+            }
+            return result(
+                await bridge.markAIContext(conversationID: id, messageIDs: ids, value: value))
+        case "send_as_my_ai":
+            let id = try requireConversationID()
+            return result(await bridge.sendAsMyAI(conversationID: id, text: try requireText()))
+
         default:
             throw RPCError(code: -32602, message: "unknown tool: \(name)")
         }
         return ["content": [["type": "text", "text": text]], "isError": false]
+    }
+
+    /// Render a write outcome as an MCP tool result. A refused (window-gated) action
+    /// is `isError: true`, so the client sees the refusal as an error — the human must
+    /// open an AI window first; EldrChat never speaks silently outside one.
+    private func result(_ outcome: MCPWriteResult) -> [String: Any] {
+        ["content": [["type": "text", "text": outcome.detail]], "isError": outcome.isError]
     }
 
     // MARK: - Resources (each conversation is a read-only resource)

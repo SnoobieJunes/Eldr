@@ -28,6 +28,11 @@ struct SettingsView: View {
     /// Local agent access (in-process MCP server) toggle state. Mirrors the live
     /// server, OFF by default; flipping it starts/stops the loopback server.
     @State private var localMCPOn = false
+    /// Set when the user flips Local agent access ON: gates the actual start behind
+    /// a LOUD consent alert (same pattern as the off-device-AI consent), because
+    /// enabling it shares decrypted (codename-redacted) chat with a local agent that
+    /// can read and — with writes — draft, mark, and send-as-your-AI in active windows.
+    @State private var showLocalMCPConsent = false
     @State private var now = Int64(Date().timeIntervalSince1970)
 
     private let ticker = Timer.publish(every: 1, on: .main, in: .common).autoconnect()
@@ -417,11 +422,17 @@ struct SettingsView: View {
             Toggle("Local agent access (MCP)", isOn: Binding(
                 get: { localMCPOn },
                 set: { on in
-                    localMCPOn = on
-                    Task {
-                        if on { await session.startLocalMCP() } else { await session.stopLocalMCP() }
-                        // Snap back if the server refused to bind.
-                        localMCPOn = session.isLocalMCPRunning
+                    if on {
+                        // Gate turning it ON behind the LOUD consent alert — this
+                        // shares decrypted chat with a local agent. Keep the toggle
+                        // visually off until the user confirms.
+                        showLocalMCPConsent = true
+                    } else {
+                        localMCPOn = false
+                        Task {
+                            await session.stopLocalMCP()
+                            localMCPOn = session.isLocalMCPRunning
+                        }
                     }
                 }))
                 .accessibilityIdentifier("local-mcp-toggle")
@@ -434,11 +445,48 @@ struct SettingsView: View {
             if localMCPOn, let connection = session.localMCPConnection {
                 localMCPInstructions(connection)
             }
+            mcpVsACPInfo
         } header: {
             Text("Local agent access")
         } footer: {
-            Text("OFF by default. When ON, a local AI agent on THIS machine (Goose, Xcode, Claude, …) can READ your conversations through a loopback-only connection — sender names are local codenames, message text is firewall-redacted and size-capped, and there is NO way for it to send or post anything. Nothing is ever exposed off this device, and the connection needs the one-time pairing token below. Turning this off, or locking, stops it immediately. Only enable it if you want a local agent to see your redacted chat.")
+            Text("OFF by default. When ON, a local AI agent on THIS machine (Goose, Xcode, Claude, …) can interact with your conversations over a loopback-only, token-gated connection. It can READ them (sender names are local codenames; message text is firewall-redacted and size-capped) and, where allowed, DRAFT a reply for you to review, MARK messages as AI context, and SEND a message labeled as YOUR AI — but only while you have an AI window open for that conversation; with no window open it cannot send anything. It can never post as you. Be careful which agent harness you grant access to: whatever you point at this can see your redacted chat. Nothing is ever exposed off this device. Turning this off, or locking, stops it immediately.")
         }
+        .alert("Share your chat with a local agent?", isPresented: $showLocalMCPConsent) {
+            Button("Enable local agent access", role: .destructive) {
+                localMCPOn = true
+                Task {
+                    await session.startLocalMCP()
+                    // Snap back if the server refused to bind.
+                    localMCPOn = session.isLocalMCPRunning
+                }
+            }
+            Button("Cancel", role: .cancel) {
+                // Never started — the toggle stays off.
+                localMCPOn = false
+            }
+        } message: {
+            Text("Turning this on SHARES your decrypted conversations (with contact names replaced by your private codenames) with a local AI agent running on THIS machine. That agent can READ your chat and — where you've allowed it — DRAFT replies, MARK messages as AI context, and SEND messages labeled as your AI, but only while you have an AI window open. It can never post as you, and nothing leaves this device. Only enable this for an agent harness you trust; whatever you point at it will see your redacted chat. You can turn it off (or just lock) at any time to stop it instantly.")
+        }
+    }
+
+    /// Clarify the TWO distinct local-agent integrations so the user isn't confused
+    /// that "ACP" has no Settings toggle: this MCP server exposes your CHAT to a
+    /// local agent here; the separate ACP coding agent is configured in Xcode.
+    private var mcpVsACPInfo: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Label {
+                Text("Two different integrations").font(.caption.weight(.semibold))
+            } icon: {
+                Image(systemName: "info.circle")
+            }
+            Text("**Local agent access (MCP)** — this toggle — exposes your CHAT to a local agent on this machine.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            Text("The separate **ACP coding agent** (`eldr-acp`) lets your self-hosted LLM pilot Xcode (write code, build, run tests). It touches no chat content and is configured **in Xcode**, not here — see SETUP-GUIDE §9.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        }
+        .accessibilityIdentifier("mcp-vs-acp-info")
     }
 
     /// The exact shim command + token + env a user pastes into their MCP client.

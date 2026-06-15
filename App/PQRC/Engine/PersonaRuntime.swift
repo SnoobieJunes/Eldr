@@ -1095,6 +1095,86 @@ actor PersonaRuntime {
         }
     }
 
+    // MARK: - MCP write actions (A35 Phase 3 — reuse existing paths, invariants 8+9)
+
+    /// Whether the human currently has an ai_window OPEN for this conversation —
+    /// the SAME source of truth `agentContext` uses to decide the AI may participate
+    /// (engine-validated, human-signed, time-bounded). This is the gate for
+    /// `mcpSendAsMyAI`: an MCP client may only make my AI speak here while this is
+    /// true (CLAUDE.md invariant 9 / SPEC §13).
+    private func aiWindowActive(conversationID: String) async -> Bool {
+        await engine.activeWindow(for: identityHex) != nil
+            && myWindowConversationID == conversationID
+    }
+
+    /// Stage a DRAFT reply for the human via the existing `draftReply` path. NEVER
+    /// sends — it only returns text the UI/agent can present for the human to send
+    /// or discard. The returned body is byte-bounded to the same 64 KB egress cap so
+    /// a draft can't smuggle an unbounded payload back to the MCP client.
+    func mcpDraftReply(conversationID: String, text proposed: String) async -> MCPDraftOutcome {
+        // Prefer a model-drafted reply (the real "draft my reply" feature). If the
+        // provider is unavailable, fall back to staging the caller's proposed text —
+        // either way nothing is sent.
+        if let drafted = try? await draftReply(conversationID: conversationID).text,
+            !drafted.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        {
+            return .drafted(mcpBounded(drafted))
+        }
+        let fallback = mcpBounded(proposed)
+        guard !fallback.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            return .failed("Could not produce a draft (no AI reply and no proposed text).")
+        }
+        return .staged(fallback)
+    }
+
+    /// Outcome of an MCP draft request. The draft is NEVER sent; this only stages it.
+    enum MCPDraftOutcome: Sendable {
+        /// The AI produced a reply for the human to review.
+        case drafted(String)
+        /// No AI reply was available; the caller's proposed text was staged as-is.
+        case staged(String)
+        case failed(String)
+    }
+
+    /// Mark/unmark messages as AI context via the existing `markAsAIContext` path
+    /// (mirrors my own marks to the peer, author-guarded). Local marker change only.
+    func mcpMarkAIContext(conversationID: String, messageIDs: [String], value: Bool) async -> Int {
+        guard !messageIDs.isEmpty else { return 0 }
+        await markAsAIContext(messageIDs: messageIDs, value: value, conversationID: conversationID)
+        return messageIDs.count
+    }
+
+    /// Post an AGENT-LABELED message via the existing `sendAsMyAI` path
+    /// (`participant_type == .agent`, so it renders as AI-authored — invariant 8),
+    /// but ONLY while an ai_window is active for this conversation. With no active
+    /// window it FAILS CLOSED: it sends nothing and returns the refusal reason, so
+    /// an MCP client can never make EldrChat speak to others outside a visible,
+    /// human-opened window (invariant 9 / SPEC §13).
+    func mcpSendAsMyAI(conversationID: String, text: String) async -> MCPSendOutcome {
+        guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            return .failedClosed("Refused: empty message.")
+        }
+        guard await aiWindowActive(conversationID: conversationID) else {
+            return .failedClosed(
+                "No active AI window for this conversation — EldrChat will not send autonomously. "
+                    + "Ask the human to open an AI window for this conversation first, then retry.")
+        }
+        do {
+            // Reuses sendMessage(.agent): same wire format, same crypto, honest label.
+            try await sendAsMyAI(text, conversationID: conversationID)
+            return .sent
+        } catch {
+            return .failedClosed("Send failed: \(error.localizedDescription)")
+        }
+    }
+
+    /// Outcome of an MCP `send_as_my_ai`. `failedClosed` is the window-gate refusal
+    /// (or a delivery error) — surfaced to the client, never a silent drop.
+    enum MCPSendOutcome: Sendable {
+        case sent
+        case failedClosed(String)
+    }
+
     /// Removes a stored message (tap-to-retry drops the failed copy first).
     func deleteMessage(_ id: String) async {
         try? await store.deleteMessage(messageID: id)

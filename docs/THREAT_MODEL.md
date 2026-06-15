@@ -235,15 +235,19 @@ off-device AI off to keep everything local. (The `hub` path additionally shares
 content with another *user's* device — see §2.9a.)
 
 ### 2.13 Local MCP server / ACP agent (developer-facing, opt-in)
-Two surfaces let a **local** agent on the same machine interact with EldrChat;
-neither touches the Nostr wire or a network by itself (DEVIATIONS A35/A36):
+Two surfaces let a **local** agent on the same machine interact with EldrChat
+(DEVIATIONS A35/A36). Neither reaches a network by itself (both are local/loopback),
+and the only path either has to the Nostr wire is the MCP `send_as_my_ai` tool —
+which is **agent-labeled and gated on a human-opened AI window** (it posts nothing
+otherwise; see below):
 
-- **In-app MCP server (A35 Phase 2 — now shipped).** When a silo is unlocked AND
-  you turn on **Settings ▸ Local agent access (MCP)** (OFF by default), the app
-  hosts a Model Context Protocol server **in-process** so a local MCP client
-  (Goose, Xcode, Claude, …) can **read** your real conversations. This is a
-  genuine **read exposure of your chat to whatever local agent you point at it** —
-  the deliberate threat-model boundary, mitigated as follows:
+- **In-app MCP server (A35 Phase 2 read, Phase 3 read/WRITE — now shipped).** When a
+  silo is unlocked AND you turn on **Settings ▸ Local agent access (MCP)** (OFF by
+  default, behind a LOUD consent alert), the app hosts a Model Context Protocol
+  server **in-process** so a local MCP client (Goose, Xcode, Claude, …) can **read**
+  your real conversations and perform a small set of **write** actions. This is a
+  genuine **exposure of your chat to whatever local agent you point at it** — the
+  deliberate threat-model boundary, mitigated as follows:
   - **Loopback only.** The server binds a **Unix-domain socket** under the app
     container (no network interface at all — filesystem-namespaced, same-machine).
     It **never** falls back to a TCP bind, so nothing is reachable off-box. (The
@@ -254,12 +258,26 @@ neither touches the Nostr wire or a network by itself (DEVIATIONS A35/A36):
     token (kept in the silo Keychain, `WhenUnlockedThisDeviceOnly`, surfaced in
     Settings); a mismatch/missing token drops the connection before any method
     runs. The comparison is length-checked and constant-time.
-  - **Read-only + firewall-redacted.** The bridge serves the **same egress-firewall
-    output** the remote-AI path produces — message senders are **local codenames,
-    never identity hex or real display names**, text is **byte-bounded to 64 KB**
-    (invariant 4), and the participant role is honest (an AI message is labeled
-    AI). There is **no `post`/`send` tool** in the protocol, so an MCP client
-    cannot make EldrChat speak on the wire — §13 holds by construction.
+  - **Reads firewall-redacted; writes invariant-preserving.** Reads serve the **same
+    egress-firewall output** the remote-AI path produces — message senders are **local
+    codenames, never identity hex or real display names**, text is **byte-bounded to
+    64 KB** (invariant 4), and the participant role is honest (an AI message is
+    labeled AI). The **three write tools (A35 Phase 3)** reuse EldrChat's existing
+    send/draft/mark paths (no new wire format, no crypto change) and respect the hard
+    invariants:
+    - `draft_reply` produces a **private DRAFT for the human** and **never sends** —
+      it only stages text the user reviews. Always safe.
+    - `mark_ai_context` toggles the local **"Add to AI Context"** marker (the
+      existing path; for my own messages it mirrors the marker to the peer). No
+      message content is posted.
+    - `send_as_my_ai` posts an **agent-labeled** message (`participant_type ==
+      agent`, so it renders as AI-authored — **invariant 8**) **only while an
+      ai_window is active for that conversation**. With no active window it **FAILS
+      CLOSED** (returns an error, posts nothing). The gate uses the *same* engine
+      check (`activeWindow(for: identityHex)` + `myWindowConversationID`) the AI's
+      own participation uses, so an MCP client can never make EldrChat speak to
+      others outside a **human-opened, visible** AI window — **invariant 9 / §13
+      holds by construction**. There is no tool that posts *as the human*.
     *Honest nuance:* the conversation **title** (not message senders) is the
     contact's resolved local name; for a normal contact that is the
     auto-generated friendly codename, but the underlying name type retains a
@@ -338,11 +356,13 @@ exactly as specified in NIP-XX.
 - **Silo count-hiding (A26):** a forensic image can still count accounts; a pooled
   opaque-record store is the Phase-2 fix (§2.3a).
 - **MCP server hardening (A35):** the in-app `PersonaRuntime`-backed MCP bridge
-  (loopback UDS, token-gated, OFF-by-default, redacted, stops-on-lock) now ships
-  (§2.13). Open follow-ups: tighten the conversation-title fallback so it can
-  never emit a key prefix even in a contrived state, and a peer-credential check
-  (`SO_PEERCRED`/`LOCAL_PEERPID`) on the UDS to bind connections to expected
-  local clients.
+  (loopback UDS, token-gated, OFF-by-default behind a consent alert, redacted,
+  stops-on-lock) now ships with **read + window-gated write** (§2.13, A35 Phase 3:
+  `draft_reply`/`mark_ai_context` are always safe; `send_as_my_ai` is agent-labeled
+  and fails closed without an active AI window). Open follow-ups: tighten the
+  conversation-title fallback so it can never emit a key prefix even in a contrived
+  state, and a peer-credential check (`SO_PEERCRED`/`LOCAL_PEERPID`) on the UDS to
+  bind connections to expected local clients.
 - Ephemeral receiving keys on by default; Tor/mixnet transport; cryptographic
   *message* deniability; MLS groups; multi-device — all tracked for v2. (Account-
   *existence* deniability via silos now ships — §2.3a.)

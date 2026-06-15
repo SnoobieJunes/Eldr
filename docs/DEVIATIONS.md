@@ -656,8 +656,50 @@ and affects interop; `[app-only]` — client behavior, no wire impact;
     (`XCLocalSwiftPackageReference` + `XCSwiftPackageProductDependency` +
     Frameworks build-file), mirroring how PQRCCore/Nostr/Agent are referenced.
   Privacy: read-only, redacted, loopback-only, token-gated, off by default, stops on
-  lock — the cardinal rule resolved at every tie. **Still open (Phase 3, opt-in):**
-  window-gated action tools.
+  lock — the cardinal rule resolved at every tie. **Phase 3 (below) adds the
+  window-gated write tools.**
+
+- **A35-Phase3 — Local MCP server is now read/WRITE (invariant-preserving)**
+  `[app-only]` (2026-06-15): the point of an agent harness is to *act*; the product
+  owner accepts that responsibility, so the MCP server gains three action tools — but
+  each reuses an EXISTING send/draft/mark path (no new wire format, no crypto change)
+  and is built to respect the hard invariants:
+  • `draft_reply(conversationID, text)` → `PersonaRuntime.mcpDraftReply` → the
+    existing `draftReply` path. Produces a DRAFT for the human to review; **never
+    sends.** Always safe. (Prefers a real AI-drafted reply; falls back to staging the
+    caller's proposed text. Result byte-bounded to the 64 KB egress cap.)
+  • `mark_ai_context(conversationID, messageIDs, value)` →
+    `PersonaRuntime.mcpMarkAIContext` → the existing `markAsAIContext` path (mirrors
+    my own marks to the peer, author-guarded). Local marker change only — posts no
+    message content. Safe.
+  • `send_as_my_ai(conversationID, text)` → `PersonaRuntime.mcpSendAsMyAI` → the
+    existing `sendAsMyAI` → `sendMessage(participantType: .agent)` path, so the
+    message is **agent-labeled and renders as AI-authored (invariant 8)**. It posts
+    **ONLY when an ai_window is active for that conversation**, using the SAME engine
+    check the AI's own participation uses (`engine.activeWindow(for: identityHex) !=
+    nil && myWindowConversationID == conversationID`). With NO active window it
+    **FAILS CLOSED** — sends nothing, returns a refusal telling the caller to have the
+    human open an AI window first. So an MCP client can never make EldrChat speak to
+    others outside a visible, human-opened window (**invariant 9 / SPEC §13**). There
+    is no tool that posts as the human.
+  Mechanics: `MCPWriteResult` (`.ok`/`.failedClosed`) is added to the `SecureChatBridge`
+  protocol; a `failedClosed` outcome is surfaced as a `tools/call` `isError: true`
+  result (never a silent drop). `MCPServer.initialize` instructions + `tools/list`
+  now describe the write tools AND the window gate; `DemoSecureChatBridge` models the
+  gate faithfully (`send_as_my_ai` succeeds only for an `activeWindowConversationID`)
+  so the executable and tests exercise both the allowed and fail-closed paths.
+  `RuntimeSecureChatBridge`'s writes also fail closed when the silo is locked (model
+  gone). The Settings toggle is now gated behind a LOUD consent alert (same pattern as
+  the off-device-AI consent) disclosing that enabling it shares decrypted
+  (codename-redacted) chat with a local agent that can read and — where allowed —
+  draft/mark/send-as-your-AI in active windows, and warning to be careful which agent
+  harness is granted access. Settings also clarifies MCP-vs-ACP (the MCP server
+  exposes CHAT here; the separate `eldr-acp` coding agent is configured in Xcode —
+  SETUP-GUIDE §9). Tests: `swift test --package-path Packages/PQRCMCP` covers the
+  write tools incl. **`send_as_my_ai` fails closed with no active window** and
+  succeeds only in the windowed conversation. Reads stay codename-redacted +
+  64 KB-bounded. The cardinal rule is preserved: convenience (acting) never beats the
+  no-autonomous-send and honest-label invariants.
 
 - **A36 — ACP AGENT (EldrChat's self-hosted LLM pilots Xcode)** `[app-only]`
   (2026-06-15): the dual of A35. Where the MCP server exposes secure chat *to* a
