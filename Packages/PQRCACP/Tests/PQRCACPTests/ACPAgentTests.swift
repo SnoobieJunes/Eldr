@@ -42,12 +42,12 @@ struct ACPAgentTests {
     // MARK: Harness
 
     private func makeAgent(
-        llm: any LLMClient, workdir: String? = nil
+        llm: any LLMClient, workdir: String? = nil, config: AgentConfig = .default
     ) -> (ACPAgent, CapturingSink) {
         let sink = CapturingSink()
         let connection = ClientConnection(sink: sink)
         let env = ToolEnvironment(developerDir: nil, workdir: workdir, baseEnvironment: [:])
-        let agent = ACPAgent(connection: connection, llm: llm, toolEnvironment: env)
+        let agent = ACPAgent(connection: connection, llm: llm, toolEnvironment: env, config: config)
         return (agent, sink)
     }
 
@@ -245,6 +245,90 @@ struct ACPAgentTests {
         let response = await agent.handle(
             line: #"{"jsonrpc":"2.0","method":"session/cancel","params":{"sessionId":"x"}}"#)
         #expect(response == nil)
+    }
+
+    // MARK: context budgeting — a large tool result is truncated before feedback
+
+    @Test func largeToolResult_isTruncatedBeforeFeedingBackToModel() async throws {
+        // A big file the model reads; with a small per-result cap the bytes fed back
+        // on the SECOND completion call must be bounded + carry the elision marker.
+        let dir = NSTemporaryDirectory()
+        let path = (dir as NSString).appendingPathComponent("eldr-acp-flood-\(UUID().uuidString).txt")
+        let big = String(repeating: "Z", count: 40_000)
+        try big.data(using: .utf8)!.write(to: URL(fileURLWithPath: path))
+        defer { try? FileManager.default.removeItem(atPath: path) }
+
+        let toolCall = LLMToolCall(
+            id: "call_1", name: "read_file", arguments: "{\"path\":\"\(path)\"}")
+        let llm = MockLLMClient([
+            LLMResponse(content: "", toolCalls: [toolCall]),
+            LLMResponse(content: "done"),
+        ])
+        let cfg = AgentConfig(maxToolResultBytes: 4096)
+        let (agent, _) = makeAgent(llm: llm, workdir: dir, config: cfg)
+
+        _ = await agent.handle(line: #"{"jsonrpc":"2.0","id":0,"method":"initialize","params":{}}"#)
+        let sid = try #require(
+            try parse(
+                await agent.handle(
+                    line: #"{"jsonrpc":"2.0","id":1,"method":"session/new","params":{}}"#))[
+                "result"]?["sessionId"]?.stringValue)
+        _ = await agent.handle(
+            line:
+                "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"session/prompt\",\"params\":{\"sessionId\":\"\(sid)\",\"prompt\":[{\"type\":\"text\",\"text\":\"read it\"}]}}"
+        )
+
+        let calls = await llm.calls()
+        #expect(calls.count == 2)
+        let toolMessage = try #require(
+            calls[1].first { $0.role == .tool && $0.toolCallId == "call_1" })
+        #expect(toolMessage.content.utf8.count <= 4096)  // not the full 40 KB
+        #expect(toolMessage.content.contains("bytes elided"))
+    }
+
+    // MARK: context budgeting — history sent to the model is turn-bounded
+
+    @Test func history_isTrimmedToRecentTurns() async throws {
+        // Force several tool round-trips (echo a tiny file each time), with a tight
+        // history cap; the final completion call must see far fewer messages than the
+        // unbounded loop would have accumulated, yet still the system + task.
+        let dir = NSTemporaryDirectory()
+        let path = (dir as NSString).appendingPathComponent("eldr-acp-hist-\(UUID().uuidString).txt")
+        try "tiny".data(using: .utf8)!.write(to: URL(fileURLWithPath: path))
+        defer { try? FileManager.default.removeItem(atPath: path) }
+
+        func readCall(_ n: Int) -> LLMResponse {
+            LLMResponse(
+                content: "",
+                toolCalls: [
+                    LLMToolCall(id: "c\(n)", name: "read_file", arguments: "{\"path\":\"\(path)\"}")
+                ])
+        }
+        // 6 tool turns, then a final answer.
+        let llm = MockLLMClient([
+            readCall(1), readCall(2), readCall(3), readCall(4), readCall(5), readCall(6),
+            LLMResponse(content: "finished"),
+        ])
+        let cfg = AgentConfig(maxHistoryTurns: 4, maxContextChars: 0)
+        let (agent, _) = makeAgent(llm: llm, workdir: dir, config: cfg)
+
+        _ = await agent.handle(line: #"{"jsonrpc":"2.0","id":0,"method":"initialize","params":{}}"#)
+        let sid = try #require(
+            try parse(
+                await agent.handle(
+                    line: #"{"jsonrpc":"2.0","id":1,"method":"session/new","params":{}}"#))[
+                "result"]?["sessionId"]?.stringValue)
+        _ = await agent.handle(
+            line:
+                "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"session/prompt\",\"params\":{\"sessionId\":\"\(sid)\",\"prompt\":[{\"type\":\"text\",\"text\":\"loop\"}]}}"
+        )
+
+        let calls = await llm.calls()
+        // Last completion call (the 7th) saw a bounded list: system + task + ≤4 turns.
+        let lastSeen = try #require(calls.last)
+        #expect(lastSeen.count <= 1 /*system*/ + 1 /*task*/ + 4)
+        #expect(lastSeen.first?.role == .system)
+        #expect(lastSeen.contains { $0.role == .user && $0.content == "loop" })
     }
 }
 

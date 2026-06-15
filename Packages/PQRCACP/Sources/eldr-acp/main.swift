@@ -47,12 +47,20 @@ struct EldrACPMain {
             log("LLM url=\(config.url) model=\(config.model)")
         }
 
+        // Context-budget / tool / prompt tuning (ELDR_ACP_* env + ~/.config/eldr-acp).
+        let config = AgentConfig.fromEnvironment(environment)
+        let toolList = config.toolAllowlist.isEmpty ? "all" : config.toolAllowlist.joined(separator: ",")
+        log(
+            "context budget: maxToolResultBytes=\(config.maxToolResultBytes == Int.max ? "∞" : String(config.maxToolResultBytes)) "
+                + "maxHistoryTurns=\(config.maxHistoryTurns) maxContextChars=\(config.maxContextChars) tools=\(toolList)")
+
         let sink = FileHandleOutputSink(FileHandle.standardOutput)
         let connection = ClientConnection(sink: sink)
         let agent = ACPAgent(
             connection: connection,
             llm: llm,
-            toolEnvironment: .fromEnvironment(environment))
+            toolEnvironment: .fromEnvironment(environment),
+            config: config)
         let inFlight = InFlight()
 
         log("ready on stdio")

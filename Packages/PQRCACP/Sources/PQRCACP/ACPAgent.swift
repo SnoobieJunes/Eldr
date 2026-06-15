@@ -19,6 +19,7 @@ public actor ACPAgent {
     private let connection: ClientConnection
     private let llm: any LLMClient
     private let toolEnvironment: ToolEnvironment
+    private let config: AgentConfig
     private let maxIterations: Int
 
     /// Negotiated at `initialize`. Defaults to "everything off" until then (so a
@@ -34,11 +35,13 @@ public actor ACPAgent {
         connection: ClientConnection,
         llm: any LLMClient,
         toolEnvironment: ToolEnvironment = .fromEnvironment(),
+        config: AgentConfig = .fromEnvironment(),
         maxIterations: Int = 20
     ) {
         self.connection = connection
         self.llm = llm
         self.toolEnvironment = toolEnvironment
+        self.config = config
         self.maxIterations = maxIterations
     }
 
@@ -179,11 +182,12 @@ public actor ACPAgent {
         perTurnEnvironment.workdir = cwd
         let executor = ToolExecutor(
             capabilities: clientCapabilities, environment: perTurnEnvironment,
-            connection: connection, sessionId: sessionId)
-        let tools = ToolExecutor.toolDefinitions()
+            connection: connection, sessionId: sessionId,
+            maxResultBytes: config.maxToolResultBytes)
+        let tools = ToolExecutor.toolDefinitions(allowlist: config.toolAllowlist)
 
         var messages: [LLMMessage] = [
-            LLMMessage(role: .system, content: Self.systemPrompt(cwd: cwd)),
+            LLMMessage(role: .system, content: Self.systemPrompt(cwd: cwd, config: config)),
             LLMMessage(role: .user, content: userText),
         ]
 
@@ -191,9 +195,15 @@ public actor ACPAgent {
         for _ in 0..<maxIterations {
             if cancelledSessions.contains(sessionId) { return .cancelled }
 
+            // Context budgeting: bound the history sent to the model each turn so a
+            // long tool loop (and the large results it accumulates) can't outgrow
+            // the window. The system prompt + the task are always preserved.
+            let outgoing = ContextBudget.trim(
+                messages, maxTurns: config.maxHistoryTurns, maxChars: config.maxContextChars)
+
             let response: LLMResponse
             do {
-                response = try await llm.complete(messages: messages, tools: tools)
+                response = try await llm.complete(messages: outgoing, tools: tools)
             } catch {
                 // Surface the failure to the user as a message, then end the turn.
                 await emitMessage(
@@ -314,27 +324,41 @@ public actor ACPAgent {
 
     // MARK: - System prompt
 
-    static func systemPrompt(cwd: String) -> String {
-        """
-        You are EldrChat's coding agent, embedded in an iOS/macOS developer's editor \
-        (an Agent Client Protocol client such as Xcode). You help write Swift code, \
-        edit files, build projects, and run tests on the iOS Simulator.
+    /// The turn's system prompt. A user override (`ELDR_ACP_SYSTEM_PROMPT` / config
+    /// file) replaces it wholesale ({cwd} substituted); otherwise the built-in
+    /// prompt is used and any preamble (`ELDR_ACP_PROMPT_PREAMBLE`) is appended so a
+    /// user can nudge a finicky model's tool-calling without forking the binary.
+    static func systemPrompt(cwd: String, config: AgentConfig = .default) -> String {
+        if let override = config.systemPromptOverride {
+            return override.replacingOccurrences(of: "{cwd}", with: cwd)
+        }
+        var prompt = """
+            You are EldrChat's coding agent, embedded in an iOS/macOS developer's editor \
+            (an Agent Client Protocol client such as Xcode). You help write Swift code, \
+            edit files, build projects, and run tests on the iOS Simulator.
 
-        You have these tools — call them rather than guessing:
-          • read_file(path): read a text file.
-          • write_file(path, content): create/overwrite a text file with full new contents.
-          • list_dir(path): list a directory.
-          • run_shell(command): run a shell command (e.g. `xcodebuild …`, `xcrun simctl …`, \
-        `swift build`). DEVELOPER_DIR is preconfigured so xcodebuild/xcrun target the \
-        intended Xcode.
+            You have these tools — call them rather than guessing:
+              • read_file(path): read a text file.
+              • write_file(path, content): create/overwrite a text file with full new contents.
+              • list_dir(path): list a directory.
+              • run_shell(command): run a shell command (e.g. `xcodebuild …`, `xcrun simctl …`, \
+            `swift build`). DEVELOPER_DIR is preconfigured so xcodebuild/xcrun target the \
+            intended Xcode.
 
-        Guidelines:
-          • The working directory is: \(cwd). Prefer paths relative to it; absolute paths also work.
-          • Make minimal, correct edits. Read a file before rewriting it.
-          • When you build or test, run the command and report the real result; do not fabricate output.
-          • When the task is done, reply with a short plain-text summary of what you did. \
-        Do not include chain-of-thought.
-        """
+            Guidelines:
+              • The working directory is: \(cwd). Prefer paths relative to it; absolute paths also work.
+              • Make minimal, correct edits. Read a file before rewriting it.
+              • Call ONE tool at a time and wait for its result before the next step.
+              • Tool results may be truncated (a `… N bytes elided …` marker): read a \
+            specific file or grep for the part you need rather than re-reading huge output.
+              • When you build or test, run the command and report the real result; do not fabricate output.
+              • When the task is done, reply with a short plain-text summary of what you did. \
+            Do not include chain-of-thought.
+            """
+        if let preamble = config.promptPreamble, !preamble.isEmpty {
+            prompt += "\n\n" + preamble
+        }
+        return prompt
     }
 
     // MARK: - Helpers

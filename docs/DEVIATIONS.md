@@ -701,6 +701,55 @@ and affects interop; `[app-only]` — client behavior, no wire impact;
   `read_file` tool round-trip to `tool_call_update: completed`, cancel, the
   bidirectional outbound-request correlation) + a piped stdio smoke test.
 
+- **A37 — ACP agent context budgeting + tool/prompt tuning** `[app-only]`
+  (2026-06-15): follow-up to A36. The E2E test of A36 confirmed the loop works but
+  flagged two real risks for self-hosted models: large tool results (file reads,
+  shell logs) FLOOD the context window, and smaller/varied models get CONFUSED by an
+  unbounded, noisy tool loop. Resolved by making the agent's context, tools, and
+  prompt **configurable**, with defaults that preserve or improve prior behavior (no
+  turn that used to succeed now fails; only never-needed bytes are trimmed). New
+  `AgentConfig` (env-first, optional `~/.config/eldr-acp/` files) + a pure,
+  deterministic `ContextBudget` (no I/O/clock → trivially testable). Decisions:
+  • **Per-tool-result cap** `ELDR_ACP_MAX_TOOL_RESULT_BYTES` (default 8 KB): every
+    result fed back is head+tail truncated past the cap with a `… N bytes elided …`
+    marker that names the env knob. Head gets ~60% (declarations / the command),
+    tail ~40% (errors / exit code). Cuts on CHARACTER boundaries so output is always
+    valid UTF-8 even mid-emoji; counts UTF-8 BYTES (what the window is measured in).
+    This is the FIRST cap on `read_file`/`list_dir` (previously unbounded); shell's
+    existing 64 KB capture cap is retained as the outer memory/deadlock guard and
+    this smaller cap then bounds what reaches the model.
+  • **History trimming** `ELDR_ACP_MAX_HISTORY_TURNS` (12) + `ELDR_ACP_MAX_CONTEXT_CHARS`
+    (48 KB): before each LLM call the running list is trimmed — the leading system
+    message(s) and the first user message (the task) are ALWAYS anchored; the most-
+    recent N turns are kept; if still over the char ceiling, the oldest non-anchor
+    message *content* is elided oldest-first. Eliding content (not removing messages)
+    keeps the OpenAI `assistant` tool-call ↔ `tool` result pairing valid. `0` on
+    either knob disables that cap.
+  • **Tool allowlist** `ELDR_ACP_TOOLS` (default = all four): only listed tools are
+    advertised + accepted, preserving canonical order; unknown names ignored.
+    Tightened the four tool DESCRIPTIONS to terse imperative one-liners each with a
+    concrete `tool(arg: …)` example, and pinned schemas with `additionalProperties:
+    false` + exact `required` — small models pick the right tool far more reliably
+    from a crisp schema than from prose.
+  • **Prompt tuning** `ELDR_ACP_PROMPT_PREAMBLE` (appended) and `ELDR_ACP_SYSTEM_PROMPT`
+    (full replace, `{cwd}` substituted), each also readable from a config-dir file
+    (`prompt-preamble` / `system-prompt`); env wins over file. Lets a user nudge a
+    finicky model's tool-calling without forking the binary. Built-in prompt also now
+    says "call ONE tool at a time" and warns results may be truncated. The A34/A36
+    reasoning-trace stripper is unchanged (still strips `<think>`/Harmony channels).
+  • **Config-dir resolution**: `ELDR_ACP_CONFIG_DIR` → `$XDG_CONFIG_HOME/eldr-acp` →
+    `~/.config/eldr-acp`. `fromEnvironment` takes the dir as an INJECTED parameter so
+    tests run home-directory-free (cardinal-rule-adjacent hygiene: no ambient FS read
+    under test). Active budget is logged to stderr on startup.
+  Backward-compatible: `ToolExecutor`'s new `maxResultBytes` defaults to `Int.max`
+  (uncapped) — only the agent layer opts into the 8 KB budget — so a direct
+  `ToolExecutor(…)` constructed without it behaves exactly as before. Verified: 67
+  headless tests total (was 35; +32 covering truncation incl. multibyte/UTF-8
+  safety, history trim + anchor preservation, allowlist filtering, schema shape,
+  env+config-file parsing with env-wins precedence, prompt preamble/override, and
+  two agent-level integration tests proving a 40 KB read is truncated before
+  feedback and a long loop's history is turn-bounded) + the piped stdio smoke test.
+
 ### Tech debt `[tech-debt]`
 
 - **T1 — Secure Enclave fallback.** Where `SecureEnclave.isAvailable == false`

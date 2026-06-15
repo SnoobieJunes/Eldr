@@ -340,3 +340,36 @@ Click **Add**. The agent uses the working directory Xcode hands it per session
   then type an `initialize` line — it must reply immediately.
 - `run_shell` honors `DEVELOPER_DIR`, so `xcodebuild`/`xcrun simctl` target the
   Xcode 27 beta toolchain even though your default `xcode-select` may be stable.
+
+### Tuning for your model (context budget, tools, prompt) — A37
+
+The agent loops tool calls against *your* local model. The two things that break a
+self-hosted setup are **context flooding** (a big `read_file` or chatty
+`xcodebuild` dumps tens of thousands of tokens into the next prompt and the model
+loses the system instructions) and **tool confusion** (weaker models mis-call or
+over-call vague tools). These knobs cap and shape what the model sees. **All
+defaults are safe** — an un-tuned install just works; tune only if your model
+struggles. Set them in `~/.config/eldr-acp/env` (sourced by the launcher) or as env.
+
+| Env var | Default | Effect |
+|---|---|---|
+| `ELDR_ACP_MAX_TOOL_RESULT_BYTES` | `8192` | Max bytes of **one tool result** fed back to the model. Larger → head+tail truncated with a `… N bytes elided …` marker (so a 200 KB file read can't flood the window). `0` → unbounded. |
+| `ELDR_ACP_MAX_HISTORY_TURNS` | `12` | Most-recent user/assistant/tool **turns** kept each call. The system prompt + the original task are *always* kept; older turns drop. `0` → no turn cap. |
+| `ELDR_ACP_MAX_CONTEXT_CHARS` | `49152` | Soft ceiling on **total** characters sent. Over budget → oldest non-anchor message *content* is elided (oldest-first) until it fits. `0` → no cap. |
+| `ELDR_ACP_TOOLS` | *(all)* | Comma/space tool **allowlist**, e.g. `read_file,write_file,run_shell`. Only listed tools are advertised + accepted; trims the menu for models that get confused by choice. |
+| `ELDR_ACP_PROMPT_PREAMBLE` | *(none)* | Extra text **appended** to the system prompt — model-specific tool-calling rules you want to experiment with. Also a `prompt-preamble` file in `~/.config/eldr-acp/`. |
+| `ELDR_ACP_SYSTEM_PROMPT` | *(built-in)* | **Replaces** the system prompt entirely (`{cwd}` is substituted). Also a `system-prompt` file in the config dir. Use only if the built-in prompt fights your model. |
+
+Config-dir lookups honor `ELDR_ACP_CONFIG_DIR`, else `$XDG_CONFIG_HOME/eldr-acp`,
+else `~/.config/eldr-acp`. **Env always wins over a file.** On startup the agent logs
+the active budget to stderr (`context budget: …`) so you can confirm what's in force.
+
+- **Small / 7-8B / heavily-quantized model** (tight window, weaker tool use): shrink
+  the budgets and trim the toolset, e.g.
+  `ELDR_ACP_MAX_TOOL_RESULT_BYTES=4096 ELDR_ACP_MAX_HISTORY_TURNS=6 ELDR_ACP_MAX_CONTEXT_CHARS=16384 ELDR_ACP_TOOLS=read_file,write_file,run_shell`,
+  and add a terse `ELDR_ACP_PROMPT_PREAMBLE` like *"Call exactly one tool per step.
+  Keep replies short."*
+- **Large / long-context model** (e.g. 128k window): raise the ceilings to let it
+  hold more of the codebase, e.g.
+  `ELDR_ACP_MAX_TOOL_RESULT_BYTES=32768 ELDR_ACP_MAX_HISTORY_TURNS=40 ELDR_ACP_MAX_CONTEXT_CHARS=262144`
+  (leave tools at the default full set).

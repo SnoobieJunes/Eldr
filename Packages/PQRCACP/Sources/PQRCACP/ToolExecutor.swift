@@ -85,82 +85,97 @@ public struct ToolExecutor: Sendable {
     let connection: ClientConnection?
     /// The active session — fs/* and terminal/* requests must carry it.
     let sessionId: String
-    /// Hard cap on captured shell output bytes fed back to the model, so a chatty
-    /// build can't blow the context window.
+    /// Hard cap on CAPTURED shell output bytes (a memory/deadlock guard on a chatty
+    /// build). This is the large outer cap; the smaller `maxResultBytes` then bounds
+    /// what actually reaches the model.
     let outputByteLimit: Int
+    /// Cap on the bytes of ANY tool result fed back to the model (head+tail
+    /// truncated past this). The context-window guard — a huge `read_file` or build
+    /// log is trimmed here so it can't flood the next prompt. `Int.max` → no cap.
+    let maxResultBytes: Int
 
     public init(
         capabilities: ClientCapabilities, environment: ToolEnvironment,
-        connection: ClientConnection?, sessionId: String, outputByteLimit: Int = 64 * 1024
+        connection: ClientConnection?, sessionId: String, outputByteLimit: Int = 64 * 1024,
+        maxResultBytes: Int = Int.max
     ) {
         self.capabilities = capabilities
         self.environment = environment
         self.connection = connection
         self.sessionId = sessionId
         self.outputByteLimit = outputByteLimit
+        self.maxResultBytes = maxResultBytes
     }
 
-    /// The OpenAI tool/function definitions the agent advertises to its LLM.
-    public static func toolDefinitions() -> [LLMTool] {
-        [
+    /// The four built-in tools' names, in advertise order. The single source of
+    /// truth for "what tools exist" (used to validate an allowlist).
+    public static let allToolNames = ["read_file", "write_file", "list_dir", "run_shell"]
+
+    /// The OpenAI tool/function definitions the agent advertises to its LLM,
+    /// optionally filtered to an allowlist (empty → all). Descriptions are written
+    /// terse and imperative with one concrete example each: weaker/smaller models
+    /// pick the right tool far more reliably from a crisp one-liner than from prose,
+    /// and schemas pin exactly one required string arg so there's nothing to
+    /// hallucinate. Order is preserved; unknown allowlist names are ignored.
+    public static func toolDefinitions(allowlist: [String] = []) -> [LLMTool] {
+        let all = [
             LLMTool(
                 name: "read_file",
                 description:
-                    "Read a UTF-8 text file and return its contents. `path` is absolute, or relative to the working directory.",
-                parameters: .object([
-                    "type": .string("object"),
-                    "properties": .object([
-                        "path": .object([
-                            "type": .string("string"), "description": .string("file path"),
-                        ])
-                    ]),
-                    "required": .array([.string("path")]),
-                ])),
+                    "Read a UTF-8 text file and return its contents. Use before editing a file. path is absolute or relative to the working directory. Example: read_file(path: \"Sources/App.swift\"). Large files come back head+tail truncated.",
+                parameters: stringArgSchema(
+                    name: "path", desc: "path to the file to read", required: true)),
             LLMTool(
                 name: "write_file",
                 description:
-                    "Create or overwrite a UTF-8 text file with `content`. Parent directories are created as needed. Prefer this over shell redirection so edits show in the editor.",
+                    "Create or overwrite a UTF-8 text file. Pass the FULL new file contents in content (not a diff); missing parent directories are created. Use this for edits, not shell redirection, so changes show in the editor. Example: write_file(path: \"Sources/App.swift\", content: \"...\").",
                 parameters: .object([
                     "type": .string("object"),
                     "properties": .object([
                         "path": .object([
-                            "type": .string("string"), "description": .string("file path"),
+                            "type": .string("string"),
+                            "description": .string("path to the file to create or overwrite"),
                         ]),
                         "content": .object([
                             "type": .string("string"),
-                            "description": .string("full new file contents"),
+                            "description": .string("the complete new contents of the file"),
                         ]),
                     ]),
                     "required": .array([.string("path"), .string("content")]),
+                    "additionalProperties": .bool(false),
                 ])),
             LLMTool(
                 name: "list_dir",
                 description:
-                    "List the entries of a directory (one per line; directories suffixed with '/'). `path` is absolute or relative to the working directory; defaults to '.'.",
-                parameters: .object([
-                    "type": .string("object"),
-                    "properties": .object([
-                        "path": .object([
-                            "type": .string("string"), "description": .string("directory path"),
-                        ])
-                    ]),
-                    "required": .array([]),
-                ])),
+                    "List a directory's entries, one per line, directories suffixed with '/'. Use to discover files before reading them. path is absolute or relative to the working directory and defaults to '.'. Example: list_dir(path: \"Sources\").",
+                parameters: stringArgSchema(
+                    name: "path", desc: "directory to list (defaults to '.')", required: false)),
             LLMTool(
                 name: "run_shell",
                 description:
-                    "Run a shell command via /bin/zsh -lc in the working directory and return its combined stdout/stderr and exit code. Use this for xcodebuild and xcrun simctl (DEVELOPER_DIR is set so they target the configured Xcode).",
-                parameters: .object([
-                    "type": .string("object"),
-                    "properties": .object([
-                        "command": .object([
-                            "type": .string("string"),
-                            "description": .string("the shell command line to execute"),
-                        ])
-                    ]),
-                    "required": .array([.string("command")]),
-                ])),
+                    "Run one shell command with /bin/zsh -lc in the working directory; returns combined stdout+stderr and the exit code. Use for builds and tests, e.g. run_shell(command: \"xcodebuild -scheme App test\") or xcrun simctl / swift build. DEVELOPER_DIR is preset to the configured Xcode. Long output is truncated.",
+                parameters: stringArgSchema(
+                    name: "command", desc: "the single shell command line to run", required: true)),
         ]
+        guard !allowlist.isEmpty else { return all }
+        let wanted = Set(allowlist)
+        return all.filter { wanted.contains($0.name) }
+    }
+
+    /// A JSON-Schema `object` with exactly one string property — the shape every
+    /// single-arg tool shares. `additionalProperties:false` discourages a model
+    /// from inventing extra keys.
+    private static func stringArgSchema(name: String, desc: String, required: Bool) -> JSONValue {
+        .object([
+            "type": .string("object"),
+            "properties": .object([
+                name: .object([
+                    "type": .string("string"), "description": .string(desc),
+                ])
+            ]),
+            "required": .array(required ? [.string(name)] : []),
+            "additionalProperties": .bool(false),
+        ])
     }
 
     /// ACP ToolKind for a tool name (drives the editor's icon/labeling).
@@ -193,13 +208,26 @@ public struct ToolExecutor: Sendable {
     // MARK: Dispatch
 
     public func run(tool: String, args: JSONValue) async -> ToolResult {
+        let result: ToolResult
         switch tool {
-        case "read_file": return await readFile(args)
-        case "write_file": return await writeFile(args)
-        case "list_dir": return listDir(args)
-        case "run_shell": return await runShell(args)
+        case "read_file": result = await readFile(args)
+        case "write_file": result = await writeFile(args)
+        case "list_dir": result = listDir(args)
+        case "run_shell": result = await runShell(args)
         default: return ToolResult(text: "unknown tool: \(tool)", isError: true)
         }
+        // Context-window guard: every tool result fed back to the model is bounded.
+        // (Shell already capped its CAPTURE at outputByteLimit; this trims further
+        // for the prompt, and is the ONLY cap for read_file/list_dir.)
+        return capped(result)
+    }
+
+    /// Head+tail truncate an over-budget result for the model, preserving the error
+    /// flag and noting the elision. A no-op when the result already fits.
+    private func capped(_ result: ToolResult) -> ToolResult {
+        let trimmed = ContextBudget.truncate(result.text, maxBytes: maxResultBytes)
+        guard trimmed.utf8.count != result.text.utf8.count else { return result }
+        return ToolResult(text: trimmed, isError: result.isError)
     }
 
     // MARK: Path resolution
