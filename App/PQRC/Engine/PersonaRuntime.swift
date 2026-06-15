@@ -1551,9 +1551,15 @@ actor PersonaRuntime {
         // would stall message delivery (relay AND Nearby both funnel through
         // handleReceived) whenever the relay is slow. Detached, fire-and-forget.
         Task { [weak self] in await self?.republishIfPrekeysLow() }
+        // Persist the dedup id SYNCHRONOUSLY (was fire-and-forget): if the app is
+        // killed right after rendering #0, a detached write could be lost, so on
+        // relaunch the relay replays the handshake — which, before the
+        // processHandshake guard (13d2f86), silently desynced the session. This is
+        // a cheap LOCAL write (no relay round-trip, unlike the prekey republish
+        // above), so awaiting it doesn't stall delivery. (Security-audit
+        // defense-in-depth for the replay-desync fix.)
         let dedupeStore = store
-        let wrapEventID = received.wrapEventID
-        Task { try? await dedupeStore?.markProcessed(eventID: wrapEventID) }
+        try? await dedupeStore?.markProcessed(eventID: received.wrapEventID)
 
         // Chunked large message: each part advanced the ratchet (handled above);
         // buffer until every part is present, then continue with the whole text.

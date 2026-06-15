@@ -168,6 +168,15 @@ actor LocalMCPServer {
     /// newline-delimited JSON-RPC through the MCP server until EOF or hang-up. Only
     /// the per-line `server.handle` and the `isRunning` check touch the actor.
     private nonisolated func serve(clientFD: Int32) async {
+        // Defense in depth atop the token: a Unix socket accepts a connection from
+        // ANY local process, so reject a peer running as a DIFFERENT user before
+        // reading a byte (especially worth it now the server can be write-capable).
+        // The token stays the primary gate; a getsockopt quirk never locks out a
+        // legitimate same-user client (peerIsSameUser fails open on read failure).
+        guard peerIsSameUser(clientFD) else {
+            Self.log.notice("Local MCP client rejected: peer is a different user")
+            return
+        }
         var reader = LineReader(fd: clientFD)
         // First line MUST be the pairing token, else drop immediately.
         guard let first = reader.next(), constantTimeEquals(first, token) else {
@@ -244,4 +253,16 @@ private func constantTimeEquals(_ a: String, _ b: String) -> Bool {
     var diff: UInt8 = 0
     for i in 0..<lhs.count { diff |= lhs[i] ^ rhs[i] }
     return diff == 0
+}
+
+/// Whether the process connected to `fd` runs as the SAME effective user, via the
+/// Darwin `LOCAL_PEERCRED` socket credential. Fails OPEN (returns true) if the
+/// credential can't be read — the pairing token remains the authoritative gate, so
+/// a getsockopt quirk must never lock out a legitimate same-user client.
+private func peerIsSameUser(_ fd: Int32) -> Bool {
+    var cred = xucred()
+    var len = socklen_t(MemoryLayout<xucred>.size)
+    let result = getsockopt(fd, SOL_LOCAL, LOCAL_PEERCRED, &cred, &len)
+    guard result == 0, cred.cr_version == UInt32(XUCRED_VERSION) else { return true }
+    return cred.cr_uid == geteuid()
 }
