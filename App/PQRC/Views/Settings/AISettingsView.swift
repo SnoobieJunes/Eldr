@@ -152,10 +152,18 @@ struct AISettingsView: View {
     @ViewBuilder private func aiRow(_ ai: Binding<ConfiguredAI>) -> some View {
         let currentKind = ai.kind.wrappedValue
         VStack(alignment: .leading, spacing: 6) {
-            TextField("Name", text: ai.name)
-                .font(.headline)
-                .onSubmit { persist() }
-                .accessibilityIdentifier("ai-name")
+            HStack {
+                TextField("Name", text: ai.name)
+                    .font(.headline)
+                    .onSubmit { persist() }
+                    .accessibilityIdentifier("ai-name")
+                Spacer()
+                // Independent on/off — toggle each model without deleting it.
+                Toggle("Enabled", isOn: enabledBinding(ai))
+                    .labelsHidden()
+                    .accessibilityIdentifier("ai-enabled")
+            }
+            .opacity(ai.wrappedValue.isEnabled ? 1 : 0.6)
             Picker("Backend", selection: ai.kind) {
                 ForEach(ConfiguredAI.kinds, id: \.tag) { kind in
                     Text(kind.label).tag(kind.tag)
@@ -186,12 +194,10 @@ struct AISettingsView: View {
                     .accessibilityIdentifier("ai-model")
             }
 
-            if ConfiguredAI.isRemote(currentKind),
-                let account = ConfiguredAI.keyAccount(for: currentKind)
-            {
+            if ConfiguredAI.isRemote(currentKind), let account = ai.wrappedValue.apiKeyAccount {
                 SecureField(
                     ConfiguredAI.keyOptional(currentKind) ? "API key (optional)" : "API key",
-                    text: keyBinding(account: account))
+                    text: keyBinding(account: account, legacyKind: currentKind))
                     .autocorrectionDisabled()
                     .textInputAutocapitalization(.never)
                     .accessibilityIdentifier("api-key-field")
@@ -272,7 +278,7 @@ struct AISettingsView: View {
                 : "Active: self-hosted at \(base)"
         }
         if ConfiguredAI.isRemote(ai.kind) {
-            return hasKey(for: ai.kind)
+            return hasKey(for: ai)
                 ? "Active: \(ConfiguredAI.label(for: ai.kind))"
                 : "No API key yet — replies use the Demo stub until you add one."
         }
@@ -289,19 +295,33 @@ struct AISettingsView: View {
         if ai.kind == "custom" {
             return !(ai.baseURL ?? "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
         }
-        if ConfiguredAI.isRemote(ai.kind) { return hasKey(for: ai.kind) }
+        if ConfiguredAI.isRemote(ai.kind) { return hasKey(for: ai) }
         if ai.kind == "demo" { return false }
         return FoundationModelsAgentProvider.availabilityReason == nil
     }
 
-    private func hasKey(for kind: String) -> Bool {
-        guard let account = ConfiguredAI.keyAccount(for: kind) else { return false }
-        return !loadKey(account).isEmpty
+    private func hasKey(for ai: ConfiguredAI) -> Bool {
+        if let account = ai.apiKeyAccount, !loadKey(account).isEmpty { return true }
+        // Fall back to a key saved by an older build under the shared account.
+        if let legacy = ConfiguredAI.keyAccount(for: ai.kind), !loadKey(legacy).isEmpty { return true }
+        return false
     }
 
-    private func keyBinding(account: String) -> Binding<String> {
+    private func enabledBinding(_ ai: Binding<ConfiguredAI>) -> Binding<Bool> {
         Binding(
-            get: { loadKey(account) },
+            get: { ai.wrappedValue.isEnabled },
+            set: { ai.wrappedValue.enabled = $0; persist() })
+    }
+
+    private func keyBinding(account: String, legacyKind: String) -> Binding<String> {
+        Binding(
+            get: {
+                let perAI = loadKey(account)
+                if !perAI.isEmpty { return perAI }
+                // Show a key saved by an older build (shared per-provider account)
+                // so it's not lost; editing saves it to THIS AI's own account.
+                return ConfiguredAI.keyAccount(for: legacyKind).map { loadKey($0) } ?? ""
+            },
             set: { saveKey(account: account, value: $0) })
     }
 

@@ -127,7 +127,7 @@ struct SettingsView: View {
     private var serversSection: some View {
         Section {
             ForEach(relayURLs, id: \.self) { url in
-                LabeledContent(url == "local" ? "Built-in local relay" : url) {
+                LabeledContent(relayDisplayName(url)) {
                     relayIndicator(for: url)
                 }
                 .font(.callout)
@@ -190,7 +190,7 @@ struct SettingsView: View {
         } header: {
             Text("Servers")
         } footer: {
-            Text("Messages are gift-wrapped: servers see only that an encrypted envelope exists for a recipient — never the sender or content. Enter `local` for the built-in offline relay.")
+            Text("Messages are gift-wrapped: servers see only that an encrypted envelope exists for a recipient — never the sender or content. Keywords instead of a URL: `local` (built-in, offline), `host` (turn THIS device into the relay for nearby companions over Wi-Fi/Bluetooth — no router, great for a train or airport), `nearby` (join a device that's hosting).")
         }
     }
 
@@ -245,12 +245,24 @@ struct SettingsView: View {
         return model.relayStatuses.first { norm($0.url) == norm(url) }?.status
     }
 
+    /// Friendly label for a relay entry, including the offline + Multipeer modes.
+    private func relayDisplayName(_ url: String) -> String {
+        switch url {
+        case "local": return "Built-in local relay (offline)"
+        case "host": return "Host a nearby relay · Multipeer"
+        case "nearby": return "Join a nearby relay · Multipeer"
+        default: return url
+        }
+    }
+
     private func addRelay() {
         let trimmed = newRelayURL.trimmingCharacters(in: .whitespacesAndNewlines)
-        let isLocal = trimmed == "local"
+        let keywords: Set<String> = ["local", "host", "nearby"]
         let url = URL(string: trimmed)
-        guard isLocal || (url != nil && (url?.scheme == "ws" || url?.scheme == "wss")) else {
-            relayError = "Server URLs must start with wss:// (or ws:// for local testing)."
+        guard keywords.contains(trimmed)
+            || (url != nil && (url?.scheme == "ws" || url?.scheme == "wss"))
+        else {
+            relayError = "Enter wss://… for a server, or a keyword: local (offline), host (relay for nearby devices), nearby (join one)."
             return
         }
         relayError = nil

@@ -41,12 +41,21 @@ public struct CustomOpenAIProvider: AgentProvider {
         return AgentTurn(messages: [AgentMessage(text: trimmed)])
     }
 
-    /// Accepts either a base (".../v1") or a full (".../v1/chat/completions") URL.
+    /// Be forgiving about how much of the OpenAI path the user typed, so LM
+    /// Studio / Ollama / vLLM all "just work" from a host:port:
+    ///  - full  ".../chat/completions" → used as-is
+    ///  - base  ".../v1"               → append "/chat/completions"
+    ///  - bare  "http://host:port"     → append "/v1/chat/completions"
+    ///  - other path                   → append "/chat/completions"
     func endpoint() -> URL? {
         var base = baseURL.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !base.isEmpty else { return nil }
         while base.hasSuffix("/") { base.removeLast() }
         if base.hasSuffix("/chat/completions") { return URL(string: base) }
+        if base.hasSuffix("/v1") { return URL(string: base + "/chat/completions") }
+        if let u = URL(string: base), u.path.isEmpty || u.path == "/" {
+            return URL(string: base + "/v1/chat/completions")
+        }
         return URL(string: base + "/chat/completions")
     }
 

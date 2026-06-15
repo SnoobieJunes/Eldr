@@ -23,16 +23,21 @@ trade-off, privacy wins.
 
 ## Getting started
 
-The first time you open EldrChat, you'll see a few short explainer cards, then:
+The first time you open EldrChat, you create your account:
 
-1. **Pick a display name.** This is stored only on your device. You can change it
-   later in Settings.
-2. **Read the "No recovery — by design" warning.** This is important: your
-   identity lives only on this device. It's never backed up, synced, or exported.
-   **If you lose this device, you lose this identity and all its conversations.
-   There is no recovery.** You'll tick a box to confirm you understand.
-3. **Tap "Generate my keys."** The app creates your private identity right on the
-   phone. Done.
+1. **Pick a display name and a passphrase.** Your account lives only on this
+   device, encrypted under your passphrase. Each passphrase opens its **own
+   separate account**, and nothing on the device reveals how many you have
+   (deniable multi-account — handy for keeping work and personal apart, or a
+   decoy).
+2. **Read the "No recovery — by design" warning.** **If you lose your passphrase,
+   that account and all its messages are gone forever — never backed up, synced,
+   or exported, and we cannot reset it.** You'll tick a box to confirm.
+3. **Face ID is the default.** After you create the account, the lock screen uses
+   Face ID / Touch ID so you don't retype your passphrase every time (it prompts
+   automatically at launch). Turn it off in **Settings ▸ Account** for
+   passphrase-only high-security mode. To open a *different* or hidden account,
+   ignore Face ID and type that account's passphrase instead.
 
 ### Your address: the npub
 
@@ -111,8 +116,35 @@ active · only messages you add to context · off), how deep, and what it **does
 (participate · draft only · summarize). You can also override the context per
 conversation in that conversation's **Details**.
 
+**Each AI is independent.** Toggle any model **on/off** without deleting it; give
+two AIs of the **same** provider their **own** API keys (just add a second one);
+and set each one's instructions, what it gathers, how deep, and whether it drafts
+or posts.
+
 **Transparency first:** see exactly what each model receives in **Settings ▸ AI ▸
-What your AI sees**. Tap **Test primary AI now** to confirm it works.
+What your AI sees**. Tap **Test primary AI now** to confirm it works (it shows the
+real reply or the exact error).
+
+#### Running your own model (self-hosted)
+
+Run a model on your Mac/PC with **LM Studio** or **Ollama** and point EldrChat at
+it — private, no cloud, no subscription:
+
+1. Start the server and **enable local-network serving** (LM Studio: *Developer ▸
+   Server ▸ Serve on Local Network*; Ollama: launch with `OLLAMA_HOST=0.0.0.0`).
+   Note the port (LM Studio default `1234`, Ollama `11434`).
+2. In **Settings ▸ AI**, add an AI with backend **Custom / self-hosted**.
+3. **Server URL:** your computer's **LAN IP**, e.g. `http://192.168.1.20:1234`.
+   EldrChat appends the OpenAI path for you (you can also paste the full
+   `…/v1`). Don't use `localhost` from a real phone — that only works in the
+   iOS Simulator; on a device, use the computer's network address.
+4. **Model:** the exact model id LM Studio / `ollama list` shows (e.g.
+   `qwen/qwen3-…`). No API key needed.
+
+EldrChat speaks the **OpenAI-compatible Chat Completions** API — `POST /v1/chat/
+completions` with a `messages` array — which is exactly what LM Studio and Ollama
+serve. (Their *other*, non-OpenAI endpoints like `/api/...` won't work; use the
+OpenAI one, which is what the steps above set up.)
 
 ### "My AI" — your private solo chat
 
@@ -158,6 +190,29 @@ context sharing. You can **see exactly what your AI receives** anytime in
 On-device AI stays on your device. A **remote API receives your message
 content** — EldrChat warns you clearly before you enable one, and again whenever
 a name or alias you type might be included in what's sent.
+
+## Connecting in crowded places — no router needed
+
+On airport Wi-Fi, a train, or a road trip you may not have — or trust — a network.
+EldrChat can run **with no router and no server**, directly between devices over
+Wi-Fi/Bluetooth:
+
+- **Nearby (1:1, automatic).** With **Settings ▸ Nearby** on, messages to a
+  contact in the same room go straight device-to-device, even fully offline.
+
+- **Host a pocket relay (a group, one host).** In **Settings ▸ Servers**, type the
+  keyword **`host`** as your server: that device becomes a tiny relay for everyone
+  around it. Companions type **`nearby`** and connect to it over the radio — no
+  router, no internet, no third party. It's your own private relay in your pocket,
+  and *more* private than a café's Wi-Fi or a public relay because nothing leaves
+  the little circle of devices.
+
+  - The host can also **share its on-device AI** — companions use the host's Apple
+    Intelligence over the same link.
+  - Everything stays end-to-end encrypted exactly as on the internet: the host
+    relays sealed envelopes and never sees message content.
+
+*(These radio features need real hardware — they don't run on the iOS Simulator.)*
 
 ## Staying safe
 

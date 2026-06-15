@@ -17,6 +17,8 @@
 	<array>
 		<string>_pqrc-local._tcp</string>
 		<string>_pqrc-local._udp</string>
+		<string>_pqrc-relay._tcp</string>
+		<string>_pqrc-relay._udp</string>
 	</array>
 	<!-- Allow plaintext HTTP ONLY to local/private network addresses (a
 	     self-hosted LLM on your LAN, e.g. http://192.168.x.x:11434). The public

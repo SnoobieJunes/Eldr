@@ -488,6 +488,26 @@ and affects interop; `[app-only]` — client behavior, no wire impact;
   computed Keychain property `@Observable` can't track, so it never re-rendered
   when flipped (now mirrored into `@State`, re-synced after each toggle so an
   enable that fails — no device passcode — snaps back and shows the reason).
+- **A31 — Device-hosted relay over Multipeer + per-AI controls** (2026-06-15):
+  a **pocket relay** for crowded places with no trusted network (`NearbyRelayHub`
+  in PQRCNostr). One device types `host` in Settings ▸ Servers → it runs the
+  existing `LocalRelaySimulator` engine and bridges it to companions over a
+  `NearbyLink` (`NearbyRelayHost`); companions type `nearby` → a `RelayTransport`
+  over the radio (`MultipeerRelayClient`). No router, no public relay, no third
+  party. The kind-1059 anchor-relay rule (serve a wrap only to the AUTHed,
+  p-tagged recipient) still holds over the hub, so the host (a trusted peer's
+  device) sees only sealed ciphertext + p-tags, never content — strictly better
+  than café Wi-Fi or a public relay. The host can also **share its on-device AI**
+  via `ai_request`/`ai_response` frames (the "Tier 2 LLM over Multipeer" request —
+  realized iPhone-to-iPhone, no Mac needed). The whole protocol runs against
+  `LocalLinkSimulator` (6 headless tests); only the MC radio adapter needs
+  hardware (a new `pqrc-relay` Bonjour service, distinct from direct-Nearby's
+  `pqrc-local`). **Per-AI controls:** each tethered AI has an independent on/off
+  `enabled` toggle, and its API key now lives in a **per-AI** Keychain account
+  (`apikey.<id>`, with the legacy shared account read as a fallback) so two AIs of
+  the SAME provider can hold DIFFERENT keys. **Self-hosted robustness:** the custom
+  provider's URL builder accepts a bare `host:port` (→ `/v1/chat/completions`), a
+  `…/v1`, or a full path, so LM Studio / Ollama "just work".
 - **A25 — Duress = decoy account** (2026-06-14): because every passphrase opens
   its own separate silo, a duress/decoy account needs no special code — create an
   account with a memorable "duress" passphrase, stock it with innocuous chats,

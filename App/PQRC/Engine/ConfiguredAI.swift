@@ -36,11 +36,15 @@ struct ConfiguredAI: Identifiable, Codable, Equatable, Sendable {
     var baseURL: String?
     /// Optional model id/slug override (groq / custom / openrouter).
     var model: String?
+    /// Independent on/off switch — a disabled AI is fully inactive (no drafts, no
+    /// context, no posting) but stays configured so you can flip it back on.
+    /// Optional → older configs default to enabled.
+    var enabled: Bool?
 
     init(
         id: String, name: String, kind: String, instructions: String? = nil,
         contextPolicy: String? = nil, contextDepth: Int? = nil, outputMode: String? = nil,
-        baseURL: String? = nil, model: String? = nil
+        baseURL: String? = nil, model: String? = nil, enabled: Bool? = nil
     ) {
         self.id = id
         self.name = name
@@ -51,6 +55,7 @@ struct ConfiguredAI: Identifiable, Codable, Equatable, Sendable {
         self.outputMode = outputMode
         self.baseURL = baseURL
         self.model = model
+        self.enabled = enabled
     }
 
     static let defaultDepth = 20
@@ -58,6 +63,14 @@ struct ConfiguredAI: Identifiable, Codable, Equatable, Sendable {
     var effectivePolicy: String { contextPolicy ?? "active" }
     var effectiveOutputMode: String { outputMode ?? "participate" }
     var effectiveDepth: Int { max(1, contextDepth ?? Self.defaultDepth) }
+    var isEnabled: Bool { enabled ?? true }
+
+    /// Per-AI Keychain account for the API key, so two AIs of the SAME provider
+    /// can hold DIFFERENT keys (e.g. two Claude accounts) just by adding a second
+    /// one. nil for backends that need no key (on-device / demo). The legacy
+    /// shared account (`keyAccount(for:)`) is still read as a fallback so keys
+    /// saved by older builds keep working.
+    var apiKeyAccount: String? { Self.isRemote(kind) ? "apikey.\(id)" : nil }
 
     /// The selectable backends and their labels.
     static let kinds: [(tag: String, label: String)] = [

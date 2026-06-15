@@ -68,5 +68,9 @@ struct APIProviderTests {
         #expect(
             CustomOpenAIProvider(baseURL: "http://h/v1/chat/completions/", apiKey: "", model: "m")
                 .endpoint()?.absoluteString == "http://h/v1/chat/completions")
+        // Bare host:port (the common LM Studio / Ollama setup) → OpenAI default path.
+        #expect(
+            CustomOpenAIProvider(baseURL: "http://localhost:1337", apiKey: "", model: "m")
+                .endpoint()?.absoluteString == "http://localhost:1337/v1/chat/completions")
     }
 }

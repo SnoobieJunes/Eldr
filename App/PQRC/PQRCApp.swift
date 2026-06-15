@@ -141,21 +141,63 @@ final class AppSession {
         return saved.isEmpty ? [Self.defaultRelayURL] : saved
     }
 
+    /// Retained while this device hosts a Multipeer relay (`host` in the relay
+    /// list). Stopped before re-resolving and on lock.
+    private var relayHost: NearbyRelayHost?
+
     private func makeRelayTransports() async -> [any RelayTransport] {
+        await relayHost?.stop()
+        relayHost = nil
         var transports: [any RelayTransport] = []
         for configured in Self.configuredRelayURLs {
-            if configured == "local" {
+            switch configured {
+            case "local":
                 transports.append(await LocalRelaySimulator(url: "local://relay").connect())
-            } else if let url = URL(string: configured),
-                url.scheme == "ws" || url.scheme == "wss"
-            {
-                transports.append(await NostrWebSocketTransport(url: url).connect())
+            case "host":
+                // Host a relay for nearby companions over Multipeer — no router,
+                // no public relay (crowded places like a train or airport). The
+                // host also shares its on-device AI. MC needs real radios, so this
+                // path is verified on hardware, not the simulator.
+                let relay = LocalRelaySimulator(url: "nearby://host")
+                #if canImport(MultipeerConnectivity)
+                    let host = NearbyRelayHost(
+                        link: MultipeerNearbyLink(serviceType: "pqrc-relay"),
+                        relay: relay, aiAnswer: Self.onDeviceHubAI())
+                    try? await host.start()
+                    relayHost = host
+                #endif
+                transports.append(await relay.connect())
+            case "nearby":
+                // Join a nearby device that's hosting a relay.
+                #if canImport(MultipeerConnectivity)
+                    let client = MultipeerRelayClient(
+                        link: MultipeerNearbyLink(serviceType: "pqrc-relay"))
+                    try? await client.start()
+                    transports.append(client)
+                #else
+                    transports.append(await LocalRelaySimulator().connect())
+                #endif
+            default:
+                if let url = URL(string: configured), url.scheme == "ws" || url.scheme == "wss" {
+                    transports.append(await NostrWebSocketTransport(url: url).connect())
+                }
             }
         }
         if transports.isEmpty {
             transports.append(await LocalRelaySimulator(url: "local://relay").connect())
         }
         return transports
+    }
+
+    /// A `HubAIAnswer` backed by this device's on-device model, so a relay host
+    /// can share its Apple Intelligence with companions over the link. Returns nil
+    /// when on-device AI isn't available.
+    private static func onDeviceHubAI() -> HubAIAnswer {
+        { system, prompt in
+            guard FoundationModelsAgentProvider.isAvailable else { return nil }
+            return try? await FoundationModelsAgentProvider.oneShot(
+                instructions: system, prompt: prompt)
+        }
     }
 
     /// Token-based API providers and the Keychain account each key is stored
@@ -179,12 +221,15 @@ final class AppSession {
     /// silo's Keychain service so accounts never share AI credentials.
     static func makeProvider(config: ConfiguredAI, siloID: String) -> any AgentProvider {
         let keychain = KeychainStore(service: siloService(siloID))
-        func key(for provider: String) -> String? {
-            guard let account = apiKeyAccounts[provider],
-                let data = keychain.loadIfPresent(account: account)
-            else { return nil }
+        func read(_ account: String?) -> String? {
+            guard let account, let data = keychain.loadIfPresent(account: account) else { return nil }
             let value = String(decoding: data, as: UTF8.self)
             return value.isEmpty ? nil : value
+        }
+        func key(for provider: String) -> String? {
+            // Per-AI key first (so two AIs of the SAME provider can hold DIFFERENT
+            // keys), then the legacy shared account for back-compat.
+            read(config.apiKeyAccount) ?? read(apiKeyAccounts[provider])
         }
         let model = config.model ?? ""
         switch config.kind {
@@ -258,7 +303,7 @@ final class AppSession {
 
     /// The configured AIs bound to live providers — the runtime's tethered AIs.
     static func makeRuntimeAIs(siloID: String) -> [TetheredAI] {
-        loadConfiguredAIs(siloID: siloID).map { config in
+        loadConfiguredAIs(siloID: siloID).filter(\.isEnabled).map { config in
             TetheredAI(
                 id: config.id, name: config.name,
                 provider: makeProvider(config: config, siloID: siloID),
@@ -426,6 +471,8 @@ final class AppSession {
         if case .single(let model) = mode {
             await model.runtime.shutdown()
         }
+        await relayHost?.stop()
+        relayHost = nil
         activeSilo = nil
         mode = .locked
     }
