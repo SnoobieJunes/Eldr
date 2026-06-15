@@ -171,10 +171,13 @@ final class TourCoordinator {
     /// Show the tour once per account on first entry. Call when a real account is
     /// active (not the lock screen, not the demo universe). No-op if already seen.
     func presentIfFirstRun(siloID: String?) {
-        // UI/automation runs must never get a modal tour in the way.
+        // UI/automation runs must never get a modal tour in the way. `--reset` is a
+        // dev/test wipe that lands on a clean create flow; the onboarding UI test
+        // drives that flow and asserts the main UI directly, so it must not be
+        // boxed in by the tour either.
         let args = ProcessInfo.processInfo.arguments
         if args.contains("--uitest") || args.contains("--local-universe")
-            || args.contains("--uitest-biometric")
+            || args.contains("--uitest-biometric") || args.contains("--reset")
         {
             return
         }
@@ -184,8 +187,22 @@ final class TourCoordinator {
     }
 
     /// Relaunch from Settings — always shows, regardless of the seen flag.
+    ///
+    /// The tour is a `fullScreenCover` on `RootView`, and "Take the tour" lives
+    /// inside the Settings `.sheet` (also presented from `RootView`). Flipping
+    /// `isPresenting` in the same turn that the sheet calls `dismiss()` made UIKit
+    /// try to present the cover while the sheet was still dismissing — a
+    /// present-while-presentation-in-progress conflict that UIKit drops, so the
+    /// tour silently never appeared. Defer to the next runloop turns so the sheet
+    /// fully tears down first, then present. (`isPresenting` already drives the
+    /// cover, so a one-tick hop after the dismissal lands is enough; we wait a
+    /// touch longer than the sheet's dismiss animation to be safe.)
     func relaunch() {
-        isPresenting = true
+        guard !isPresenting else { return }
+        Task { @MainActor in
+            try? await Task.sleep(for: .milliseconds(450))
+            isPresenting = true
+        }
     }
 
     /// Mark seen + dismiss (Skip or finishing the last card). Records against the

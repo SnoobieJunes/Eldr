@@ -90,11 +90,14 @@ struct PQRCApp: App {
                 Button("Find Conversation") { commands.find() }
                     .keyboardShortcut("f", modifiers: .command)
             }
-            // Sidebar toggle in the View menu (matches Mail / Messages).
-            CommandGroup(after: .sidebar) {
-                Button("Toggle Sidebar") { commands.toggleSidebar() }
-                    .keyboardShortcut("s", modifiers: [.command, .control])
-            }
+            // NOTE: no custom "Toggle Sidebar" command. SwiftUI already installs a
+            // system "Show Sidebar" item bound to ⌃⌘S for the `NavigationSplitView`
+            // in `MainView`, and registering our own ⌃⌘S in `.sidebar` duplicated
+            // that exact shortcut — UIKit rejects duplicate key commands with an
+            // uncaught `NSInvalidArgumentException` ("Replacement elements contain
+            // duplicates") the moment the main menu is built, which on Mac is at
+            // launch. So the app crashed on launch on Mac. The built-in ⌃⌘S already
+            // toggles the split view's sidebar, so we just rely on it.
             // ⌘, Settings in the app menu, replacing the disabled default.
             CommandGroup(replacing: .appSettings) {
                 Button("Settings…") { commands.openSettings() }

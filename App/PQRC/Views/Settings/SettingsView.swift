@@ -526,9 +526,10 @@ struct SettingsView: View {
     private var aboutSection: some View {
         Section("About") {
             Button {
+                // Dismiss Settings first; `relaunch()` defers the full-screen tour
+                // until this sheet has finished dismissing, so the cover doesn't
+                // collide with the sheet's dismissal (which silently dropped it).
                 dismiss()
-                // Let Settings fully dismiss before the full-screen tour mounts,
-                // so the cover doesn't fight the sheet's dismissal transition.
                 tour.relaunch()
             } label: {
                 Label("Take the tour", systemImage: "sparkles")
