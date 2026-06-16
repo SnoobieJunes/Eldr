@@ -233,13 +233,19 @@ actor PersonaRuntime {
             ? (contactRecords[conversationID]?.autoName ?? "a contact")
             : (groupRosters[conversationID]?.name ?? contactName(conversationID))
         let override: String? = threadID.map { tid in
-            AgentSkills.threadSystemPrompt(
+            let base = AgentSkills.threadSystemPrompt(
                 displayName: promptDisplayName,
                 contextDomain: AppSession.aiContextDomain(siloID: siloID),
                 peerName: promptPeerName,
                 threadID: tid,
                 activeSkillIDs: AppSession.threadSkills(tid, siloID: siloID),
                 instructions: ai.instructions)
+            // App-layer overlay: append any pinned CUSTOM skills' instruction text
+            // the same way the package appends a built-in's fragment. The package
+            // catalog stays the built-in source of truth; these are merged in only
+            // for the prompt. Still just message text — no wire/privacy exception.
+            let custom = customSkillFragments(threadID: tid)
+            return custom.isEmpty ? base : base + "\n\n" + custom
         }
         let ctx = await agentContext(
             conversationID: conversationID, threadID: threadID, depth: ai.contextDepth,
@@ -272,6 +278,20 @@ actor PersonaRuntime {
             transcript: entries, threadID: context.threadID, threadTitle: context.threadTitle,
             instructions: context.instructions, summarize: context.summarize,
             systemPromptOverride: context.systemPromptOverride)
+    }
+
+    /// The pinned CUSTOM skills' instruction text for a thread, formatted exactly
+    /// like the built-in `ACTIVE SKILLS` block so the model treats them the same.
+    /// Resolves the per-silo overlay (`AppSession.loadCustomSkills`); built-in ids
+    /// are handled by the package and skipped here. Empty when none are pinned.
+    private func customSkillFragments(threadID: String) -> String {
+        let pinned = AppSession.threadSkills(threadID, siloID: siloID)
+        guard !pinned.isEmpty else { return "" }
+        let custom = AppSession.loadCustomSkills(siloID: siloID)
+        let active = pinned.compactMap { id in custom.first { $0.id == id } }
+        guard !active.isEmpty else { return "" }
+        return "CUSTOM SKILLS — use the one whose trigger fits; reply in the same envelope:\n"
+            + active.map { "## \($0.id)\n\($0.instruction)" }.joined(separator: "\n\n")
     }
 
     // MARK: - Bootstrap
@@ -993,6 +1013,107 @@ actor PersonaRuntime {
         }
     }
 
+    // MARK: - Context inspector (read-only, per-AI; backs AIContextInspectorView)
+
+    /// One assembled context window for one tethered AI — EXACTLY what it would
+    /// receive for a conversation/thread right now: the system prompt (its honest,
+    /// resolved text), the gather policy + depth, and every transcript entry. For
+    /// a REMOTE AI with the egress firewall on, names are already codename-redacted
+    /// (the same boundary `contextFor` crosses), so the inspector never shows a
+    /// remote vendor something the model wouldn't see. Read-only.
+    struct AIContextInspection: Sendable, Identifiable {
+        let id: String  // the tethered AI's id
+        let aiName: String
+        let isRemote: Bool
+        let firewallOn: Bool
+        /// Engine policy actually in effect ("active" | "strict" | "off"), after
+        /// the per-conversation override is applied.
+        let effectivePolicy: String
+        let depth: Int
+        /// The system/instructions text the model receives this turn (draft prompt
+        /// for a conversation, the composed guardrails+skills override for a thread).
+        let systemPrompt: String
+        let entries: [Entry]
+
+        struct Entry: Sendable, Identifiable {
+            let id: String  // the stored message id — drives the include/exclude toggle
+            let role: String
+            let text: String
+            let isAgent: Bool
+            let isMine: Bool
+            /// Whether this message is currently marked "Add to AI Context".
+            let marked: Bool
+            /// Whether it's a peer's message a sharing grant authorized.
+            let shared: Bool
+            /// True when it's included by the live policy (window/solo) rather than
+            /// by an explicit mark — so the UI can explain why excluding it needs
+            /// the gather mode changed, not just an un-mark.
+            let includedByPolicy: Bool
+        }
+    }
+
+    /// Assemble the inspector view for every tethered AI for one conversation/
+    /// thread. Mirrors `contextFor` precisely (same policy resolution, same depth,
+    /// same redaction) so what the user inspects is what the AI gets.
+    func contextInspections(conversationID: String, threadID: String? = nil) async
+        -> [AIContextInspection]
+    {
+        var out: [AIContextInspection] = []
+        for ai in ais {
+            // Resolve the effective gather policy exactly as contextFor does: the
+            // per-conversation override (Settings ▸ conversation details) wins.
+            var policy = ai.contextPolicy
+            switch AppSession.conversationContextMode(conversationID, siloID: siloID) {
+            case "off": policy = "off"
+            case "marked": policy = "strict"
+            case "full": policy = "active"
+            default: break
+            }
+            // The honest system-prompt text + redaction state this AI receives.
+            let ctx = await contextFor(ai, conversationID: conversationID, threadID: threadID)
+            let systemPrompt = threadID == nil ? ctx.draftSystemPrompt() : ctx.turnSystemPrompt()
+            let redact = ai.isRemote && firewallEnabled
+
+            var entries: [AIContextInspection.Entry] = []
+            if policy != "off" {
+                let visible = await visibleContextMessages(
+                    conversationID: conversationID, threadID: threadID,
+                    depth: ai.contextDepth, strict: policy == "strict")
+                entries = visible.map { item in
+                    let message = item.message
+                    let isMine = message.senderIdentity == identityHex
+                    let isAgent = message.participantType == .agent
+                    // Same codename rule as redactedForRemote, but keep the id.
+                    let display: String
+                    if redact {
+                        display =
+                            isMine ? "you" : (contactRecords[message.senderIdentity]?.autoName ?? "a contact")
+                    } else {
+                        display =
+                            isMine ? displayName : (contactRecords[message.senderIdentity]?.displayName ?? "Contact")
+                    }
+                    return AIContextInspection.Entry(
+                        id: message.id,
+                        role: isAgent ? "\(display)'s AI" : display,
+                        text: message.text,
+                        isAgent: isAgent,
+                        isMine: isMine,
+                        marked: message.aiContext,
+                        shared: item.shared,
+                        // Included by live policy when it's NOT a marked message
+                        // (a marked message would be included even when off/strict).
+                        includedByPolicy: policy == "active" && !message.aiContext)
+                }
+            }
+            out.append(
+                AIContextInspection(
+                    id: ai.id, aiName: ai.name, isRemote: ai.isRemote,
+                    firewallOn: firewallEnabled, effectivePolicy: policy,
+                    depth: ai.contextDepth, systemPrompt: systemPrompt, entries: entries))
+        }
+        return out
+    }
+
     // MARK: - Egress-firewall-redacted accessors for the local MCP server (A35 Phase 2)
 
     /// The SAME egress firewall the remote-AI path uses (`redactedForRemote`),
@@ -1330,11 +1451,14 @@ actor PersonaRuntime {
         try await sendMessage(text, conversationID: conversationID, participantType: .agent)
     }
 
-    private func agentContext(
-        conversationID: String, threadID: String?, depth: Int = ConfiguredAI.defaultDepth,
-        strict: Bool = false, instructions: String? = nil, summarize: Bool = false,
-        systemPromptOverride: String? = nil
-    ) async -> AgentContext {
+    /// The EXACT messages the AI would see for this scope, with the per-message
+    /// `shared` flag — the single source of truth for both `agentContext` (what's
+    /// actually sent) and the read-only context inspector (what the user is
+    /// shown). Pure read: store + grants + settings, no engine mutation.
+    /// `strict` forces marked-context-only even while the AI is active.
+    private func visibleContextMessages(
+        conversationID: String, threadID: String?, depth: Int, strict: Bool
+    ) async -> [(message: StoredMessage, shared: Bool)] {
         let stored: [StoredMessage]
         if let threadID {
             stored = (try? await store.messages(threadID: threadID)) ?? []
@@ -1389,14 +1513,27 @@ actor PersonaRuntime {
             budget -= cost
         }
         let visible = Array(bounded.reversed())
-
-        let transcript = visible.map { message -> TranscriptEntry in
+        return visible.map { message in
             let isMine = message.senderIdentity == identityHex
             // A message flagged "Add to AI Context" is elevated to shared
             // context the agent treats specially: my own marked messages always
             // (my AI, my content); a peer's only when BOTH humans granted in
             // this scope — default-deny otherwise (invariant 9, privacy).
             let shared = message.aiContext && (isMine || sharingAuthorized)
+            return (message, shared)
+        }
+    }
+
+    private func agentContext(
+        conversationID: String, threadID: String?, depth: Int = ConfiguredAI.defaultDepth,
+        strict: Bool = false, instructions: String? = nil, summarize: Bool = false,
+        systemPromptOverride: String? = nil
+    ) async -> AgentContext {
+        let visible = await visibleContextMessages(
+            conversationID: conversationID, threadID: threadID, depth: depth, strict: strict)
+        let transcript = visible.map { entry -> TranscriptEntry in
+            let message = entry.message
+            let isMine = message.senderIdentity == identityHex
             return TranscriptEntry(
                 senderIdentityHex: message.senderIdentity,
                 senderDisplayName: isMine
@@ -1404,7 +1541,7 @@ actor PersonaRuntime {
                 participantType: message.participantType,
                 text: message.text,
                 isContext: message.isContext,
-                isSharedContext: shared)
+                isSharedContext: entry.shared)
         }
         return AgentContext(
             myIdentityHex: identityHex, myDisplayName: displayName,

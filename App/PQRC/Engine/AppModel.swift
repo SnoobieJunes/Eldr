@@ -415,6 +415,15 @@ final class AppModel {
         await runtime.contextPreview(conversationID: conversationID)
     }
 
+    /// Per-AI assembled context windows — exactly what each tethered AI receives
+    /// for a conversation (system prompt + policy + depth + transcript), for the
+    /// Context inspector. Remote AIs are already codename-redacted.
+    func contextInspections(conversationID: String) async
+        -> [PersonaRuntime.AIContextInspection]
+    {
+        await runtime.contextInspections(conversationID: conversationID)
+    }
+
     /// Names of the AIs tethered to me right now.
     func tetheredAINames() async -> [String] {
         await runtime.tetheredAINames()

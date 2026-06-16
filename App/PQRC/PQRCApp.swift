@@ -448,6 +448,35 @@ final class AppSession {
         else { UserDefaults.standard.set(ids, forKey: key) }
     }
 
+    // MARK: - Custom agent skills (app-layer overlay, per-silo)
+
+    /// User-authored skills overlaid on the built-in `AgentSkills.catalog`. Stored
+    /// per-silo (deniability — A33) so accounts never share or accumulate each
+    /// other's custom skills at rest, exactly like every other silo-scoped
+    /// setting. The package catalog stays the source of truth for built-ins; these
+    /// are merged in only for DISPLAY (the Thread Skills picker) and for THREAD
+    /// INJECTION (their `fragment` is appended to the thread-turn prompt the same
+    /// way a built-in's is). Nothing here ever touches the wire — a skill is just
+    /// prompt text, recorded in the thread like any agent message.
+    nonisolated static func loadCustomSkills(siloID: String = "") -> [CustomSkill] {
+        guard let data = UserDefaults.standard.data(forKey: siloDefaultsKey("customSkills", siloID)),
+            let list = try? JSONDecoder().decode([CustomSkill].self, from: data)
+        else { return [] }
+        return list
+    }
+    nonisolated static func saveCustomSkills(_ list: [CustomSkill], siloID: String = "") {
+        let key = siloDefaultsKey("customSkills", siloID)
+        if list.isEmpty {
+            UserDefaults.standard.removeObject(forKey: key)
+        } else if let data = try? JSONEncoder().encode(list) {
+            UserDefaults.standard.set(data, forKey: key)
+        }
+    }
+    /// One custom skill, looked up by its (overlay) id — for thread injection.
+    nonisolated static func customSkill(_ id: String, siloID: String = "") -> CustomSkill? {
+        loadCustomSkills(siloID: siloID).first { $0.id == id }
+    }
+
     /// The configured AIs bound to live providers — the runtime's tethered AIs.
     static func makeRuntimeAIs(siloID: String, hubClient: MultipeerRelayClient?) -> [TetheredAI] {
         loadConfiguredAIs(siloID: siloID).filter(\.isEnabled).map { config in

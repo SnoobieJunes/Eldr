@@ -124,14 +124,22 @@ struct AISettingsView: View {
 
             Section {
                 NavigationLink {
+                    AIContextInspectorView(model: model)
+                } label: {
+                    Label("Context inspector", systemImage: "doc.text.magnifyingglass")
+                }
+                .accessibilityIdentifier("ai-context-inspector")
+                NavigationLink {
                     AIContextView(model: model)
                 } label: {
-                    Label("View tethered LLM context", systemImage: "doc.text.magnifyingglass")
+                    Label("Quick view (read-only)", systemImage: "eye")
                 }
                 .accessibilityIdentifier("view-ai-context")
             } header: {
                 Text("What your AI sees")
-                    .helpInfo("Transparency first: open this to read the exact text each model receives, word for word. It's read-only and sent nowhere. By default your AI only sees messages you add to context — not your whole history.")
+                    .helpInfo("Transparency first, with control. The Context inspector shows EXACTLY what each AI receives for a conversation — its instructions, how much it gathers, and every message — and lets you adjust the depth and include/exclude individual messages, live. The quick view is the same context, read-only. A remote AI always sees your private codenames, never real names.")
+            } footer: {
+                Text("The inspector's edits map to real, saved controls (per-AI depth and the per-message \"Add to AI Context\" marker) — not a separate copy.")
             }
         }
         .navigationTitle("AI")
