@@ -65,9 +65,10 @@ final class ContextLearner: ObservableObject {
             let mask = source.data
             Task { @MainActor [weak self] in self?.readEvents(mask) }
         }
-        source.setCancelHandler { [weak self] in
-            Task { @MainActor in self?.eventsHandle = nil }
-        }
+        // No async `self.eventsHandle = nil` in the cancel handler: it ran AFTER a
+        // stop()/start() rotation had already installed the new handle and nilled it,
+        // silently killing the watch. stop() cancels then releases the handle (which
+        // owns + closes its fd on dealloc), which is sufficient and race-free.
         eventsSource = source
         source.resume()
     }

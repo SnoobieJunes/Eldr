@@ -35,6 +35,22 @@ struct JSONValueTests {
         #expect(JSONValue.parse("") == nil)
         #expect(JSONValue.parse("   ") == nil)
     }
+
+    /// Regression: `intValue` on a non-finite or out-of-range double must return nil,
+    /// not TRAP. A malformed wire field like `1e400` parses (via JSONSerialization) to
+    /// `+inf`, and `Int(.infinity)` is a fatal runtime error — a remote crash the
+    /// instant any `id`/`n`/`exit` field is read as Int.
+    @Test func intValueOnExtremeDoubleDoesNotTrap() {
+        // These all parse to ±inf or an out-of-Int64-range double.
+        #expect(JSONValue.parse(#"{"id":1e400}"#)?["id"]?.intValue == nil)
+        #expect(JSONValue.parse(#"{"id":-1e400}"#)?["id"]?.intValue == nil)
+        #expect(JSONValue.parse(#"{"id":1e309}"#)?["id"]?.intValue == nil)
+        // In-range values still coerce fine (regression guard, not over-rejecting).
+        #expect(JSONValue.parse(#"{"id":42.9}"#)?["id"]?.intValue == 42)
+        #expect(JSONValue.parse(#"{"id":-7}"#)?["id"]?.intValue == -7)
+        #expect(JSONValue.double(.nan).intValue == nil)
+        #expect(JSONValue.double(.infinity).intValue == nil)
+    }
 }
 
 @Suite("OpenAI codec")

@@ -1,3 +1,4 @@
+import AppKit
 import Combine
 import Foundation
 import PQRCACP
@@ -27,10 +28,38 @@ final class LLMHealthChecker: ObservableObject {
 
     private var pollTask: Task<Void, Never>?
     private var observers: [NSObjectProtocol] = []
+    private var pollInterval: TimeInterval = 30
 
-    /// Begin foreground-gated polling. Idempotent.
+    /// Begin foreground-gated polling. Idempotent. Registers app
+    /// active/resign observers (the doc-promised gating that was never actually
+    /// wired — `observers` stayed empty and the poll ran forever in the
+    /// background). Now polling pauses on resign and resumes on activate.
     func startPolling(interval: TimeInterval = 30) {
-        stopPolling()
+        pollInterval = interval
+        guard observers.isEmpty else {
+            resumePolling()
+            return
+        }
+        let center = NotificationCenter.default
+        observers = [
+            center.addObserver(
+                forName: NSApplication.didBecomeActiveNotification, object: nil, queue: .main
+            ) { [weak self] _ in
+                MainActor.assumeIsolated { self?.resumePolling() }
+            },
+            center.addObserver(
+                forName: NSApplication.willResignActiveNotification, object: nil, queue: .main
+            ) { [weak self] _ in
+                MainActor.assumeIsolated { self?.pausePolling() }
+            },
+        ]
+        resumePolling()
+    }
+
+    /// (Re)start the polling loop if it isn't already running.
+    private func resumePolling() {
+        guard pollTask == nil else { return }
+        let interval = pollInterval
         pollTask = Task { [weak self] in
             while !Task.isCancelled {
                 await self?.checkNow()
@@ -39,9 +68,18 @@ final class LLMHealthChecker: ObservableObject {
         }
     }
 
-    func stopPolling() {
+    /// Pause polling (foreground-gating) without tearing down the observers.
+    private func pausePolling() {
         pollTask?.cancel()
         pollTask = nil
+    }
+
+    /// Fully stop: cancel the loop and remove the app-state observers.
+    func stopPolling() {
+        pausePolling()
+        let center = NotificationCenter.default
+        for observer in observers { center.removeObserver(observer) }
+        observers.removeAll()
     }
 
     /// One immediate health check (used by the wizard's "Test connection" step).

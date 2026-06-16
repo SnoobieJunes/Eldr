@@ -145,6 +145,10 @@ final class ACPBridgeService: ObservableObject {
     /// Generate/load the identity, publish the QR payload, and start advertising over
     /// Multipeer so a nearby EldrChat can discover the agent.
     func enable() {
+        // Tear down any prior advertiser first so re-enabling (e.g. retrying from the
+        // `.error` state, where the Enable button is still shown) can't orphan a live
+        // MultipeerNearbyLink + its events Task. Idempotent.
+        if link != nil || eventsTask != nil { disable() }
         do {
             let kp = try loadOrCreateKeypair()
             pairingPayloadJSON = PairingPayload(pubkey: kp.publicKeyHex, relay: preferredRelay)

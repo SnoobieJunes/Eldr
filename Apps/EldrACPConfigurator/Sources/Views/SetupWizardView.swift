@@ -13,6 +13,7 @@ struct SetupWizardView: View {
     @State private var step = 0
     @State private var installing = false
     @State private var installError: String?
+    @State private var xcodeOpenError: String?
 
     private let lastStep = 4
 
@@ -131,10 +132,35 @@ struct SetupWizardView: View {
             Text("In Xcode ▸ Settings ▸ Intelligence ▸ add a model provider of type “Agent (ACP)” and set its command to the launcher path:")
                 .font(.callout).foregroundStyle(.secondary)
             pathRow("Launcher", store.paths.launcher)
-            Button("Open Xcode") {
-                if let url = URL(string: "xcode://") { NSWorkspace.shared.open(url) }
+            Button("Open Xcode") { openXcode() }
+            if let xcodeOpenError {
+                Label(xcodeOpenError, systemImage: "exclamationmark.triangle.fill")
+                    .font(.caption).foregroundStyle(.orange)
             }
         }
+    }
+
+    /// Open the installed Xcode (resolving Xcode-beta too) without relying on the
+    /// `xcode://` URL scheme, which beta installs don't register. Falls back to the
+    /// generic `/Applications/Xcode.app` path, then surfaces guidance if neither
+    /// resolves. No force-unwrap, no crash, no error dialog when Xcode is absent.
+    private func openXcode() {
+        xcodeOpenError = nil
+        let workspace = NSWorkspace.shared
+        // 1) Bundle-id lookup resolves Xcode, Xcode-beta, and renamed copies.
+        if let appURL = workspace.urlForApplication(withBundleIdentifier: "com.apple.dt.Xcode") {
+            workspace.openApplication(at: appURL, configuration: NSWorkspace.OpenConfiguration())
+            return
+        }
+        // 2) Fall back to the conventional install path if it exists.
+        let fallback = URL(fileURLWithPath: "/Applications/Xcode.app")
+        if FileManager.default.fileExists(atPath: fallback.path) {
+            workspace.openApplication(at: fallback, configuration: NSWorkspace.OpenConfiguration())
+            return
+        }
+        // 3) Nothing found — guide the user instead of failing silently/crashing.
+        xcodeOpenError =
+            "Couldn't find Xcode. Open it yourself, then go to Xcode ▸ Settings ▸ Intelligence."
     }
 
     // MARK: Step 4 — Done

@@ -61,7 +61,10 @@ struct TestChatView: View {
             Button(action: sendDraft) {
                 Image(systemName: "paperplane.fill")
             }
-            .keyboardShortcut(.return, modifiers: [])
+            // NB: the TextField's `.onSubmit(sendDraft)` already handles Return. Do
+            // NOT also bind `.keyboardShortcut(.return)` here — that fired BOTH on a
+            // single Return press, starting two concurrent sends. Clicking the button
+            // still works; Return goes through onSubmit only.
             .disabled(draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || session.isResponding)
         }
         .padding(12)

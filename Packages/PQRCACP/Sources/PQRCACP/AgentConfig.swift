@@ -278,6 +278,14 @@ public enum ContextBudget {
         var keptTail = tail
         if maxTurns > 0, tail.count > maxTurns {
             keptTail = Array(tail.suffix(maxTurns))
+            // A `suffix` boundary can land between an assistant tool_call and its
+            // `tool` result, orphaning leading `tool` messages — which the OpenAI
+            // shape rejects ("tool message must follow a preceding tool_calls").
+            // Drop any leading orphaned tool results so the kept window starts on a
+            // valid (user/assistant) message.
+            while let first = keptTail.first, first.role == .tool {
+                keptTail.removeFirst()
+            }
         }
 
         rest = (firstTask.map { [$0] } ?? []) + keptTail

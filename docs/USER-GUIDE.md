@@ -329,3 +329,8 @@ Two integrations are available if you run EldrChat on a Mac:
 
 Both are off by default and documented step-by-step in **docs/SETUP-GUIDE.md §9**
 (Xcode 27 registration) and the in-app Settings.
+
+For the Xcode 27 agent, there's also a point-and-click **Eldr ACP Configurator**
+macOS app (`Apps/EldrACPConfigurator/`) that wraps the whole setup in a wizard, with
+a live config panel, a log viewer, an in-app test chat, and self-learning per-project
+memory. See **Apps/EldrACPConfigurator/README.md**.

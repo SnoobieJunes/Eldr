@@ -44,9 +44,11 @@ final class LogTailer: ObservableObject {
     }
 
     func stop() {
+        // Cancel the source, then drop the handle. The handle (a
+        // `FileHandle(forReadingAtPath:)`) owns its fd and closes it on dealloc, so
+        // releasing it here is sufficient — no explicit close racing the source.
         source?.cancel()
         source = nil
-        try? handle?.close()
         handle = nil
     }
 
@@ -82,14 +84,16 @@ final class LogTailer: ObservableObject {
         let src = DispatchSource.makeFileSystemObjectSource(
             fileDescriptor: h.fileDescriptor, eventMask: [.write, .extend, .rename, .delete],
             queue: queue)
+        // Pin the handle this source watches so the event/cancel closures can't
+        // touch a freshly-reopened handle after a rotation (the old bug: an async
+        // `self.handle = nil` from the stale cancel handler nilled the NEW handle and
+        // silently stopped tailing). The handle owns its fd and closes it on dealloc.
         src.setEventHandler { [weak self] in
             let mask = src.data
             Task { @MainActor [weak self] in self?.handleEvent(mask) }
         }
-        src.setCancelHandler { [weak self] in
-            // The cancel handler owns closing the fd to avoid races with the source.
-            Task { @MainActor in self?.handle = nil }
-        }
+        // No cancel handler: releasing `handle` (in stop()/reopen) closes the fd, and
+        // the source is cancelled before the handle is released.
         source = src
         src.resume()
     }

@@ -45,6 +45,10 @@ final class TestChatSession: ObservableObject {
     private var sink: EventSink?
     private var sessionId: String?
     private var consumeTask: Task<Void, Never>?
+    /// Closes the current event stream so a torn-down/rebuilt session's consumer
+    /// task actually exits its `for await` (cancellation alone doesn't end the
+    /// stream). Without this, every reset()/rebootstrap leaked a consumer.
+    private var streamContinuation: AsyncStream<TestChatEvent>.Continuation?
     private var nextItemID = 0
     private var rpcID = 100
 
@@ -60,13 +64,21 @@ final class TestChatSession: ObservableObject {
     func send(_ text: String) async {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty, !isResponding else { return }
+        // Claim the turn BEFORE the first `await` (bootstrap). The composer fires
+        // BOTH the TextField's `.onSubmit` AND the send button's
+        // `keyboardShortcut(.return)` on a single Return press, so two `send` tasks
+        // can arrive together; setting the flag here (not after bootstrap) makes the
+        // second one bail at the guard instead of running a second, concurrent
+        // session/prompt on the same agent actor — which duplicated every tool call
+        // and flooded the UI (the reported "blew up / froze").
+        isResponding = true
         await bootstrap()
         guard let agent, let sid = sessionId else {
             append(.assistantMessage("Could not start the agent session."))
+            isResponding = false
             return
         }
         append(.userMessage(trimmed))
-        isResponding = true
         _ = await agent.handle(line: promptLine(sid: sid, text: trimmed))
         isResponding = false
     }
@@ -74,12 +86,18 @@ final class TestChatSession: ObservableObject {
     /// Tear down so the next `send` rebuilds with current config (e.g. after the user
     /// edits the LLM URL or toggles echo).
     func reset() {
+        // Finish the stream FIRST so the consumer's `for await` returns, then cancel
+        // (cancellation alone doesn't terminate an AsyncStream loop). Otherwise each
+        // reset leaked a live consumer task bound to the MainActor.
+        streamContinuation?.finish()
+        streamContinuation = nil
         consumeTask?.cancel()
         consumeTask = nil
         agent = nil
         connection = nil
         sink = nil
         sessionId = nil
+        isResponding = false
         items.removeAll()
     }
 
@@ -104,6 +122,7 @@ final class TestChatSession: ObservableObject {
         self.sink = sink
         self.connection = connection
         self.agent = agent
+        self.streamContinuation = continuation
         consumeTask = Task { [weak self] in
             for await event in stream { self?.append(event) }
         }

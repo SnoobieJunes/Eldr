@@ -122,6 +122,24 @@ struct ContextBudgetTrimTests {
     @Test func emptyMessagesIsSafe() {
         #expect(ContextBudget.trim([], maxTurns: 4, maxChars: 100).isEmpty)
     }
+
+    /// Regression: a `maxTurns` suffix boundary that lands BETWEEN an assistant
+    /// tool_call and its `tool` result must not leave a leading orphaned `tool`
+    /// message — the OpenAI shape rejects a `tool` message that doesn't follow a
+    /// preceding `tool_calls`, which 400s the model mid-loop.
+    @Test func oddTurnCapNeverOrphansLeadingToolResult() {
+        // 5 tool round-trips = 10 tail messages [a0,t0,…,a4,t4]. An ODD cap (3) would
+        // suffix to [t3,a4,t4] — a leading orphan. The trim must drop that t3.
+        let trimmed = ContextBudget.trim(msgs(turns: 5), maxTurns: 3, maxChars: 0)
+        // Every `tool` message must immediately follow an assistant with tool_calls
+        // (here our test assistants carry no toolCalls array, so we assert the
+        // weaker, sufficient invariant: the kept window never STARTS with a tool).
+        let firstNonAnchor = trimmed.dropFirst(2).first  // after system + task
+        #expect(firstNonAnchor?.role != .tool)
+        // Anchors still present.
+        #expect(trimmed.first?.role == .system)
+        #expect(trimmed.contains { $0.role == .user && $0.content == "TASK" })
+    }
 }
 
 @Suite("AgentConfig parsing")

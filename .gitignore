@@ -7,3 +7,6 @@ DerivedData/
 # Stray build output from command-line xcodebuild/swift build writing into the tree
 build/
 **/build/
+
+# Eldr ACP Configurator DMG build artifacts (signed/notarized DMGs aren't committed)
+Apps/EldrACPConfigurator/dist/

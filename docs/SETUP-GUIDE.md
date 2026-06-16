@@ -300,6 +300,20 @@ EldrChat ships an **Agent Client Protocol** agent so a self-hosted LLM can pilot
 Xcode 27 (write code, build, run on simulators). Xcode 27 is the ACP *client*;
 `eldr-acp` is the *agent* it spawns over stdio (A36).
 
+> **GUI alternative — the Eldr ACP Configurator.** If you'd rather not do the manual
+> steps below, the **Eldr ACP Configurator** macOS app
+> (`Apps/EldrACPConfigurator/`) wraps all of this in a 5-step setup wizard: connect
+> your LLM, test it, install the binary + launcher, register it in Xcode, and start
+> using it — plus a live config panel, a log viewer, an in-app test chat, and
+> self-learning per-project memory. Build it with
+> `xcodebuild -scheme EldrACPConfigurator -destination 'platform=macOS' build` (or
+> open `Apps/EldrACPConfigurator/EldrACPConfigurator.xcodeproj` and Run). It writes
+> the same `~/.config/eldr-acp/env` and `~/.local/bin/eldr-acp-xcode` documented
+> here, so the two approaches are interchangeable. See
+> [`Apps/EldrACPConfigurator/README.md`](../Apps/EldrACPConfigurator/README.md), and
+> [`docs/SIGNING-AND-DISTRIBUTION.md`](SIGNING-AND-DISTRIBUTION.md) for packaging it
+> as a DMG. The manual command-line setup follows.
+
 **1. Build + install the agent**
 ```bash
 swift build -c release --package-path Packages/PQRCACP

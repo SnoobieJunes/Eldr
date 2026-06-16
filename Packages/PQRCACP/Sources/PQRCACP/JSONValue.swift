@@ -21,7 +21,17 @@ public enum JSONValue: Sendable, Equatable {
     public var intValue: Int? {
         switch self {
         case .int(let i): return i
-        case .double(let d): return Int(d)
+        case .double(let d):
+            // `Int(d)` TRAPS (fatal error) on a non-finite or out-of-range double.
+            // A malformed wire message (e.g. an `id`/`n`/`exit` field of `1e400`,
+            // which JSONSerialization parses to +inf) would otherwise crash the
+            // agent the moment any field is read as Int. Reject those instead.
+            // Upper bound is strict: `Double(Int.max)` rounds UP to 2^63, and
+            // `Int(2^63)` itself traps (Int.max is 2^63 − 1), so `<` not `<=`.
+            guard d.isFinite,
+                d >= Double(Int.min), d < Double(Int.max)
+            else { return nil }
+            return Int(d)
         default: return nil
         }
     }
