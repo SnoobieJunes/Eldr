@@ -908,7 +908,7 @@ final class AppSession {
 
 struct RootView: View {
     @Environment(AppSession.self) private var session
-    /// The "explore a new planet" first-run tour. Lives here (RootView) so it
+    /// The "venturing on unknown seas" first-run tour. Lives here (RootView) so it
     /// overlays the whole app without touching MainView/ConversationView, and is
     /// shared into the environment so Settings ▸ About can relaunch it.
     @State private var tour = TourCoordinator()

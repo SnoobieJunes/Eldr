@@ -2,7 +2,7 @@ import SwiftUI
 
 /// A single tour card: a glowing hero badge (mock iconography, never a
 /// screenshot), a headline + evocative subtitle, the teaching body, and an honest
-/// "field note" pill. Responsive (constrained reading width for iPad/Mac), works
+/// "ship's log" pill. Responsive (constrained reading width for iPad/Mac), works
 /// in light + dark, and folds into one VoiceOver element so the decorative split
 /// isn't read piece-by-piece.
 struct TourStepCard: View {
@@ -115,11 +115,11 @@ struct TourStepCard: View {
         .accessibilityHidden(true)
     }
 
-    // MARK: - Field note (the honest detail)
+    // MARK: - Ship's log (the honest detail)
 
     private var fieldNote: some View {
         HStack(alignment: .firstTextBaseline, spacing: 10) {
-            Image(systemName: "binoculars.fill")
+            Image(systemName: "binoculars.fill")  // scanning the horizon — the honest, concrete detail
                 .font(.footnote)
                 .foregroundStyle(step.gradient.first ?? .accentColor)
             Text(step.fieldNote)

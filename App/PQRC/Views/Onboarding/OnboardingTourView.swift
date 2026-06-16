@@ -110,7 +110,7 @@ struct OnboardingTourView: View {
                 Button {
                     if isLast { onFinish() } else { advance(to: index + 1) }
                 } label: {
-                    Text(isLast ? "Start exploring" : "Next")
+                    Text(isLast ? "Set sail" : "Next")
                         .font(.body.weight(.semibold))
                         .frame(maxWidth: .infinity)
                         .padding(.vertical, 6)
@@ -179,5 +179,16 @@ extension View {
         fullScreenCover(isPresented: Bindable(coordinator).isPresenting) {
             OnboardingTourView(onFinish: { coordinator.finish(siloID: activeSiloID) })
         }
+        // Dev/QA-only: `--show-tour` forces the welcome tour up over whatever mode
+        // the app booted into (e.g. the demo universe) so it can be reviewed and
+        // screenshotted without walking through account creation. Compiled out of
+        // Release; never reachable in a shipped build.
+        #if DEBUG
+            .task {
+                if ProcessInfo.processInfo.arguments.contains("--show-tour") {
+                    coordinator.presentIfFirstRun(siloID: activeSiloID)
+                }
+            }
+        #endif
     }
 }
