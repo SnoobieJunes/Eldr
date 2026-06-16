@@ -55,15 +55,18 @@ struct PQRCApp: App {
 
     var body: some Scene {
         WindowGroup {
+            // Mac ONLY: a sane window minimum so it can't be squeezed to a phone
+            // sliver. A `.frame(minWidth:)` is NOT inert on iOS — it would force a
+            // real iPhone to render 760pt wide and CLIP everything (the "UI cut off"
+            // bug). So gate it to "iOS app running on Mac" and pass nil (no
+            // constraint) on a real iPhone/iPad.
+            let onMac = ProcessInfo.processInfo.isiOSAppOnMac
             RootView()
                 .environment(session)
                 .environment(commands)
-                // Mac (and Catalyst): give the window a sane minimum so it can't
-                // be squeezed to a phone sliver, and let it grow to use a big
-                // display. On iPhone/iPad these are inert — there is no resizable
-                // window and `idealWidth/minWidth` on a full-screen root is a
-                // no-op, so iOS layout is untouched.
-                .frame(minWidth: 760, idealWidth: 1100, minHeight: 520, idealHeight: 760)
+                .frame(
+                    minWidth: onMac ? 760 : nil, idealWidth: onMac ? 1100 : nil,
+                    minHeight: onMac ? 520 : nil, idealHeight: onMac ? 760 : nil)
                 .onOpenURL { url in
                     session.handleDeepLink(url)
                 }
