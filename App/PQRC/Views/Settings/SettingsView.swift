@@ -33,6 +33,17 @@ struct SettingsView: View {
     /// enabling it shares decrypted (codename-redacted) chat with a local agent that
     /// can read and — with writes — draft, mark, and send-as-your-AI in active windows.
     @State private var showLocalMCPConsent = false
+    /// Per-silo loop-guard threshold (DEVIATIONS D14): pause a thread's AIs after
+    /// this many consecutive agent messages with no human. `0` = guard OFF
+    /// (unbounded). Loaded in `.onAppear`, written through `model.setLoopGuardLimit`.
+    @State private var loopGuardLimit = PQRCConstants.agentLoopGuardLimit
+    /// Pairing-token reveal state: masked by default, shown once on "Reveal",
+    /// then re-masked (the platform-standard view-once pattern). Reset whenever
+    /// the connection (and thus the token) changes.
+    @State private var revealMCPToken = false
+    /// Gates the "Regenerate" action behind a confirm alert (it breaks any paired
+    /// shim, which must re-pair with the new token).
+    @State private var showRegenerateTokenConfirm = false
     @State private var now = Int64(Date().timeIntervalSince1970)
 
     private let ticker = Timer.publish(every: 1, on: .main, in: .common).autoconnect()
@@ -46,6 +57,7 @@ struct SettingsView: View {
                 nearbySection
                 reachabilitySection
                 aiSection
+                aiLoopGuardSection
                 prekeysSection
                 privacySection
                 localAgentSection
@@ -73,6 +85,7 @@ struct SettingsView: View {
                     UserDefaults.standard.string(forKey: AppSession.displayNameKey(model.siloID)) ?? ""
                 biometricOn = session.hasBiometricUnlock
                 localMCPOn = session.isLocalMCPRunning
+                loopGuardLimit = AppSession.agentLoopGuardLimit(siloID: model.siloID)
                 Task {
                     openInboxUntil = await model.runtime.openInboxActiveUntil()
                     // Refresh the live prekey count so the Prekeys section isn't
@@ -370,6 +383,55 @@ struct SettingsView: View {
         }
     }
 
+    // MARK: AI loop guard (DEVIATIONS D14)
+
+    /// The loop guard pauses a shared thread's AIs once they've sent N messages in
+    /// a row with no human, keeping a person in the loop. Per-silo (deniability),
+    /// applied live to the running engine. `0` = OFF (unbounded — AIs may loop).
+    private var aiLoopGuardSection: some View {
+        Section {
+            Toggle("Pause AIs after a run of messages", isOn: Binding(
+                get: { loopGuardLimit > 0 },
+                set: { on in
+                    // Turning it back on restores the spec default; OFF stores 0.
+                    setLoopGuard(on ? PQRCConstants.agentLoopGuardLimit : 0)
+                }))
+                .accessibilityIdentifier("loop-guard-toggle")
+            if loopGuardLimit > 0 {
+                Stepper(value: Binding(
+                    get: { loopGuardLimit },
+                    set: { setLoopGuard($0) }
+                ), in: AppSession.agentLoopGuardMin...AppSession.agentLoopGuardMax) {
+                    LabeledContent("Pause after") {
+                        Text("\(loopGuardLimit) messages")
+                            .monospacedDigit()
+                            .accessibilityIdentifier("loop-guard-value")
+                    }
+                }
+                .accessibilityIdentifier("loop-guard-stepper")
+                .accessibilityValue("\(loopGuardLimit) consecutive AI messages")
+            }
+        } header: {
+            Text("AI loop guard")
+        } footer: {
+            if loopGuardLimit > 0 {
+                Text("In a shared AI thread, your assistants pause automatically after \(loopGuardLimit) message\(loopGuardLimit == 1 ? "" : "s") in a row with no human, so a person always stays in the loop. Anyone typing in the thread resumes them. Lower keeps you more in control; higher lets the AIs go further on their own.")
+            } else {
+                Text("OFF — your assistants will NOT auto-pause in a shared AI thread. Two AIs left talking to each other can loop indefinitely (and, with a remote provider, keep spending tokens) until you step in. Recommended: keep this on.")
+                    .foregroundStyle(.orange)
+            }
+        }
+    }
+
+    /// Persist + apply the loop-guard threshold and reflect it in the UI. `0` =
+    /// OFF; positive values are clamped to the supported range by AppSession.
+    private func setLoopGuard(_ value: Int) {
+        let clamped = value <= 0 ? 0
+            : min(max(value, AppSession.agentLoopGuardMin), AppSession.agentLoopGuardMax)
+        loopGuardLimit = clamped
+        Task { await model.setLoopGuardLimit(clamped) }
+    }
+
     // MARK: Prekeys / privacy / data / about
 
     private var prekeysSection: some View {
@@ -429,6 +491,7 @@ struct SettingsView: View {
                         showLocalMCPConsent = true
                     } else {
                         localMCPOn = false
+                        revealMCPToken = false  // never carry a reveal across off→on
                         Task {
                             await session.stopLocalMCP()
                             localMCPOn = session.isLocalMCPRunning
@@ -454,6 +517,7 @@ struct SettingsView: View {
         .alert("Share your chat with a local agent?", isPresented: $showLocalMCPConsent) {
             Button("Enable local agent access", role: .destructive) {
                 localMCPOn = true
+                revealMCPToken = false  // a freshly published token starts masked
                 Task {
                     await session.startLocalMCP()
                     // Snap back if the server refused to bind.
@@ -489,36 +553,109 @@ struct SettingsView: View {
         .accessibilityIdentifier("mcp-vs-acp-info")
     }
 
-    /// The exact shim command + token + env a user pastes into their MCP client.
+    /// 8 dots — what the pairing token shows as while masked.
+    private let maskedToken = String(repeating: "•", count: 8)
+
+    /// The shim command + socket + token a user pastes into their MCP client.
+    /// The token is a SECRET: masked by default, shown once on "Reveal" (then
+    /// re-masked), copyable, and regenerable. The copied configuration always
+    /// carries the REAL token regardless of mask state.
     @ViewBuilder
     private func localMCPInstructions(_ connection: LocalMCPConnection) -> some View {
-        let block = """
+        // The full block the user pastes — always the real token (it's headed to
+        // their own MCP client config, not the screen).
+        let configBlock = """
             command: pqrc-mcp-bridge
             env:
               PQRC_MCP_SOCKET=\(connection.socketPath)
               PQRC_MCP_TOKEN=\(connection.token)
             """
-        VStack(alignment: .leading, spacing: 6) {
-            Text("Point your MCP client at the bridge shim with this env:")
+        VStack(alignment: .leading, spacing: 10) {
+            Text("Point your MCP client at the bridge shim with this socket and pairing token:")
                 .font(.caption)
                 .foregroundStyle(.secondary)
-            Text(block)
-                .font(.caption.monospaced())
-                .textSelection(.enabled)
-                .padding(8)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .background(.quaternary, in: RoundedRectangle(cornerRadius: 8))
-                .accessibilityIdentifier("local-mcp-config")
+
+            // Socket path (not secret) — selectable.
+            VStack(alignment: .leading, spacing: 2) {
+                Text("Socket").font(.caption2).foregroundStyle(.secondary)
+                Text(connection.socketPath)
+                    .font(.caption.monospaced())
+                    .textSelection(.enabled)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .accessibilityIdentifier("local-mcp-socket")
+            }
+
+            // Pairing token — masked by default, revealed once on tap.
+            VStack(alignment: .leading, spacing: 4) {
+                Text("Pairing token").font(.caption2).foregroundStyle(.secondary)
+                Text(revealMCPToken ? connection.token : maskedToken)
+                    .font(.caption.monospaced())
+                    // Selectable only when revealed (selecting dots is pointless);
+                    // the Copy button is the masked-state path to the real value.
+                    .textSelection(.enabled)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(8)
+                    .background(.quaternary, in: RoundedRectangle(cornerRadius: 8))
+                    .accessibilityIdentifier("local-mcp-token")
+                    .accessibilityLabel(revealMCPToken ? "Pairing token revealed" : "Pairing token hidden")
+                    .accessibilityValue(revealMCPToken ? connection.token : "hidden")
+                HStack(spacing: 16) {
+                    Button {
+                        revealMCPToken.toggle()
+                    } label: {
+                        Label(
+                            revealMCPToken ? "Hide" : "Reveal",
+                            systemImage: revealMCPToken ? "eye.slash" : "eye")
+                    }
+                    .accessibilityIdentifier("local-mcp-reveal-token")
+                    Button {
+                        UIPasteboard.general.string = connection.token
+                    } label: {
+                        Label("Copy token", systemImage: "doc.on.doc")
+                    }
+                    .accessibilityIdentifier("local-mcp-copy-token")
+                }
+                .font(.caption)
+                .buttonStyle(.borderless)
+            }
+
+            // Copy the whole config block (real token) for the MCP client.
             Button {
-                UIPasteboard.general.string = block
+                UIPasteboard.general.string = configBlock
             } label: {
-                Label("Copy configuration", systemImage: "doc.on.doc")
+                Label("Copy configuration", systemImage: "doc.on.clipboard")
             }
             .font(.caption)
             .accessibilityIdentifier("local-mcp-copy")
-            Text("`pqrc-mcp-bridge` is built from Packages/PQRCMCP (`swift build`). The socket lives in this app's container and changes each time you turn this on.")
+
+            // Regenerate — mints a fresh token and breaks any paired shim.
+            Button(role: .destructive) {
+                showRegenerateTokenConfirm = true
+            } label: {
+                Label("Regenerate token", systemImage: "arrow.triangle.2.circlepath")
+            }
+            .font(.caption)
+            .accessibilityIdentifier("local-mcp-regenerate-token")
+
+            Text("Keep the pairing token secret — anyone who has it (and is on this machine) can reach your redacted chat. Reveal shows it once, then re-hides it. Regenerate mints a new token and invalidates the old one, so any agent you'd paired must be updated with the new token. `pqrc-mcp-bridge` is built from Packages/PQRCMCP (`swift build`); the socket lives in this app's container and changes each time you turn this on.")
                 .font(.caption2)
                 .foregroundStyle(.secondary)
+        }
+        // Whenever the published token changes (turn on, regenerate), re-mask so a
+        // fresh secret never appears already-revealed.
+        .onChange(of: connection.token) { _, _ in revealMCPToken = false }
+        .alert("Regenerate pairing token?", isPresented: $showRegenerateTokenConfirm) {
+            Button("Regenerate", role: .destructive) {
+                Task {
+                    await session.regenerateMCPPairingToken()
+                    // The new token must never show up pre-revealed.
+                    revealMCPToken = false
+                    localMCPOn = session.isLocalMCPRunning
+                }
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("This mints a brand-new pairing token and invalidates the current one. Any MCP client you'd already paired will stop connecting until you paste the new token into its configuration.")
         }
     }
 

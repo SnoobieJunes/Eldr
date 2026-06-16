@@ -21,7 +21,7 @@ and affects interop; `[app-only]` — client behavior, no wire impact;
 | D11 | No published kind-0 profiles; local-only nicknames (encrypted at rest) | app-only |
 | D12 | Message-requests inbox gates unknown-sender handshakes | app-only |
 | D13 | Safety-code verification screen: 60 digits in 12 groups from SHA-256 over both identity pubkeys (sorted), QR compare, local "verified" flag | app-only |
-| D14 | Thread agent loop guard: 6 consecutive agent messages → pause until a human message | app-only |
+| D14 | Thread agent loop guard: pause after N consecutive agent messages until a human speaks. Default 6; now a **per-silo setting** (2–20, or OFF/unbounded). See A39. | app-only |
 | S1 | ~~BLE/Multipeer local link: seam only~~ → **Implemented** (2026-06-12): `MultipeerLinkTransport` over MultipeerConnectivity, seal-frame wire format, automatic relay fallback. See N17–N20, A9. | upstream-NIP |
 | S2 | ~~Localhost WebSocket relay frontend: not shipped~~ → **Implemented** (2026-06-12): `pqrc-relay` executable (NWListener WS over `LocalRelaySimulator`) + `NostrWebSocketTransport` client. See A10, T9–T10. | app-only |
 
@@ -838,6 +838,41 @@ and affects interop; `[app-only]` — client behavior, no wire impact;
     in both initialize and the session/update, skill-instruction injection + prefix
     stripping for `/spec` and `/html`, and plain-prompt unchanged) + a real-LLM E2E
     that produced a Markdown spec, a Swift snippet, and a standalone HTML chart.
+
+- **A39 — Loop guard is now a per-silo SETTING; MCP token gets a mask/reveal-once/
+  regenerate UX** `[app-only]` (2026-06-15): two usability hardening changes that touch
+  no wire/crypto.
+  • **Configurable loop guard (supersedes the fixed D14).** The thread loop guard was
+    hardcoded at `PQRCConstants.agentLoopGuardLimit = 6`. It is now an instance value on
+    `AgentEngine` (`loopGuardLimit`, init-injected, default = the constant, plus a live
+    `setLoopGuardLimit(_:)`); `authorizeAutonomousSend`/`loopGuardActive` read it, and a
+    value `<= 0` means the guard is **OFF** (unbounded — AIs may ping-pong). The app stores
+    the threshold **per silo** via `AppSession.agentLoopGuardLimit(siloID:)` /
+    `setAgentLoopGuardLimit` (UserDefaults key `agentLoopGuardLimit`, namespaced by silo per
+    A33 — a hidden account never shares/leaks the knob). `object(forKey:)` distinguishes
+    "never set" (→ default 6) from an explicit `0` (OFF), which `integer(forKey:)` can't.
+    `PersonaRuntime` reads it when constructing its engine and `AppModel.setLoopGuardLimit`
+    pushes live changes through `PersonaRuntime.setLoopGuardLimit` so a change applies without
+    re-booting the silo. SettingsView ▸ "AI loop guard" Section: a master Toggle (on restores
+    the default 6, off stores 0) + a Stepper bounded to `[2, 20]`
+    (`AppSession.agentLoopGuard{Min,Max}`) with an HONEST footer that turns orange when OFF
+    ("two AIs left talking can loop indefinitely … keep this on"). Cardinal-rule note: the
+    DEFAULT still keeps a human in the loop at 6; turning it off is an explicit, clearly-warned
+    user choice, never silent. The two pre-existing D14 tests still pass unchanged (they use the
+    default), plus two new tests cover a custom limit (3) and OFF.
+  • **MCP pairing-token UX (around the existing A35-Phase2 token display).** The token was
+    shown in plaintext inside the paste-able config block. It is now treated as the secret it
+    is: **masked by default** (8 `•`), a **Reveal** that shows it once then re-masks (re-masked
+    on every connection/token change, on toggle off→on, and after regenerate), a **Copy token**
+    button, a **Copy configuration** button (always the real token — it's bound for the user's
+    own MCP client config, not the screen), and a **Regenerate** button (confirm alert) wired to
+    a new `AppSession.regenerateMCPPairingToken()` that mints a fresh 32-byte token (reusing the
+    existing generator), persists it to the same per-silo Keychain account, and — if the server
+    is live — restarts it so it enforces the new token and republishes the connection. Copy is
+    the platform-standard egress (no app-level clipboard policy exists here); the footer warns
+    the token is a local-machine secret and that regenerating invalidates any paired shim, which
+    must be re-pasted. The MCP toggle, consent alert, and MCP-vs-ACP note are untouched. No
+    crypto/wire change beyond minting a new random token.
 
 ### Tech debt `[tech-debt]`
 

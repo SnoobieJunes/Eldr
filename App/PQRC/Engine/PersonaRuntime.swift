@@ -193,6 +193,14 @@ actor PersonaRuntime {
         firewallEnabled = enabled
     }
 
+    /// Apply a changed per-silo loop-guard threshold (DEVIATIONS D14) to the live
+    /// engine so it takes effect without re-booting the silo. `0` turns the guard
+    /// off (unbounded). Persistence is the caller's (Settings) responsibility;
+    /// this only pushes the value into the running engine.
+    func setLoopGuardLimit(_ limit: Int) async {
+        await engine?.setLoopGuardLimit(limit)
+    }
+
     /// Builds the context for one AI: the normal (byte-bounded) context for an
     /// on-device AI, or the firewalled (name-redacted) context for a remote AI
     /// when the firewall is on. This is the single boundary every byte crosses
@@ -389,7 +397,9 @@ actor PersonaRuntime {
             identity: identity, nostrKeypair: nostrKeypair, prekeyManager: prekeyManager,
             identityDH: identityDH, transports: transports, clock: clock,
             randomSource: randomSource, nonceSource: nonceSource)
-        engine = AgentEngine(myIdentity: identity, clock: clock, sink: RuntimeSink(runtime: self))
+        engine = AgentEngine(
+            myIdentity: identity, clock: clock, sink: RuntimeSink(runtime: self),
+            loopGuardLimit: AppSession.agentLoopGuardLimit(siloID: siloID))
 
         // Restore persisted state: contacts (bindings re-verified — invariant 7
         // survives persistence), ratchet sessions, group rosters, threads, and

@@ -517,6 +517,13 @@ final class AppModel {
         contactNames[myIdentityHex] = alias ?? personaName
     }
 
+    /// Persist the per-silo loop-guard threshold (DEVIATIONS D14) and push it into
+    /// the live engine so it takes effect immediately. `0` turns the guard OFF.
+    func setLoopGuardLimit(_ limit: Int) async {
+        AppSession.setAgentLoopGuardLimit(limit, siloID: siloID)
+        await runtime.setLoopGuardLimit(AppSession.agentLoopGuardLimit(siloID: siloID))
+    }
+
     func togglePinned(_ conversationID: String) async {
         guard let index = conversations.firstIndex(where: { $0.id == conversationID }) else { return }
         conversations[index].pinned.toggle()

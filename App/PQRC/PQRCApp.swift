@@ -477,6 +477,38 @@ final class AppSession {
         loadCustomSkills(siloID: siloID).first { $0.id == id }
     }
 
+    /// Bounds the Settings stepper for the loop-guard threshold (DEVIATIONS D14):
+    /// a sensible floor so a human is reliably kept in the loop, up to a high cap.
+    /// `nonisolated` so the (actor) PersonaRuntime and the nonisolated setter can
+    /// read them without hopping to the main actor.
+    nonisolated static let agentLoopGuardMin = 2
+    nonisolated static let agentLoopGuardMax = 20
+
+    /// Per-silo loop-guard threshold (DEVIATIONS D14): pause a thread's agents
+    /// after this many consecutive agent messages with no human in between.
+    /// Returns the spec default (`PQRCConstants.agentLoopGuardLimit`) when unset,
+    /// or the user's per-account value — including `0`, which means the guard is
+    /// OFF (unbounded). Per-silo so a hidden account never shares/leaks the knob
+    /// (A33). `nonisolated` so the (actor) PersonaRuntime can read it without an
+    /// await before constructing its engine.
+    nonisolated static func agentLoopGuardLimit(siloID: String = "") -> Int {
+        let key = siloDefaultsKey("agentLoopGuardLimit", siloID)
+        // `object(forKey:)` distinguishes "never set" (use the default) from an
+        // explicit `0` (the user turned the guard OFF) — `integer(forKey:)` can't.
+        guard UserDefaults.standard.object(forKey: key) != nil else {
+            return PQRCConstants.agentLoopGuardLimit
+        }
+        return UserDefaults.standard.integer(forKey: key)
+    }
+
+    /// Persist the per-silo loop-guard threshold. `0` turns the guard OFF; any
+    /// positive value is clamped to `[agentLoopGuardMin, agentLoopGuardMax]`.
+    nonisolated static func setAgentLoopGuardLimit(_ limit: Int, siloID: String = "") {
+        let key = siloDefaultsKey("agentLoopGuardLimit", siloID)
+        let clamped = limit <= 0 ? 0 : min(max(limit, agentLoopGuardMin), agentLoopGuardMax)
+        UserDefaults.standard.set(clamped, forKey: key)
+    }
+
     /// The configured AIs bound to live providers — the runtime's tethered AIs.
     static func makeRuntimeAIs(siloID: String, hubClient: MultipeerRelayClient?) -> [TetheredAI] {
         loadConfiguredAIs(siloID: siloID).filter(\.isEnabled).map { config in
@@ -744,21 +776,53 @@ final class AppSession {
         localMCPError = nil
     }
 
+    /// Keychain account (within the per-silo service) holding the MCP pairing
+    /// token. Per-silo so a hidden account never shares/leaks it (deniability).
+    private static let mcpPairingTokenAccount = "mcp-pairing-token"
+
     /// A random pairing token for this silo, persisted in its Keychain so it's
     /// stable across launches (and protected at rest), generated on first use.
     private static func pairingToken(siloID: String) -> String {
         let keychain = KeychainStore(service: siloService(siloID))
-        let account = "mcp-pairing-token"
-        if let existing = keychain.loadIfPresent(account: account),
+        if let existing = keychain.loadIfPresent(account: mcpPairingTokenAccount),
             let value = String(data: existing, encoding: .utf8), !value.isEmpty
         {
             return value
         }
+        return mintPairingToken(siloID: siloID)
+    }
+
+    /// Mint a fresh random pairing token and persist it, REPLACING any existing
+    /// one. Used both for first-use generation and explicit regeneration.
+    @discardableResult
+    private static func mintPairingToken(siloID: String) -> String {
         var bytes = [UInt8](repeating: 0, count: 32)
         _ = SecRandomCopyBytes(kSecRandomDefault, bytes.count, &bytes)
         let token = Data(bytes).base64EncodedString()
-        try? keychain.save(Data(token.utf8), account: account)
+        try? KeychainStore(service: siloService(siloID)).save(
+            Data(token.utf8), account: mcpPairingTokenAccount)
         return token
+    }
+
+    /// Regenerate the per-silo MCP pairing token: mint a fresh one (invalidating
+    /// the old one — any connected shim must re-pair with the new token), and if
+    /// the local MCP server is currently running, restart it so it serves the new
+    /// token and `localMCPConnection` republishes it for Settings to display.
+    /// No-op without an unlocked silo.
+    func regenerateMCPPairingToken() async {
+        guard let siloID = activeSilo?.siloID else {
+            localMCPError = "Unlock an account first."
+            return
+        }
+        Self.mintPairingToken(siloID: siloID)
+        // If the server is live, cycle it onto the new token. The published
+        // connection (and the socket path) updates so the displayed token matches
+        // what the server now enforces; the user must re-paste it into their MCP
+        // client. If it's not running, the fresh token simply waits in Keychain.
+        if isLocalMCPRunning {
+            await stopLocalMCP()
+            await startLocalMCP()
+        }
     }
 
     // MARK: - Biometric convenience unlock (one primary silo)
