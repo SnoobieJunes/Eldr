@@ -42,12 +42,17 @@ struct ACPAgentTests {
     // MARK: Harness
 
     private func makeAgent(
-        llm: any LLMClient, workdir: String? = nil, config: AgentConfig = .default
+        llm: any LLMClient, workdir: String? = nil, config: AgentConfig = .default,
+        configDir: String? = nil
     ) -> (ACPAgent, CapturingSink) {
         let sink = CapturingSink()
         let connection = ClientConnection(sink: sink)
         let env = ToolEnvironment(developerDir: nil, workdir: workdir, baseEnvironment: [:])
-        let agent = ACPAgent(connection: connection, llm: llm, toolEnvironment: env, config: config)
+        // configDir defaults to nil so unit tests never auto-discover a project
+        // eldr.md from the real home dir (hermetic; CLAUDE.md: no real home under test).
+        let agent = ACPAgent(
+            connection: connection, llm: llm, toolEnvironment: env, config: config,
+            configDir: configDir)
         return (agent, sink)
     }
 
@@ -329,6 +334,190 @@ struct ACPAgentTests {
         #expect(lastSeen.count <= 1 /*system*/ + 1 /*task*/ + 4)
         #expect(lastSeen.first?.role == .system)
         #expect(lastSeen.contains { $0.role == .user && $0.content == "loop" })
+    }
+
+    // MARK: - Phase 1c: events.jsonl logging
+
+    /// A sink that captures outbound lines AND auto-grants any permission request,
+    /// so a turn that runs mutating tools (write_file/run_shell) doesn't hang waiting
+    /// for a client that the unit harness doesn't have. (Same shape the app's
+    /// in-process TestChatSession uses.)
+    actor AutoGrantSink: OutputSink {
+        private(set) var lines: [String] = []
+        private var connection: ClientConnection?
+        func attach(_ c: ClientConnection) { connection = c }
+        func write(line: String) async {
+            lines.append(line)
+            guard let message = JSONValue.parse(line),
+                message["method"]?.stringValue == "session/request_permission",
+                let id = message["id"]
+            else { return }
+            await connection?.deliver(
+                response: .object([
+                    "jsonrpc": .string("2.0"), "id": id,
+                    "result": .object([
+                        "outcome": .object([
+                            "outcome": .string("selected"), "optionId": .string("allow_once"),
+                        ])
+                    ]),
+                ]))
+        }
+    }
+
+    private func makeAutoGrantAgent(
+        llm: any LLMClient, workdir: String? = nil, config: AgentConfig = .default,
+        configDir: String? = nil
+    ) async -> (ACPAgent, AutoGrantSink) {
+        let sink = AutoGrantSink()
+        let connection = ClientConnection(sink: sink)
+        await sink.attach(connection)
+        let env = ToolEnvironment(developerDir: nil, workdir: workdir, baseEnvironment: [:])
+        let agent = ACPAgent(
+            connection: connection, llm: llm, toolEnvironment: env, config: config,
+            configDir: configDir)
+        return (agent, sink)
+    }
+
+    @Test func eventsFile_recordsWriteShellAndSessionEnd() async throws {
+        let dir = (NSTemporaryDirectory() as NSString).appendingPathComponent(
+            "eldr-acp-ev-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(atPath: dir) }
+        let eventsPath = (dir as NSString).appendingPathComponent("events.jsonl")
+        let targetFile = (dir as NSString).appendingPathComponent("out.txt")
+
+        let writeCall = LLMToolCall(
+            id: "w1", name: "write_file",
+            arguments: "{\"path\":\"\(targetFile)\",\"content\":\"hello\"}")
+        let shellCall = LLMToolCall(
+            id: "s1", name: "run_shell", arguments: "{\"command\":\"echo run-canary\"}")
+        let llm = MockLLMClient([
+            LLMResponse(content: "", toolCalls: [writeCall]),
+            LLMResponse(content: "", toolCalls: [shellCall]),
+            LLMResponse(content: "all done"),
+        ])
+        let cfg = AgentConfig(eventsFilePath: eventsPath)
+        let (agent, _) = await makeAutoGrantAgent(llm: llm, workdir: dir, config: cfg)
+
+        _ = await agent.handle(line: #"{"jsonrpc":"2.0","id":0,"method":"initialize","params":{}}"#)
+        let sid = try #require(
+            try parse(
+                await agent.handle(
+                    line: #"{"jsonrpc":"2.0","id":1,"method":"session/new","params":{}}"#))[
+                "result"]?["sessionId"]?.stringValue)
+        _ = await agent.handle(
+            line:
+                "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"session/prompt\",\"params\":{\"sessionId\":\"\(sid)\",\"prompt\":[{\"type\":\"text\",\"text\":\"go\"}]}}"
+        )
+
+        let events =
+            try String(contentsOfFile: eventsPath, encoding: .utf8)
+            .split(separator: "\n").map(String.init)
+            .compactMap { JSONValue.parse($0) }
+
+        let write = try #require(events.first { $0["type"]?.stringValue == "write_file" })
+        #expect(write["path"]?.stringValue == targetFile)
+        #expect(write["session"]?.stringValue == sid)
+        #expect(write["cwd"]?.stringValue == dir)
+        #expect(write["ts"]?.stringValue?.isEmpty == false)
+
+        let shell = try #require(events.first { $0["type"]?.stringValue == "shell_result" })
+        #expect(shell["cmd"]?.stringValue == "echo run-canary")
+        #expect(shell["exit"]?.intValue == 0)
+        #expect(shell["summary"]?.stringValue?.contains("run-canary") == true)
+
+        let end = try #require(events.first { $0["type"]?.stringValue == "session_end" })
+        #expect(end["files"]?.intValue == 1)
+        #expect(end["build"]?.stringValue == "unknown")  // echo isn't a build command
+        #expect(end["summary"]?.stringValue == "all done")
+    }
+
+    @Test func eventsFile_absentWhenNotConfigured() async throws {
+        // Default config has no eventsFilePath → no file is ever created.
+        let llm = MockLLMClient([LLMResponse(content: "done")])
+        let (agent, _) = makeAgent(llm: llm)
+        _ = await agent.handle(line: #"{"jsonrpc":"2.0","id":0,"method":"initialize","params":{}}"#)
+        let sid = try #require(
+            try parse(
+                await agent.handle(
+                    line: #"{"jsonrpc":"2.0","id":1,"method":"session/new","params":{}}"#))[
+                "result"]?["sessionId"]?.stringValue)
+        _ = await agent.handle(
+            line:
+                "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"session/prompt\",\"params\":{\"sessionId\":\"\(sid)\",\"prompt\":[{\"type\":\"text\",\"text\":\"hi\"}]}}"
+        )
+        // No crash, no file — nothing to assert beyond reaching here cleanly.
+        #expect(sid.hasPrefix("eldr-session-"))
+    }
+
+    // MARK: - Phase 1c: project-context injection
+
+    @Test func contextFile_injectedAsLeadingSystemMessage() async throws {
+        let dir = NSTemporaryDirectory()
+        let ctxPath = (dir as NSString).appendingPathComponent("eldr-ctx-\(UUID().uuidString).md")
+        let canary = "PROJECT-CANARY-\(UUID().uuidString)"
+        try canary.data(using: .utf8)!.write(to: URL(fileURLWithPath: ctxPath))
+        defer { try? FileManager.default.removeItem(atPath: ctxPath) }
+
+        let llm = MockLLMClient([LLMResponse(content: "ok")])
+        let cfg = AgentConfig(contextFilePath: ctxPath)
+        let (agent, _) = makeAgent(llm: llm, workdir: dir, config: cfg)
+        _ = await agent.handle(line: #"{"jsonrpc":"2.0","id":0,"method":"initialize","params":{}}"#)
+        let sid = try #require(
+            try parse(
+                await agent.handle(
+                    line: #"{"jsonrpc":"2.0","id":1,"method":"session/new","params":{}}"#))[
+                "result"]?["sessionId"]?.stringValue)
+        _ = await agent.handle(
+            line:
+                "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"session/prompt\",\"params\":{\"sessionId\":\"\(sid)\",\"prompt\":[{\"type\":\"text\",\"text\":\"hi\"}]}}"
+        )
+
+        let firstSeen = try #require(await llm.calls().first)
+        // Leading system message = the project-context block carrying the file.
+        #expect(firstSeen.first?.role == .system)
+        #expect(firstSeen.first?.content.contains(canary) == true)
+        #expect(firstSeen.first?.content.contains("Project Context") == true)
+        // The operating system prompt and the task still follow it.
+        #expect(firstSeen.count >= 3)
+        #expect(firstSeen[1].role == .system)
+        #expect(firstSeen.contains { $0.role == .user && $0.content == "hi" })
+    }
+
+    @Test func contextFile_autoDiscoveredByProjectIdentity() async throws {
+        // No explicit ELDR_ACP_CONTEXT_FILE: the agent must find the per-project
+        // eldr.md at <configDir>/projects/<sha256(cwd)>/eldr.md — proving the agent
+        // and ProjectContext agree on the path math.
+        let cwd = (NSTemporaryDirectory() as NSString).appendingPathComponent(
+            "eldr-proj-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(atPath: cwd, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(atPath: cwd) }
+
+        let configDir = (NSTemporaryDirectory() as NSString).appendingPathComponent(
+            "eldr-cfg-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(atPath: configDir) }
+        let memPath = ProjectContext.memoryPath(configDir: configDir, cwd: cwd)
+        try FileManager.default.createDirectory(
+            atPath: (memPath as NSString).deletingLastPathComponent,
+            withIntermediateDirectories: true)
+        let canary = "AUTO-CANARY-\(UUID().uuidString)"
+        try canary.data(using: .utf8)!.write(to: URL(fileURLWithPath: memPath))
+
+        let llm = MockLLMClient([LLMResponse(content: "ok")])
+        let (agent, _) = makeAgent(llm: llm, workdir: cwd, config: .default, configDir: configDir)
+        _ = await agent.handle(line: #"{"jsonrpc":"2.0","id":0,"method":"initialize","params":{}}"#)
+        let sid = try #require(
+            try parse(
+                await agent.handle(
+                    line: #"{"jsonrpc":"2.0","id":1,"method":"session/new","params":{}}"#))[
+                "result"]?["sessionId"]?.stringValue)
+        _ = await agent.handle(
+            line:
+                "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"session/prompt\",\"params\":{\"sessionId\":\"\(sid)\",\"prompt\":[{\"type\":\"text\",\"text\":\"hi\"}]}}"
+        )
+
+        let firstSeen = try #require(await llm.calls().first)
+        #expect(firstSeen.first?.content.contains(canary) == true)
     }
 }
 

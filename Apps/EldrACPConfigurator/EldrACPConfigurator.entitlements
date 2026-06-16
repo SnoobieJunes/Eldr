@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!-- The Configurator is a developer tool: it installs the eldr-acp CLI to
+	     ~/.local/bin and writes config to ~/.config/eldr-acp, spawns the local LLM
+	     client + shell tools, and pairs over the local network. The App Sandbox
+	     would block all of that, so this ships UNSANDBOXED (Developer ID +
+	     notarization + hardened runtime is the Gatekeeper story instead). -->
+	<key>com.apple.security.app-sandbox</key>
+	<false/>
+</dict>
+</plist>

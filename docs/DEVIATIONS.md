@@ -930,3 +930,32 @@ and affects interop; `[app-only]` — client behavior, no wire impact;
   marked context is consumed only when BOTH humans have a live grant in scope,
   rather than a single author-side grant exposing one party's content
   unilaterally. The looser single-side mode is not shipped.
+
+## Eldr ACP Configurator (macOS GUI app + DMG)
+
+A SwiftUI macOS app (`Apps/EldrACPConfigurator/`) that wraps the `eldr-acp` CLI in
+a setup wizard, live config, log viewer, in-app test chat, self-learning project
+memory, and an EldrChat bridge, then ships as a DMG. Judgment calls made:
+
+| ID | Decision | Tag |
+|---|---|---|
+| AC1 | New thin macOS app target wrapping the existing PQRCACP engine; the CLI itself is unchanged in behavior and still runs headless. | app-only |
+| AC2 | App deployment target = **macOS 26.0**, not the plan's macOS 14. Forced: Phase 4 links `PQRCNostr`/`PQRCCore`, which declare `.macOS(.v26)`. Also matches the rest of the repo (iOS/macOS 26). | app-only |
+| AC3 | PQRCACP gains `ELDR_ACP_EVENTS_FILE` (a JSONL turn-event log) and `ELDR_ACP_CONTEXT_FILE` + auto-discovery of `<configDir>/projects/<sha256(cwd)>/eldr.md`. Both default OFF/`nil` — existing installs are byte-for-byte unaffected. Project identity = SHA-256 of the absolute cwd (one-way; the real path is not exposed in the shared `projects/` namespace; a sidecar `cwd` marker, written locally, lets the GUI show a friendly name). | app-only |
+| AC4 | `promptCapabilities.embeddedContext` flipped to `true`; `extractPromptText` now folds Xcode-27 `code` blocks (fenced) and `compilation_error`/`diagnostic` blocks (labeled) into the prompt. Unknown/image/audio blocks still ignored (forward-compatible). | app-only |
+| AC5 | `ConfigurationStore` round-trips config through the binary's OWN parsers (`LLMConfig.fromEnvironment` / `AgentConfig.fromEnvironment`) — no duplicated parsing. It writes `export KEY='value'` lines to `<configDir>/env` (sourced by the launcher) for scalars, and the individual `tools`/`skills`/`prompt-preamble`/`system-prompt` files AgentConfig reads directly. | app-only |
+| AC6 | The Configurator ships **unsandboxed**. It installs the CLI to `~/.local/bin`, writes `~/.config/eldr-acp`, spawns the local LLM client + shell tools, and pairs over the local network — all of which the App Sandbox forbids. Developer ID + notarization + hardened runtime is the Gatekeeper story instead (`entitlements` sets `com.apple.security.app-sandbox = false`). | app-only |
+| AC7 | Menu-bar presence uses a SwiftUI **`MenuBarExtra` scene**, not a hand-managed `NSStatusItem`. Same UX (status dot + quick actions) with no `AppDelegate` and clean `@StateObject` sharing. | app-only |
+| AC8 | `ContextLearner`'s "user edited a file the agent wrote → correction" rule is a heuristic: a `DispatchSource` vnode watch on the written path for a 15-min window. Any post-write modification yields a soft "prefer your version" note. Best-effort; not a precise diff. | tech-debt |
+| AC9 | **Bridge runtime boundary.** Standing up a full PQRC node in the Configurator (identity + prekeys published to a relay, then a live PQXDH pairing handshake with EldrChat over Multipeer) needs a second peer and the app's identity/session stack, so it is not headlessly verifiable. Implemented + tested: `NostrKeypair` generation and Keychain storage (SPEC §3.1 flags: `…WhenUnlockedThisDeviceOnly`, `synchronizable=false`), the QR pairing payload codec, `MultipeerNearbyLink` advertising, ACP-activity formatting, and the send path that emits `participant_type: .agent` (invariant 8) — all behind a `BridgeMessaging` seam. Production wires a `PQRCMessenger`-backed implementation into that seam; until paired, sends throw. | tech-debt |
+| AC10 | Bridge advertises Bonjour service type **`eldr-acp`** (per plan) while EldrChat's nearby link defaults to `pqrc-local`. Cross-discovery requires matching service types; the app `Info.plist` declares `_eldr-acp._tcp`/`_udp`. Reconciling the two service types is part of the AC9 runtime wiring. | app-only |
+| AC11 | iOS/macOS EldrChat changes are minimal + purely local (never broadcast, SPEC §0): `ContactRecord.contactType` (`"coding_agent"`), `ConversationVM.isCodingAgent`, a `wrench.and.screwdriver.fill` badge in `ConversationRow`, and `PersonaRuntime.contactType`/`setContactType`. Agent-message rendering (invariant 8) was already handled by `MessageBubble`, so no message-path change. The in-conversation header info-chip ("Coding session shared from <host>") was deferred to keep the change surgical. | app-only / tech-debt |
+| AC12 | `build-dmg.sh` (archive → export → notarytool → staple → hdiutil → codesign) requires a paid Apple Developer account (Developer ID cert + notarization creds via `APPLE_ID`/`APP_PASSWORD`/`TEAM_ID`). It is intentionally NOT part of CI and was not executed here; the script header documents the prerequisites. | tech-debt |
+| AC13 | The `--version` executable test spawns the **pre-built** binary; it must not run `swift build`/`swift run` from inside `swift test` (that deadlocks on the SwiftPM `.build/.lock` the outer run holds). Documented flow is `swift build` then `swift test`; a clean `swift test` skips that one spawn (a sibling test pins the version constant). | tech-debt |
+
+**Cardinal-rule resolutions (bridge):** the bridge shares **nothing** until the user
+pairs, picks a conversation, AND enables a per-message-type toggle (all OFF by
+default). The coding agent never self-activates — it is the user's own tool reporting
+their work, so no `ai_window` gate applies to its outbound messages (SPEC §13); the
+agent-authored `participant_type: .agent` label and the existing PQXDH/ratchet/gift-
+wrap stack are preserved unchanged (invariants 6, 8 intact).

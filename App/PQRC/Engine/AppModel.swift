@@ -15,6 +15,8 @@ struct ConversationVM: Identifiable, Hashable {
     var verified: Bool
     var memberCount: Int
     var unread: Int = 0
+    /// A paired Eldr ACP coding agent (local tag only) — drives the wrench icon.
+    var isCodingAgent: Bool = false
 }
 
 struct ThreadVM: Identifiable, Hashable {
@@ -222,6 +224,8 @@ final class AppModel {
             if let aiName = await runtime.contactAIName(id) { aiNames[id] = aiName }
         }
         contactNames[id] = title
+        var isCodingAgent = false
+        if roster == nil { isCodingAgent = await runtime.contactType(id) == "coding_agent" }
         var row = conversations.first { $0.id == id }
             ?? ConversationVM(
                 id: id, title: title, isGroup: roster != nil, lastMessage: "",
@@ -229,6 +233,7 @@ final class AppModel {
                 memberCount: roster?.members.count ?? 2)
         row.title = title
         row.verified = verified
+        row.isCodingAgent = isCodingAgent
         row.memberCount = roster?.members.count ?? 2
         if let lastMessage, lastMessage.threadID == nil {
             row.lastMessage = lastMessage.text

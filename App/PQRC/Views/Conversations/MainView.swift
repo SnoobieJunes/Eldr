@@ -377,6 +377,12 @@ struct ConversationRow: View {
                             .foregroundStyle(.secondary)
                             .accessibilityLabel("Muted")
                     }
+                    if conversation.isCodingAgent {
+                        Image(systemName: "wrench.and.screwdriver.fill")
+                            .font(.caption2)
+                            .foregroundStyle(.blue)
+                            .accessibilityLabel("Coding agent")
+                    }
                     if conversation.isGroup {
                         Text("\(conversation.memberCount)")
                             .font(.caption2)

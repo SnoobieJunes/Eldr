@@ -670,6 +670,20 @@ actor PersonaRuntime {
         eventContinuation?.yield(.conversationChanged(identityHex))
     }
 
+    /// Phase 4: this contact's local type tag (`"coding_agent"` for a paired Eldr
+    /// ACP Configurator). PURELY LOCAL — never broadcast (SPEC §0).
+    func contactType(_ identityHex: String) -> String? {
+        contactRecords[identityHex]?.contactType
+    }
+
+    /// Tag (or clear) a contact as a coding agent — set when pairing the Configurator
+    /// so its conversation renders with the wrench icon. Local-only; persisted.
+    func setContactType(_ identityHex: String, type: String?) async {
+        contactRecords[identityHex]?.contactType = (type?.isEmpty ?? true) ? nil : type
+        persistContact(identityHex)
+        eventContinuation?.yield(.conversationChanged(identityHex))
+    }
+
     /// Sets my alias and broadcasts it to every connected contact over the
     /// existing encrypted sessions (an empty-text control message — never a
     /// public profile; only established contacts learn the name).

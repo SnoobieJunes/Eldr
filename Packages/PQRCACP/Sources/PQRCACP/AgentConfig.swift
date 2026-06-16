@@ -55,6 +55,16 @@ public struct AgentConfig: Sendable, Equatable {
     /// built-ins, e.g. `spec,html`). nil/empty → all built-ins. Env:
     /// `ELDR_ACP_SKILLS` when it names skills rather than a boolean.
     public var skillAllowlist: [String]?
+    /// Path to a JSONL file where the agent appends one JSON line per significant
+    /// event (write_file, shell_result, session_end). The Configurator GUI tails
+    /// this to drive ContextLearner. nil → no event logging.
+    /// Env: `ELDR_ACP_EVENTS_FILE`.
+    public var eventsFilePath: String?
+    /// Path to a project context file (eldr.md) to prepend to the system prompt at
+    /// the start of every session. nil → auto-discover
+    /// `~/.config/eldr-acp/projects/<sha256(cwd)>/eldr.md`.
+    /// Env: `ELDR_ACP_CONTEXT_FILE`.
+    public var contextFilePath: String?
 
     /// Defaults preserve/improve prior behavior: 8 KB per tool result (the loop
     /// previously fed back whole files unbounded and only capped shell at 64 KB),
@@ -69,7 +79,9 @@ public struct AgentConfig: Sendable, Equatable {
         promptPreamble: nil,
         systemPromptOverride: nil,
         skillsEnabled: true,
-        skillAllowlist: nil)
+        skillAllowlist: nil,
+        eventsFilePath: nil,
+        contextFilePath: nil)
 
     public init(
         maxToolResultBytes: Int = 8 * 1024,
@@ -79,7 +91,9 @@ public struct AgentConfig: Sendable, Equatable {
         promptPreamble: String? = nil,
         systemPromptOverride: String? = nil,
         skillsEnabled: Bool = true,
-        skillAllowlist: [String]? = nil
+        skillAllowlist: [String]? = nil,
+        eventsFilePath: String? = nil,
+        contextFilePath: String? = nil
     ) {
         // Clamp to sane floors: a non-positive byte cap would truncate everything to
         // nothing (worse than no cap), so treat ≤0 as "effectively unbounded".
@@ -91,6 +105,8 @@ public struct AgentConfig: Sendable, Equatable {
         self.systemPromptOverride = systemPromptOverride
         self.skillsEnabled = skillsEnabled
         self.skillAllowlist = skillAllowlist
+        self.eventsFilePath = eventsFilePath
+        self.contextFilePath = contextFilePath
     }
 
     /// Build from the process environment, falling back to an optional config
@@ -142,7 +158,9 @@ public struct AgentConfig: Sendable, Equatable {
             promptPreamble: textEnvOrFile("ELDR_ACP_PROMPT_PREAMBLE", file: "prompt-preamble"),
             systemPromptOverride: textEnvOrFile("ELDR_ACP_SYSTEM_PROMPT", file: "system-prompt"),
             skillsEnabled: skillsEnabled,
-            skillAllowlist: skillAllowlist)
+            skillAllowlist: skillAllowlist,
+            eventsFilePath: stringEnv("ELDR_ACP_EVENTS_FILE"),
+            contextFilePath: stringEnv("ELDR_ACP_CONTEXT_FILE"))
     }
 
     /// Interpret the overloaded `ELDR_ACP_SKILLS` value.

@@ -30,6 +30,11 @@ actor InFlight {
 @main
 struct EldrACPMain {
     static func main() async {
+        if CommandLine.arguments.contains("--version") {
+            print("eldr-acp/\(ACPAgent.agentVersion)")
+            return
+        }
+
         let environment = ProcessInfo.processInfo.environment
 
         func log(_ message: String) {
@@ -66,7 +71,8 @@ struct EldrACPMain {
             connection: connection,
             llm: llm,
             toolEnvironment: .fromEnvironment(environment),
-            config: config)
+            config: config,
+            configDir: AgentConfig.defaultConfigDir(environment))
         let inFlight = InFlight()
 
         log("ready on stdio")

@@ -20,6 +20,10 @@ public actor ACPAgent {
     private let llm: any LLMClient
     private let toolEnvironment: ToolEnvironment
     private let config: AgentConfig
+    /// Config dir used to auto-discover a project's `eldr.md` when no explicit
+    /// `ELDR_ACP_CONTEXT_FILE` is set. Injected (not hard-coded to ~/.config) so
+    /// unit tests stay home-directory-free — pass `nil` to disable auto-discovery.
+    private let configDir: String?
     private let maxIterations: Int
     /// The advertised, executable skills (ACP slash-commands). Derived from config
     /// once at init; empty when skills are disabled.
@@ -33,18 +37,28 @@ public actor ACPAgent {
     private var sessionCounter = 0
     /// Sessions the client asked to cancel; the turn loop checks this and bails.
     private var cancelledSessions: Set<String> = []
+    /// Per-session project context (eldr.md contents), resolved at session/new and
+    /// prepended to the system prompt on every turn of that session.
+    private var sessionContext: [String: String] = [:]
+    /// Per-session count of files written (for the session_end event's `files`).
+    private var sessionWriteCounts: [String: Int] = [:]
+    /// Per-session last observed build result ("green" | "red" | "unknown"), updated
+    /// whenever a run_shell command looks like a build/test (for `session_end.build`).
+    private var sessionBuildStatus: [String: String] = [:]
 
     public init(
         connection: ClientConnection,
         llm: any LLMClient,
         toolEnvironment: ToolEnvironment = .fromEnvironment(),
         config: AgentConfig = .fromEnvironment(),
+        configDir: String? = AgentConfig.defaultConfigDir(ProcessInfo.processInfo.environment),
         maxIterations: Int = 20
     ) {
         self.connection = connection
         self.llm = llm
         self.toolEnvironment = toolEnvironment
         self.config = config
+        self.configDir = configDir
         self.maxIterations = maxIterations
         self.skills = AgentSkillSet.from(config: config)
     }
@@ -120,11 +134,13 @@ public actor ACPAgent {
         var agentCapabilities: [String: JSONValue] = [
             // We don't persist sessions across runs.
             "loadSession": .bool(false),
-            // Text in, text out — no image/audio/embedded context yet.
+            // Text + embedded context (Xcode 27 sends selected code / build errors
+            // as embedded blocks; `extractPromptText` folds them into the prompt).
+            // Still no image/audio.
             "promptCapabilities": .object([
                 "image": .bool(false),
                 "audio": .bool(false),
-                "embeddedContext": .bool(false),
+                "embeddedContext": .bool(true),
             ]),
         ]
         // Advertise skills here too (in addition to the post-session/new
@@ -154,6 +170,14 @@ public actor ACPAgent {
         // Per-session cwd: the client's `cwd`, else the agent's configured workdir.
         let cwd = params["cwd"]?.stringValue ?? toolEnvironment.effectiveWorkdir
         sessions[sessionId] = cwd
+        // Resolve this project's persistent context (explicit ELDR_ACP_CONTEXT_FILE,
+        // else the auto-discovered per-project eldr.md). Stored once; prepended to
+        // the system prompt on every turn of this session.
+        if let context = ProjectContext.read(
+            explicitPath: config.contextFilePath, configDir: configDir, cwd: cwd)
+        {
+            sessionContext[sessionId] = context
+        }
         // Advertise the agent's skills for this session. ACP's canonical channel for
         // command discovery is an available_commands_update session/update; clients
         // (Zed, OpenClaw) surface these as slash-commands in their menu.
@@ -191,17 +215,39 @@ public actor ACPAgent {
         return .object(["stopReason": .string(stopReason.rawValue)])
     }
 
-    /// Concatenate the text content blocks of a prompt into a single user string.
-    /// (We advertise no image/audio support, so non-text blocks are ignored.)
+    /// Flatten a prompt's content blocks into a single user string. Handles the
+    /// embedded-context blocks an ACP client (Xcode 27) sends when the user invokes
+    /// the agent on a selection or a build error: `code` blocks are fenced (with any
+    /// language/path hint) and `compilation_error`/`diagnostic` blocks are labeled so
+    /// the model treats them as something to fix. image/audio/unknown blocks are
+    /// ignored (forward-compatible).
     static func extractPromptText(_ prompt: JSONValue?) -> String {
         guard let blocks = prompt?.arrayValue else { return prompt?.stringValue ?? "" }
-        return
-            blocks
-            .compactMap { block -> String? in
-                guard block["type"]?.stringValue == "text" else { return nil }
-                return block["text"]?.stringValue
+        return blocks.compactMap(blockText(_:)).joined(separator: "\n")
+    }
+
+    /// Render one ACP content block as prompt text, or nil to drop it.
+    static func blockText(_ block: JSONValue) -> String? {
+        switch block["type"]?.stringValue {
+        case "text":
+            return block["text"]?.stringValue
+        case "code":
+            guard let code = block["text"]?.stringValue ?? block["code"]?.stringValue else {
+                return nil
             }
-            .joined(separator: "\n")
+            let language = block["language"]?.stringValue ?? ""
+            let location = block["path"]?.stringValue ?? block["uri"]?.stringValue
+            let header = location.map { "// \($0)\n" } ?? ""
+            return "\(header)```\(language)\n\(code)\n```"
+        case "compilation_error", "diagnostic":
+            guard let message = block["text"]?.stringValue ?? block["message"]?.stringValue else {
+                return nil
+            }
+            let at = (block["path"]?.stringValue).map { " at \($0)" } ?? ""
+            return "Compilation error\(at):\n\(message)"
+        default:
+            return nil
+        }
     }
 
     /// The tool-calling loop. Builds the message list, calls the LLM with tool defs;
@@ -220,12 +266,20 @@ public actor ACPAgent {
             maxResultBytes: config.maxToolResultBytes)
         let tools = ToolExecutor.toolDefinitions(allowlist: config.toolAllowlist)
 
-        var messages: [LLMMessage] = [
+        // Leading system run: optional project-context block FIRST (so the model
+        // reads the project's accumulated facts/corrections before its operating
+        // instructions), then the operating system prompt, then the task. Both
+        // system messages are anchored by ContextBudget.trim's leading-system rule.
+        var messages: [LLMMessage] = []
+        if let context = sessionContext[sessionId] {
+            messages.append(
+                LLMMessage(role: .system, content: ProjectContext.systemBlock(context)))
+        }
+        messages.append(
             LLMMessage(
                 role: .system,
-                content: Self.systemPrompt(cwd: cwd, config: config, skill: skill)),
-            LLMMessage(role: .user, content: userText),
-        ]
+                content: Self.systemPrompt(cwd: cwd, config: config, skill: skill)))
+        messages.append(LLMMessage(role: .user, content: userText))
 
         var toolCallSeq = 0
         for _ in 0..<maxIterations {
@@ -254,6 +308,7 @@ public actor ACPAgent {
                 // Final answer.
                 let text = response.content.isEmpty ? "(no response)" : response.content
                 await emitMessage(sessionId: sessionId, text: text)
+                logSessionEnd(sessionId: sessionId, cwd: cwd, summary: text)
                 return .endTurn
             }
 
@@ -269,16 +324,16 @@ public actor ACPAgent {
                 let args = call.argumentsJSON
                 let result = await runOneTool(
                     sessionId: sessionId, toolCallId: toolCallId, executor: executor,
-                    name: call.name, args: args)
+                    name: call.name, args: args, cwd: cwd)
                 messages.append(
                     LLMMessage(role: .tool, content: result.text, toolCallId: call.id))
             }
         }
 
         // Hit the iteration cap without a final message.
-        await emitMessage(
-            sessionId: sessionId,
-            text: "Reached the tool-call limit (\(maxIterations) steps) without finishing.")
+        let capMessage = "Reached the tool-call limit (\(maxIterations) steps) without finishing."
+        await emitMessage(sessionId: sessionId, text: capMessage)
+        logSessionEnd(sessionId: sessionId, cwd: cwd, summary: capMessage)
         return .maxTurnRequests
     }
 
@@ -287,7 +342,7 @@ public actor ACPAgent {
     /// short-circuits to a failed tool_call_update and a "denied" tool result.
     private func runOneTool(
         sessionId: String, toolCallId: String, executor: ToolExecutor,
-        name: String, args: JSONValue
+        name: String, args: JSONValue, cwd: String
     ) async -> ToolResult {
         let kind = ToolExecutor.kind(for: name)
         let title = ToolExecutor.title(for: name, args: args)
@@ -329,7 +384,46 @@ public actor ACPAgent {
                 sessionId: sessionId, toolCallId: toolCallId,
                 status: result.isError ? "failed" : "completed",
                 contentText: result.text, isError: result.isError))
+
+        logToolEvent(name: name, args: args, result: result, sessionId: sessionId, cwd: cwd)
         return result
+    }
+
+    /// Append a JSONL event for a significant tool call (write_file / run_shell) and
+    /// update per-session counters that feed the session_end event. No-op unless
+    /// `ELDR_ACP_EVENTS_FILE` is set.
+    private func logToolEvent(
+        name: String, args: JSONValue, result: ToolResult, sessionId: String, cwd: String
+    ) {
+        switch name {
+        case "write_file" where !result.isError:
+            sessionWriteCounts[sessionId, default: 0] += 1
+            let path = Self.resolvePath(args["path"]?.stringValue ?? "", cwd: cwd)
+            ACPEventLog.writeFile(
+                path: path, session: sessionId, cwd: cwd, to: config.eventsFilePath)
+        case "run_shell":
+            let cmd = args["command"]?.stringValue ?? ""
+            let exit = Self.parseShellExit(from: result.text)
+            // A build/test command's outcome is the session's build status.
+            if Self.isBuildCommand(cmd) {
+                sessionBuildStatus[sessionId] = exit == 0 ? "green" : "red"
+            }
+            ACPEventLog.shellResult(
+                cmd: cmd, exit: exit, summary: String(result.text.prefix(200)),
+                session: sessionId, cwd: cwd, to: config.eventsFilePath)
+        default:
+            break
+        }
+    }
+
+    /// Emit the session_end event with the final summary, files-written count, and
+    /// build status. No-op unless `ELDR_ACP_EVENTS_FILE` is set.
+    private func logSessionEnd(sessionId: String, cwd: String, summary: String) {
+        ACPEventLog.sessionEnd(
+            cwd: cwd, session: sessionId, summary: String(summary.prefix(200)),
+            files: sessionWriteCounts[sessionId] ?? 0,
+            build: sessionBuildStatus[sessionId] ?? "unknown",
+            to: config.eventsFilePath)
     }
 
     /// Ask the client for permission. If the client can't prompt (no permission
@@ -411,6 +505,30 @@ public actor ACPAgent {
     }
 
     // MARK: - Helpers
+
+    /// Resolve a (possibly relative) tool path against the session cwd, matching
+    /// `ToolExecutor.absolutePath` so an events.jsonl `path` equals where the file
+    /// actually landed (ContextLearner watches that path).
+    static func resolvePath(_ path: String, cwd: String) -> String {
+        if path.isEmpty || path.hasPrefix("/") { return path }
+        return (cwd as NSString).appendingPathComponent(path)
+    }
+
+    /// Pull the exit code out of a run_shell result (`formatShellResult` appends
+    /// `[exit code: N]`). Returns -1 when absent/unknown.
+    static func parseShellExit(from text: String) -> Int {
+        guard let marker = text.range(of: "[exit code: ", options: .backwards) else { return -1 }
+        let tail = text[marker.upperBound...]
+        let digits = tail.prefix { $0 == "-" || $0.isNumber }
+        return Int(digits) ?? -1
+    }
+
+    /// True when a shell command is a build/test invocation whose exit status should
+    /// become the session's build result.
+    static func isBuildCommand(_ command: String) -> Bool {
+        let c = command.lowercased()
+        return c.contains("xcodebuild") || c.contains("swift build") || c.contains("swift test")
+    }
 
     static func describe(_ error: Error) -> String {
         switch error {
