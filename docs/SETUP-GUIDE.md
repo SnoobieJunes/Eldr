@@ -428,11 +428,16 @@ drops into all of them. Configure the launcher as the agent command:
   ```json
   { "agent_servers": { "eldr": { "command": "/Users/<you>/.local/bin/eldr-acp-xcode", "args": [] } } }
   ```
-- **OpenClaw** (its `acpx` plugin registers external ACP harnesses by `command`/`args`):
+- **OpenClaw — one-click in the Configurator (A42).** The Eldr ACP Configurator now
+  registers OpenClaw first-class, like Xcode: it installs a dedicated
+  `~/.local/bin/eldr-acp-openclaw` launcher and the wizard's **"Register in OpenClaw"**
+  step merges the agent into OpenClaw's config (default `~/.config/openclaw/config.json`,
+  path overridable) **without clobbering** your existing settings. Manual fallback (its
+  `acpx` plugin registers external ACP harnesses by `command`/`args`):
   ```json
   { "plugins": { "entries": { "acpx": { "enabled": true,
       "config": { "agents": { "eldr": {
-        "command": "/Users/<you>/.local/bin/eldr-acp-xcode", "args": [] } } } } } } }
+        "command": "/Users/<you>/.local/bin/eldr-acp-openclaw", "args": [] } } } } } } }
   ```
   `eldr-acp` requires **no authentication** (empty `authMethods`), so acpx's
   credential plumbing is a no-op. It advertises `loadSession:false`, so a client
@@ -451,3 +456,25 @@ drops into all of them. Configure the launcher as the agent command:
 Compatibility was validated by driving the binary through a mock ACP client
 exercising the full handshake plus the three skills, against both the built-in echo
 LLM and a real local model.
+
+#### contextgraph (smart context assembly) — A43
+
+[`rdevaul/contextgraph`](https://github.com/rdevaul/contextgraph) is an optional
+graph-based context manager (DAG + tag retrieval; sticky/recency/topic layers) that
+runs as a local HTTP service on `:8302`. Eldr can leverage it at **two** layers:
+
+1. **Agent route (any ACP client).** Set `ELDR_ACP_CONTEXTGRAPH=1` (and optionally
+   `ELDR_ACP_CONTEXTGRAPH_URL`, default `http://localhost:8302`) and `eldr-acp`
+   assembles prior context via `POST /assemble` each turn and learns the turn via
+   `POST /ingest`. It health-checks once per session and **falls back to the built-in
+   recent-window budgeting** if the service is down — no turn ever fails because
+   contextgraph is offline. Toggle it (and install/start the service from a checkout)
+   in the Configurator's **Configuration ▸ ContextGraph** section.
+2. **OpenClaw-plugin route.** contextgraph ships its own OpenClaw plugin; enabling
+   contextgraph before the wizard's "Register in OpenClaw" step also writes its plugin
+   entry pointed at the same endpoint.
+
+Run the service yourself per its README (`pip install -r requirements.txt`,
+`python -m spacy download en_core_web_sm`, `./scripts/install-service.sh`), or let the
+Configurator run those steps for you — note this depends on your Python toolchain.
+Verify reachability with `curl http://localhost:8302/health`.

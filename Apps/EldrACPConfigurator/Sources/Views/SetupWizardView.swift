@@ -14,8 +14,11 @@ struct SetupWizardView: View {
     @State private var installing = false
     @State private var installError: String?
     @State private var xcodeOpenError: String?
+    @State private var openClawConfigPath = ""
+    @State private var openClawStatus: String?
+    @State private var openClawError: String?
 
-    private let lastStep = 4
+    private let lastStep = 5
 
     var body: some View {
         VStack(spacing: 0) {
@@ -45,6 +48,7 @@ struct SetupWizardView: View {
         case 1: testStep
         case 2: installStep
         case 3: xcodeStep
+        case 4: openClawStep
         default: doneStep
         }
     }
@@ -163,7 +167,57 @@ struct SetupWizardView: View {
             "Couldn't find Xcode. Open it yourself, then go to Xcode ▸ Settings ▸ Intelligence."
     }
 
-    // MARK: Step 4 — Done
+    // MARK: Step 4 — OpenClaw
+    private var openClawStep: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("Register in OpenClaw").font(.headline)
+            Text("Adds the eldr agent to OpenClaw's acpx plugin config. Your existing OpenClaw settings are preserved — only the agent entry is merged in.")
+                .font(.callout).foregroundStyle(.secondary)
+            pathRow("Launcher", store.paths.openClawLauncher)
+            VStack(alignment: .leading, spacing: 4) {
+                Text("OpenClaw config file").font(.caption).foregroundStyle(.secondary)
+                TextField("~/.config/openclaw/config.json", text: $openClawConfigPath)
+                    .textFieldStyle(.roundedBorder)
+                    .font(.system(.caption, design: .monospaced))
+                    .autocorrectionDisabled()
+            }
+            Button("Register with OpenClaw") { registerOpenClaw() }
+            if let openClawStatus {
+                Label(openClawStatus, systemImage: "checkmark.circle.fill")
+                    .font(.caption).foregroundStyle(.green)
+            }
+            if let openClawError {
+                Label(openClawError, systemImage: "exclamationmark.triangle.fill")
+                    .font(.caption).foregroundStyle(.orange)
+            }
+        }
+        .onAppear {
+            if openClawConfigPath.isEmpty { openClawConfigPath = store.paths.defaultOpenClawConfig }
+        }
+    }
+
+    /// Merge the eldr agent into OpenClaw's config (creating it if absent),
+    /// preserving any existing keys. Surfaces a clear status/error instead of
+    /// failing silently.
+    private func registerOpenClaw() {
+        openClawError = nil
+        openClawStatus = nil
+        let raw = openClawConfigPath.isEmpty ? store.paths.defaultOpenClawConfig : openClawConfigPath
+        let path = (raw as NSString).expandingTildeInPath
+        do {
+            let written = try OpenClawRegistration.register(
+                configPath: path, launcherPath: store.paths.openClawLauncher,
+                contextGraphURL: store.contextGraphEnabled ? store.contextGraphURL : nil)
+            let extra = store.contextGraphEnabled ? " (contextgraph plugin enabled too)" : ""
+            openClawStatus = "Registered the eldr agent in \(written).\(extra)"
+        } catch {
+            openClawError =
+                (error as? OpenClawRegistration.RegError)?.errorDescription
+                ?? error.localizedDescription
+        }
+    }
+
+    // MARK: Step 5 — Done
     private var doneStep: some View {
         VStack(alignment: .leading, spacing: 12) {
             Label("You're ready", systemImage: "checkmark.seal.fill").font(.headline).foregroundStyle(.green)

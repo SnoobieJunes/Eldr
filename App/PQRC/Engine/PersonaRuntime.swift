@@ -234,7 +234,7 @@ actor PersonaRuntime {
         // local autoName) instead of real display names — otherwise the skills
         // prompt would leak the very social graph the firewall withholds from the
         // redacted transcript (DEVIATIONS A19/A20).
-        let redactNames = ai.isRemote && firewallEnabled
+        let redactNames = ai.appliesEgressFirewall && firewallEnabled
         let promptDisplayName = redactNames ? "you" : displayName
         let promptPeerName =
             redactNames
@@ -259,7 +259,7 @@ actor PersonaRuntime {
             conversationID: conversationID, threadID: threadID, depth: ai.contextDepth,
             strict: policy == "strict", instructions: ai.instructions, summarize: ai.summarizes,
             systemPromptOverride: override)
-        guard ai.isRemote, firewallEnabled else { return ctx }
+        guard ai.appliesEgressFirewall, firewallEnabled else { return ctx }
         return redactedForRemote(ctx)
     }
 

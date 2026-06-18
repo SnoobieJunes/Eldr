@@ -65,6 +65,15 @@ public struct AgentConfig: Sendable, Equatable {
     /// `~/.config/eldr-acp/projects/<sha256(cwd)>/eldr.md`.
     /// Env: `ELDR_ACP_CONTEXT_FILE`.
     public var contextFilePath: String?
+    /// Route context assembly through the `contextgraph` service (graph-based, tag
+    /// retrieval) instead of (well, ahead of) the local sliding-window budgeting.
+    /// Default off → unchanged behavior. Env: `ELDR_ACP_CONTEXTGRAPH` (boolean).
+    public var contextGraphEnabled: Bool
+    /// contextgraph REST base URL. Env: `ELDR_ACP_CONTEXTGRAPH_URL`.
+    public var contextGraphURL: String
+    /// Channel/agent label so per-project graphs stay separate. nil → derived from
+    /// the session cwd. Env: `ELDR_ACP_CONTEXTGRAPH_AGENT`.
+    public var contextGraphAgentName: String?
 
     /// Defaults preserve/improve prior behavior: 8 KB per tool result (the loop
     /// previously fed back whole files unbounded and only capped shell at 64 KB),
@@ -81,7 +90,10 @@ public struct AgentConfig: Sendable, Equatable {
         skillsEnabled: true,
         skillAllowlist: nil,
         eventsFilePath: nil,
-        contextFilePath: nil)
+        contextFilePath: nil,
+        contextGraphEnabled: false,
+        contextGraphURL: "http://localhost:8302",
+        contextGraphAgentName: nil)
 
     public init(
         maxToolResultBytes: Int = 8 * 1024,
@@ -93,7 +105,10 @@ public struct AgentConfig: Sendable, Equatable {
         skillsEnabled: Bool = true,
         skillAllowlist: [String]? = nil,
         eventsFilePath: String? = nil,
-        contextFilePath: String? = nil
+        contextFilePath: String? = nil,
+        contextGraphEnabled: Bool = false,
+        contextGraphURL: String = "http://localhost:8302",
+        contextGraphAgentName: String? = nil
     ) {
         // Clamp to sane floors: a non-positive byte cap would truncate everything to
         // nothing (worse than no cap), so treat ≤0 as "effectively unbounded".
@@ -107,6 +122,9 @@ public struct AgentConfig: Sendable, Equatable {
         self.skillAllowlist = skillAllowlist
         self.eventsFilePath = eventsFilePath
         self.contextFilePath = contextFilePath
+        self.contextGraphEnabled = contextGraphEnabled
+        self.contextGraphURL = contextGraphURL.isEmpty ? "http://localhost:8302" : contextGraphURL
+        self.contextGraphAgentName = contextGraphAgentName
     }
 
     /// Build from the process environment, falling back to an optional config
@@ -128,6 +146,14 @@ public struct AgentConfig: Sendable, Equatable {
         }
         func stringEnv(_ key: String) -> String? {
             env[key].flatMap { $0.isEmpty ? nil : $0 }
+        }
+        func boolEnv(_ key: String, default fallback: Bool) -> Bool {
+            guard let raw = stringEnv(key)?.lowercased() else { return fallback }
+            switch raw {
+            case "1", "on", "true", "yes", "enable", "enabled": return true
+            case "0", "off", "false", "no", "disable", "disabled": return false
+            default: return fallback
+            }
         }
         // Env value, else a file in the config dir, else nil.
         func textEnvOrFile(_ key: String, file: String) -> String? {
@@ -160,7 +186,10 @@ public struct AgentConfig: Sendable, Equatable {
             skillsEnabled: skillsEnabled,
             skillAllowlist: skillAllowlist,
             eventsFilePath: stringEnv("ELDR_ACP_EVENTS_FILE"),
-            contextFilePath: stringEnv("ELDR_ACP_CONTEXT_FILE"))
+            contextFilePath: stringEnv("ELDR_ACP_CONTEXT_FILE"),
+            contextGraphEnabled: boolEnv("ELDR_ACP_CONTEXTGRAPH", default: d.contextGraphEnabled),
+            contextGraphURL: stringEnv("ELDR_ACP_CONTEXTGRAPH_URL") ?? d.contextGraphURL,
+            contextGraphAgentName: stringEnv("ELDR_ACP_CONTEXTGRAPH_AGENT"))
     }
 
     /// Interpret the overloaded `ELDR_ACP_SKILLS` value.

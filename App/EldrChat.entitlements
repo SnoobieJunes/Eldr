@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!-- Apple Private Cloud Compute (FoundationModels PrivateCloudComputeLanguageModel,
+	     used by PCCFoundationModelsProvider — see DEVIATIONS A40).
+	     MANAGED entitlement: Apple provisions it to the team only after the PCC
+	     access request is approved (developer.apple.com/private-cloud-compute).
+	     Until then, on-device signing/provisioning that includes this key will
+	     fail — that is expected. -->
+	<key>com.apple.developer.private-cloud-compute</key>
+	<true/>
+</dict>
+</plist>

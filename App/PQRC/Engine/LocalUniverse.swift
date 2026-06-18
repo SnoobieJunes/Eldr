@@ -92,6 +92,7 @@ final class LocalUniverse {
             provider: MockAgentProvider(
                 script: MockAgentProvider.Script(draft: "(research) Tuesday is the popular slot.")),
             isRemote: true,
+            appliesEgressFirewall: true,  // demo the firewall on the off-device path
             instructions: "Surface options and trade-offs; never decide.",
             contextPolicy: "strict",  // only marked context (privacy-forward default)
             outputMode: "draft")

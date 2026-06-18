@@ -874,6 +874,76 @@ and affects interop; `[app-only]` — client behavior, no wire impact;
     must be re-pasted. The MCP toggle, consent alert, and MCP-vs-ACP note are untouched. No
     crypto/wire change beyond minting a new random token.
 
+- **A40 — Apple Private Cloud Compute as its own off-device AI tier** `[app-only]`
+  (2026-06-18): added `pcc` as a tethered-AI backend
+  (`PCCFoundationModelsProvider`, mirroring the on-device `FoundationModelsAgentProvider`)
+  that runs Apple's WWDC26 server foundation model. Per-AI **reasoning depth**
+  (`light`/`moderate`/`deep`, default moderate) is surfaced in Settings ▸ AI and
+  passed via `ContextOptions(reasoningLevel:)`; `GenerationOptions` carries optional
+  temperature / max tokens. **Cardinal-rule resolution:** PCC sends decrypted context
+  off-device, so it requires the off-device **consent** alert and shows the
+  "leaves device" indicator (`isRemote("pcc") == true`), BUT it is **exempt from the
+  name-redaction egress firewall** (`appliesEgressFirewall("pcc") == false`) — Apple
+  PCC is attested and retains no prompts, so we send full names/context for quality
+  while third-party vendors stay firewalled. This required splitting the old
+  `isRemote`-drives-everything coupling: `ConfiguredAI.appliesEgressFirewall` is a new
+  classifier, `TetheredAI` carries it, and `PersonaRuntime`'s two firewall predicates
+  (name redaction + `redactedForRemote`) now key off it instead of `isRemote`.
+  Eligibility (App Store Small Business Program, < 2M lifetime downloads, PCC
+  entitlement) and rate-limits surface as actionable `availabilityReason` strings →
+  Demo fallback, never a silent confidentiality downgrade.
+- **A40-tech-debt — PCC APIs are build-gated behind `ELDR_PCC_SDK`** `[tech-debt]`
+  (2026-06-18): the WWDC26 PCC symbols (`PrivateCloudComputeLanguageModel`,
+  `ContextOptions`, the `respond(to:options:contextOptions:)` overload) are absent from
+  the 2025 on-device-only SDK currently installed, so the provider's PCC path compiles
+  only when the target defines `ELDR_PCC_SDK` (set
+  `SWIFT_ACTIVE_COMPILATION_CONDITIONS` once building with the Xcode-26 SDK + PCC
+  entitlement). Without the flag the file still compiles and reports "not built with the
+  PCC SDK" → Demo. The structured-output / tool-calling / vision / adapter seams from the
+  "everything" scope are deferred to that same flagged path; **adapters are
+  specifically NOT pursued** (the training toolkit is EOL at v26.0.0, incompatible with
+  OS 27+) — prompt engineering is the supported path. Exact symbol spellings must be
+  verified in Xcode Quick Help when flipping the flag on.
+- **A41 — Mac Catalyst for a freely-resizable desktop window** `[app-only]`
+  (2026-06-18): EldrChat on Mac ran as "Designed for iPad" (`TARGETED_DEVICE_FAMILY
+  = "1,2"`), which forces small-or-fullscreen and ignores `.windowResizability`. Switched
+  the Mac runtime to **Mac Catalyst** (`SUPPORTS_MACCATALYST = YES`,
+  `SUPPORTS_MAC_DESIGNED_FOR_IPHONE_IPAD = NO`, device family `1,2,6`, macOS
+  deployment 26.0) so the window is a real, freely-resizable AppKit window. The
+  existing `.windowResizability(.contentMinSize)` / `.defaultSize` are now honored; the
+  `onMac` frame gate broadened to `isiOSAppOnMac || isMacCatalystApp`. `MainView`'s
+  `NavigationSplitView` already gives the responsive list/detail layout. Signing for
+  run/distribution is a manual Catalyst capability step (CI compiles with
+  `CODE_SIGNING_ALLOWED=NO`). The **Eldr ACP Configurator** (native macOS) got the same
+  desktop-window polish: its scene only set a 760×560 *minimum* (so it opened cramped at
+  the min), now `.defaultSize(1000×760)` + an ideal/`maxWidth:.infinity` content frame so
+  it opens comfortably and resizes freely.
+- **A42 — OpenClaw is a first-class ACP client in the Configurator** `[app-only]`
+  (2026-06-18): the `eldr-acp` agent is client-agnostic, so OpenClaw plugs in like Xcode.
+  `InstallerService` now writes a dedicated `~/.local/bin/eldr-acp-openclaw` launcher
+  (identical body to the Xcode one), and `OpenClawRegistration` auto-merges the agent into
+  OpenClaw's `acpx` plugin config (`plugins.entries.acpx.config.agents.eldr`) via a
+  read-modify-write that **preserves existing keys** (no clobber). The config path is
+  user-overridable in the wizard (default `~/.config/openclaw/config.json`). A new wizard
+  step (detect/register/status) mirrors the Xcode step. The `acpx` shape is taken from
+  SETUP-GUIDE; verify against the installed OpenClaw if rejected.
+- **A43 — contextgraph as an optional context backend (both hook points)** `[app-only]`
+  (2026-06-18): integrated `rdevaul/contextgraph` (graph/tag context manager, HTTP on
+  `:8302`) at the two layers requested. **(1) Agent route:** `ContextGraphClient`
+  (behind a `ContextGraphAssembling` seam) lets `eldr-acp` route context assembly through
+  `/assemble` + `/ingest` each turn (gated by `ELDR_ACP_CONTEXTGRAPH`, default OFF). It
+  is health-checked once per session and **falls back to the existing
+  `ContextBudget.trim` window on any failure** — no turn ever fails because contextgraph
+  is down (consistent with AgentConfig's "nothing makes a turn fail that used to
+  succeed"). Benefits every ACP client, not just OpenClaw. **(2) OpenClaw-plugin route:**
+  `OpenClawRegistration` also enables contextgraph's bundled plugin entry when the user
+  opts in. The Configurator (`ContextGraphService`) can install/start the Python service
+  from a user-supplied checkout (pip + spaCy model + `install-service.sh` + `launchctl`)
+  and shows a live `/health` dot. **Tech-debt:** the install/start path depends on the
+  user's Python toolchain and may need the app sandbox relaxed; the fallback is
+  "point at an already-running endpoint." The contextgraph OpenClaw-plugin config shape is
+  best-effort — verify against the shipped plugin.
+
 ### Tech debt `[tech-debt]`
 
 - **T1 — Secure Enclave fallback.** Where `SecureEnclave.isAvailable == false`

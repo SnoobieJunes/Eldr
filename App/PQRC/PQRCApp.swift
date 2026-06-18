@@ -60,7 +60,13 @@ struct PQRCApp: App {
             // real iPhone to render 760pt wide and CLIP everything (the "UI cut off"
             // bug). So gate it to "iOS app running on Mac" and pass nil (no
             // constraint) on a real iPhone/iPad.
-            let onMac = ProcessInfo.processInfo.isiOSAppOnMac
+            // "iOS app on Mac" (Designed for iPad) AND Mac Catalyst both want the
+            // desktop min/ideal frame so the window resizes freely instead of the
+            // fixed small-or-fullscreen iPad sizing. `isMacCatalystApp` covers the
+            // Catalyst runtime; `isiOSAppOnMac` the Designed-for-iPad one.
+            let onMac =
+                ProcessInfo.processInfo.isiOSAppOnMac
+                || ProcessInfo.processInfo.isMacCatalystApp
             RootView()
                 .environment(session)
                 .environment(commands)
@@ -373,6 +379,15 @@ final class AppSession {
             // Borrow a nearby host's AI over the Multipeer link. Needs an active
             // `nearby` relay client; otherwise fall back to the Demo stub.
             return hubClient.map { NearbyHubAIProvider(client: $0) } ?? DemoAgentProvider()
+        case "pcc":
+            // Apple Private Cloud Compute server model. No API key (on-Apple).
+            // Reasoning depth + sampling are baked into the provider instance.
+            return PCCFoundationModelsProvider.isAvailable
+                ? PCCFoundationModelsProvider(
+                    reasoningLevel: config.effectiveReasoning,
+                    temperature: config.temperature,
+                    maxResponseTokens: config.maxResponseTokens)
+                : DemoAgentProvider()
         case "demo":
             return DemoAgentProvider()
         default:  // "ondevice"
@@ -516,6 +531,7 @@ final class AppSession {
                 id: config.id, name: config.name,
                 provider: makeProvider(config: config, siloID: siloID, hubClient: hubClient),
                 isRemote: ConfiguredAI.isRemote(config.kind),
+                appliesEgressFirewall: ConfiguredAI.appliesEgressFirewall(config.kind),
                 instructions: config.instructions,
                 contextPolicy: config.effectivePolicy,
                 contextDepth: config.effectiveDepth,
@@ -954,6 +970,34 @@ final class AppSession {
         guard case .single(let model) = mode, let siloID = activeSilo?.siloID else { return }
         await model.runtime.setAIs(Self.makeRuntimeAIs(siloID: siloID, hubClient: relayClient))
         await model.runtime.setFirewallEnabled(Self.firewallEnabled)
+    }
+
+    /// Test ONE configured AI on demand (Settings ▸ AI per-row "Test"). Builds the
+    /// provider exactly as the runtime would — this silo's Keychain key, base URL,
+    /// model, PCC reasoning, etc. — runs a one-line sample, and returns the reply
+    /// or a readable failure reason. Works for ANY row (enabled or not) and
+    /// reflects the row's CURRENT settings, so it doesn't depend on the runtime
+    /// having refreshed. Drafts only (never posts), so no window/consent is needed.
+    func testProvider(for config: ConfiguredAI) async -> String {
+        let siloID = activeSilo?.siloID ?? ""
+        let provider = Self.makeProvider(config: config, siloID: siloID, hubClient: relayClient)
+        let name = UserDefaults.standard.string(forKey: Self.displayNameKey(siloID)) ?? "Me"
+        let sample = AgentContext(
+            myIdentityHex: "test", myDisplayName: name,
+            transcript: [
+                TranscriptEntry(
+                    senderIdentityHex: "sample", senderDisplayName: "Test",
+                    participantType: .human,
+                    text: "Hi! Are you working? Reply in one short sentence.")
+            ],
+            instructions: config.instructions)
+        do {
+            let text = try await provider.draftReply(context: sample).text
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            return text.isEmpty ? "⚠️ Connected, but the model returned an empty reply." : text
+        } catch {
+            return "⚠️ " + AppModel.describeAgentError(error)
+        }
     }
 
     /// `pqrc:add?npub=npub1…` — from a scanned QR. Opens New Conversation

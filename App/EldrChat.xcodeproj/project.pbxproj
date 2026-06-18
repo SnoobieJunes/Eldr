@@ -10,10 +10,10 @@
 		AA0000000000000000000101 /* PQRCCore in Frameworks */ = {isa = PBXBuildFile; productRef = AA0000000000000000000201 /* PQRCCore */; };
 		AA0000000000000000000102 /* PQRCNostr in Frameworks */ = {isa = PBXBuildFile; productRef = AA0000000000000000000202 /* PQRCNostr */; };
 		AA0000000000000000000103 /* PQRCAgent in Frameworks */ = {isa = PBXBuildFile; productRef = AA0000000000000000000203 /* PQRCAgent */; };
-		AA0000000000000000000107 /* PQRCMCP in Frameworks */ = {isa = PBXBuildFile; productRef = AA0000000000000000000207 /* PQRCMCP */; };
 		AA0000000000000000000104 /* PQRCCore in Frameworks */ = {isa = PBXBuildFile; productRef = AA0000000000000000000204 /* PQRCCore */; };
 		AA0000000000000000000105 /* PQRCNostr in Frameworks */ = {isa = PBXBuildFile; productRef = AA0000000000000000000205 /* PQRCNostr */; };
 		AA0000000000000000000106 /* PQRCAgent in Frameworks */ = {isa = PBXBuildFile; productRef = AA0000000000000000000206 /* PQRCAgent */; };
+		AA0000000000000000000107 /* PQRCMCP in Frameworks */ = {isa = PBXBuildFile; productRef = AA0000000000000000000207 /* PQRCMCP */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -191,7 +191,7 @@
 			attributes = {
 				BuildIndependentTargetsInParallel = 1;
 				LastSwiftUpdateCheck = 2600;
-				LastUpgradeCheck = 2650;
+				LastUpgradeCheck = 2700;
 				TargetAttributes = {
 					AA0000000000000000000013 = {
 						TestTargetID = AA0000000000000000000011;
@@ -277,6 +277,7 @@
 			isa = XCBuildConfiguration;
 			buildSettings = {
 				ALWAYS_SEARCH_USER_PATHS = NO;
+				ASSETCATALOG_COMPILER_GENERATE_SWIFT_ASSET_SYMBOL_EXTENSIONS = YES;
 				CLANG_ENABLE_MODULES = YES;
 				CLANG_ENABLE_OBJC_ARC = YES;
 				CLANG_WARN_BLOCK_CAPTURE_AUTORELEASING = YES;
@@ -333,6 +334,7 @@
 			isa = XCBuildConfiguration;
 			buildSettings = {
 				ALWAYS_SEARCH_USER_PATHS = NO;
+				ASSETCATALOG_COMPILER_GENERATE_SWIFT_ASSET_SYMBOL_EXTENSIONS = YES;
 				CLANG_ENABLE_MODULES = YES;
 				CLANG_ENABLE_OBJC_ARC = YES;
 				CLANG_WARN_BLOCK_CAPTURE_AUTORELEASING = YES;
@@ -383,6 +385,7 @@
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
+				CODE_SIGN_ENTITLEMENTS = EldrChat.entitlements;
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
 				ENABLE_PREVIEWS = YES;
@@ -413,6 +416,7 @@
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
+				CODE_SIGN_ENTITLEMENTS = EldrChat.entitlements;
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
 				ENABLE_PREVIEWS = YES;
@@ -573,10 +577,6 @@
 			isa = XCSwiftPackageProductDependency;
 			productName = PQRCAgent;
 		};
-		AA0000000000000000000207 /* PQRCMCP */ = {
-			isa = XCSwiftPackageProductDependency;
-			productName = PQRCMCP;
-		};
 		AA0000000000000000000204 /* PQRCCore */ = {
 			isa = XCSwiftPackageProductDependency;
 			productName = PQRCCore;
@@ -588,6 +588,10 @@
 		AA0000000000000000000206 /* PQRCAgent */ = {
 			isa = XCSwiftPackageProductDependency;
 			productName = PQRCAgent;
+		};
+		AA0000000000000000000207 /* PQRCMCP */ = {
+			isa = XCSwiftPackageProductDependency;
+			productName = PQRCMCP;
 		};
 /* End XCSwiftPackageProductDependency section */
 	};

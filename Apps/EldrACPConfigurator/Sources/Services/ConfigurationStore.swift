@@ -39,6 +39,12 @@ final class ConfigurationStore: ObservableObject {
     /// emits no events and the learner goes idle.
     @Published var learningEnabled: Bool
 
+    // MARK: contextgraph (graph-based context manager) — env file.
+    /// Route context assembly through the contextgraph service. Off → unchanged.
+    @Published var contextGraphEnabled: Bool
+    /// contextgraph REST endpoint the agent calls (and the wizard health-checks).
+    @Published var contextGraphURL: String
+
     /// The four built-in tools, in advertise order (mirrors ToolExecutor.allToolNames).
     static let allToolNames = ["read_file", "write_file", "list_dir", "run_shell"]
 
@@ -69,6 +75,8 @@ final class ConfigurationStore: ObservableObject {
         promptPreamble = agent.promptPreamble ?? ""
         systemPromptOverride = agent.systemPromptOverride ?? ""
         learningEnabled = (agent.eventsFilePath?.isEmpty == false)
+        contextGraphEnabled = agent.contextGraphEnabled
+        contextGraphURL = agent.contextGraphURL
 
         loaded = true
         // Debounced auto-save: any published change schedules one write 0.5s after the
@@ -104,6 +112,8 @@ final class ConfigurationStore: ObservableObject {
             export("ELDR_ACP_MAX_CONTEXT_CHARS", String(maxContextChars)),
             // Empty value (learning off) → AgentConfig.stringEnv treats "" as nil.
             export("ELDR_ACP_EVENTS_FILE", learningEnabled ? paths.eventsFile : ""),
+            export("ELDR_ACP_CONTEXTGRAPH", contextGraphEnabled ? "1" : "0"),
+            export("ELDR_ACP_CONTEXTGRAPH_URL", contextGraphURL),
         ]
         lines.append("")
         writeFile(paths.envFile, contents: lines.joined(separator: "\n"))
@@ -200,6 +210,17 @@ struct ConfigPaths: Sendable {
 
     var installedBinary: String { join(binDir, "eldr-acp") }
     var launcher: String { join(binDir, "eldr-acp-xcode") }
+    /// Dedicated launcher OpenClaw (and other ACP clients) are pointed at. Same
+    /// script body as the Xcode launcher — client-agnostic.
+    var openClawLauncher: String { join(binDir, "eldr-acp-openclaw") }
+
+    /// Default OpenClaw config file the agent is registered into (user-overridable
+    /// in the wizard). OpenClaw loads ACP agents via its `acpx` plugin.
+    var defaultOpenClawConfig: String {
+        let home = FileManager.default.homeDirectoryForCurrentUser.path
+        return ((home as NSString).appendingPathComponent(".config/openclaw") as NSString)
+            .appendingPathComponent("config.json")
+    }
 
     /// Production paths: `$ELDR_ACP_CONFIG_DIR`/`$XDG_CONFIG_HOME`/`~/.config/eldr-acp`
     /// for config (so the GUI and CLI agree), and `~/.local/bin` for the binaries.

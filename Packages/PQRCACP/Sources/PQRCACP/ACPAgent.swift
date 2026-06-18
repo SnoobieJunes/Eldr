@@ -28,6 +28,12 @@ public actor ACPAgent {
     /// The advertised, executable skills (ACP slash-commands). Derived from config
     /// once at init; empty when skills are disabled.
     private let skills: AgentSkillSet
+    /// Optional external context manager (contextgraph). nil → local sliding-window
+    /// budgeting only. When present and healthy, it assembles prior context per
+    /// turn and learns each completed turn; any failure falls back to local.
+    private let contextGraph: (any ContextGraphAssembling)?
+    /// Cached `contextGraph.health()` result (checked once, before first use).
+    private var contextGraphHealthy: Bool?
 
     /// Negotiated at `initialize`. Defaults to "everything off" until then (so a
     /// stray prompt before initialize still works via Foundation fallbacks).
@@ -52,7 +58,8 @@ public actor ACPAgent {
         toolEnvironment: ToolEnvironment = .fromEnvironment(),
         config: AgentConfig = .fromEnvironment(),
         configDir: String? = AgentConfig.defaultConfigDir(ProcessInfo.processInfo.environment),
-        maxIterations: Int = 20
+        maxIterations: Int = 20,
+        contextGraph: (any ContextGraphAssembling)? = nil
     ) {
         self.connection = connection
         self.llm = llm
@@ -61,6 +68,11 @@ public actor ACPAgent {
         self.configDir = configDir
         self.maxIterations = maxIterations
         self.skills = AgentSkillSet.from(config: config)
+        // Build the real client from config when enabled and not injected (tests
+        // inject a stub so they stay network-free).
+        self.contextGraph =
+            contextGraph
+            ?? (config.contextGraphEnabled ? ContextGraphClient(baseURL: config.contextGraphURL) : nil)
     }
 
     struct RPCError: Error { let code: Int; let message: String }
@@ -279,6 +291,12 @@ public actor ACPAgent {
             LLMMessage(
                 role: .system,
                 content: Self.systemPrompt(cwd: cwd, config: config, skill: skill)))
+        // contextgraph (optional): assemble prior context via graph/tag retrieval
+        // ahead of the local sliding window. Part of the anchored leading-system
+        // run, so ContextBudget.trim never drops it. Unreachable → nil → fall back.
+        if let assembled = await assembledContext(for: userText), !assembled.isEmpty {
+            messages.append(LLMMessage(role: .system, content: assembled))
+        }
         messages.append(LLMMessage(role: .user, content: userText))
 
         var toolCallSeq = 0
@@ -309,6 +327,7 @@ public actor ACPAgent {
                 let text = response.content.isEmpty ? "(no response)" : response.content
                 await emitMessage(sessionId: sessionId, text: text)
                 logSessionEnd(sessionId: sessionId, cwd: cwd, summary: text)
+                await ingestTurn(userText: userText, assistantText: text, cwd: cwd)
                 return .endTurn
             }
 
@@ -335,6 +354,33 @@ public actor ACPAgent {
         await emitMessage(sessionId: sessionId, text: capMessage)
         logSessionEnd(sessionId: sessionId, cwd: cwd, summary: capMessage)
         return .maxTurnRequests
+    }
+
+    /// Assembled prior context from contextgraph, or nil to use local budgeting.
+    /// Health is checked (and cached) before the first assemble; any failure → nil
+    /// so the turn falls back to `ContextBudget.trim` (no turn ever fails because
+    /// contextgraph is down).
+    private func assembledContext(for userText: String) async -> String? {
+        guard let cg = contextGraph else { return nil }
+        if contextGraphHealthy == nil { contextGraphHealthy = await cg.health() }
+        guard contextGraphHealthy == true else { return nil }
+        do {
+            // token_budget ≈ chars/4 (rough tokenizer ratio); never below 1.
+            let budget = max(1, config.maxContextChars / 4)
+            return try await cg.assemble(userText: userText, tokenBudget: budget)
+        } catch {
+            FileHandle.standardError.write(
+                Data("contextgraph assemble failed: \(Self.describe(error))\n".utf8))
+            return nil
+        }
+    }
+
+    /// Record a completed turn so contextgraph learns it. Only when the service is
+    /// known-healthy this turn; fire-and-forget (never fails the turn).
+    private func ingestTurn(userText: String, assistantText: String, cwd: String) async {
+        guard let cg = contextGraph, contextGraphHealthy == true else { return }
+        let label = config.contextGraphAgentName ?? (cwd as NSString).lastPathComponent
+        await cg.ingest(userText: userText, assistantText: assistantText, channelLabel: label)
     }
 
     /// Stream one tool call's lifecycle and run it. Mutating tools (write_file,

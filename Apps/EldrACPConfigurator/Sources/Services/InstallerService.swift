@@ -83,19 +83,29 @@ final class InstallerService: ObservableObject {
         await refreshState()
     }
 
-    /// The launcher Xcode invokes. It sources the env file (so the GUI's settings
-    /// reach the agent) and appends stderr to the log the LogTailer follows.
+    /// The launchers ACP clients invoke. Each sources the env file (so the GUI's
+    /// settings reach the agent) and appends stderr to the log the LogTailer
+    /// follows. The Xcode and OpenClaw launchers share an identical body — the
+    /// agent is client-agnostic; the only reason for two files is so each client
+    /// points at a stable, recognizable path.
     private func writeLauncher() throws {
+        try writeLauncherScript(
+            at: paths.launcher, comment: "Xcode is pointed at this launcher.")
+        try writeLauncherScript(
+            at: paths.openClawLauncher,
+            comment: "OpenClaw (and other ACP clients) are pointed at this launcher.")
+    }
+
+    private func writeLauncherScript(at path: String, comment: String) throws {
         let script = """
             #!/bin/zsh
-            # Written by EldrACPConfigurator. Xcode 27 is pointed at this launcher.
+            # Written by EldrACPConfigurator. \(comment)
             source "\(paths.envFile)" 2>/dev/null || true
             exec "\(paths.installedBinary)" "$@" 2>> "\(paths.logFile)"
             """
         guard let data = script.data(using: .utf8) else { throw InstallError.encodingFailed }
-        try data.write(to: URL(fileURLWithPath: paths.launcher), options: .atomic)
-        try FileManager.default.setAttributes(
-            [.posixPermissions: 0o755], ofItemAtPath: paths.launcher)
+        try data.write(to: URL(fileURLWithPath: path), options: .atomic)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: path)
     }
 
     enum InstallError: Error {

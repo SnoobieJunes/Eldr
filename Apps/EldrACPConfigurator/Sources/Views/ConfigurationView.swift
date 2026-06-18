@@ -40,6 +40,8 @@ struct ConfigurationView: View {
                 .font(.caption).foregroundStyle(.secondary)
             }
 
+            ContextGraphSection()
+
             Section("Tools") {
                 ForEach(ConfigurationStore.allToolNames, id: \.self) { name in
                     Toggle(

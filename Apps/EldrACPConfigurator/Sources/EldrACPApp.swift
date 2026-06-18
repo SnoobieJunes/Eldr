@@ -16,7 +16,12 @@ struct EldrACPConfiguratorApp: App {
                 .environmentObject(store)
                 .environmentObject(health)
                 .environmentObject(installer)
-                .frame(minWidth: 760, minHeight: 560)
+                // Open at a comfortable size and stay FREELY resizable up from the
+                // minimum (the content is flexible, so the window grows with the drag
+                // — same desktop treatment as the EldrChat app, not small-or-fullscreen).
+                .frame(
+                    minWidth: 760, idealWidth: 1000, maxWidth: .infinity,
+                    minHeight: 560, idealHeight: 760, maxHeight: .infinity)
                 .task {
                     // Health checker reads the live LLM config and polls while open.
                     health.configProvider = { store.llmConfig }
@@ -24,6 +29,7 @@ struct EldrACPConfiguratorApp: App {
                     await installer.refreshState()
                 }
         }
+        .defaultSize(width: 1000, height: 760)
         .windowResizability(.contentMinSize)
         .commands { CommandGroup(replacing: .newItem) {} }  // no "New Window"
 
