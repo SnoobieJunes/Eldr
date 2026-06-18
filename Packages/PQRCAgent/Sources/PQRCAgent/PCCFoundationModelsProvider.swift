@@ -23,16 +23,25 @@ import Foundation
 /// specific reason and the caller falls back to the Demo stub — never a silent
 /// confidentiality downgrade.
 ///
-/// BUILD GATE — `ELDR_PCC_SDK`: the WWDC26 PCC symbols
+/// BUILD GATE — `ELDR_PCC_SDK`: the PCC symbols
 /// (`PrivateCloudComputeLanguageModel`, `ContextOptions`, `ContextOptions.ReasoningLevel`,
-/// the `respond(to:options:contextOptions:)` overload) ship only in the Xcode-26 /
-/// iOS-26.x SDK. They are absent from the 2025 on-device-only SDK. So the real PCC
-/// path is compiled ONLY when the target defines `ELDR_PCC_SDK` (set
-/// `SWIFT_ACTIVE_COMPILATION_CONDITIONS = ... ELDR_PCC_SDK` once building with the
-/// WWDC26 SDK + the Private Cloud Compute entitlement). Without the flag the file
-/// still compiles everywhere and the provider degrades to a clear "not built with
-/// the PCC SDK" reason → Demo fallback. Verify the exact symbol spellings in Xcode
-/// Quick Help when flipping the flag on — they are isolated to this one file.
+/// the `respond(to:options:contextOptions:)` overload) are documented by Apple for the
+/// iOS-27 / macOS-27 SDK, but are NOT YET exported by the installed Xcode 27.0 seed
+/// (verified absent from every FoundationModels .swiftinterface, 2026-06-18). So the
+/// real PCC path is compiled ONLY when `ELDR_PCC_SDK` is defined — and defining it
+/// against this seed fails to build. Because this provider lives in the PQRCAgent
+/// SwiftPM package, the flag is set in `Package.swift`
+/// (`swiftSettings: [.define("ELDR_PCC_SDK")]`) — NOT the app target's
+/// `SWIFT_ACTIVE_COMPILATION_CONDITIONS`, which doesn't reach package compilation.
+/// Without the flag the file still compiles everywhere and the provider degrades to a
+/// clear "not built with the PCC SDK" reason → Demo fallback.
+///
+/// RUNTIME GATE: even once the symbols ship, `PrivateCloudComputeLanguageModel` & friends
+/// require iOS/macOS 27 while the package deploys to iOS/macOS 26 — so every PCC symbol
+/// use is already behind an `@available(iOS 27, macOS 27, *)` check (`#available` guards
+/// in the entry points, attributes on the helpers). On 26 the provider reports the
+/// version gap → Demo. Verify exact symbol spellings in Xcode Quick Help when the SDK
+/// ships them — they are isolated to this one file.
 public struct PCCFoundationModelsProvider: AgentProvider {
     /// User-selected reasoning depth ("light" | "moderate" | "deep"); nil → moderate.
     private let reasoningLevel: String?
@@ -58,6 +67,9 @@ public struct PCCFoundationModelsProvider: AgentProvider {
     /// surface at `respond` time and are mapped in `mapGenerationError`.
     public static var availabilityReason: String? {
         #if canImport(FoundationModels) && ELDR_PCC_SDK
+            guard #available(iOS 27, macOS 27, *) else {
+                return "Private Cloud Compute requires iOS 27 / macOS 27 or later — this device is on an older OS."
+            }
             switch SystemLanguageModel.default.availability {
             case .available:
                 return nil
@@ -84,6 +96,10 @@ public struct PCCFoundationModelsProvider: AgentProvider {
 
     public func draftReply(context: AgentContext) async throws -> Draft {
         #if canImport(FoundationModels) && ELDR_PCC_SDK
+            guard #available(iOS 27, macOS 27, *) else {
+                throw AgentProviderError.unavailable(
+                    "Private Cloud Compute requires iOS 27 / macOS 27 or later.")
+            }
             if let reason = Self.availabilityReason {
                 throw AgentProviderError.unavailable(reason)
             }
@@ -114,6 +130,10 @@ public struct PCCFoundationModelsProvider: AgentProvider {
 
     public func threadTurn(context: AgentContext) async throws -> AgentTurn? {
         #if canImport(FoundationModels) && ELDR_PCC_SDK
+            guard #available(iOS 27, macOS 27, *) else {
+                throw AgentProviderError.unavailable(
+                    "Private Cloud Compute requires iOS 27 / macOS 27 or later.")
+            }
             if let reason = Self.availabilityReason {
                 throw AgentProviderError.unavailable(reason)
             }
@@ -142,6 +162,7 @@ public struct PCCFoundationModelsProvider: AgentProvider {
 
     #if canImport(FoundationModels) && ELDR_PCC_SDK
         /// Build a session bound to the PCC SERVER model (not the on-device default).
+        @available(iOS 27, macOS 27, *)
         private static func makeSession(instructions: String) -> LanguageModelSession {
             LanguageModelSession(
                 model: PrivateCloudComputeLanguageModel(), instructions: instructions)
@@ -149,6 +170,7 @@ public struct PCCFoundationModelsProvider: AgentProvider {
 
         /// One PCC generation with the per-AI reasoning depth + sampling options
         /// applied. Reasoning is PCC-only and consumes tokens against the 32K window.
+        @available(iOS 27, macOS 27, *)
         private static func respond(
             session: LanguageModelSession,
             prompt: String,
@@ -165,6 +187,7 @@ public struct PCCFoundationModelsProvider: AgentProvider {
         }
 
         /// Map the stored string to the framework enum; unknown/nil → `.moderate`.
+        @available(iOS 27, macOS 27, *)
         static func mapReasoning(_ level: String?) -> ContextOptions.ReasoningLevel {
             switch level?.lowercased() {
             case "light": return .light

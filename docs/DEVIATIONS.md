@@ -903,7 +903,20 @@ and affects interop; `[app-only]` — client behavior, no wire impact;
   "everything" scope are deferred to that same flagged path; **adapters are
   specifically NOT pursued** (the training toolkit is EOL at v26.0.0, incompatible with
   OS 27+) — prompt engineering is the supported path. Exact symbol spellings must be
-  verified in Xcode Quick Help when flipping the flag on.
+  verified in Xcode Quick Help when flipping the flag on. **Update (2026-06-18):**
+  confirmed the symbols are STILL absent even with the **Xcode 27.0** SDK installed
+  (`SDKROOT=iphoneos27.0`) — `PrivateCloudComputeLanguageModel` / `ContextOptions` /
+  reasoning appear in zero FoundationModels `.swiftinterface` files (iPhoneOS,
+  Simulator, macOS, Catalyst all checked); Apple's online docs are ahead of this seed.
+  Defining `ELDR_PCC_SDK` therefore breaks the build, so the gate stays OFF until a
+  later seed ships the symbols. Two prep changes landed meanwhile: (1) the
+  `com.apple.developer.private-cloud-compute` **managed** entitlement is wired
+  (`App/EldrChat.entitlements` + `CODE_SIGN_ENTITLEMENTS`; Apple must still grant it via
+  the PCC access request before device signing succeeds); (2) the gated PCC code paths
+  now carry `@available(iOS 27, macOS 27, *)` guards (the package deploys to 26, the PCC
+  symbols are 27-only) and `availabilityReason` reports the OS-version gap. The flag
+  belongs in `Package.swift` (`swiftSettings: [.define("ELDR_PCC_SDK")]`), not the app's
+  `SWIFT_ACTIVE_COMPILATION_CONDITIONS` — the provider lives in the PQRCAgent package.
 - **A41 — Mac Catalyst for a freely-resizable desktop window** `[app-only]`
   (2026-06-18): EldrChat on Mac ran as "Designed for iPad" (`TARGETED_DEVICE_FAMILY
   = "1,2"`), which forces small-or-fullscreen and ignores `.windowResizability`. Switched
