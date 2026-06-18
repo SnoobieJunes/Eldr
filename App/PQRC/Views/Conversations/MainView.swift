@@ -14,6 +14,7 @@ struct MainView: View {
     @State private var showNewGroup = false
     @State private var showSettings = false
     @State private var deepLinkNpub: String?
+    @State private var deepLinkContactType: String?
     /// Conversation-list search text (⌘F on Mac). Filters the list by title.
     @State private var searchText = ""
     /// Bound to `.searchable`'s focus so ⌘F can pop the cursor into it on Mac.
@@ -67,8 +68,10 @@ struct MainView: View {
             }
         }
         .sheet(isPresented: $showNewChat) {
-            NewChatView(model: model, prefilledNpub: deepLinkNpub ?? "")
-                .onDisappear { deepLinkNpub = nil }
+            NewChatView(
+                model: model, prefilledNpub: deepLinkNpub ?? "",
+                prefilledContactType: deepLinkContactType)
+                .onDisappear { deepLinkNpub = nil; deepLinkContactType = nil }
         }
         .sheet(isPresented: $showNewGroup) {
             NewGroupView(model: model)
@@ -82,7 +85,9 @@ struct MainView: View {
             // prefilled with the scanned address.
             guard let npub else { return }
             deepLinkNpub = npub
+            deepLinkContactType = session.pendingContactType
             session.pendingNpub = nil
+            session.pendingContactType = nil
             showNewChat = true
         }
         // Menu-bar commands (Mac). Each is a counter the command bumps; reacting
@@ -478,6 +483,10 @@ import PQRCNostr
 struct NewChatView: View {
     @Bindable var model: AppModel
     var prefilledNpub: String = ""
+    /// When the deep link declared one (e.g. the Eldr ACP Configurator's
+    /// `…&type=coding_agent`), tag the new contact so the phone recognizes it as the
+    /// owner's coding agent — required for the §13.5 watch-along draft path to fire.
+    var prefilledContactType: String? = nil
     @Environment(\.dismiss) private var dismiss
     @State private var npub = ""
     @State private var firstMessage = ""
@@ -518,8 +527,13 @@ struct NewChatView: View {
                     offerInvite = false
                     Task {
                         do {
-                            _ = try await model.runtime.startConversation(
+                            let identityHex = try await model.runtime.startConversation(
                                 npub: npub, firstMessage: firstMessage.isEmpty ? "👋" : firstMessage)
+                            // Tag a coding-agent contact (from the Configurator deep link)
+                            // so its watch-along drafts are recognized + voiced (§13.5).
+                            if let type = prefilledContactType, !type.isEmpty {
+                                await model.runtime.setContactType(identityHex, type: type)
+                            }
                             dismiss()
                         } catch PQRCError.relayUnreachable {
                             self.error = "Can't reach your relay right now. Check your connection or your relay in Settings — or use Nearby below to connect in person, no server needed."

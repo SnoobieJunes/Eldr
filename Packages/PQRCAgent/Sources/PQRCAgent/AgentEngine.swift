@@ -21,6 +21,29 @@ public protocol AgentMessageSink: Sendable {
     /// tethering); it is stored locally for labeling and NEVER put on the wire.
     func postAgentMessage(_ body: MessageBody, threadID: String, agentName: String?) async throws
     func postAgentReply(_ body: MessageBody, agentName: String?) async throws  // conversation scope (ai_window)
+
+    /// Voice a watch-along DRAFT (SPEC §13.5 endpoint model): `body` carries the
+    /// REDACTED text that goes on the wire to the group; `rawText` is the owner's
+    /// local-only view (so the owner sees the real answer the agent produced). A sink
+    /// that can't split the two falls back (default) to posting the redacted body.
+    /// `threadID == nil` ⇒ conversation scope.
+    func postAgentDraft(
+        _ body: MessageBody, rawText: String, threadID: String?, agentName: String?
+    ) async throws
+}
+
+extension AgentMessageSink {
+    /// Default: no raw/redacted split available — post the SAFE (redacted) `body` so a
+    /// secret never reaches the wire even if a sink doesn't implement the local view.
+    public func postAgentDraft(
+        _ body: MessageBody, rawText: String, threadID: String?, agentName: String?
+    ) async throws {
+        if let threadID {
+            try await postAgentMessage(body, threadID: threadID, agentName: agentName)
+        } else {
+            try await postAgentReply(body, agentName: agentName)
+        }
+    }
 }
 
 /// Enforcement core for AI participation (SPEC §13, APP-SPEC §8–9).
@@ -250,6 +273,42 @@ public actor AgentEngine {
         }
         guard let until = conversationWindows[ownerHex], now < until else { return false }
         return true
+    }
+
+    // MARK: - Watch-along draft voicing (§13.5 endpoint model, DEVIATIONS AC24)
+
+    /// Voice a watch-along DRAFT — produced by the owner's Mac coding agent and
+    /// delivered to this (the owner's) phone — to the group, as the owner's
+    /// cryptographically-bound agent. The wire copy is REDACTED here (the scrub lives in
+    /// the engine so it can't be bypassed); the raw text is handed to the sink only for
+    /// the owner's local view. Gated by MY (the owner's) own active window/invite, fail
+    /// closed (invariant 9). `threadID == nil` ⇒ conversation scope. Returns true iff
+    /// posted.
+    ///
+    /// This is the §13.5 win: the agent's words are signed with MY agent key (the sink
+    /// posts as `.agent`, which signs with this device's agent key) and the raw secret
+    /// never leaves my device — only the redacted copy goes to the group.
+    @discardableResult
+    public func voiceAgentDraft(
+        rawText: String, threadID: String? = nil, agentName: String? = nil
+    ) async -> Bool {
+        do {
+            try authorizeAutonomousSend(threadID: threadID)
+        } catch {
+            return false  // no active owner window/invite (or loop-guard) ⇒ fail closed
+        }
+        let redacted = CredentialRedactor.scrub(rawText)
+        let body = MessageBody(
+            text: redacted, sentAt: clock.now(),
+            thread: threadID.map { RumorContent.ThreadRef(id: $0) })
+        do {
+            try await sink.postAgentDraft(
+                body, rawText: rawText, threadID: threadID, agentName: agentName)
+            if let threadID { recordThreadMessage(threadID: threadID, participantType: .agent) }
+            return true
+        } catch {
+            return false
+        }
     }
 
     // MARK: - Drafting (always allowed; private to my human; nothing sent)

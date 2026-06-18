@@ -100,6 +100,15 @@ final class InstallerService: ObservableObject {
         let script = """
             #!/bin/zsh
             # Written by EldrACPConfigurator. \(comment)
+            # EldrChat builds against the iOS 27 / macOS 26 beta SDK (Private Cloud
+            # Compute symbols), which exist only in Xcode-beta. Force the agent's
+            # xcodebuild/xcrun onto the beta toolchain even when xcode-select (or the
+            # client that spawned this launcher) defaults to stable Xcode — otherwise
+            # the agent's builds fail on the missing PCC symbols. The env file sourced
+            # below can still override DEVELOPER_DIR for a non-default toolchain.
+            if [[ -d "/Applications/Xcode-beta.app/Contents/Developer" ]]; then
+              export DEVELOPER_DIR="/Applications/Xcode-beta.app/Contents/Developer"
+            fi
             source "\(paths.envFile)" 2>/dev/null || true
             exec "\(paths.installedBinary)" "$@" 2>> "\(paths.logFile)"
             """

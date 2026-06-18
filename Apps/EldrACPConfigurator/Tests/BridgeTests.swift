@@ -32,11 +32,13 @@ struct BridgePureTests {
     @Test func deepLinkEncodesPqrcScheme() throws {
         let kp = try NostrKeypair(randomSource: SystemRandomSource())
         let link = ACPBridgeService.deepLink(pubkeyHex: kp.publicKeyHex, relay: nil)
-        #expect(link == "pqrc:add?npub=\(Bech32.npub(kp.publicKeyHex))")
+        #expect(link == "pqrc:add?npub=\(Bech32.npub(kp.publicKeyHex))&type=coding_agent")
         let comps = URLComponents(string: link)
         #expect(comps?.scheme == "pqrc")
         let npub = comps?.queryItems?.first(where: { $0.name == "npub" })?.value
         #expect(npub?.hasPrefix("npub1") == true)
+        // Marks the contact as a coding agent so the phone enables the watch-along path.
+        #expect(comps?.queryItems?.first(where: { $0.name == "type" })?.value == "coding_agent")
     }
 
     @Test func deepLinkCarriesPreferredRelay() {
@@ -123,11 +125,22 @@ struct BridgeSendTests {
 struct BridgeWatchAlongTests {
 
     actor RecordingMessaging: BridgeMessaging {
-        struct Sent: Sendable { let text: String; let peer: String; let type: ParticipantType }
+        struct Sent: Sendable {
+            let text: String
+            let peer: String
+            let type: ParticipantType
+            let isDraft: Bool
+            let voiceInto: String?
+        }
         private(set) var sent: [Sent] = []
         func send(_ body: MessageBody, to peerIdentityHex: String, participantType: ParticipantType)
             async throws
-        { sent.append(Sent(text: body.text, peer: peerIdentityHex, type: participantType)) }
+        {
+            sent.append(
+                Sent(
+                    text: body.text, peer: peerIdentityHex, type: participantType,
+                    isDraft: body.agentDraft != nil, voiceInto: body.agentDraft?.voiceInto))
+        }
         func all() -> [Sent] { sent }
         func text(to peer: String) -> String? { sent.first { $0.peer == peer }?.text }
     }
@@ -256,14 +269,105 @@ struct BridgeWatchAlongTests {
     @Test func handleInboundPromptDrivesAgentAndFansOut() async throws {
         let recorder = RecordingMessaging()
         let (bridge, ownerHex, otherHex) = try await Self.openGateBridge(recorder: recorder)
+        bridge.watchAlongMode = .direct  // Mac-fans-out path (AC20)
         bridge.setAgentRunner(StubRunner(answer: "Found it: \(Self.secret)"))
 
         let convo = ACPBridgeService.BridgeConversation(
             id: "group-1", name: "Group", enabled: true, members: [ownerHex, otherHex])
         await bridge.handleInboundPrompt("read config.env", conversation: convo)
 
-        #expect(await recorder.text(to: ownerHex)?.contains(Self.secret) == true)
-        #expect(await recorder.text(to: otherHex)?.contains(Self.secret) == false)
+        // handleInboundPrompt now also sends an "On it…" ack, so assert over ALL
+        // messages to each peer (not just the first): the raw answer reached the owner,
+        // the redacted answer reached the other, and the secret NEVER reached the other.
+        let toOwner = await recorder.all().filter { $0.peer == ownerHex }.map(\.text)
+        let toOther = await recorder.all().filter { $0.peer == otherHex }.map(\.text)
+        #expect(toOwner.contains { $0.contains(Self.secret) })
+        #expect(toOther.contains { $0.contains("‹redacted:") })
+        #expect(!toOther.contains { $0.contains(Self.secret) })
+    }
+
+    @MainActor
+    @Test func endpointModeSendsRawDraftToOwnerOnly() async throws {
+        // §13.5: the Mac sends the COMPLETE (raw) answer to the OWNER ONLY, marked as a
+        // draft for the phone to voice. No fan-out, no Mac-side redaction. The phone (not
+        // tested here) does the redaction + group voicing.
+        let recorder = RecordingMessaging()
+        let (bridge, ownerHex, otherHex) = try await Self.openGateBridge(recorder: recorder)
+        bridge.watchAlongMode = .endpoint
+        bridge.setAgentRunner(StubRunner(answer: "Found it: \(Self.secret)"))
+
+        let convo = ACPBridgeService.BridgeConversation(
+            id: "group-1", name: "Group", enabled: true, members: [ownerHex, otherHex])
+        await bridge.handleInboundPrompt("read config.env", conversation: convo)
+
+        let sent = await recorder.all()
+        #expect(sent.count == 1)  // ONLY the owner — the Mac isn't a group participant
+        let draft = try #require(sent.first)
+        #expect(draft.peer == ownerHex)
+        #expect(draft.type == .agent)
+        #expect(draft.isDraft)  // carries the AgentDraft marker
+        #expect(draft.voiceInto == "group-1")
+        #expect(draft.text.contains(Self.secret))  // raw — redaction happens on the phone
+        // Nothing went to the other member directly.
+        #expect(await recorder.text(to: otherHex) == nil)
+    }
+
+    @Test func resolveAgentExecutablePrefersLauncherThenBinaryThenBundled() throws {
+        let tmp = (NSTemporaryDirectory() as NSString).appendingPathComponent(
+            "eldr-bin-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(atPath: tmp, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(atPath: tmp) }
+        let paths = ConfigPaths(configDir: tmp, binDir: tmp)
+        let bundled = URL(fileURLWithPath: "/bundled/eldr-acp")
+
+        func makeExecutable(_ path: String) throws {
+            FileManager.default.createFile(atPath: path, contents: Data("#!/bin/zsh\n".utf8))
+            try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: path)
+        }
+
+        // Nothing installed → the app-bundled binary.
+        #expect(ACPBridgeService.resolveAgentExecutable(paths: paths, bundled: bundled) == bundled)
+        // Installed binary present → preferred over bundled.
+        try makeExecutable(paths.installedBinary)
+        #expect(
+            ACPBridgeService.resolveAgentExecutable(paths: paths, bundled: bundled)?.path
+                == paths.installedBinary)
+        // Launcher present → preferred over the bare binary (it sources the LLM env).
+        try makeExecutable(paths.launcher)
+        #expect(
+            ACPBridgeService.resolveAgentExecutable(paths: paths, bundled: bundled)?.path
+                == paths.launcher)
+    }
+
+    @MainActor
+    @Test func configureProductionWiresWorkingOwnerEngine() async throws {
+        // configureProduction() stands up a real owner-authority engine (random-identity
+        // oracle) — prove the gate then opens for a genuine owner-signed window and the
+        // fan-out diverges owner-vs-others, with NO engine injected by the test.
+        let recorder = RecordingMessaging()
+        let bridge = ACPBridgeService(
+            messaging: recorder,
+            configDir: (NSTemporaryDirectory() as NSString).appendingPathComponent(
+                "eldr-owner-\(UUID().uuidString)"))
+        bridge.configureProduction()
+
+        let owner = try PQRCIdentity(seed: Data(repeating: 0x2b, count: 32))
+        let otherHex = try PQRCIdentity(seed: Data(repeating: 0x3c, count: 32))
+            .publicKeyData.hexString
+        let ownerHex = owner.publicKeyData.hexString
+        bridge.setOwnerIdentity(ownerHex)
+
+        // The engine uses the real clock, so sign a window that's live now.
+        let activeUntil = Int64(Date().timeIntervalSince1970) + 1800
+        let window = try AIWindowAnnouncement.make(activeUntil: activeUntil, identity: owner)
+        await bridge.receiveOwnerWindow(window, fromSenderIdentityHex: ownerHex)
+        #expect(await bridge.ownerAuthorized() == true)
+
+        let convo = ACPBridgeService.BridgeConversation(
+            id: "g", name: "g", enabled: true, members: [ownerHex, otherHex])
+        await bridge.broadcastAgentMessage(
+            "key sk-abc123DEF456ghi789JKL012", conversation: convo)
+        #expect(await recorder.text(to: ownerHex)?.contains("sk-abc123DEF456ghi789JKL012") == true)
         #expect(await recorder.text(to: otherHex)?.contains("‹redacted:") == true)
     }
 

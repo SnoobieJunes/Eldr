@@ -13,6 +13,20 @@ This repository contains the v1 iOS client and test suite for **PQRC (Post-Quant
 
 **The cardinal rule (SPEC §0): user privacy is the number one priority, without exception.** Every tie resolves in favor of privacy, even at the cost of convenience, features, or performance.
 
+## Communication — no sycophancy, no placating
+
+The user does **not** want a yes-man. This is a hard rule, not a style preference.
+
+- **Banned:** flattery, validation openers ("You're right", "Great question",
+  "Absolutely"), reflexive apologies, and agreeing just to be agreeable. Lead with the
+  fact or the action, never with reassurance.
+- **Tell the truth even when it's unwelcome.** If something is broken, can't be done,
+  or was claimed done but wasn't, say so plainly and show the evidence.
+- **Never report a build, test, or feature as working without having run it and seen it
+  pass.** Distinguish what is *proven* (ran it, saw the output) from what is *inferred*
+  or *compile-checked only*. Label every unverified claim as unverified.
+- Don't soften bad news with hedges or padding. Disagree when the evidence warrants it.
+
 ## Stack
 
 - **Language:** Swift 6.x, strict concurrency enabled everywhere (`-strict-concurrency=complete`). No `@unchecked Sendable` without a written justification comment.

@@ -142,6 +142,10 @@ final class AppSession {
     /// npub arriving via a `pqrc:add?npub=…` deep link (QR scan from the
     /// Camera app lands here instead of in a web browser).
     var pendingNpub: String?
+    /// Optional `&type=…` from the deep link — `coding_agent` when the Eldr ACP
+    /// Configurator generated it, so the new contact is tagged as the owner's coding
+    /// agent (enables the §13.5 watch-along draft path). nil for an ordinary add.
+    var pendingContactType: String?
 
     /// A pre-silo account from an older build is present and must be migrated
     /// (wrapped under a passphrase) before it can be unlocked.
@@ -1009,6 +1013,9 @@ final class AppSession {
             npub.hasPrefix("npub1")
         {
             pendingNpub = npub
+            // The Configurator marks its pairing link `&type=coding_agent` so the phone
+            // tags the agent contact (lets the watch-along draft path recognize it).
+            pendingContactType = components?.queryItems?.first(where: { $0.name == "type" })?.value
         }
     }
 

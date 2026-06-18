@@ -106,6 +106,11 @@ actor PersonaRuntime {
     private var threadTitles: [String: String] = [:]
     /// Conversation my active ai_window was started in (window replies route here).
     private var myWindowConversationID: String?
+    /// The conversation a watch-along draft is currently being voiced into (§13.5).
+    /// Stashed across the `engine.voiceAgentDraft` → `RuntimeSink.postAgentDraft` hop so
+    /// the sink resolves the target the Mac's draft named (`voiceInto`). Set/cleared
+    /// synchronously around a single voicing on this actor, so no concurrent draft races.
+    private var pendingDraftTarget: String?
     /// conversationID / threadID -> when MY AI was turned on here. The AI only
     /// ingests messages from this point forward — NEVER prior chat history — plus
     /// any message the human manually marked "Add to AI Context" (b7: stream
@@ -828,7 +833,8 @@ actor PersonaRuntime {
         aiWindow: AIWindowAnnouncement? = nil, aiInvite: AIInvite? = nil,
         aiContextGrant: AIContextGrant? = nil,
         threadCreate: ThreadCreate? = nil, groupCreate: GroupCreate? = nil,
-        asSystemRow: Bool = false, agentName: String? = nil
+        asSystemRow: Bool = false, agentName: String? = nil,
+        localTextOverride: String? = nil
     ) async throws {
         let recipients = recipientsFor(conversationID: conversationID)
         // A group I'm a member of with no other humans (the "solo AI chat") is a
@@ -872,10 +878,13 @@ actor PersonaRuntime {
         // leave you staring at an empty chat: the bubble is local and shouldn't
         // depend on the relay round-trip succeeding. Status is local-only and
         // never claims "delivered" (D5).
+        // `localTextOverride` lets the locally-stored copy differ from the wire body —
+        // the §13.5 watch-along path stores the OWNER's RAW answer locally while the
+        // wire carries the redacted text (only the owner ever sees the secret).
         let message = StoredMessage(
             id: messageID, conversationID: conversationID,
             senderIdentity: identityHex, participantType: participantType,
-            text: body.text, sentAt: body.sentAt, threadID: threadID,
+            text: localTextOverride ?? body.text, sentAt: body.sentAt, threadID: threadID,
             isContext: isContext, aiContext: aiContext,
             localStatus: asSystemRow ? "system" : "sent", agentName: agentName)
         try await store.save(message)
@@ -1810,6 +1819,18 @@ actor PersonaRuntime {
             body = whole
         }
 
+        // Watch-along DRAFT (SPEC §13.5 endpoint model): the owner's Mac coding agent
+        // produced an answer for THIS phone to voice to the group. Recognize it
+        // (agent-signed, from a pinned coding_agent contact, carrying the draft marker),
+        // voice it REDACTED as the owner's signed agent, and return — the raw draft is
+        // never stored as a 1:1 message; only the owner's local group echo holds the raw.
+        if let draft = body.agentDraft, received.participantType == .agent,
+            contactType(senderHex) == "coding_agent"
+        {
+            await voiceCodingAgentDraft(rawText: body.text, draft: draft)
+            return
+        }
+
         // Peer self-chosen alias (D11-preserving: arrived over the encrypted
         // session, visible only to us). Local rename still wins.
         if let alias = body.alias, contactRecords[senderHex]?.peerAlias != alias {
@@ -2036,11 +2057,63 @@ private struct RuntimeSink: AgentMessageSink {
         try await runtime.sendMessage(
             body.text, conversationID: conversationID, participantType: .agent, agentName: agentName)
     }
+
+    /// §13.5 voicing: `body` (redacted) goes on the wire to the group; `rawText` is the
+    /// owner's local-only view. Thread scope routes via the thread's conversation;
+    /// conversation scope routes via the draft's target (`voiceInto`, stashed on the
+    /// runtime). Signs as the owner's agent (sendMessage `.agent` → owner's agent key).
+    func postAgentDraft(
+        _ body: MessageBody, rawText: String, threadID: String?, agentName: String?
+    ) async throws {
+        let conversationID: String
+        if let threadID, let info = await runtime.threadInfo(threadID: threadID) {
+            conversationID = info.conversationID
+        } else if let target = await runtime.draftTargetConversation() {
+            conversationID = target
+        } else {
+            throw PQRCError.sessionNotEstablished
+        }
+        try await runtime.sendMessage(
+            body.text, conversationID: conversationID, participantType: .agent,
+            threadID: threadID, agentName: agentName, localTextOverride: rawText)
+    }
 }
 
 extension PersonaRuntime {
     func windowConversation() -> String? {
         myWindowConversationID
+    }
+
+    /// The conversation a watch-along draft is currently being voiced into — read by
+    /// `RuntimeSink.postAgentDraft` to route a conversation-scope voicing (§13.5).
+    func draftTargetConversation() -> String? {
+        pendingDraftTarget
+    }
+
+    /// Voice a watch-along DRAFT from the owner's Mac coding agent (§13.5 endpoint
+    /// model). Stashes the Mac-named target conversation so the sink can route it, then
+    /// runs the raw answer through the engine — which gates on MY (the owner's) active
+    /// window/invite and REDACTS the wire copy while preserving the raw for my local
+    /// view (the owner sees the real answer; the group sees `‹redacted:…›`, signed with
+    /// MY agent key). Fail closed + visible: if my window is off, drop a LOCAL-ONLY note
+    /// (never published) so I know to enable it.
+    func voiceCodingAgentDraft(rawText: String, draft: AgentDraft) async {
+        guard let target = draft.voiceInto, !target.isEmpty else { return }
+        pendingDraftTarget = target
+        defer { pendingDraftTarget = nil }
+
+        let posted = await engine.voiceAgentDraft(
+            rawText: rawText, threadID: draft.threadID, agentName: draft.agentName)
+        guard !posted else { return }
+
+        let note = StoredMessage(
+            id: UUID().uuidString, conversationID: target, senderIdentity: identityHex,
+            participantType: .human,
+            text: "Your coding agent replied, but your AI window is off — turn it on to share its answer.",
+            sentAt: clock.now(), threadID: draft.threadID, isContext: false, aiContext: false,
+            localStatus: "system", agentName: nil)
+        try? await store.save(note)
+        eventContinuation?.yield(.messageAdded(note))
     }
 }
 

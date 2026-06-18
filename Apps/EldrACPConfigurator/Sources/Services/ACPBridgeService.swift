@@ -1,3 +1,4 @@
+import Crypto
 import Foundation
 import PQRCACP
 import PQRCAgent
@@ -66,6 +67,19 @@ struct UnpairedMessaging: BridgeMessaging {
     { throw NotPaired() }
 }
 
+/// Production `BridgeMessaging` backed by a live `PQRCMessenger` (the Mac's PQRC node).
+/// Sends ride the same PQXDH + Double Ratchet + gift-wrap stack as EldrChat (so every
+/// invariant — agent signature, padding, fuzzed timestamp — holds), addressed pairwise
+/// by the recipient's identity hex.
+struct PQRCMessengerMessaging: BridgeMessaging {
+    let messenger: PQRCMessenger
+    func send(_ body: MessageBody, to peerIdentityHex: String, participantType: ParticipantType)
+        async throws
+    {
+        try await messenger.send(body, to: peerIdentityHex, participantType: participantType)
+    }
+}
+
 /// Drives the local `eldr-acp` agent for one prompt and returns its COMPLETE final
 /// answer. Deliberately NON-streaming: per-recipient redaction (§10) must scrub a whole
 /// message — a secret split across two streamed deltas could evade a naive scrubber.
@@ -78,6 +92,9 @@ struct UnavailableAgentRunner: BridgeAgentRunner {
     struct NotConfigured: Error {}
     func run(prompt: String, workdir: String?) async throws -> String { throw NotConfigured() }
 }
+
+/// Thrown when a single agent run exceeds the watch-along wall-clock cap.
+struct AgentRunTimeout: Error {}
 
 /// Production runner: spawns `eldr-acp` through `ACPClientDriver`, with streaming OFF
 /// (`ELDR_ACP_STREAM=0`) so the agent emits the whole answer in one piece, and collects
@@ -108,6 +125,14 @@ actor AgentAnswerCollector {
     func append(_ s: String) { value += s }
 }
 
+/// A no-op `AgentMessageSink`. The bridge uses its `AgentEngine` purely as the
+/// owner-authority ORACLE (verify owner-signed windows, answer `isAuthorizedForOwner`)
+/// and does its OWN per-recipient fan-out (§9), so the engine never posts anything.
+struct NoopAgentSink: AgentMessageSink {
+    func postAgentMessage(_ body: MessageBody, threadID: String, agentName: String?) async throws {}
+    func postAgentReply(_ body: MessageBody, agentName: String?) async throws {}
+}
+
 // MARK: - Service
 
 @MainActor
@@ -118,6 +143,19 @@ final class ACPBridgeService: ObservableObject {
         case advertising
         case paired(contactName: String)
         case error(String)
+    }
+
+    /// How the watch-along agent participates in the group (Path 2 §9 vs SPEC §13.5).
+    enum WatchAlongMode: String, Sendable, CaseIterable, Identifiable {
+        /// The Mac is a group participant: it pairs with everyone and fans the answer
+        /// out itself (owner raw, others redacted). Mac-enforced redaction. (AC20)
+        case direct
+        /// The Mac drafts privately to the owner's PHONE, which redacts + voices it to
+        /// the group as the owner's signed agent. Hardened: the raw secret never
+        /// reaches a non-owner link, and the message is cryptographically the owner's
+        /// agent. (AC24 — needs the iOS endpoint glue.)
+        case endpoint
+        var id: String { rawValue }
     }
 
     /// One EldrChat conversation the agent can report into, with the user's opt-in.
@@ -156,6 +194,14 @@ final class ACPBridgeService: ObservableObject {
     /// closed (never "first peer wins").
     @Published private(set) var ownerIdentityHex: String?
 
+    /// Watch-along participation mode. Defaults to `.direct` (the Mac fans out itself —
+    /// owner raw, others redacted) because it works in BOTH 1:1 and group chats and is
+    /// the path the first live demo exercises. `.endpoint` is the §13.5 hardening (Mac
+    /// drafts to the owner's phone, the phone voices to the group as the owner's signed
+    /// agent) — it only makes sense in a GROUP (in a 1:1 there's no group to voice into),
+    /// so switch to it once you're testing the multi-party scenario.
+    @Published var watchAlongMode: WatchAlongMode = .direct
+
     // Per-message-type opt-in — OFF by default (the user chooses to share).
     @Published var shareToolCalls = false
     @Published var shareBuildResults = false
@@ -175,14 +221,31 @@ final class ACPBridgeService: ObservableObject {
     private var ownerEngine: AgentEngine?
     /// Drives the local agent for the watch-along flow. Injected via `setAgentRunner`.
     private var agentRunner: BridgeAgentRunner = UnavailableAgentRunner()
-    /// Where the agent runs (project dir). nil ⇒ the runner's default.
-    private var agentWorkdir: String?
+    /// Where the agent runs (project dir the coding tools operate on). nil ⇒ the
+    /// runner's default cwd (which is useless for real tasks — set it in the UI).
+    /// Published so the Bridge panel can show/pick it; persisted in the config dir.
+    @Published private(set) var agentWorkdir: String?
+    /// True while an agent run is in flight — a guard so queued messages don't each
+    /// spawn a fresh agent (which stacked up and looked "dead").
+    private var agentRunInFlight = false
+    /// Overall wall-clock cap for one agent run. A weak tool-calling model can loop to
+    /// the iteration limit; without this the run (and the watch-along) hangs silently.
+    private let agentRunTimeout: Double = 90
     /// File holding the pinned owner hex (`<configDir>/owner`).
     private let ownerFilePath: String?
+    /// File holding the agent's project working directory (`<configDir>/workdir`).
+    private let workdirFilePath: String?
 
     private var keypair: NostrKeypair?
     private var link: MultipeerNearbyLink?
     private var eventsTask: Task<Void, Never>?
+
+    /// The Mac's live PQRC node (publishes keys, pairs, sends/receives). nil until
+    /// `startMessagingNode` runs. The reusable messaging path the watch-along rides.
+    private var messenger: PQRCMessenger?
+    private var nodeTask: Task<Void, Never>?
+    /// The relay the node publishes to / subscribes on. MUST match the phone's relay.
+    static let defaultRelayURL = "wss://relay.lerants.com"
 
     init(
         keychain: KeychainBox = KeychainBox(),
@@ -196,7 +259,24 @@ final class ACPBridgeService: ObservableObject {
         self.preferredRelay = preferredRelay
         self.messaging = messaging
         self.ownerFilePath = configDir.map { ($0 as NSString).appendingPathComponent("owner") }
+        self.workdirFilePath = configDir.map { ($0 as NSString).appendingPathComponent("workdir") }
         self.ownerIdentityHex = Self.loadOwner(from: ownerFilePath)
+        self.agentWorkdir = Self.loadOwner(from: workdirFilePath)
+    }
+
+    /// Set (or clear) the project directory the agent's tools operate in, and persist it.
+    /// Without this, the agent runs in an undefined dir and real file/build tasks fail.
+    func setAgentWorkdir(_ path: String?) {
+        let trimmed = path?.trimmingCharacters(in: .whitespacesAndNewlines)
+        agentWorkdir = (trimmed?.isEmpty ?? true) ? nil : trimmed
+        guard let workdirFilePath else { return }
+        if let agentWorkdir {
+            let dir = (workdirFilePath as NSString).deletingLastPathComponent
+            try? FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
+            try? agentWorkdir.write(toFile: workdirFilePath, atomically: true, encoding: .utf8)
+        } else {
+            try? FileManager.default.removeItem(atPath: workdirFilePath)
+        }
     }
 
     /// True once the agent has a stored Nostr identity (whether or not advertising).
@@ -247,18 +327,23 @@ final class ACPBridgeService: ObservableObject {
                     await MainActor.run { self?.bridgeState = .error("\(error)") }
                 }
             }
+            // Stand up the live PQRC node (publishes keys to the relay, subscribes,
+            // pairs) and wires the production runner + owner engine to its identity.
+            // This is what makes "Pair with EldrChat" actually resolve our keys.
+            Task { [weak self] in await self?.startMessagingNode() }
         } catch {
             bridgeState = .error("Could not create the agent identity: \(error)")
         }
     }
 
-    /// Stop advertising (keeps the identity).
+    /// Stop advertising + tear down the PQRC node (keeps the persisted identity/keys).
     func disable() {
         eventsTask?.cancel()
         eventsTask = nil
         let link = self.link
         self.link = nil
         Task { await link?.stop() }
+        stopMessagingNode()
         pairingPayloadJSON = nil
         pairingLink = nil
         if case .error = bridgeState {} else { bridgeState = .unpaired }
@@ -269,7 +354,11 @@ final class ACPBridgeService: ObservableObject {
     /// scan expects); a preferred relay rides along as a forward-compatible query
     /// item the app ignores until it wires relay hints in.
     nonisolated static func deepLink(pubkeyHex: String, relay: String?) -> String {
-        var link = "pqrc:add?npub=\(Bech32.npub(pubkeyHex))"
+        // Always mark the agent as a coding agent so the phone tags the contact
+        // (`contactType = "coding_agent"`) — the phone uses that to recognize watch-along
+        // drafts and voice them as the owner's agent (§13.5). Older app builds ignore
+        // the unknown `type` query item.
+        var link = "pqrc:add?npub=\(Bech32.npub(pubkeyHex))&type=coding_agent"
         if let relay, !relay.isEmpty,
             let encoded = relay.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed)
         {
@@ -301,6 +390,210 @@ final class ACPBridgeService: ObservableObject {
     func setAgentRunner(_ runner: BridgeAgentRunner, workdir: String? = nil) {
         self.agentRunner = runner
         self.agentWorkdir = workdir
+    }
+
+    // MARK: Production wiring (Path 2 §8/§11 — narrows the AC21 runtime boundary)
+
+    /// Stand up the production agent runner + owner-authority engine in the live app,
+    /// unless test doubles were already injected. Idempotent. Called from `enable()`.
+    ///
+    /// The runner spawns the installed `eldr-acp` launcher (which sources the LLM env);
+    /// the answer is collected whole regardless of streaming, so redaction always scrubs
+    /// a complete message. The engine is the owner-authority ORACLE only — the owner-gate
+    /// path (`receiveWindow`/`isAuthorizedForOwner`) never reads the engine's OWN
+    /// identity (it keys on the owner's), so a fresh identity is correct and needs no
+    /// persistence. What remains the boundary: a live `BridgeMessaging` and the inbound
+    /// receive path that would call `receiveOwnerWindow`/`handleInboundPrompt`.
+    func configureProduction() {
+        if agentRunner is UnavailableAgentRunner,
+            let executable = Self.resolveAgentExecutable(
+                paths: .standard,
+                bundled: Bundle.main.url(forResource: "eldr-acp", withExtension: nil))
+        {
+            agentRunner = ACPDriverAgentRunner(executableURL: executable)
+        }
+        if ownerEngine == nil, let identity = try? PQRCIdentity(randomSource: SystemRandomSource()) {
+            ownerEngine = AgentEngine(myIdentity: identity, clock: clock, sink: NoopAgentSink())
+        }
+    }
+
+    /// Resolve the agent executable: prefer the installed launcher (it sources the env
+    /// file → LLM config), then the bare installed binary, then the app-bundled binary.
+    nonisolated static func resolveAgentExecutable(
+        paths: ConfigPaths, bundled: URL?, fileManager: FileManager = .default
+    ) -> URL? {
+        if fileManager.isExecutableFile(atPath: paths.launcher) {
+            return URL(fileURLWithPath: paths.launcher)
+        }
+        if fileManager.isExecutableFile(atPath: paths.installedBinary) {
+            return URL(fileURLWithPath: paths.installedBinary)
+        }
+        return bundled
+    }
+
+    // MARK: PQRC messaging node (AC25 — the live BridgeMessaging seam)
+
+    /// Stand up the Mac's PQRC node: load/persist the identity + prekeys (under the SAME
+    /// Nostr key the QR advertises, so the phone's `fetchVerifiedPeer(npub)` resolves us),
+    /// connect to the relay, subscribe to our gift-wrap inbox, publish our 10420/10421,
+    /// and inject a `PQRCMessenger`-backed `BridgeMessaging`. Mirrors `PersonaRuntime.bootstrap`.
+    /// Idempotent. `transports`/`relayURLs` are injectable so tests drive it through a
+    /// `LocalRelaySimulator`; production builds a `NostrWebSocketTransport`.
+    func startMessagingNode(
+        transports injectedTransports: [any RelayTransport]? = nil,
+        relayURLs overrideRelayURLs: [String]? = nil
+    ) async {
+        guard messenger == nil else { return }
+        do {
+            let nostrKeypair = try loadOrCreateKeypair()
+            let identity = try loadOrCreatePQRCIdentity()
+            let identityDH = try loadOrCreateIdentityDH()
+            let prekeyManager = try await loadOrCreatePrekeyManager(identity: identity)
+            let relayURLs = overrideRelayURLs ?? [preferredRelay ?? Self.defaultRelayURL]
+
+            let transports: [any RelayTransport]
+            if let injectedTransports {
+                transports = injectedTransports
+            } else {
+                var built: [any RelayTransport] = []
+                for raw in relayURLs {
+                    if let url = URL(string: raw) {
+                        built.append(await NostrWebSocketTransport(url: url).connect())
+                    }
+                }
+                transports = built
+            }
+
+            let messenger = try PQRCMessenger(
+                identity: identity, nostrKeypair: nostrKeypair, prekeyManager: prekeyManager,
+                identityDH: identityDH, transports: transports, clock: clock,
+                randomSource: SystemRandomSource(), nonceSource: SystemNonceSource())
+            self.messenger = messenger
+
+            // Now that we have a real device-bound identity + messenger, wire the
+            // production seams to it (the owner-authority engine uses this identity; the
+            // agent runner + messaging are live).
+            if ownerEngine == nil {
+                ownerEngine = AgentEngine(myIdentity: identity, clock: clock, sink: NoopAgentSink())
+            }
+            configureProduction()
+            messaging = PQRCMessengerMessaging(messenger: messenger)
+
+            let events = try await messenger.start()
+            nodeTask = Task { [weak self] in
+                for await event in events { await self?.handleMessengerEvent(event) }
+            }
+            // Publish our keys so the phone can find us and start the encrypted chat.
+            try await messenger.announce(relayURLs: relayURLs)
+        } catch {
+            bridgeState = .error("Messaging node failed: \(error)")
+        }
+    }
+
+    /// Tear down the node (relay subscriptions + pump). Keeps the persisted keys.
+    private func stopMessagingNode() {
+        nodeTask?.cancel()
+        nodeTask = nil
+        let messenger = self.messenger
+        self.messenger = nil
+        Task { await messenger?.stop() }
+        messaging = UnpairedMessaging()
+    }
+
+    /// Route one inbound messenger event. New peers are auto-accepted (the user
+    /// initiated pairing from their phone); owner-signed windows/grants open the gate;
+    /// a human message becomes a watch-along prompt.
+    private func handleMessengerEvent(_ event: MessengerEvent) async {
+        switch event {
+        case .messageRequest(let senderNostrPubkeyHex, _):
+            // The agent is a service the user paired from their phone — accept it.
+            guard let messenger else { break }
+            if let contact = try? await messenger.acceptRequest(
+                senderNostrPubkeyHex: senderNostrPubkeyHex)
+            {
+                addPairedConversation(identityHex: contact.identityHex)
+                bridgeState = .paired(contactName: shortHex(contact.identityHex))
+            }
+        case .message(let received):
+            // Owner-signed window/grant → into the engine (gate opens only for the
+            // pinned owner; non-owner senders are rejected inside these).
+            if let window = received.aiWindow {
+                await receiveOwnerWindow(
+                    window, fromSenderIdentityHex: received.senderIdentityHex)
+            }
+            if let grant = received.aiContextGrant {
+                await receiveOwnerContextGrant(
+                    grant, fromSenderIdentityHex: received.senderIdentityHex)
+            }
+            let conversationID = received.body.group?.id ?? received.senderIdentityHex
+            addPairedConversation(identityHex: conversationID)
+            // A human message is a prompt for the agent — UNLESS it's a control message
+            // (one carrying a window/grant, e.g. the "enabled always-on AI" system row,
+            // whose boilerplate text must NOT be fed to the agent as a task).
+            if received.participantType == .human, !received.body.text.isEmpty,
+                received.aiWindow == nil, received.aiContextGrant == nil
+            {
+                let conversation = BridgeConversation(
+                    id: conversationID, name: shortHex(conversationID), enabled: true,
+                    members: received.body.group != nil ? [] : [received.senderIdentityHex],
+                    threadID: received.body.thread?.id)
+                await handleInboundPrompt(received.body.text, conversation: conversation)
+            }
+        default:
+            break  // protocolViolation / quarantined / nearbyContact — not used here
+        }
+    }
+
+    /// Add a conversation to the published list (so it shows in the UI + Owner panel),
+    /// de-duplicated by id.
+    private func addPairedConversation(identityHex: String) {
+        guard !activeConversations.contains(where: { $0.id == identityHex }) else { return }
+        activeConversations.append(
+            BridgeConversation(
+                id: identityHex, name: shortHex(identityHex), enabled: true,
+                members: [identityHex]))
+    }
+
+    private func shortHex(_ hex: String) -> String {
+        hex.count > 18 ? "\(hex.prefix(8))…\(hex.suffix(8))" : hex
+    }
+
+    // MARK: PQRC node key material (persisted in the Keychain)
+
+    private func loadOrCreatePQRCIdentity() throws -> PQRCIdentity {
+        if let seed = keychain.load(account: "bridge-pqrc-identity-seed") {
+            return try PQRCIdentity(seed: seed)
+        }
+        let identity = try PQRCIdentity(randomSource: SystemRandomSource())
+        try keychain.save(identity.privateKey.rawRepresentation, account: "bridge-pqrc-identity-seed")
+        return identity
+    }
+
+    private func loadOrCreateIdentityDH() throws -> Curve25519.KeyAgreement.PrivateKey {
+        if let seed = keychain.load(account: "bridge-identity-dh") {
+            return try Curve25519.KeyAgreement.PrivateKey(rawRepresentation: seed)
+        }
+        let dh = try Curve25519.KeyAgreement.PrivateKey(
+            rawRepresentation: SystemRandomSource().bytes(32))
+        try keychain.save(dh.rawRepresentation, account: "bridge-identity-dh")
+        return dh
+    }
+
+    private func loadOrCreatePrekeyManager(identity: PQRCIdentity) async throws -> PrekeyManager {
+        let manager: PrekeyManager
+        if let blob = keychain.load(account: "bridge-prekey-state"),
+            let state = try? JSONDecoder().decode(PrekeyState.self, from: blob)
+        {
+            manager = try PrekeyManager(
+                identity: identity, randomSource: SystemRandomSource(), state: state)
+        } else {
+            manager = try PrekeyManager(
+                identity: identity, randomSource: SystemRandomSource(), oneTimeCount: 16)
+        }
+        _ = try await manager.replenish(to: 16)
+        try keychain.save(
+            JSONEncoder().encode(await manager.snapshot()), account: "bridge-prekey-state")
+        return manager
     }
 
     // MARK: Owner identity (Path 2 §7)
@@ -413,17 +706,98 @@ final class ACPBridgeService: ObservableObject {
 
     // MARK: - Watch-along: owner-gated per-recipient fan-out (Path 2 §9, §11)
 
-    /// The distinguishing feature: while the owner gate is open, treat an inbound human
-    /// message as a prompt, drive the local agent to a COMPLETE answer (never streamed —
-    /// §10), and fan it out so the OWNER sees the raw answer while every other member
-    /// sees the credential-scrubbed copy. Fails closed if the owner isn't authorizing.
+    /// Codename labeling the producing AI in a draft (local only; never load-bearing).
+    private let agentCodename = "eldr-acp"
+
+    /// The distinguishing feature: treat an inbound prompt as a request to the agent,
+    /// drive it to a COMPLETE answer (never streamed — §10), and deliver it per the
+    /// active watch-along mode:
+    ///  - `.direct`: gate on the owner's window here, then fan out (owner raw, others
+    ///    redacted) — the Mac is the group participant (AC20).
+    ///  - `.endpoint`: send the answer privately to the owner's PHONE as a draft; the
+    ///    phone gates + redacts + voices it to the group as the owner's signed agent
+    ///    (§13.5). No Mac-side window gate — the draft is private to the owner.
     func handleInboundPrompt(_ text: String, conversation: BridgeConversation) async {
-        guard await ownerAuthorized(threadID: conversation.threadID) else { return }
+        // One run at a time: a weak/looping model can take a while, and spawning an
+        // agent per queued message stacked up and read as "dead". Tell the user instead.
+        guard !agentRunInFlight else {
+            if watchAlongMode == .direct {
+                await broadcastAgentMessage(
+                    "🤖 Still working on your previous request — one moment.",
+                    conversation: conversation)
+            }
+            return
+        }
+        agentRunInFlight = true
+        defer { agentRunInFlight = false }
+
+        // Capture Sendable values so the timed run closure needs no actor hop.
+        let runner = agentRunner
+        let workdir = agentWorkdir
+        let timeout = agentRunTimeout
+
+        switch watchAlongMode {
+        case .direct:
+            guard await ownerAuthorized(threadID: conversation.threadID) else { return }
+            // Immediate feedback so silence (a slow/looping model) never looks dead.
+            await broadcastAgentMessage("🤖 On it…", conversation: conversation)
+            do {
+                let answer = try await Self.runWithTimeout(seconds: timeout) {
+                    try await runner.run(prompt: text, workdir: workdir)
+                }
+                await broadcastAgentMessage(answer, conversation: conversation)
+            } catch is AgentRunTimeout {
+                await broadcastAgentMessage(
+                    "⚠️ The model didn't finish within \(Int(timeout))s — it may be looping or overloaded. Try a simpler request, or a stronger tool-calling model.",
+                    conversation: conversation)
+            } catch {
+                bridgeState = .error("Agent run failed: \(error)")
+                await broadcastAgentMessage(
+                    "⚠️ The agent run failed: \(error.localizedDescription)",
+                    conversation: conversation)
+            }
+        case .endpoint:
+            do {
+                let answer = try await Self.runWithTimeout(seconds: timeout) {
+                    try await runner.run(prompt: text, workdir: workdir)
+                }
+                await sendDraftToOwner(answer, conversation: conversation)
+            } catch {
+                bridgeState = .error("Agent run failed: \(error)")
+            }
+        }
+    }
+
+    /// Run `operation`, throwing `AgentRunTimeout` if it doesn't finish in `seconds`.
+    /// Bounds a single agent turn so a looping model can't hang the watch-along.
+    nonisolated static func runWithTimeout<T: Sendable>(
+        seconds: Double, _ operation: @escaping @Sendable () async throws -> T
+    ) async throws -> T {
+        try await withThrowingTaskGroup(of: T.self) { group in
+            group.addTask { try await operation() }
+            group.addTask {
+                try await Task.sleep(nanoseconds: UInt64(seconds * 1_000_000_000))
+                throw AgentRunTimeout()
+            }
+            guard let result = try await group.next() else { throw AgentRunTimeout() }
+            group.cancelAll()
+            return result
+        }
+    }
+
+    /// Endpoint mode (§13.5): send the COMPLETE answer to the OWNER ONLY, marked as a
+    /// watch-along draft for the owner's phone to redact + voice to the group. No
+    /// Mac-side redaction or fan-out (the phone does both), and no window gate (the
+    /// draft is private, owner↔agent E2EE). Fails closed if no owner is pinned.
+    func sendDraftToOwner(_ answer: String, conversation: BridgeConversation) async {
+        guard let ownerIdentityHex else { return }  // no owner pinned ⇒ nothing to draft to
+        let draft = AgentDraft(
+            agentName: agentCodename, voiceInto: conversation.id, threadID: conversation.threadID)
+        let body = MessageBody(text: answer, sentAt: clock.now(), agentDraft: draft)
         do {
-            let answer = try await agentRunner.run(prompt: text, workdir: agentWorkdir)
-            await broadcastAgentMessage(answer, conversation: conversation)
+            try await messaging.send(body, to: ownerIdentityHex, participantType: .agent)
         } catch {
-            bridgeState = .error("Agent run failed: \(error)")
+            bridgeState = .error("Draft send failed: \(error)")
         }
     }
 

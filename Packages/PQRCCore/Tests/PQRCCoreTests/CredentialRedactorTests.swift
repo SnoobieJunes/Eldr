@@ -1,7 +1,7 @@
 import Foundation
 import Testing
 
-@testable import PQRCACP
+import PQRCCore
 
 // The security-critical seam of the PQRC watch-along bridge: secrets must never
 // survive `scrub` into a non-owner's copy. These assert detection across the common

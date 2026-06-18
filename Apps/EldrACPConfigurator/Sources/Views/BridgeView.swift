@@ -1,3 +1,4 @@
+import AppKit
 import CoreImage
 import CoreImage.CIFilterBuiltins
 import SwiftUI
@@ -25,6 +26,7 @@ struct BridgeView: View {
                 if !bridge.activeConversations.isEmpty || bridge.ownerIdentityHex != nil {
                     ownerBox
                 }
+                projectDirBox
                 togglesBox
                 controls
 
@@ -162,6 +164,19 @@ struct BridgeView: View {
                     .controlSize(.small)
                     .disabled(manualOwnerHex.trimmingCharacters(in: .whitespaces).isEmpty)
                 }
+
+                Divider()
+                Picker("Watch-along mode", selection: $bridge.watchAlongMode) {
+                    Text("Endpoint (hardened)").tag(ACPBridgeService.WatchAlongMode.endpoint)
+                    Text("Direct (fallback)").tag(ACPBridgeService.WatchAlongMode.direct)
+                }
+                .pickerStyle(.segmented)
+                Text(
+                    bridge.watchAlongMode == .endpoint
+                        ? "Endpoint: the Mac drafts to your phone; your phone redacts + voices to the group as your signed agent. The raw secret never reaches anyone but you."
+                        : "Direct: the Mac voices to the group itself (owner raw, others redacted). Verified fallback."
+                )
+                .font(.caption2).foregroundStyle(.secondary)
             }
             .padding(4)
         }
@@ -176,6 +191,49 @@ struct BridgeView: View {
 
     static func shortHex(_ hex: String) -> String {
         hex.count > 18 ? "\(hex.prefix(8))…\(hex.suffix(8))" : hex
+    }
+
+    /// The project folder the agent's tools (read_file, run_shell, xcodebuild) operate
+    /// in. Without it the agent runs in an undefined dir and real tasks fail — so this
+    /// is load-bearing for anything beyond "what can you do?".
+    private var projectDirBox: some View {
+        GroupBox("Agent project folder") {
+            VStack(alignment: .leading, spacing: 6) {
+                if let dir = bridge.agentWorkdir {
+                    Text(dir)
+                        .font(.caption.monospaced()).foregroundStyle(.secondary)
+                        .textSelection(.enabled)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                } else {
+                    Label(
+                        "Not set — the agent has no project to read or build. Pick the folder it should work in.",
+                        systemImage: "exclamationmark.triangle.fill"
+                    )
+                    .font(.caption).foregroundStyle(.orange)
+                }
+                HStack {
+                    Button("Choose project folder…") { chooseProjectFolder() }
+                        .controlSize(.small)
+                    if bridge.agentWorkdir != nil {
+                        Button("Clear") { bridge.setAgentWorkdir(nil) }
+                            .controlSize(.small)
+                    }
+                }
+            }
+            .padding(4)
+        }
+    }
+
+    private func chooseProjectFolder() {
+        let panel = NSOpenPanel()
+        panel.canChooseDirectories = true
+        panel.canChooseFiles = false
+        panel.allowsMultipleSelection = false
+        panel.prompt = "Use this folder"
+        panel.message = "Choose the project the coding agent should operate in."
+        if panel.runModal() == .OK, let url = panel.url {
+            bridge.setAgentWorkdir(url.path)
+        }
     }
 
     private var togglesBox: some View {

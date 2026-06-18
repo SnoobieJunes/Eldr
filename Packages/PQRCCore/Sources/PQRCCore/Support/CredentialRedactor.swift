@@ -1,12 +1,15 @@
 import Foundation
 
 /// Replaces secrets in agent output with opaque markers before that text is shown to
-/// anyone but its owner. The PQRC watch-along bridge fans an agent answer out
-/// per-recipient: the owner's session carries the raw text, everyone else's carries
-/// `scrub(text)`. This is the one security-critical seam in that flow, so it's pure,
+/// anyone but its owner. Used by both watch-along fan-out paths: the Mac bridge's
+/// DIRECT mode (per-recipient — owner raw, others scrubbed) and the owner's phone in
+/// the §13.5 ENDPOINT model (the phone scrubs before voicing the draft to the group,
+/// keeping the raw only in the owner's local view). Lives in PQRCCore so the Mac
+/// (PQRCACP-light), `AgentEngine` (PQRCAgent), and the iOS app all share one
+/// implementation. The one security-critical seam in the flow, so it's pure,
 /// synchronous, and unit-tested in isolation.
 ///
-/// Design rules (Path 2 §10):
+/// Design rules:
 ///  - CONSERVATIVE toward leaking: a false positive merely redacts a non-secret in
 ///    the OTHER participants' copy (never the owner's), which is the privacy-maximizing
 ///    failure (SPEC §0). A false NEGATIVE would leak a real secret — far worse — so the

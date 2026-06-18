@@ -70,16 +70,19 @@ public struct PCCFoundationModelsProvider: AgentProvider {
             guard #available(iOS 27, macOS 27, *) else {
                 return "Private Cloud Compute requires iOS 27 / macOS 27 or later — this device is on an older OS."
             }
-            switch SystemLanguageModel.default.availability {
+            // Gate on the PCC model's OWN availability, NOT SystemLanguageModel's.
+            // PCC is a distinct model with its own reasons (`.deviceNotEligible` /
+            // `.systemNotReady`); Apple Intelligence being on satisfies the on-device
+            // model but does not guarantee PCC is ready. Checking the wrong model is
+            // what let a not-ready PCC slip through to an opaque `-1` at respond time.
+            switch PrivateCloudComputeLanguageModel().availability {
             case .available:
                 return nil
             case .unavailable(let reason):
                 switch reason {
                 case .deviceNotEligible:
                     return "This device isn't eligible for Apple Intelligence (required for Private Cloud Compute)."
-                case .appleIntelligenceNotEnabled:
-                    return "Apple Intelligence is off — turn it on in Settings ▸ Apple Intelligence & Siri to use Private Cloud Compute."
-                case .modelNotReady:
+                case .systemNotReady:
                     return "Apple Intelligence is still preparing. Try again in a few minutes."
                 @unknown default:
                     return "Private Cloud Compute is unavailable on this device."
@@ -119,6 +122,8 @@ public struct PCCFoundationModelsProvider: AgentProvider {
                 return Draft(text: text)
             } catch let error as AgentProviderError {
                 throw error
+            } catch let error as PrivateCloudComputeLanguageModel.Error {
+                throw AgentProviderError.unavailable(Self.mapPCCError(error))
             } catch {
                 throw AgentProviderError.unavailable(Self.mapGenerationError(error))
             }
@@ -149,6 +154,8 @@ public struct PCCFoundationModelsProvider: AgentProvider {
                 return AgentTurn(messages: [AgentMessage(text: text)])
             } catch let error as AgentProviderError {
                 throw error
+            } catch let error as PrivateCloudComputeLanguageModel.Error {
+                throw AgentProviderError.unavailable(Self.mapPCCError(error))
             } catch {
                 throw AgentProviderError.unavailable(Self.mapGenerationError(error))
             }
@@ -193,6 +200,29 @@ public struct PCCFoundationModelsProvider: AgentProvider {
             case "light": return .light
             case "deep": return .deep
             default: return .moderate
+            }
+        }
+
+        /// Translate the PCC-specific typed error into a human, actionable reason.
+        /// PCC throws `PrivateCloudComputeLanguageModel.Error` (distinct from the
+        /// general `LanguageModelError`); matching the type is more reliable than the
+        /// localized-string sniffing in `mapGenerationError`. Network reachability is
+        /// intentionally surfaced here (Apple's availability enum excludes it — you
+        /// attempt the request and handle the failure).
+        @available(iOS 27, macOS 27, *)
+        static func mapPCCError(_ error: PrivateCloudComputeLanguageModel.Error) -> String {
+            switch error {
+            case .networkFailure:
+                return "Private Cloud Compute is unreachable — check your network connection and try again."
+            case .quotaLimitReached(let info):
+                if let resetDate = info.resetDate {
+                    return "Private Cloud Compute daily quota reached. It resets at \(resetDate). Use a different provider in Settings ▸ AI until then."
+                }
+                return "Private Cloud Compute daily quota reached. Use a different provider in Settings ▸ AI until it resets."
+            case .serviceUnavailable:
+                return "Private Cloud Compute is temporarily unavailable. Try again in a few minutes, or pick a different provider in Settings ▸ AI."
+            @unknown default:
+                return "Private Cloud Compute generation failed: \(error.localizedDescription)"
             }
         }
     #endif

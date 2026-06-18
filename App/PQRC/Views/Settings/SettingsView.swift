@@ -45,6 +45,10 @@ struct SettingsView: View {
     /// shim, which must re-pair with the new token).
     @State private var showRegenerateTokenConfirm = false
     @State private var now = Int64(Date().timeIntervalSince1970)
+    /// Presents the "connect your Mac coding agent" pairing sheet (the agent contact
+    /// is a persistent device relationship, so it lives here in Settings rather than
+    /// in New Chat). Tagged `coding_agent` on pair so its watch-along drafts are voiced.
+    @State private var showConnectAgent = false
 
     private let ticker = Timer.publish(every: 1, on: .main, in: .common).autoconnect()
 
@@ -58,6 +62,7 @@ struct SettingsView: View {
                 reachabilitySection
                 aiSection
                 aiLoopGuardSection
+                codingAgentSection
                 prekeysSection
                 privacySection
                 localAgentSection
@@ -430,6 +435,33 @@ struct SettingsView: View {
             : min(max(value, AppSession.agentLoopGuardMin), AppSession.agentLoopGuardMax)
         loopGuardLimit = clamped
         Task { await model.setLoopGuardLimit(clamped) }
+    }
+
+    // MARK: Mac coding agent (watch-along pairing, §13.5)
+
+    /// Pair the Mac-hosted coding agent (the Eldr ACP Configurator) as a persistent
+    /// device — a long-lived relationship that belongs in Settings, not New Chat. The
+    /// contact is tagged `coding_agent`, which is what lets the phone recognize its
+    /// watch-along drafts and voice them as your signed agent under your AI window.
+    private var codingAgentSection: some View {
+        Section {
+            Button {
+                showConnectAgent = true
+            } label: {
+                Label("Connect your Mac coding agent", systemImage: "desktopcomputer")
+            }
+            .accessibilityIdentifier("connect-mac-agent")
+        } header: {
+            Text("Mac coding agent")
+        } footer: {
+            Text("Pair the Eldr ACP Configurator running on your Mac so its coding agent can join a conversation — controlled by you, under your AI window. On the Mac: open the Bridge tab, then scan its QR here (or use “Open in EldrChat” / paste its address). Paired this way, the agent is recognized as yours and its answers are shown to you in full while secrets are redacted for everyone else.")
+        }
+        .sheet(isPresented: $showConnectAgent) {
+            // Reuse the verified-pairing flow, pre-tagged as a coding agent so its
+            // drafts are voice-trusted. The user scans the Configurator's QR or pastes
+            // its npub.
+            NewChatView(model: model, prefilledContactType: "coding_agent")
+        }
     }
 
     // MARK: Prekeys / privacy / data / about

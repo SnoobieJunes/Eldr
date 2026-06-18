@@ -77,7 +77,7 @@ chaos for resilience demos.
 
 ```bash
 # Build + run (default port 7777):
-swift run --package-path Packages/PQRCNostr pqrc-relay
+1
 
 # Custom port and chaos injection:
 swift run --package-path Packages/PQRCNostr pqrc-relay \
