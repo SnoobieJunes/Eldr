@@ -20,7 +20,12 @@ final class ContextGraphService: ObservableObject {
     }
 
     @Published private(set) var state: ServiceState = .unknown
-    @Published var repoDir: String = ""
+    /// The chosen contextgraph checkout, persisted so the user doesn't have to
+    /// re-pick it on every launch (the path isn't an agent env var, so it lives in
+    /// UserDefaults rather than ConfigurationStore's env file).
+    @Published var repoDir: String {
+        didSet { UserDefaults.standard.set(repoDir, forKey: Self.repoDirKey) }
+    }
     @Published private(set) var isWorking = false
     @Published private(set) var lastError: String?
     /// Tail of the setup output, shown in the wizard so failures are diagnosable.
@@ -29,8 +34,11 @@ final class ContextGraphService: ObservableObject {
     /// The endpoint we health-check; kept in sync with ConfigurationStore.contextGraphURL.
     var endpoint: String
 
+    private static let repoDirKey = "contextGraphRepoDir"
+
     init(endpoint: String = "http://localhost:8302") {
         self.endpoint = endpoint
+        self.repoDir = UserDefaults.standard.string(forKey: Self.repoDirKey) ?? ""
     }
 
     // MARK: - Health

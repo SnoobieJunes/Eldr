@@ -1,5 +1,6 @@
 import PQRCCore
 import SwiftUI
+import UIKit
 
 /// Bubble rendering (APP-SPEC §6.2). Agent messages are unmistakably distinct
 /// — tinted outline + sparkles badge + caption — and the styling survives
@@ -51,10 +52,23 @@ struct MessageBubble: View {
         }
     }
 
-    /// Long-press menu: full-screen (for rich content) + AI-context toggle.
+    /// Long-press / right-click menu: copy + full-screen (for rich content) +
+    /// AI-context toggle. Copy is first so it's the obvious desktop affordance.
     @ViewBuilder private var bubbleMenu: some View {
+        copyMenuItem
         fullScreenMenuItem
         aiContextMenuItem
+    }
+
+    /// Copy the message text to the pasteboard — the right-click → Copy desktop
+    /// users expect, and the only way to lift AI output off the screen short of
+    /// the full-screen reader.
+    private var copyMenuItem: some View {
+        Button {
+            UIPasteboard.general.string = message.text
+        } label: {
+            Label("Copy", systemImage: "doc.on.doc")
+        }
     }
 
     /// "View full screen" — only for markdown/HTML messages.
@@ -145,6 +159,8 @@ struct MessageBubble: View {
             if isMine { Spacer(minLength: 48) }
             VStack(alignment: isMine ? .trailing : .leading, spacing: 2) {
                 CollapsibleMessageContent(text: message.text, onFullScreen: onFullScreen)
+                    // Drag-to-select on Mac/iPad (with right-click → Copy above).
+                    .textSelection(.enabled)
                     .padding(.horizontal, 14)
                     .padding(.vertical, 9)
                     .background(
@@ -231,6 +247,7 @@ struct MessageBubble: View {
                             .accessibilityLabel("Context contribution")
                     }
                     CollapsibleMessageContent(text: message.text, onFullScreen: onFullScreen)
+                        .textSelection(.enabled)
                     aiContextBadge
                 }
                 .padding(.horizontal, 14)

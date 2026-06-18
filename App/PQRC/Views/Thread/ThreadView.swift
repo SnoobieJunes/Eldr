@@ -1,6 +1,7 @@
 import PQRCAgent
 import PQRCCore
 import SwiftUI
+import UIKit
 
 /// Full-screen embedded AI thread (APP-SPEC §8): pinned header with live AI
 /// status per human, invite/withdraw control with bounded durations, loop
@@ -204,6 +205,15 @@ struct ThreadView: View {
                 .lineLimit(1...4)
                 .textFieldStyle(.roundedBorder)
                 .accessibilityIdentifier("thread-composer-field")
+                // Explicit Paste for iPad/Mac (right-click / long-press) — the
+                // main composer has the same affordance.
+                .contextMenu {
+                    Button {
+                        if let clip = UIPasteboard.general.string { draftText += clip }
+                    } label: {
+                        Label("Paste", systemImage: "doc.on.clipboard")
+                    }
+                }
             Button {
                 let text = draftText
                 draftText = ""

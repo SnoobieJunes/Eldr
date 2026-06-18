@@ -86,6 +86,12 @@ final class ACPBridgeService: ObservableObject {
     @Published private(set) var bridgeState: BridgeState = .unpaired
     /// JSON for the QR code shown while advertising; nil when the bridge is off.
     @Published private(set) var pairingPayloadJSON: String?
+    /// The `pqrc:add?npub=…` deep link EldrChat understands — what the QR encodes
+    /// and what "Copy pairing link" / "Open in EldrChat" use. A bare JSON blob (the
+    /// old QR payload) is read as plain text by the Camera, which "helpfully" web-
+    /// searches it; a registered URL scheme deep-links straight into the app, and
+    /// also lets you pair on the SAME Mac (no second device to scan with). nil off.
+    @Published private(set) var pairingLink: String?
     @Published var activeConversations: [BridgeConversation] = []
     /// Inbound messages the group sent back (instructions/context), newest last.
     @Published private(set) var inbound: [String] = []
@@ -109,7 +115,7 @@ final class ACPBridgeService: ObservableObject {
 
     init(
         keychain: KeychainBox = KeychainBox(),
-        serviceType: String = "eldr-acp",
+        serviceType: String = MultipeerNearbyLink.bridgeServiceType,
         preferredRelay: String? = nil,
         messaging: BridgeMessaging = UnpairedMessaging()
     ) {
@@ -153,6 +159,7 @@ final class ACPBridgeService: ObservableObject {
             let kp = try loadOrCreateKeypair()
             pairingPayloadJSON = PairingPayload(pubkey: kp.publicKeyHex, relay: preferredRelay)
                 .jsonString()
+            pairingLink = Self.deepLink(pubkeyHex: kp.publicKeyHex, relay: preferredRelay)
             let link = MultipeerNearbyLink(serviceType: serviceType)
             self.link = link
             bridgeState = .advertising
@@ -179,7 +186,22 @@ final class ACPBridgeService: ObservableObject {
         self.link = nil
         Task { await link?.stop() }
         pairingPayloadJSON = nil
+        pairingLink = nil
         if case .error = bridgeState {} else { bridgeState = .unpaired }
+    }
+
+    /// Build the `pqrc:add?npub=…` deep link EldrChat's `handleDeepLink` parses.
+    /// The pubkey is bech32-encoded to `npub1…` (what the app's New-conversation
+    /// scan expects); a preferred relay rides along as a forward-compatible query
+    /// item the app ignores until it wires relay hints in.
+    nonisolated static func deepLink(pubkeyHex: String, relay: String?) -> String {
+        var link = "pqrc:add?npub=\(Bech32.npub(pubkeyHex))"
+        if let relay, !relay.isEmpty,
+            let encoded = relay.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed)
+        {
+            link += "&relay=\(encoded)"
+        }
+        return link
     }
 
     /// Revoke pairing: stop, delete the identity key, and forget conversations.

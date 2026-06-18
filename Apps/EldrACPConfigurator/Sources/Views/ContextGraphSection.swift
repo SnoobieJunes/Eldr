@@ -9,6 +9,9 @@ import SwiftUI
 struct ContextGraphSection: View {
     @EnvironmentObject private var store: ConfigurationStore
     @StateObject private var service = ContextGraphService()
+    /// Debounces the live health probe so editing the endpoint doesn't fire a
+    /// (4s-timeout) request on every keystroke.
+    @State private var healthProbe: Task<Void, Never>?
 
     var body: some View {
         Section("ContextGraph (smart context)") {
@@ -24,9 +27,28 @@ struct ContextGraphSection: View {
                 TextField("http://localhost:8302", text: $store.contextGraphURL)
                     .textFieldStyle(.roundedBorder)
                     .autocorrectionDisabled()
+                    .onChange(of: store.contextGraphURL) { _, newValue in
+                        // Live feedback: re-probe shortly after the user stops typing
+                        // so the dot reflects the endpoint they're actually editing,
+                        // not the one from when the section first appeared.
+                        service.endpoint = newValue
+                        healthProbe?.cancel()
+                        healthProbe = Task {
+                            try? await Task.sleep(for: .milliseconds(600))
+                            if Task.isCancelled { return }
+                            await service.refreshHealth()
+                        }
+                    }
             }
 
             healthRow
+
+            if store.contextGraphEnabled, case .down = service.state {
+                Text(
+                    "Not answering yet. Pick your contextgraph checkout and press “Install & start service,” or point Endpoint at an already-running instance. The agent falls back to a plain recent-window until it's reachable."
+                )
+                .font(.caption).foregroundStyle(.secondary)
+            }
 
             LabeledContent("contextgraph checkout") {
                 HStack {

@@ -144,25 +144,35 @@ struct SetupWizardView: View {
         }
     }
 
-    /// Open the installed Xcode (resolving Xcode-beta too) without relying on the
-    /// `xcode://` URL scheme, which beta installs don't register. Falls back to the
-    /// generic `/Applications/Xcode.app` path, then surfaces guidance if neither
-    /// resolves. No force-unwrap, no crash, no error dialog when Xcode is absent.
+    /// Open Xcode, **preferring Xcode-beta**. Xcode 27's "Agent (ACP)" settings
+    /// only exist in the beta, but with both installed the `com.apple.dt.Xcode`
+    /// bundle id (and the `xcode://` URL scheme) resolve to whichever is the
+    /// LaunchServices default — frequently the stable Xcode, the wrong one. So we
+    /// check the conventional beta path FIRST, then fall back to the bundle-id
+    /// lookup, then the generic `/Applications/Xcode.app`, then surface guidance.
+    /// No force-unwrap, no crash, no error dialog when Xcode is absent.
     private func openXcode() {
         xcodeOpenError = nil
         let workspace = NSWorkspace.shared
-        // 1) Bundle-id lookup resolves Xcode, Xcode-beta, and renamed copies.
-        if let appURL = workspace.urlForApplication(withBundleIdentifier: "com.apple.dt.Xcode") {
-            workspace.openApplication(at: appURL, configuration: NSWorkspace.OpenConfiguration())
+        let config = NSWorkspace.OpenConfiguration()
+        // 1) Xcode-beta at its conventional path wins over the LaunchServices default.
+        let betaPath = "/Applications/Xcode-beta.app"
+        if FileManager.default.fileExists(atPath: betaPath) {
+            workspace.openApplication(at: URL(fileURLWithPath: betaPath), configuration: config)
             return
         }
-        // 2) Fall back to the conventional install path if it exists.
+        // 2) Bundle-id lookup resolves a single installed Xcode (stable or renamed).
+        if let appURL = workspace.urlForApplication(withBundleIdentifier: "com.apple.dt.Xcode") {
+            workspace.openApplication(at: appURL, configuration: config)
+            return
+        }
+        // 3) Fall back to the conventional install path if it exists.
         let fallback = URL(fileURLWithPath: "/Applications/Xcode.app")
         if FileManager.default.fileExists(atPath: fallback.path) {
-            workspace.openApplication(at: fallback, configuration: NSWorkspace.OpenConfiguration())
+            workspace.openApplication(at: fallback, configuration: config)
             return
         }
-        // 3) Nothing found — guide the user instead of failing silently/crashing.
+        // 4) Nothing found — guide the user instead of failing silently/crashing.
         xcodeOpenError =
             "Couldn't find Xcode. Open it yourself, then go to Xcode ▸ Settings ▸ Intelligence."
     }

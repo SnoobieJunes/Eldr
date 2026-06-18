@@ -24,6 +24,25 @@ struct BridgePureTests {
         #expect(PairingPayload.decode("not json") == nil)
     }
 
+    /// The QR must encode EldrChat's registered `pqrc:add?npub=…` deep link, NOT a
+    /// bare JSON blob — a blob is read as plain text by the Camera and web-searched
+    /// instead of deep-linking into the app.
+    @Test func deepLinkEncodesPqrcScheme() throws {
+        let kp = try NostrKeypair(randomSource: SystemRandomSource())
+        let link = ACPBridgeService.deepLink(pubkeyHex: kp.publicKeyHex, relay: nil)
+        #expect(link == "pqrc:add?npub=\(Bech32.npub(kp.publicKeyHex))")
+        let comps = URLComponents(string: link)
+        #expect(comps?.scheme == "pqrc")
+        let npub = comps?.queryItems?.first(where: { $0.name == "npub" })?.value
+        #expect(npub?.hasPrefix("npub1") == true)
+    }
+
+    @Test func deepLinkCarriesPreferredRelay() {
+        let link = ACPBridgeService.deepLink(pubkeyHex: "deadbeef", relay: "wss://relay.example")
+        let comps = URLComponents(string: link)
+        #expect(comps?.queryItems?.first(where: { $0.name == "relay" })?.value == "wss://relay.example")
+    }
+
     @Test func nostrKeypairGeneratesAndReloads() throws {
         let kp = try NostrKeypair(randomSource: SystemRandomSource())
         #expect(kp.publicKeyHex.count == 64)  // 32-byte x-only pubkey, hex

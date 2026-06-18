@@ -7,6 +7,7 @@ import SwiftUI
 /// PQRC E2EE stack. Agent messages always render as AI-authored (invariant 8).
 struct BridgeView: View {
     @StateObject private var bridge = ACPBridgeService()
+    @State private var copied = false
 
     var body: some View {
         ScrollView {
@@ -44,22 +45,46 @@ struct BridgeView: View {
     }
 
     private var pairingBox: some View {
-        GroupBox("Scan in EldrChat") {
+        GroupBox("Pair with EldrChat") {
             HStack(alignment: .top, spacing: 14) {
-                if let payload = bridge.pairingPayloadJSON, let image = Self.qrImage(payload) {
+                if let link = bridge.pairingLink, let image = Self.qrImage(link) {
                     Image(nsImage: image)
                         .interpolation(.none)
                         .resizable()
                         .frame(width: 140, height: 140)
                         .background(Color.white)
                 }
-                VStack(alignment: .leading, spacing: 6) {
-                    Text("Open EldrChat ▸ New conversation ▸ Scan, and point it at this code. The agent pairs as a contact you can add to any conversation.")
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("On another device: open EldrChat ▸ New conversation ▸ Scan and point it at this code. The agent pairs as a contact you can add to any conversation.")
                         .font(.caption).foregroundStyle(.secondary)
+                    Text("On this Mac, EldrChat can't scan its own screen — copy the link or open it directly:")
+                        .font(.caption).foregroundStyle(.secondary)
+                    HStack {
+                        Button {
+                            guard let link = bridge.pairingLink else { return }
+                            NSPasteboard.general.clearContents()
+                            NSPasteboard.general.setString(link, forType: .string)
+                            copied = true
+                        } label: {
+                            Label(
+                                copied ? "Copied" : "Copy pairing link",
+                                systemImage: copied ? "checkmark" : "doc.on.doc")
+                        }
+                        Button {
+                            guard let link = bridge.pairingLink, let url = URL(string: link) else {
+                                return
+                            }
+                            NSWorkspace.shared.open(url)
+                        } label: {
+                            Label("Open in EldrChat", systemImage: "arrow.up.forward.app")
+                        }
+                    }
+                    .controlSize(.small)
                 }
             }
             .padding(4)
         }
+        .onChange(of: bridge.pairingLink) { _, _ in copied = false }
     }
 
     private var conversationsBox: some View {
@@ -113,7 +138,7 @@ struct BridgeView: View {
         }
     }
 
-    /// Render the pairing JSON as a QR code.
+    /// Render the `pqrc:add?npub=…` pairing link as a QR code.
     static func qrImage(_ string: String) -> NSImage? {
         let context = CIContext()
         let filter = CIFilter.qrCodeGenerator()
