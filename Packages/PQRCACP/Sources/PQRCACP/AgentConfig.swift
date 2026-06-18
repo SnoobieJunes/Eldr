@@ -25,6 +25,13 @@ public struct AgentConfig: Sendable, Equatable {
     /// than this is head+tail truncated with a `… N bytes elided …` marker, so one
     /// big file read or build log can't blow the window. Env: `ELDR_ACP_MAX_TOOL_RESULT_BYTES`.
     public var maxToolResultBytes: Int
+    /// Max bytes `read_file` will pull off disk BEFORE truncation. `maxToolResultBytes`
+    /// bounds what reaches the model, but it only trims AFTER the whole file is loaded
+    /// into memory — a multi-gigabyte file would OOM the agent first. This is the
+    /// read-side backpressure: `read_file` stats the file and, when it's over this
+    /// cap, streams only a bounded prefix off disk (with an elision note) instead of
+    /// loading it whole. Env: `ELDR_ACP_MAX_READ_FILE_BYTES`. `Int.max` → no cap.
+    public var maxReadFileBytes: Int
     /// How many of the most-recent user/assistant/tool TURNS to keep verbatim when
     /// the running history is trimmed before each LLM call. The system prompt and
     /// the first user message are always kept; older tool noise beyond this window
@@ -82,6 +89,7 @@ public struct AgentConfig: Sendable, Equatable {
     /// tools, no prompt changes, all skills advertised.
     public static let `default` = AgentConfig(
         maxToolResultBytes: 8 * 1024,
+        maxReadFileBytes: 1024 * 1024,
         maxHistoryTurns: 12,
         maxContextChars: 48 * 1024,
         toolAllowlist: [],
@@ -97,6 +105,7 @@ public struct AgentConfig: Sendable, Equatable {
 
     public init(
         maxToolResultBytes: Int = 8 * 1024,
+        maxReadFileBytes: Int = 1024 * 1024,
         maxHistoryTurns: Int = 12,
         maxContextChars: Int = 48 * 1024,
         toolAllowlist: [String] = [],
@@ -113,6 +122,7 @@ public struct AgentConfig: Sendable, Equatable {
         // Clamp to sane floors: a non-positive byte cap would truncate everything to
         // nothing (worse than no cap), so treat ≤0 as "effectively unbounded".
         self.maxToolResultBytes = maxToolResultBytes > 0 ? maxToolResultBytes : Int.max
+        self.maxReadFileBytes = maxReadFileBytes > 0 ? maxReadFileBytes : Int.max
         self.maxHistoryTurns = max(0, maxHistoryTurns)
         self.maxContextChars = max(0, maxContextChars)
         self.toolAllowlist = toolAllowlist
@@ -178,6 +188,7 @@ public struct AgentConfig: Sendable, Equatable {
 
         return AgentConfig(
             maxToolResultBytes: intEnv("ELDR_ACP_MAX_TOOL_RESULT_BYTES", default: d.maxToolResultBytes),
+            maxReadFileBytes: intEnv("ELDR_ACP_MAX_READ_FILE_BYTES", default: d.maxReadFileBytes),
             maxHistoryTurns: intEnv("ELDR_ACP_MAX_HISTORY_TURNS", default: d.maxHistoryTurns),
             maxContextChars: intEnv("ELDR_ACP_MAX_CONTEXT_CHARS", default: d.maxContextChars),
             toolAllowlist: tools,

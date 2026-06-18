@@ -25,6 +25,14 @@ public actor ACPAgent {
     /// unit tests stay home-directory-free — pass `nil` to disable auto-discovery.
     private let configDir: String?
     private let maxIterations: Int
+    /// Stream the final answer to the client token-by-token (`agent_message_chunk`
+    /// per delta) instead of one message at end-of-turn. Tool-call turns are never
+    /// streamed (they produce no visible text). Off for echo/tests via `ELDR_ACP_STREAM`.
+    private let streamingEnabled: Bool
+    /// Wall-clock backstop for a single model call: `runTurn` races each completion
+    /// against this so a wedged model (or one that streams forever) ends the turn
+    /// instead of hanging. Mirrors `LLMConfig.requestTimeoutSeconds`.
+    private let requestTimeoutSeconds: Double
     /// The advertised, executable skills (ACP slash-commands). Derived from config
     /// once at init; empty when skills are disabled.
     private let skills: AgentSkillSet
@@ -59,6 +67,8 @@ public actor ACPAgent {
         config: AgentConfig = .fromEnvironment(),
         configDir: String? = AgentConfig.defaultConfigDir(ProcessInfo.processInfo.environment),
         maxIterations: Int = 20,
+        streamingEnabled: Bool = true,
+        requestTimeoutSeconds: Double = 120,
         contextGraph: (any ContextGraphAssembling)? = nil
     ) {
         self.connection = connection
@@ -67,6 +77,8 @@ public actor ACPAgent {
         self.config = config
         self.configDir = configDir
         self.maxIterations = maxIterations
+        self.streamingEnabled = streamingEnabled
+        self.requestTimeoutSeconds = requestTimeoutSeconds > 0 ? requestTimeoutSeconds : 120
         self.skills = AgentSkillSet.from(config: config)
         // Build the real client from config when enabled and not injected (tests
         // inject a stub so they stay network-free).
@@ -275,7 +287,8 @@ public actor ACPAgent {
         let executor = ToolExecutor(
             capabilities: clientCapabilities, environment: perTurnEnvironment,
             connection: connection, sessionId: sessionId,
-            maxResultBytes: config.maxToolResultBytes)
+            maxResultBytes: config.maxToolResultBytes,
+            maxReadFileBytes: config.maxReadFileBytes)
         let tools = ToolExecutor.toolDefinitions(allowlist: config.toolAllowlist)
 
         // Leading system run: optional project-context block FIRST (so the model
@@ -309,10 +322,26 @@ public actor ACPAgent {
             let outgoing = ContextBudget.trim(
                 messages, maxTurns: config.maxHistoryTurns, maxChars: config.maxContextChars)
 
+            // One model call, raced against a timeout and against an in-flight
+            // session/cancel so a hung model or a mid-generation cancel aborts the
+            // turn rather than blocking on `complete`. When streaming is on, the final
+            // answer's deltas are forwarded to the client as they arrive.
             let response: LLMResponse
-            do {
-                response = try await llm.complete(messages: outgoing, tools: tools)
-            } catch {
+            let alreadyStreamed: String
+            switch await runModelCall(sessionId: sessionId, outgoing: outgoing, tools: tools) {
+            case .completed(let r, let streamed):
+                response = r
+                alreadyStreamed = streamed
+            case .cancelled:
+                return .cancelled
+            case .timedOut:
+                await emitMessage(
+                    sessionId: sessionId,
+                    text:
+                        "The local model did not respond within \(Int(requestTimeoutSeconds))s "
+                        + "(raise ELDR_LLM_TIMEOUT_SECONDS or check the model server).")
+                return .refusal
+            case .failed(let error):
                 // Surface the failure to the user as a message, then end the turn.
                 await emitMessage(
                     sessionId: sessionId,
@@ -323,9 +352,11 @@ public actor ACPAgent {
             if cancelledSessions.contains(sessionId) { return .cancelled }
 
             guard response.wantsTools else {
-                // Final answer.
+                // Final answer. Streaming already forwarded `alreadyStreamed`; emit only
+                // the remainder (the whole text when nothing streamed, e.g. tests/echo).
                 let text = response.content.isEmpty ? "(no response)" : response.content
-                await emitMessage(sessionId: sessionId, text: text)
+                let remainder = Self.remainder(of: text, afterStreaming: alreadyStreamed)
+                if !remainder.isEmpty { await emitMessage(sessionId: sessionId, text: remainder) }
                 logSessionEnd(sessionId: sessionId, cwd: cwd, summary: text)
                 await ingestTurn(userText: userText, assistantText: text, cwd: cwd)
                 return .endTurn
@@ -498,6 +529,89 @@ public actor ACPAgent {
             params: ACPWire.agentMessageChunk(sessionId: sessionId, text: text))
     }
 
+    // MARK: - Model call (timeout + cancel race + streaming)
+
+    /// The outcome of one raced model call.
+    private enum ModelCallOutcome {
+        /// The model returned; `streamed` is the visible text already sent as
+        /// `agent_message_chunk`s during streaming (empty when not streaming).
+        case completed(LLMResponse, streamed: String)
+        case timedOut
+        case cancelled
+        case failed(Error)
+    }
+
+    /// True iff the client asked to cancel this session (actor-isolated read so the
+    /// racing cancel-poll can observe a session/cancel that arrives mid-generation).
+    private func isCancelled(_ sessionId: String) -> Bool {
+        cancelledSessions.contains(sessionId)
+    }
+
+    /// Run one model completion, racing it against (a) a wall-clock timeout and (b) an
+    /// in-flight session/cancel, whichever resolves first. When streaming is enabled
+    /// the final answer's deltas are forwarded to the client as `agent_message_chunk`s
+    /// as they arrive; a tool-call turn produces no deltas. The non-winning racers are
+    /// cancelled (which cancels the underlying URLSession request too).
+    private func runModelCall(
+        sessionId: String, outgoing: [LLMMessage], tools: [LLMTool]
+    ) async -> ModelCallOutcome {
+        let llm = self.llm
+        let connection = self.connection
+        let streaming = self.streamingEnabled
+        let timeoutNanos = UInt64(requestTimeoutSeconds * 1_000_000_000)
+
+        return await withTaskGroup(of: ModelCallOutcome.self) { group in
+            // 1. The model call.
+            group.addTask {
+                let streamed = StreamedTextBox()
+                do {
+                    let response: LLMResponse
+                    if streaming {
+                        response = try await llm.stream(messages: outgoing, tools: tools) { delta in
+                            await streamed.append(delta)
+                            await connection.notify(
+                                method: "session/update",
+                                params: ACPWire.agentMessageChunk(sessionId: sessionId, text: delta))
+                        }
+                    } else {
+                        response = try await llm.complete(messages: outgoing, tools: tools)
+                    }
+                    return .completed(response, streamed: await streamed.value)
+                } catch {
+                    return .failed(error)
+                }
+            }
+            // 2. Timeout backstop.
+            group.addTask {
+                try? await Task.sleep(nanoseconds: timeoutNanos)
+                return .timedOut
+            }
+            // 3. Cancel poll (session/cancel can land on the actor while we await).
+            group.addTask { [weak self] in
+                while !Task.isCancelled {
+                    if await self?.isCancelled(sessionId) == true { return .cancelled }
+                    do { try await Task.sleep(nanoseconds: 50_000_000) } catch { break }
+                }
+                return .cancelled
+            }
+
+            let first = await group.next() ?? .failed(LLMError.badResponse("no model outcome"))
+            group.cancelAll()
+            return first
+        }
+    }
+
+    /// The slice of `text` not yet streamed: when `streamed` is a prefix of `text`,
+    /// the unsent tail; when nothing was streamed, the whole text; otherwise (the
+    /// streamed text diverged — shouldn't happen, both are reasoning-stripped) the
+    /// whole text, so the client never loses the answer.
+    static func remainder(of text: String, afterStreaming streamed: String) -> String {
+        guard !streamed.isEmpty else { return text }
+        if text == streamed { return "" }
+        if text.hasPrefix(streamed) { return String(text.dropFirst(streamed.count)) }
+        return text
+    }
+
     // MARK: - System prompt
 
     /// The turn's system prompt. A user override (`ELDR_ACP_SYSTEM_PROMPT` / config
@@ -529,7 +643,11 @@ public actor ACPAgent {
             You have these tools — call them rather than guessing:
               • read_file(path): read a text file.
               • write_file(path, content): create/overwrite a text file with full new contents.
+              • edit_file(path, old_string, new_string): replace one exact, unique substring \
+            in a file (prefer this for small edits — you don't resend the whole file).
               • list_dir(path): list a directory.
+              • search(query, path): find a literal string in files (path:line:text); use it to \
+            locate code before reading whole files.
               • run_shell(command): run a shell command (e.g. `xcodebuild …`, `xcrun simctl …`, \
             `swift build`). DEVELOPER_DIR is preconfigured so xcodebuild/xcrun target the \
             intended Xcode.
@@ -601,4 +719,12 @@ public actor ACPAgent {
             "error": .object(["code": .int(code), "message": .string(message)]),
         ]).serialized()
     }
+}
+
+/// A tiny actor that accumulates streamed deltas inside the model-call child task,
+/// so the `@Sendable` onDelta closure has a Sendable place to write without sharing
+/// mutable state across the task boundary.
+private actor StreamedTextBox {
+    private(set) var value = ""
+    func append(_ s: String) { value += s }
 }

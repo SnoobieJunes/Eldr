@@ -213,16 +213,23 @@ struct ToolExecutorTests {
         #expect(result.text.contains("/Applications/Xcode-beta.app/Contents/Developer"))
     }
 
-    @Test func toolDefinitionsCoverAllFour() {
+    @Test func toolDefinitionsCoverAllTools() {
         let names = Set(ToolExecutor.toolDefinitions().map(\.name))
-        #expect(names == ["read_file", "write_file", "list_dir", "run_shell"])
+        #expect(
+            names == [
+                "read_file", "write_file", "edit_file", "list_dir", "search", "run_shell",
+            ])
+        // The advertised set must match the declared source of truth.
+        #expect(names == Set(ToolExecutor.allToolNames))
     }
 
     @Test func permissionRequiredOnlyForMutating() {
         #expect(ToolExecutor.needsPermission("write_file"))
+        #expect(ToolExecutor.needsPermission("edit_file"))
         #expect(ToolExecutor.needsPermission("run_shell"))
         #expect(!ToolExecutor.needsPermission("read_file"))
         #expect(!ToolExecutor.needsPermission("list_dir"))
+        #expect(!ToolExecutor.needsPermission("search"))
     }
 }
 

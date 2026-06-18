@@ -1,4 +1,6 @@
 import Foundation
+import PQRCACP
+import PQRCAgent
 import PQRCCore
 import PQRCNostr
 import Testing
@@ -112,5 +114,174 @@ struct BridgeSendTests {
         await bridge.reportBuildResult(command: "swift build", exitCode: 0, output: "")
         await bridge.reportSessionSummary(summary: "s", filesChanged: 1)
         #expect(await recorder.all().isEmpty)
+    }
+}
+
+// MARK: - Path 2 watch-along bridge: owner gate + per-recipient redaction
+
+@Suite("Bridge — watch-along (owner gate + per-recipient redaction)")
+struct BridgeWatchAlongTests {
+
+    actor RecordingMessaging: BridgeMessaging {
+        struct Sent: Sendable { let text: String; let peer: String; let type: ParticipantType }
+        private(set) var sent: [Sent] = []
+        func send(_ body: MessageBody, to peerIdentityHex: String, participantType: ParticipantType)
+            async throws
+        { sent.append(Sent(text: body.text, peer: peerIdentityHex, type: participantType)) }
+        func all() -> [Sent] { sent }
+        func text(to peer: String) -> String? { sent.first { $0.peer == peer }?.text }
+    }
+
+    /// No-op sink — the bridge does its OWN per-recipient fan-out (§9); the engine here
+    /// is only the authorization oracle, never a posting path.
+    struct NoopSink: AgentMessageSink {
+        func postAgentMessage(_ body: MessageBody, threadID: String, agentName: String?) async throws {}
+        func postAgentReply(_ body: MessageBody, agentName: String?) async throws {}
+    }
+
+    struct StubRunner: BridgeAgentRunner {
+        let answer: String
+        func run(prompt: String, workdir: String?) async throws -> String { answer }
+    }
+
+    private static let secret = "sk-abc123DEF456ghi789JKL012"
+
+    /// Build a bridge with a live owner window already open, plus the owner/other hexes.
+    @MainActor
+    private static func openGateBridge(recorder: RecordingMessaging) async throws -> (
+        bridge: ACPBridgeService, ownerHex: String, otherHex: String
+    ) {
+        let clock = FixedClock(now: 1_756_000_000)
+        let mac = try PQRCIdentity(seed: Data(repeating: 0x1a, count: 32))
+        let owner = try PQRCIdentity(seed: Data(repeating: 0x2b, count: 32))
+        let other = try PQRCIdentity(seed: Data(repeating: 0x3c, count: 32))
+        let ownerHex = owner.publicKeyData.hexString
+        let otherHex = other.publicKeyData.hexString
+
+        let engine = AgentEngine(myIdentity: mac, clock: clock, sink: NoopSink())
+        let tempDir = (NSTemporaryDirectory() as NSString).appendingPathComponent(
+            "eldr-owner-\(UUID().uuidString)")
+        let bridge = ACPBridgeService(messaging: recorder, configDir: tempDir)
+        bridge.setOwnerAuthority(engine)
+        bridge.setOwnerIdentity(ownerHex)
+
+        // Owner enables their AI → signs a window → bridge routes it into the engine.
+        let window = try AIWindowAnnouncement.make(
+            activeUntil: clock.now() + 1800, identity: owner)
+        await bridge.receiveOwnerWindow(window, fromSenderIdentityHex: ownerHex)
+        return (bridge, ownerHex, otherHex)
+    }
+
+    @MainActor
+    @Test func ownerSeesRawEveryoneElseSeesRedacted() async throws {
+        let recorder = RecordingMessaging()
+        let (bridge, ownerHex, otherHex) = try await Self.openGateBridge(recorder: recorder)
+
+        let convo = ACPBridgeService.BridgeConversation(
+            id: "group-1", name: "Project group", enabled: true,
+            members: [ownerHex, otherHex])
+        await bridge.broadcastAgentMessage(
+            "The API key is \(Self.secret) — use it.", conversation: convo)
+
+        // The owner's session carries the raw secret…
+        let ownerText = await recorder.text(to: ownerHex)
+        #expect(ownerText?.contains(Self.secret) == true)
+        // …every other member's copy is scrubbed.
+        let otherText = await recorder.text(to: otherHex)
+        #expect(otherText?.contains(Self.secret) == false)
+        #expect(otherText?.contains("‹redacted:") == true)
+        // Both are agent-labeled (invariant 8).
+        #expect(await recorder.all().allSatisfy { $0.type == .agent })
+    }
+
+    @MainActor
+    @Test func failsClosedWithNoOwnerWindow() async throws {
+        let recorder = RecordingMessaging()
+        // Owner pinned + engine set, but NO window received → gate shut.
+        let clock = FixedClock(now: 1_756_000_000)
+        let mac = try PQRCIdentity(seed: Data(repeating: 0x1a, count: 32))
+        let owner = try PQRCIdentity(seed: Data(repeating: 0x2b, count: 32))
+        let engine = AgentEngine(myIdentity: mac, clock: clock, sink: NoopSink())
+        let bridge = ACPBridgeService(
+            messaging: recorder,
+            configDir: (NSTemporaryDirectory() as NSString).appendingPathComponent(
+                "eldr-owner-\(UUID().uuidString)"))
+        bridge.setOwnerAuthority(engine)
+        bridge.setOwnerIdentity(owner.publicKeyData.hexString)
+
+        let convo = ACPBridgeService.BridgeConversation(
+            id: "g", name: "g", enabled: true, members: [owner.publicKeyData.hexString])
+        await bridge.broadcastAgentMessage("anything", conversation: convo)
+        #expect(await recorder.all().isEmpty)  // no live window ⇒ nothing sent
+    }
+
+    @MainActor
+    @Test func noOwnerPinnedFailsClosed() async throws {
+        let recorder = RecordingMessaging()
+        let bridge = ACPBridgeService(messaging: recorder)  // no owner, no engine
+        let convo = ACPBridgeService.BridgeConversation(
+            id: "peer", name: "peer", enabled: true)
+        await bridge.broadcastAgentMessage("anything", conversation: convo)
+        #expect(await recorder.all().isEmpty)
+    }
+
+    @MainActor
+    @Test func windowFromNonOwnerIsRejected() async throws {
+        let recorder = RecordingMessaging()
+        let clock = FixedClock(now: 1_756_000_000)
+        let mac = try PQRCIdentity(seed: Data(repeating: 0x1a, count: 32))
+        let owner = try PQRCIdentity(seed: Data(repeating: 0x2b, count: 32))
+        let stranger = try PQRCIdentity(seed: Data(repeating: 0x9f, count: 32))
+        let engine = AgentEngine(myIdentity: mac, clock: clock, sink: NoopSink())
+        let bridge = ACPBridgeService(
+            messaging: recorder,
+            configDir: (NSTemporaryDirectory() as NSString).appendingPathComponent(
+                "eldr-owner-\(UUID().uuidString)"))
+        bridge.setOwnerAuthority(engine)
+        bridge.setOwnerIdentity(owner.publicKeyData.hexString)
+
+        // A window the STRANGER signed and tries to deliver — must not open the gate.
+        let strangerHex = stranger.publicKeyData.hexString
+        let forged = try AIWindowAnnouncement.make(
+            activeUntil: clock.now() + 1800, identity: stranger)
+        await bridge.receiveOwnerWindow(forged, fromSenderIdentityHex: strangerHex)
+
+        let convo = ACPBridgeService.BridgeConversation(
+            id: "g", name: "g", enabled: true, members: [owner.publicKeyData.hexString])
+        await bridge.broadcastAgentMessage("secret stuff", conversation: convo)
+        #expect(await recorder.all().isEmpty)  // stranger can't authorize the agent
+    }
+
+    @MainActor
+    @Test func handleInboundPromptDrivesAgentAndFansOut() async throws {
+        let recorder = RecordingMessaging()
+        let (bridge, ownerHex, otherHex) = try await Self.openGateBridge(recorder: recorder)
+        bridge.setAgentRunner(StubRunner(answer: "Found it: \(Self.secret)"))
+
+        let convo = ACPBridgeService.BridgeConversation(
+            id: "group-1", name: "Group", enabled: true, members: [ownerHex, otherHex])
+        await bridge.handleInboundPrompt("read config.env", conversation: convo)
+
+        #expect(await recorder.text(to: ownerHex)?.contains(Self.secret) == true)
+        #expect(await recorder.text(to: otherHex)?.contains(Self.secret) == false)
+        #expect(await recorder.text(to: otherHex)?.contains("‹redacted:") == true)
+    }
+
+    @MainActor
+    @Test func ownerIdentityPersistsAcrossInstances() async throws {
+        let tempDir = (NSTemporaryDirectory() as NSString).appendingPathComponent(
+            "eldr-owner-\(UUID().uuidString)")
+        let first = ACPBridgeService(configDir: tempDir)
+        first.setOwnerIdentity("deadbeefowner")
+        #expect(first.ownerIdentityHex == "deadbeefowner")
+
+        // A fresh instance pointed at the same config dir reloads the pinned owner.
+        let second = ACPBridgeService(configDir: tempDir)
+        #expect(second.ownerIdentityHex == "deadbeefowner")
+
+        // Clearing removes it for the next load too.
+        second.setOwnerIdentity(nil)
+        let third = ACPBridgeService(configDir: tempDir)
+        #expect(third.ownerIdentityHex == nil)
     }
 }

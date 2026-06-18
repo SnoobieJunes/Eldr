@@ -93,11 +93,15 @@ public struct ToolExecutor: Sendable {
     /// truncated past this). The context-window guard — a huge `read_file` or build
     /// log is trimmed here so it can't flood the next prompt. `Int.max` → no cap.
     let maxResultBytes: Int
+    /// Cap on bytes `read_file` pulls off DISK before truncation — the read-side
+    /// backpressure (`maxResultBytes` only trims after the whole file is in memory).
+    /// Over-cap files are read as a bounded prefix via `FileHandle`. `Int.max` → no cap.
+    let maxReadFileBytes: Int
 
     public init(
         capabilities: ClientCapabilities, environment: ToolEnvironment,
         connection: ClientConnection?, sessionId: String, outputByteLimit: Int = 64 * 1024,
-        maxResultBytes: Int = Int.max
+        maxResultBytes: Int = Int.max, maxReadFileBytes: Int = Int.max
     ) {
         self.capabilities = capabilities
         self.environment = environment
@@ -105,11 +109,14 @@ public struct ToolExecutor: Sendable {
         self.sessionId = sessionId
         self.outputByteLimit = outputByteLimit
         self.maxResultBytes = maxResultBytes
+        self.maxReadFileBytes = maxReadFileBytes
     }
 
-    /// The four built-in tools' names, in advertise order. The single source of
-    /// truth for "what tools exist" (used to validate an allowlist).
-    public static let allToolNames = ["read_file", "write_file", "list_dir", "run_shell"]
+    /// The built-in tools' names, in advertise order. The single source of truth for
+    /// "what tools exist" (used to validate an allowlist).
+    public static let allToolNames = [
+        "read_file", "write_file", "edit_file", "list_dir", "search", "run_shell",
+    ]
 
     /// The OpenAI tool/function definitions the agent advertises to its LLM,
     /// optionally filtered to an allowlist (empty → all). Descriptions are written
@@ -145,11 +152,57 @@ public struct ToolExecutor: Sendable {
                     "additionalProperties": .bool(false),
                 ])),
             LLMTool(
+                name: "edit_file",
+                description:
+                    "Replace an exact substring in a UTF-8 text file: old_string must occur EXACTLY ONCE (include enough surrounding lines to make it unique). Prefer this over write_file for small edits — you don't resend the whole file. Fails if old_string is missing or appears more than once. Example: edit_file(path: \"Sources/App.swift\", old_string: \"let x = 1\", new_string: \"let x = 2\").",
+                parameters: .object([
+                    "type": .string("object"),
+                    "properties": .object([
+                        "path": .object([
+                            "type": .string("string"),
+                            "description": .string("path to the file to edit"),
+                        ]),
+                        "old_string": .object([
+                            "type": .string("string"),
+                            "description": .string(
+                                "the exact text to replace (must be unique in the file)"),
+                        ]),
+                        "new_string": .object([
+                            "type": .string("string"),
+                            "description": .string("the replacement text"),
+                        ]),
+                    ]),
+                    "required": .array([
+                        .string("path"), .string("old_string"), .string("new_string"),
+                    ]),
+                    "additionalProperties": .bool(false),
+                ])),
+            LLMTool(
                 name: "list_dir",
                 description:
                     "List a directory's entries, one per line, directories suffixed with '/'. Use to discover files before reading them. path is absolute or relative to the working directory and defaults to '.'. Example: list_dir(path: \"Sources\").",
                 parameters: stringArgSchema(
                     name: "path", desc: "directory to list (defaults to '.')", required: false)),
+            LLMTool(
+                name: "search",
+                description:
+                    "Search file contents for a literal string and return matching lines as path:line:text. Use to find where a symbol/string is defined or used before reading whole files. path scopes the search (a file or directory, default '.'). Read-only; results are capped. Example: search(query: \"func runTurn\", path: \"Sources\").",
+                parameters: .object([
+                    "type": .string("object"),
+                    "properties": .object([
+                        "query": .object([
+                            "type": .string("string"),
+                            "description": .string("the literal text to search for"),
+                        ]),
+                        "path": .object([
+                            "type": .string("string"),
+                            "description": .string(
+                                "file or directory to search (defaults to '.')"),
+                        ]),
+                    ]),
+                    "required": .array([.string("query")]),
+                    "additionalProperties": .bool(false),
+                ])),
             LLMTool(
                 name: "run_shell",
                 description:
@@ -181,8 +234,8 @@ public struct ToolExecutor: Sendable {
     /// ACP ToolKind for a tool name (drives the editor's icon/labeling).
     static func kind(for tool: String) -> String {
         switch tool {
-        case "read_file", "list_dir": return "read"
-        case "write_file": return "edit"
+        case "read_file", "list_dir", "search": return "read"
+        case "write_file", "edit_file": return "edit"
         case "run_shell": return "execute"
         default: return "other"
         }
@@ -191,7 +244,7 @@ public struct ToolExecutor: Sendable {
     /// True for tools that change the world / run code — these get a permission
     /// prompt (when the client supports it) before they run.
     static func needsPermission(_ tool: String) -> Bool {
-        tool == "write_file" || tool == "run_shell"
+        tool == "write_file" || tool == "edit_file" || tool == "run_shell"
     }
 
     /// A short human title for a tool call (shown in the editor's tool UI).
@@ -199,7 +252,9 @@ public struct ToolExecutor: Sendable {
         switch tool {
         case "read_file": return "Read \(args["path"]?.stringValue ?? "file")"
         case "write_file": return "Write \(args["path"]?.stringValue ?? "file")"
+        case "edit_file": return "Edit \(args["path"]?.stringValue ?? "file")"
         case "list_dir": return "List \(args["path"]?.stringValue ?? ".")"
+        case "search": return "Search \"\(args["query"]?.stringValue ?? "")\""
         case "run_shell": return "Run: \(args["command"]?.stringValue ?? "")"
         default: return tool
         }
@@ -212,7 +267,9 @@ public struct ToolExecutor: Sendable {
         switch tool {
         case "read_file": result = await readFile(args)
         case "write_file": result = await writeFile(args)
+        case "edit_file": result = await editFile(args)
         case "list_dir": result = listDir(args)
+        case "search": result = await search(args)
         case "run_shell": result = await runShell(args)
         default: return ToolResult(text: "unknown tool: \(tool)", isError: true)
         }
@@ -261,6 +318,25 @@ public struct ToolExecutor: Sendable {
                 // Fall back to Foundation on any client-side failure.
             }
         }
+        // Foundation fallback with read-side backpressure: stat first, and if the
+        // file is over `maxReadFileBytes` read only a bounded PREFIX off disk (via
+        // FileHandle) rather than loading the whole thing into memory just to trim it.
+        let size =
+            (try? FileManager.default.attributesOfItem(atPath: path)[.size] as? Int) ?? nil
+        if let size, maxReadFileBytes != Int.max, size > maxReadFileBytes {
+            guard let handle = FileHandle(forReadingAtPath: path) else {
+                return ToolResult(text: "read_file: cannot read \(path)", isError: true)
+            }
+            defer { try? handle.close() }
+            let prefix = (try? handle.read(upToCount: maxReadFileBytes)) ?? Data()
+            // Cut on a UTF-8 character boundary so the prefix is always valid text.
+            let head = String(decoding: prefix, as: UTF8.self)
+            let note =
+                "\n…[read_file: showing first \(prefix.count) of \(size) bytes; "
+                + "the file is over the \(maxReadFileBytes)-byte read cap "
+                + "(ELDR_ACP_MAX_READ_FILE_BYTES). Use search or read a narrower path.]"
+            return ToolResult(text: head + note)
+        }
         guard let data = FileManager.default.contents(atPath: path),
             let text = String(data: data, encoding: .utf8)
         else {
@@ -277,7 +353,16 @@ public struct ToolExecutor: Sendable {
         }
         let content = args["content"]?.stringValue ?? ""
         let path = absolutePath(rawPath)
+        return await writeTextContents(
+            path: path, content: content, label: "write_file",
+            successNote: "wrote \(content.utf8.count) bytes to \(path)")
+    }
 
+    /// Write a file, preferring the client's `fs/write_text_file` (so the edit shows
+    /// in the editor) and falling back to FileManager. Shared by write_file/edit_file.
+    private func writeTextContents(
+        path: String, content: String, label: String, successNote: String
+    ) async -> ToolResult {
         if capabilities.fsWriteTextFile, let connection {
             do {
                 _ = try await connection.request(
@@ -287,7 +372,7 @@ public struct ToolExecutor: Sendable {
                         "path": .string(path),
                         "content": .string(content),
                     ]))
-                return ToolResult(text: "wrote \(content.utf8.count) bytes to \(path)")
+                return ToolResult(text: successNote)
             } catch {
                 // Fall back to FileManager below.
             }
@@ -297,11 +382,205 @@ public struct ToolExecutor: Sendable {
             try FileManager.default.createDirectory(
                 atPath: dir, withIntermediateDirectories: true)
             try content.data(using: .utf8)?.write(to: URL(fileURLWithPath: path))
-            return ToolResult(text: "wrote \(content.utf8.count) bytes to \(path)")
+            return ToolResult(text: successNote)
         } catch {
             return ToolResult(
-                text: "write_file: \(error.localizedDescription) (\(path))", isError: true)
+                text: "\(label): \(error.localizedDescription) (\(path))", isError: true)
         }
+    }
+
+    /// Read a file's full contents as text (prefer the client buffer, then
+    /// FileManager). No backpressure cap: callers that need the WHOLE file (edit_file
+    /// must see every byte to do a correct substring replace) use this. Returns nil on
+    /// any failure.
+    private func readTextContents(path: String) async -> String? {
+        if capabilities.fsReadTextFile, let connection {
+            if let result = try? await connection.request(
+                method: "fs/read_text_file",
+                params: .object(["sessionId": .string(sessionId), "path": .string(path)])),
+                let content = result["content"]?.stringValue
+            {
+                return content
+            }
+        }
+        guard let data = FileManager.default.contents(atPath: path),
+            let text = String(data: data, encoding: .utf8)
+        else { return nil }
+        return text
+    }
+
+    // MARK: edit_file
+
+    /// Exact-substring replace. `old_string` must be present and UNIQUE in the file —
+    /// absent or ambiguous is an error (the model must add surrounding context), so an
+    /// edit never silently changes the wrong occurrence. Mutating; permission-gated.
+    private func editFile(_ args: JSONValue) async -> ToolResult {
+        guard let rawPath = args["path"]?.stringValue, !rawPath.isEmpty else {
+            return ToolResult(text: "edit_file: missing 'path'", isError: true)
+        }
+        guard let oldString = args["old_string"]?.stringValue, !oldString.isEmpty else {
+            return ToolResult(text: "edit_file: missing or empty 'old_string'", isError: true)
+        }
+        let newString = args["new_string"]?.stringValue ?? ""
+        if oldString == newString {
+            return ToolResult(
+                text: "edit_file: old_string and new_string are identical (no change)",
+                isError: true)
+        }
+        let path = absolutePath(rawPath)
+        guard let current = await readTextContents(path: path) else {
+            return ToolResult(text: "edit_file: cannot read \(path)", isError: true)
+        }
+        let occurrences = current.components(separatedBy: oldString).count - 1
+        if occurrences == 0 {
+            return ToolResult(
+                text: "edit_file: old_string not found in \(path)", isError: true)
+        }
+        if occurrences > 1 {
+            return ToolResult(
+                text:
+                    "edit_file: old_string is not unique in \(path) (\(occurrences) matches); "
+                    + "include more surrounding context so it matches exactly once",
+                isError: true)
+        }
+        // Single occurrence: replace it (range-based so a `newString` that itself
+        // contains `oldString` can't trigger a second replacement).
+        guard let range = current.range(of: oldString) else {
+            return ToolResult(text: "edit_file: old_string not found in \(path)", isError: true)
+        }
+        let updated = current.replacingCharacters(in: range, with: newString)
+        return await writeTextContents(
+            path: path, content: updated, label: "edit_file",
+            successNote:
+                "edited \(path): replaced \(oldString.utf8.count) bytes with \(newString.utf8.count) bytes")
+    }
+
+    // MARK: search
+
+    /// Max matching lines a single `search` returns (the rest are elided with a
+    /// note). Bounds the result so a broad query can't flood the context window.
+    static let searchMatchCap = 200
+    /// Directories never descended into during a recursive search (build/VCS noise).
+    static let searchSkipDirs: Set<String> = [".git", ".build", ".swiftpm", "node_modules", ".DS_Store"]
+
+    /// Literal, read-only content search. Prefers ripgrep (fast on a big tree) and
+    /// falls back to a Foundation recursive walk; both emit `path:line:text` lines
+    /// relative to the search root and are capped at `searchMatchCap`.
+    private func search(_ args: JSONValue) async -> ToolResult {
+        guard let query = args["query"]?.stringValue, !query.isEmpty else {
+            return ToolResult(text: "search: missing 'query'", isError: true)
+        }
+        let rawPath = args["path"]?.stringValue ?? "."
+        let root = absolutePath(rawPath.isEmpty ? "." : rawPath)
+        let cap = Self.searchMatchCap
+
+        let matches =
+            await searchViaRipgrep(query: query, root: root, cap: cap)
+            ?? searchViaFoundation(query: query, root: root, cap: cap)
+
+        guard !matches.lines.isEmpty else {
+            return ToolResult(text: "search: no matches for \"\(query)\" under \(root)")
+        }
+        var text = matches.lines.joined(separator: "\n")
+        if matches.truncated {
+            text += "\n…[search: more than \(cap) matches; showing the first \(cap). Narrow the query or path.]"
+        }
+        return ToolResult(text: text)
+    }
+
+    private struct SearchMatches { var lines: [String]; var truncated: Bool }
+
+    /// Run ripgrep with `cwd = root` (a dir) or its parent (a file) so it prints
+    /// root-relative paths; returns nil when ripgrep is unavailable/failed (caller
+    /// falls back to Foundation). `-F` = literal, `--no-heading -n` = `path:line:text`.
+    private func searchViaRipgrep(query: String, root: String, cap: Int) async -> SearchMatches? {
+        var isDir: ObjCBool = false
+        guard FileManager.default.fileExists(atPath: root, isDirectory: &isDir) else { return nil }
+        let cwd = isDir.boolValue ? root : (root as NSString).deletingLastPathComponent
+        let target = isDir.boolValue ? "." : (root as NSString).lastPathComponent
+
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/env")
+        process.arguments = [
+            "rg", "--no-heading", "--line-number", "--color", "never", "-F",
+            "--max-count", "\(cap)", "--", query, target,
+        ]
+        process.currentDirectoryURL = URL(fileURLWithPath: cwd)
+        let pipe = Pipe()
+        process.standardOutput = pipe
+        process.standardError = FileHandle.nullDevice
+        do {
+            try process.run()
+        } catch {
+            return nil  // ripgrep not installed → Foundation fallback
+        }
+        let data = pipe.fileHandleForReading.readDataToEndOfFile()
+        process.waitUntilExit()
+        // rg exit 1 = no matches (still a valid empty result); 2+ = usage/IO error.
+        // 127 (env couldn't find rg) surfaces as a launch that ran but errored → treat
+        // any status > 1 as "unavailable" so we fall back.
+        if process.terminationStatus > 1 { return nil }
+        let allLines = String(decoding: data, as: UTF8.self)
+            .split(separator: "\n", omittingEmptySubsequences: true).map(String.init)
+        let capped = Array(allLines.prefix(cap))
+        return SearchMatches(lines: capped, truncated: allLines.count > cap)
+    }
+
+    /// Foundation fallback: recursively walk `root` (skipping build/VCS dirs and
+    /// over-cap files), matching the literal query line-by-line.
+    private func searchViaFoundation(query: String, root: String, cap: Int) -> SearchMatches {
+        let fm = FileManager.default
+        var isDir: ObjCBool = false
+        guard fm.fileExists(atPath: root, isDirectory: &isDir) else {
+            return SearchMatches(lines: [], truncated: false)
+        }
+        let files: [String]
+        if isDir.boolValue {
+            var collected: [String] = []
+            if let enumerator = fm.enumerator(atPath: root) {
+                for case let rel as String in enumerator {
+                    let last = (rel as NSString).lastPathComponent
+                    if Self.searchSkipDirs.contains(last) {
+                        enumerator.skipDescendants()
+                        continue
+                    }
+                    let full = (root as NSString).appendingPathComponent(rel)
+                    var entryIsDir: ObjCBool = false
+                    fm.fileExists(atPath: full, isDirectory: &entryIsDir)
+                    if !entryIsDir.boolValue { collected.append(full) }
+                }
+            }
+            files = collected
+        } else {
+            files = [root]
+        }
+
+        var lines: [String] = []
+        for file in files {
+            // Skip obviously-binary or huge files (bounded read).
+            let size = (try? fm.attributesOfItem(atPath: file)[.size] as? Int) ?? nil ?? 0
+            if size > 2 * 1024 * 1024 { continue }
+            guard let data = fm.contents(atPath: file),
+                let text = String(data: data, encoding: .utf8)
+            else { continue }
+            let display = relativePath(file, to: root, rootIsDir: isDir.boolValue)
+            for (i, line) in text.split(separator: "\n", omittingEmptySubsequences: false).enumerated() {
+                if line.contains(query) {
+                    lines.append("\(display):\(i + 1):\(line)")
+                    if lines.count > cap {
+                        return SearchMatches(lines: Array(lines.prefix(cap)), truncated: true)
+                    }
+                }
+            }
+        }
+        return SearchMatches(lines: lines, truncated: false)
+    }
+
+    /// Path of `file` relative to the search root (so output matches ripgrep's).
+    private func relativePath(_ file: String, to root: String, rootIsDir: Bool) -> String {
+        guard rootIsDir else { return (file as NSString).lastPathComponent }
+        let base = root.hasSuffix("/") ? root : root + "/"
+        return file.hasPrefix(base) ? String(file.dropFirst(base.count)) : file
     }
 
     // MARK: list_dir (always local — directory listing has no ACP method)

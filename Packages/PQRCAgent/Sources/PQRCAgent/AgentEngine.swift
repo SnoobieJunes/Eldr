@@ -228,6 +228,30 @@ public actor AgentEngine {
         }
     }
 
+    // MARK: - Owner-gated authorization (PQRC watch-along bridge, SPEC §13)
+
+    /// Whether a PINNED OWNER currently authorizes autonomous agent sends. Mirrors
+    /// `authorizeAutonomousSend`/`activeWindow`, but keyed on the owner's identity
+    /// rather than mine: the Mac bridge participates as an openly-AI agent whose
+    /// autonomy is governed by a *designated owner's* live, signed window/invite, not
+    /// its own. `threadID == nil` ⇒ conversation scope (owner's `ai_window`); a thread
+    /// id ⇒ the owner's `ai_invite` for that thread.
+    ///
+    /// Fail closed: no live owner window/invite ⇒ `false`. A link drop simply lets the
+    /// window go stale, so the agent stops sending — the correct behavior (invariant 9).
+    /// The owner's window/invite is populated by `receiveWindow(_,fromSenderIdentityHex:)`
+    /// / `receiveInvite(_,fromSenderIdentityHex:)`, which already verify the signature
+    /// is the owner's and the duration is bounded before storing it.
+    public func isAuthorizedForOwner(_ ownerHex: String, threadID: String? = nil) -> Bool {
+        let now = clock.now()
+        if let threadID {
+            guard let until = threadInvites[threadID]?[ownerHex], now < until else { return false }
+            return true
+        }
+        guard let until = conversationWindows[ownerHex], now < until else { return false }
+        return true
+    }
+
     // MARK: - Drafting (always allowed; private to my human; nothing sent)
 
     public func draft(provider: any AgentProvider, context: AgentContext) async throws -> Draft {

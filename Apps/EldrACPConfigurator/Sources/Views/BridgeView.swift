@@ -8,6 +8,7 @@ import SwiftUI
 struct BridgeView: View {
     @StateObject private var bridge = ACPBridgeService()
     @State private var copied = false
+    @State private var manualOwnerHex = ""
 
     var body: some View {
         ScrollView {
@@ -21,6 +22,9 @@ struct BridgeView: View {
                 stateBox
                 if case .advertising = bridge.bridgeState { pairingBox }
                 if !bridge.activeConversations.isEmpty { conversationsBox }
+                if !bridge.activeConversations.isEmpty || bridge.ownerIdentityHex != nil {
+                    ownerBox
+                }
                 togglesBox
                 controls
 
@@ -94,6 +98,84 @@ struct BridgeView: View {
             }
             .padding(4)
         }
+    }
+
+    /// Path 2 §7 — designate the device whose owner controls this agent. The owner sees
+    /// the agent's RAW answers (incl. secrets it reads); every other participant sees the
+    /// redacted copy. No owner pinned ⇒ the agent stays silent (fails closed).
+    private var ownerBox: some View {
+        GroupBox("Owner device") {
+            VStack(alignment: .leading, spacing: 8) {
+                Text("This agent acts only while the owner's AI is active. The owner sees raw answers; everyone else sees secrets redacted.")
+                    .font(.caption).foregroundStyle(.secondary)
+
+                if let owner = bridge.ownerIdentityHex {
+                    HStack(spacing: 8) {
+                        Image(systemName: "person.badge.shield.checkmark.fill")
+                            .foregroundStyle(.green)
+                        Text("Owner: \(ownerLabel(owner))").font(.callout.weight(.medium))
+                        Spacer()
+                        Button("Re-assign") { bridge.setOwnerIdentity(nil) }
+                            .controlSize(.small)
+                    }
+                } else {
+                    Label(
+                        "No owner pinned — the agent stays silent (fails closed).",
+                        systemImage: "exclamationmark.triangle.fill"
+                    )
+                    .font(.callout).foregroundStyle(.orange)
+                }
+
+                if !bridge.activeConversations.isEmpty {
+                    Divider()
+                    Text("Choose from paired devices:").font(.caption).foregroundStyle(.secondary)
+                    ForEach(bridge.activeConversations) { convo in
+                        Button {
+                            bridge.setOwnerIdentity(convo.id)
+                        } label: {
+                            HStack(spacing: 8) {
+                                Image(
+                                    systemName: bridge.ownerIdentityHex == convo.id
+                                        ? "largecircle.fill.circle" : "circle"
+                                )
+                                .foregroundStyle(bridge.ownerIdentityHex == convo.id ? .green : .secondary)
+                                Text(convo.name)
+                                Text(Self.shortHex(convo.id))
+                                    .font(.caption.monospaced()).foregroundStyle(.secondary)
+                                Spacer()
+                            }
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
+
+                Divider()
+                Text("Or pin by identity hex (beta — before the owner appears above):")
+                    .font(.caption).foregroundStyle(.secondary)
+                HStack {
+                    TextField("owner identity hex", text: $manualOwnerHex)
+                        .textFieldStyle(.roundedBorder).font(.caption.monospaced())
+                    Button("Pin") {
+                        bridge.setOwnerIdentity(manualOwnerHex)
+                        manualOwnerHex = ""
+                    }
+                    .controlSize(.small)
+                    .disabled(manualOwnerHex.trimmingCharacters(in: .whitespaces).isEmpty)
+                }
+            }
+            .padding(4)
+        }
+    }
+
+    private func ownerLabel(_ hex: String) -> String {
+        if let convo = bridge.activeConversations.first(where: { $0.id == hex }) {
+            return "\(convo.name) (\(Self.shortHex(hex)))"
+        }
+        return Self.shortHex(hex)
+    }
+
+    static func shortHex(_ hex: String) -> String {
+        hex.count > 18 ? "\(hex.prefix(8))…\(hex.suffix(8))" : hex
     }
 
     private var togglesBox: some View {

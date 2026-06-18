@@ -35,6 +35,10 @@ struct EldrACPMain {
             return
         }
 
+        // If the client closes our stdout (it went away mid-write), don't die from
+        // SIGPIPE — let the write fail and the read loop hit EOF and exit cleanly.
+        signal(SIGPIPE, SIG_IGN)
+
         let environment = ProcessInfo.processInfo.environment
 
         func log(_ message: String) {
@@ -65,6 +69,17 @@ struct EldrACPMain {
             ? "none (disabled)" : skillSet.skills.map { "/\($0.name)" }.joined(separator: " ")
         log("skills: \(skillList)")
 
+        // Streaming on by default; ELDR_ACP_STREAM=0/off/false disables it (echo/tests).
+        let streamingEnabled: Bool = {
+            switch (environment["ELDR_ACP_STREAM"] ?? "").lowercased() {
+            case "0", "off", "false", "no": return false
+            default: return true
+            }
+        }()
+        // The turn-level timeout mirrors the LLM's own request timeout.
+        let timeoutSeconds = LLMConfig.fromEnvironment(environment).requestTimeoutSeconds
+        log("streaming=\(streamingEnabled) request-timeout=\(Int(timeoutSeconds))s")
+
         let sink = FileHandleOutputSink(FileHandle.standardOutput)
         let connection = ClientConnection(sink: sink)
         let agent = ACPAgent(
@@ -72,7 +87,9 @@ struct EldrACPMain {
             llm: llm,
             toolEnvironment: .fromEnvironment(environment),
             config: config,
-            configDir: AgentConfig.defaultConfigDir(environment))
+            configDir: AgentConfig.defaultConfigDir(environment),
+            streamingEnabled: streamingEnabled,
+            requestTimeoutSeconds: timeoutSeconds)
         let inFlight = InFlight()
 
         log("ready on stdio")
