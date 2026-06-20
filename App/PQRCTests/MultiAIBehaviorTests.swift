@@ -612,7 +612,7 @@ struct LabeledProvider: AgentProvider {
 /// prove the draft path consults the policy. `participants` keeps the default
 /// `participatesAutonomously` filter.
 struct SecondPrimaryPolicy: AISelectionPolicy {
-    func primary(from ais: [TetheredAI]) -> TetheredAI? {
+    func primary(from ais: [TetheredAI], conversationID: String, threadID: String?) -> TetheredAI? {
         ais.count >= 2 ? ais[1] : ais.first
     }
     func participants(
@@ -627,7 +627,9 @@ struct SecondPrimaryPolicy: AISelectionPolicy {
 /// keeps the default (first AI).
 struct OnlyParticipantPolicy: AISelectionPolicy {
     let id: String
-    func primary(from ais: [TetheredAI]) -> TetheredAI? { ais.first }
+    func primary(from ais: [TetheredAI], conversationID: String, threadID: String?) -> TetheredAI? {
+        ais.first
+    }
     func participants(
         from ais: [TetheredAI], conversationID: String, threadID: String?
     ) -> [TetheredAI] {

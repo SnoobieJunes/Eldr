@@ -214,10 +214,17 @@ struct TetheredAI: Sendable {
     var summarizes: Bool { outputMode == "summarize" }
 }
 
-/// `TetheredAI` already exposes `participatesAutonomously`, so it satisfies the
-/// `AISelectionCandidate` requirement with no new members — this conformance just
-/// lets the routing policy (`AISelectionPolicy`, in PQRCAgent) operate on it.
-extension TetheredAI: AISelectionCandidate {}
+/// `TetheredAI` already exposes `participatesAutonomously`; this conformance also
+/// supplies `routingCapabilities` so the optional task router
+/// (`CapabilityRoutingPolicy`, in PQRCAgent) can route by engine. Only the `acp`
+/// backend — a paired coding node/harness — advertises `"code"`, so a coding-scope
+/// requirement routes to it; every other backend stays general (empty → no special
+/// routing, identical to the default policy).
+extension TetheredAI: AISelectionCandidate {
+    var routingCapabilities: Set<String> {
+        kind == "acp" ? ["code"] : []
+    }
+}
 
 /// One line of the read-only "what your AI sees" context preview (Settings).
 struct ContextPreviewLine: Identifiable, Sendable {

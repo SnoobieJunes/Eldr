@@ -208,11 +208,17 @@ actor PersonaRuntime {
     /// e.g. code/dev requests to the paired Mac ("acp") backend.
     private var aiSelection: any AISelectionPolicy<TetheredAI> = DefaultAISelectionPolicy<TetheredAI>()
 
-    /// The primary AI used for private drafts and the Settings probe. Routed via
-    /// the policy; falls back to the first AI so it is NEVER nil (the runtime
-    /// guarantees `ais` is non-empty, matching the old `ais[0]`).
-    private var primaryAI: TetheredAI { aiSelection.primary(from: ais) ?? ais[0] }
-    private var primaryProvider: any AgentProvider { primaryAI.provider }
+    /// The primary AI for a private draft or the Settings probe, routed via the
+    /// policy for the given scope (`conversationID`/`threadID` — empty/nil for the
+    /// probe). Falls back to the first AI so it is NEVER nil (the runtime guarantees
+    /// `ais` is non-empty, matching the old `ais[0]`). The default policy ignores
+    /// the scope; `CapabilityRoutingPolicy` uses it to route the engine by task.
+    private func primaryAI(conversationID: String, threadID: String?) -> TetheredAI {
+        aiSelection.primary(from: ais, conversationID: conversationID, threadID: threadID) ?? ais[0]
+    }
+    private func primaryProvider(conversationID: String, threadID: String?) -> any AgentProvider {
+        primaryAI(conversationID: conversationID, threadID: threadID).provider
+    }
     /// Egress firewall: when on, context handed to a REMOTE AI is name-redacted
     /// (real names → local codenames) and byte-bounded before it leaves the
     /// device. On-device AIs always bypass it.
@@ -1591,9 +1597,10 @@ actor PersonaRuntime {
     }
 
     func draftReply(conversationID: String, threadID: String? = nil) async throws -> Draft {
-        try await engine.draft(
-            provider: primaryProvider,
-            context: await contextFor(primaryAI, conversationID: conversationID, threadID: threadID))
+        let primary = primaryAI(conversationID: conversationID, threadID: threadID)
+        return try await engine.draft(
+            provider: primary.provider,
+            context: await contextFor(primary, conversationID: conversationID, threadID: threadID))
     }
 
     /// Diagnostic for Settings "Test AI now": run the active provider against a
@@ -1607,7 +1614,8 @@ actor PersonaRuntime {
                     senderIdentityHex: "sample", senderDisplayName: "Test",
                     participantType: .human, text: "Hi! Are you working? Reply in one short sentence.")
             ])
-        return try await engine.draft(provider: primaryProvider, context: sample).text
+        return try await engine.draft(
+            provider: primaryProvider(conversationID: "", threadID: nil), context: sample).text
     }
 
     func startAIWindow(conversationID: String, durationSeconds: Int64) async throws {
