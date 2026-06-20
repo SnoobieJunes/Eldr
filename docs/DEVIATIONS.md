@@ -960,8 +960,13 @@ and affects interop; `[app-only]` — client behavior, no wire impact;
 ### Tech debt `[tech-debt]`
 
 - **T1 — Secure Enclave fallback.** Where `SecureEnclave.isAvailable == false`
-  (some simulators), the master key wraps under a Keychain-held software KEK
-  (still device-only/unlocked-only). Hardware builds always use the SE path.
+  (some simulators / hardware with no secure element), the master key wraps under
+  a Keychain-held software KEK (still device-only/unlocked-only). On secure-element
+  hardware the SE path is mandatory. *(Corrected 2026-06-19: between `439a8f0` and
+  the AC31 rework, the deniable-silo feature made the **passphrase**-derived software
+  KEK the production default on ALL hardware — so "hardware builds always use the SE
+  path" was FALSE in that window and the code violated invariant 10. AC31 restores
+  SE-wrap as the default; the passphrase is now an optional layer under it.)*
 - **T2 — ~~Prekey private state is not persisted across launches~~ →
   Resolved** (2026-06-12): `PrekeyState` snapshot/restore on `PrekeyManager`,
   persisted in the Keychain, replenished to 16 at boot, consumed hashes kept
@@ -1064,3 +1069,47 @@ wrap stack are preserved unchanged (invariants 6, 8 intact).
 | AC28 | **C-2 (High) — file tools jailed to the working directory.** `ToolExecutor`'s `read_file`/`write_file`/`edit_file`/`list_dir`/`search` resolved any absolute or `../` path verbatim (read `~/.ssh`, overwrite `~/.zshrc`/launchd). New `ToolExecutor.jailedPath` canonicalizes (resolve symlinks, then `..`) and returns nil for anything outside the session workdir; each tool returns a tool error on escape. `run_shell` stays the deliberate, permission-gated (C-1) escape hatch and is NOT jailed. Tests: absolute-escape, `../` traversal, symlink-out rejected; relative/absolute in-jail allowed. PQRCACP green (141 tests). | app-only |
 | AC29 | **C-8 (High) — LLM token moved to the Keychain (user decision over `chmod 0600`).** `ELDR_LLM_TOKEN` was written cleartext to `~/.config/eldr-acp/env` at the umask (commonly 0644, world-readable on a multi-user Mac). Now `ConfigurationStore` stores/loads it in the Keychain (`WhenUnlockedThisDeviceOnly`; injectable service for test isolation) and never writes it to the env file; `writeFile` chmods all config files 0600; `ACPBridgeService.llmTokenEnvironment()` injects it from the Keychain into the agent's environment when the Configurator spawns the launcher; the launcher reads it via the `security` CLI for external clients (Xcode/OpenClaw — may prompt once; integration-only, NOT unit-verified). Legacy env-file tokens migrate to the Keychain on next save. Tests: token absent from env file, env 0600, Keychain round-trip + reload; watch-along suite still green. | app-only |
 | AC30 | **Deferred audit items (C-5, C-6) — tracked, not done.** **C-5 (High, nearby-relay AUTH allowlist):** `NearbyRelayHost` AUTHs any validly-signed key (a stranger in radio range can self-AUTH, publish to the store, or spend the host's AI). The library gate (an `authorize` predicate + an `.event` publish gate) is simple, but the real benefit needs the host's silo verified-contacts list, which isn't available at `PQRCApp.makeRelayTransports`; it belongs with the Phase-1 node/contact wiring (mesh content stays E2E-encrypted regardless). **C-6 (High, redact agent stdout / events-log / logfile at rest):** the events JSONL records `run_shell` commands + result prefixes in `ACPAgent`/PQRCACP, which is deliberately dependency-free (no PQRCCore/`CredentialRedactor`, per AC24); scrubbing it needs a vendor-vs-dep decision — the same shared-scrubber question as the MCP-redaction port (P-7/G5). Events log is opt-in (`ELDR_ACP_EVENTS_FILE`) and on the user's own Mac. Both deferred to Phase 1. | tech-debt |
+| AC31 | **At-rest key storage returns to SPEC §3.4 (Secure-Enclave hardware wrap) — supersedes the passphrase-silo deviation.** Full tradeoff analysis in the **"At-rest key storage (AC31)"** section below. One-line: `439a8f0`'s deniable-silo feature replaced §3.4's SE-wrap with a passphrase-derived KEK (PBKDF2, **fixed** salt) that is offline-brute-forceable from a stolen-phone disk image — a regression from the SPEC and invariant 10. Reverted to per-account **secure-element** wrapping (Secure Enclave on Apple; platform-equivalent elsewhere) with **optional** user passphrase + biometric chosen at setup. Proven crypto only (§2 forbids invented primitives, so the un-traceable "device-SE-mixed-KDF" idea was rejected). Accepted cost: hardware-binding leaves a per-account on-disk trace ⇒ forensic count/coercion-deniability is **reduced** (duress/decoy covers a live coercer, not a forensic imager). Needs the SPEC §15.4 security review before shipping to high-sensitivity users. | app-only |
+
+---
+
+## At-rest key storage (AC31) — return to SPEC §3.4
+
+**Decision (2026-06-19, owner-directed).** Revert the deniable-silo at-rest key model (`439a8f0`) back to SPEC §3.4 — **hardware-wrap every account's key material with the device's secure element** — because the silo model traded away §3.4's hardware root for a passphrase-derived KEK that is **offline-brute-forceable from a stolen device**. This re-aligns the code with both the SPEC and invariant 10.
+
+### Why (grounded in the SPEC the owner re-read)
+- **§2 forbids invented crypto:** *"No custom cryptographic primitives are defined or permitted. PQRC composes vetted building blocks; it does not invent them."* → the clever "single device-wide SE secret mixed into every account's KDF" design (which *would* hardware-bind hidden accounts with no per-account trace) is a **novel composition** and was **rejected** on these grounds.
+- **§2 + §3.4 mandate the Secure Enclave at rest:** §2's primitive table lists *"Key wrapping (at rest) | Secure Enclave P-256"*; §3.4: *"All long-term secret material … is encrypted at rest using a P-256 wrapping key generated in and bound to the Secure Enclave … non-exportable hardware-bound."* The silo change deviated from this; the code had been **violating invariant 10** ever since (the SE path was dead in production — `PersonaRuntime.masterKeyWrapper()` returned the passphrase `SoftwareKeyWrapper`).
+- **The concrete vulnerability:** `SiloKey.derive` used PBKDF2-HMAC-SHA256, 600k iters, a **fixed app salt**. An attacker with a disk image / forensic extraction can mount a fully offline, GPU/ASIC dictionary attack on the passphrase — no device, no rate limit. A weak/memorable passphrase falls in seconds–days. `WhenUnlockedThisDeviceOnly` does **not** prevent this once the raw blob is extracted.
+
+### The new model
+- **Hardware root, always:** each account's key material is wrapped by the device's secure element — **Secure Enclave** on Apple platforms (iOS *and* modern/Apple-silicon + T2 Macs), the **platform-equivalent hardware keystore** (Android StrongBox, Windows TPM) on future ports, and a **hardened-passphrase KEK only** where no secure element exists (security-conscious users choose hardware-backed devices — surfaced honestly).
+- **Optional, user-chosen at account setup:** a **passphrase** (layered *under* the hardware wrap, so even an unlocked stolen device needs it for that account) and/or **biometric** (Face ID / Touch ID) unlock. SE-only(+biometric) = max convenience; SE+passphrase(no biometric) = max security (must type it).
+- **Separation (the owner's "Grand Canyon"):** each account is its own silo — separate random key, separate SE wrap, separate encrypted store, **zero shared key material**; cross-contamination is cryptographically impossible.
+- **Quantum:** unchanged and uncompromised — the at-rest wrap (SE P-256 / hardware keystore) is a **local** operation with no harvest-now-decrypt-later exposure; the **wire** stays ML-KEM-768 / X-Wing / PQXDH per §4–6. The passphrase layer (when present) sits *under* the SE wrap, so a standard PBKDF2 KDF suffices (brute-forcing it requires the non-exportable SE anyway) — **no new crypto dependency** (Argon2 not needed; CryptoKit "no other crypto deps" pin honored).
+
+### Threat model — old vs new
+| Adversary | OLD (passphrase-KEK, fixed salt — `439a8f0`) | NEW (§3.4 secure-element wrap) |
+|---|---|---|
+| **Coercion** (forced to unlock) | strong (deniable silos: wrong passphrase ≡ no account) | **partial** — duress/decoy passphrase covers a *live* coercer; accounts are traceable to a *forensic* imager |
+| **Thief, LOCKED phone** | passcode-dependent, then offline-brute-forceable | **strong** — SE key non-exportable, gated by device unlock |
+| **Thief, UNLOCKED phone** | game over | game over (a passphrase-protected account still needs its passphrase unless biometric is caching it) |
+| **Disk image / backup** (no live SE) | **WEAK — fully offline brute-forceable** | **STRONG — non-exportable SE key absent ⇒ cannot unwrap off-device, even with the correct passphrase** |
+| **Malware running as the app** | no protection | no protection (app-level auto-lock/re-auth is the lever — separate, currently thin) |
+
+### What we gain / give up
+- **Gain:** Fort-Knox against theft / break-in / brute-force / disk-image extraction (the owner's #1, the medical-data/enterprise use-case); re-adherence to §3.4 + invariant 10; cross-platform proven crypto.
+- **Give up:** the silo's **forensic** count/coercion-deniability — hardware-binding leaves a per-account on-disk artifact, so a forensic imager can see *that* accounts exist (and how many). The owner **explicitly accepted** this ("not at the sacrifice of actual encrypted security"; "if you have the app installed you have ≥1 account"). The proven ceiling for *forensic* coercion-resistance is a **separate physical device** for the high-sensitivity account — no software gives cryptographic unprovability **and** hardware-binding at once (that was the rejected, SPEC-forbidden, design).
+- **Coercion-resistance** is retained as a **UX layer**: the duress/decoy passphrase (A25) lets a coerced user reveal a plausible account while keeping another's passphrase secret — effective against a coercer who makes you unlock, **not** against forensic imaging.
+
+### Relationship to A23–A26 (the deniable silos)
+The **silo separation** (A23) is KEPT — it's how the work/personal accounts stay cryptographically isolated. What changes is the **basis of each silo's key**: random + SE-wrapped (+ optional passphrase/biometric) instead of passphrase-derived. The silo's **forensic count-deniability (A26)** is reduced (see threat table) — accepted, security-first. The **duress/decoy (A25)** is kept as the coercion-resistance layer. The **biometric tier (A24)** is generalized into the per-account setup choice.
+
+### Migration
+Existing passphrase-silo accounts re-wrap on next unlock: the user authenticates with their existing passphrase, the master key + secrets are re-wrapped under the secure element (and the user's chosen optional passphrase/biometric), and the old passphrase-only blobs are deleted — **atomically, with no data-loss window**.
+
+### Open items (do NOT mark "done" until these close)
+1. **SPEC §15.4 security review** — this is the at-rest crypto guarding medical-grade data; the full silo-KEK restructure + migration MUST get the SPEC's security-review pass before shipping to real high-sensitivity users. I implement and test it; I do not declare it production-safe unreviewed.
+2. **Count-obfuscation / hidden-volume** — a separate analysis is evaluating whether hiding the *number* of accounts is worth building (owner leans "boondoggle"); its verdict lands in a follow-up note.
+3. **Unlocked-stolen-device + in-process-malware** — defended by **no** wrap design; the lever is app-level (auto-lock on background, re-auth on foreground), currently thin. Tracked separately.
+4. **Cross-platform secure elements** (StrongBox/TPM) are design targets; only Apple Secure Enclave is built today (iOS + Mac).
