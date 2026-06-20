@@ -10,11 +10,15 @@ let package = Package(
     dependencies: [
         .package(path: "../PQRCCore"),
         .package(path: "../PQRCNostr"),
+        // ACPAgentProvider drives an external ACP coding harness as an
+        // AgentProvider. PQRCACP is ZERO-dependency (no PQRC* imports), so
+        // PQRCAgent → PQRCACP is a clean one-way edge — no cycle.
+        .package(path: "../PQRCACP"),
     ],
     targets: [
         .target(
             name: "PQRCAgent",
-            dependencies: ["PQRCCore", "PQRCNostr"],
+            dependencies: ["PQRCCore", "PQRCNostr", "PQRCACP"],
             // Real Private Cloud Compute path in PCCFoundationModelsProvider.
             // `ELDR_PCC_SDK` is enabled because the installed Xcode-beta SDK now
             // vends the PCC symbols (`PrivateCloudComputeLanguageModel`,
