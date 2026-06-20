@@ -1,5 +1,6 @@
 import Foundation
 import PQRCACP
+import Synchronization
 
 /// An `ACPTransport` that carries the ACP line protocol over the **relay** —
 /// i.e. over the existing gift-wrapped + Double-Ratcheted message mesh
@@ -47,17 +48,31 @@ import PQRCACP
 /// - `lineId` — identifies the original ACP line a chunk belongs to. It is
 ///   `<random-instance-salt>-<base36 counter>`: the salt (per transport
 ///   instance) keeps two senders' ids from colliding at a shared receiver, and
-///   the counter is unique per line within a sender. Hex/base36 only — no `|`.
+///   the counter is unique per line within a sender AND monotonic in send order,
+///   so the receiver can restore line order from it (below). Hex/base36 — no `|`.
 /// - `seq` — 1-based chunk index (base 10).
 /// - `total` — total chunk count for this line (base 10).
 /// - `payloadB64Url` — base64url (RFC 4648 §5, no padding) of this chunk's UTF-8
 ///   bytes. base64url's alphabet (`A–Z a–z 0–9 - _`) contains no `|`, so the
 ///   delimiter is never ambiguous and the original line round-trips byte-exact.
 ///
-/// Reassembly is keyed by `lineId`; a line emits on `inboundLines` only once all
-/// `total` distinct chunks (by `seq`) have arrived — out-of-order and
-/// interleaved-with-other-lines delivery both reassemble correctly, and a line
-/// missing any chunk never emits.
+/// Reassembly is keyed by `lineId`; a line is *complete* once all `total`
+/// distinct chunks (by `seq`) have arrived — out-of-order and
+/// interleaved-with-other-lines chunk delivery both reassemble correctly, and a
+/// line missing any chunk never completes.
+///
+/// ## Line ordering (not just chunk reassembly)
+///
+/// A relay delivers each line as a SEPARATE gift-wrapped event, so two complete
+/// lines can surface in either order — but the ACP line protocol is a stream: a
+/// content `session/update` MUST reach the client before the `end_turn` result
+/// that ends the turn, or the turn finalizes empty. So a complete line is not
+/// emitted on `inboundLines` immediately; it is released in the sender's order
+/// using the monotonic index in its `lineId` (lines that complete ahead of a gap
+/// wait for the gap to fill). This makes the unordered relay behave like the
+/// ordered stdio pipe the protocol assumes. The buffer is bounded
+/// (`maxReorderBuffer`): a genuinely lost line is skipped rather than wedging the
+/// stream forever.
 public actor RelayACPTransport: ACPTransport {
     /// The relay's per-message byte budget. Every FRAMED chunk handed to `send`
     /// is ≤ this many UTF-8 bytes (header + payload), so it fits one relay event.
@@ -70,11 +85,23 @@ public actor RelayACPTransport: ACPTransport {
     /// ids from two different senders can never collide in a shared receiver's
     /// reassembly table. Hex, so it never contains the `|` delimiter.
     private let instanceSalt: String
-    /// Monotonic per-line counter; combined with `instanceSalt` to form `lineId`.
-    private var nextLineSeq: UInt64 = 0
+    /// Monotonic per-line index, minted at `send`-CALL time (atomically — `send`
+    /// is `nonisolated` + sync per `ACPTransport`, so it cannot hop onto the actor
+    /// to bump a counter without losing call order). Its value IS the sender's line
+    /// order; the receiver re-sorts by it to undo the relay's unordered delivery.
+    private let lineSeqCounter = Atomic<UInt64>(0)
 
     /// In-flight inbound lines being reassembled, keyed by `lineId`.
     private var reassembly: [String: Reassembly] = [:]
+
+    /// Inbound line ordering, per sender `salt`: the next line index to emit, and
+    /// the lines that completed reassembly AHEAD of a gap (held until the gap
+    /// fills). Keyed by salt so two senders sharing one receiver order
+    /// independently. This is what makes the relay (which delivers each line as a
+    /// separate, unordered gift-wrapped event) behave like the ordered stdio pipe
+    /// the ACP line protocol assumes.
+    private var nextEmit: [String: UInt64] = [:]
+    private var pendingLines: [String: [UInt64: String]] = [:]
 
     private let inbound: AsyncStream<String>
     private let inboundContinuation: AsyncStream<String>.Continuation
@@ -99,13 +126,22 @@ public actor RelayACPTransport: ACPTransport {
 
     // MARK: - ACPTransport
 
-    /// Frame + chunk one ACP line and publish each chunk over the relay, in
-    /// order. Synchronous + `Sendable` per the `ACPTransport` contract (it may be
-    /// called from inside a JSON-RPC continuation without `await`); the actual
-    /// framing/sends happen on a hop onto this actor. Ordering follows call order
-    /// because each hop is enqueued in turn and the chunk loop awaits in sequence.
+    /// Frame + chunk one ACP line and publish each chunk over the relay.
+    /// Synchronous + `Sendable` per the `ACPTransport` contract (it may be called
+    /// from inside a JSON-RPC continuation without `await`); the framing/sends then
+    /// happen on a hop onto this actor.
+    ///
+    /// The line's order index is minted HERE, at call time, so it reflects the
+    /// exact order `send` was invoked even though the per-line framing Tasks (and
+    /// the relay's delivery) race afterward. The index rides in the frame's
+    /// `lineId`; `deliverInbound` re-sorts by it on the far end. This is the half
+    /// that makes "content `session/update` before its `end_turn`" hold over an
+    /// unordered relay — a previous version bumped the counter inside the framing
+    /// Task, where two `send`s could interleave and swap a turn's content past its
+    /// terminator (the turn then finalized empty under load).
     public nonisolated func send(_ line: String) {
-        Task { await self.frameAndSend(line) }
+        let seq = lineSeqCounter.wrappingAdd(1, ordering: .relaxed).oldValue
+        Task { await self.frameAndSend(line, seq: seq) }
     }
 
     public nonisolated func inboundLines() -> AsyncStream<String> { inbound }
@@ -116,9 +152,8 @@ public actor RelayACPTransport: ACPTransport {
 
     // MARK: - Outbound: frame + chunk
 
-    private func frameAndSend(_ line: String) async {
-        let lineId = "\(instanceSalt)-\(String(nextLineSeq, radix: 36))"
-        nextLineSeq &+= 1
+    private func frameAndSend(_ line: String, seq: UInt64) async {
+        let lineId = "\(instanceSalt)-\(String(seq, radix: 36))"
         for chunk in Self.frameChunks(line: line, lineId: lineId, maxFrameBytes: maxFrameBytes) {
             await sendChunk(chunk)
         }
@@ -158,14 +193,80 @@ public actor RelayACPTransport: ACPTransport {
                 }
                 bytes.append(part)
             }
-            inboundContinuation.yield(String(decoding: bytes, as: UTF8.self))
+            emitInOrder(lineId: chunk.lineId, line: String(decoding: bytes, as: UTF8.self))
         } else {
             reassembly[chunk.lineId] = entry
         }
     }
 
+    // MARK: - Inbound: restore sender order
+
+    /// Emit a fully-reassembled line in SENDER order. Every line carries a
+    /// per-sender monotonic index in its `lineId` (`<salt>-<base36 seq>`); we
+    /// release the contiguous run from the next-expected index and BUFFER any line
+    /// that completed ahead of a gap, so the ACP client sees lines exactly as the
+    /// agent wrote them (a content `session/update` before the `end_turn` that
+    /// follows it). A raw arrival-order emit scrambles that under load — the
+    /// terminator overtakes the content and the turn finalizes empty.
+    ///
+    /// A line whose id has no parsable index (a hand-crafted or legacy frame) is
+    /// emitted immediately — never buffered — so foreign/test frames still flow.
+    private func emitInOrder(lineId: String, line: String) {
+        guard let (salt, seq) = Self.splitLineId(lineId) else {
+            inboundContinuation.yield(line)
+            return
+        }
+        // Already advanced past this index (a duplicate re-completion): never
+        // re-emit, and never out of order.
+        let expected = nextEmit[salt] ?? 0
+        if seq < expected { return }
+        pendingLines[salt, default: [:]][seq] = line
+        flushReady(salt: salt)
+    }
+
+    /// Release every buffered line that extends the contiguous run from
+    /// `nextEmit[salt]`. If too many lines pile up behind a still-missing index
+    /// (genuine relay loss, or a peer withholding a low index to wedge us), skip to
+    /// the lowest buffered index rather than stall forever — bounded degradation,
+    /// never an unbounded buffer or a permanent wedge (worst case it degrades to
+    /// the old arrival-ish order, which is no worse than having no ordering).
+    private func flushReady(salt: String) {
+        var expected = nextEmit[salt] ?? 0
+        var buffer = pendingLines[salt] ?? [:]
+        while let line = buffer.removeValue(forKey: expected) {
+            inboundContinuation.yield(line)
+            expected &+= 1
+        }
+        if buffer.count > Self.maxReorderBuffer, let lowest = buffer.keys.min() {
+            expected = lowest
+            while let line = buffer.removeValue(forKey: expected) {
+                inboundContinuation.yield(line)
+                expected &+= 1
+            }
+        }
+        nextEmit[salt] = expected
+        pendingLines[salt] = buffer.isEmpty ? nil : buffer
+    }
+
+    /// Split a `lineId` of the form `<salt>-<base36 seq>` into its parts. The seq
+    /// is base36 (no `-`); the salt is hex by default but may be caller-supplied,
+    /// so we split on the LAST `-` to tolerate a salt that itself contains one.
+    /// Returns nil when there is no `-` or the tail is not base36 — the caller then
+    /// emits the line immediately (legacy/crafted frames keep working).
+    static func splitLineId(_ lineId: String) -> (salt: String, seq: UInt64)? {
+        guard let dash = lineId.lastIndex(of: "-") else { return nil }
+        let salt = String(lineId[lineId.startIndex..<dash])
+        let seqPart = String(lineId[lineId.index(after: dash)...])
+        guard !salt.isEmpty, !seqPart.isEmpty, let seq = UInt64(seqPart, radix: 36) else {
+            return nil
+        }
+        return (salt, seq)
+    }
+
     private func shutdown() {
         reassembly.removeAll()
+        pendingLines.removeAll()
+        nextEmit.removeAll()
         inboundContinuation.finish()
     }
 
@@ -189,6 +290,10 @@ public actor RelayACPTransport: ACPTransport {
     /// total numbers stay well under this in practice; the guard just keeps a
     /// caller-supplied tiny budget from making chunking diverge.
     static let minViableFrameBytes = 64
+    /// Cap on inbound lines buffered ahead of a missing index before we give up on
+    /// it and skip forward — bounds memory + guarantees liveness under genuine line
+    /// loss or a peer that withholds a low index to wedge the stream.
+    static let maxReorderBuffer = 1000
 
     // MARK: - Framing internals
 

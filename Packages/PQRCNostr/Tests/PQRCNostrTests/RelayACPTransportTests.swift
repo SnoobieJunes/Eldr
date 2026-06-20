@@ -45,6 +45,17 @@ struct RelayACPTransportTests {
         return await sink.all()
     }
 
+    /// The sender's line-order index parsed out of a frame's `lineId`
+    /// (`ACP1|<salt>-<base36 seq>|seq|total|payload`). Lets a test deliver complete
+    /// lines in a chosen order regardless of which framing Task filled the sink
+    /// first. `.max` for an unparsable frame so callers' `== n` checks just miss.
+    static func lineIndex(of frame: String) -> UInt64 {
+        let parts = frame.split(separator: "|")
+        guard parts.count > 1 else { return .max }
+        let tail = parts[1].split(separator: "-").last.map(String.init) ?? ""
+        return UInt64(tail, radix: 36) ?? .max
+    }
+
     // MARK: - (a) Round trip
 
     @Test func roundTrip_lineIsByteIdenticalAfterFrameAndReassemble() async throws {
@@ -231,6 +242,69 @@ struct RelayACPTransportTests {
         for chunk in allChunks.reversed() { await receiver.deliverInbound(chunk) }
         let got = await lines.waitFor(1)
         #expect(got.first == line)
+    }
+
+    /// Two lines from ONE sender whose COMPLETE frames arrive in REVERSE order
+    /// (the relay delivers each line as a separate, unordered event) must still
+    /// emit in SENDER order — the content line before the `end_turn` line that
+    /// followed it. This is the exact Phase-3 failure mode: a raw arrival-order
+    /// emit surfaces `end_turn` first and the ACP client finalizes the turn empty.
+    @Test func twoLinesFromOneSender_emitInSenderOrder_whenDeliveredReversed() async throws {
+        let (sender, sink) = Self.makeSender(maxFrameBytes: 4096, salt: "cccc")
+        let receiver = RelayACPTransport(maxFrameBytes: 4096, send: { _ in })
+        let lines = ACPLineCollector()
+        await lines.attach(receiver.inboundLines())
+
+        // Short lines → one chunk each. `first` is sent before `second`, so it gets
+        // the lower index even though the two framing Tasks race afterward.
+        let first = #"{"jsonrpc":"2.0","method":"session/update","params":{"text":"CONTENT"}}"#
+        let second = #"{"jsonrpc":"2.0","id":9,"result":{"stopReason":"end_turn"}}"#
+        sender.send(first)
+        sender.send(second)
+        let chunks = await Self.waitChunks(sink, atLeast: 2)
+        #expect(chunks.count == 2, "each short line frames to a single chunk")
+
+        let firstFrame = chunks.first { Self.lineIndex(of: $0) == 0 }
+        let secondFrame = chunks.first { Self.lineIndex(of: $0) == 1 }
+        #expect(firstFrame != nil && secondFrame != nil, "indices 0 and 1 must both be present")
+
+        // The relay reordering: the SECOND line (end_turn) is delivered FIRST.
+        await receiver.deliverInbound(secondFrame!)
+        await receiver.deliverInbound(firstFrame!)
+
+        let got = await lines.waitFor(2)
+        #expect(
+            got == [first, second],
+            "lines must emit in SENDER order (content before its end_turn), not arrival order; got \(got)")
+    }
+
+    /// A line that completes while an EARLIER line is still missing is held back,
+    /// then both flush in order once the gap fills — the buffering half of the
+    /// ordering guarantee (no premature emit, no lost line).
+    @Test func laterLineHeldUntilEarlierArrives() async throws {
+        let (sender, sink) = Self.makeSender(maxFrameBytes: 4096, salt: "dddd")
+        let receiver = RelayACPTransport(maxFrameBytes: 4096, send: { _ in })
+        let lines = ACPLineCollector()
+        await lines.attach(receiver.inboundLines())
+
+        let l0 = #"{"i":0}"#
+        let l1 = #"{"i":1}"#
+        sender.send(l0)
+        sender.send(l1)
+        let chunks = await Self.waitChunks(sink, atLeast: 2)
+        let f0 = chunks.first { Self.lineIndex(of: $0) == 0 }
+        let f1 = chunks.first { Self.lineIndex(of: $0) == 1 }
+        #expect(f0 != nil && f1 != nil, "indices 0 and 1 must both be present")
+
+        // Deliver ONLY the later line. It must NOT emit — index 0 is still a gap.
+        await receiver.deliverInbound(f1!)
+        try? await Task.sleep(for: .milliseconds(120))
+        #expect(await lines.all().isEmpty, "a line ahead of a gap must wait, not emit early")
+
+        // Fill the gap → both flush, in order.
+        await receiver.deliverInbound(f0!)
+        let got = await lines.waitFor(2)
+        #expect(got == [l0, l1], "filling the gap releases both in order; got \(got)")
     }
 
     // MARK: - (e) Partial line never emits
