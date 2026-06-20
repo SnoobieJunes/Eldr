@@ -296,13 +296,33 @@ public struct ToolExecutor: Sendable {
         return (environment.effectiveWorkdir as NSString).appendingPathComponent(path)
     }
 
+    /// C-2: resolve `path` to a canonical absolute path and confirm it stays WITHIN the
+    /// session working directory. Returns nil when it escapes — an absolute path outside
+    /// the workdir, a `../` traversal, or a symlink that points out — so the four file
+    /// tools serve the project tree but never `~/.ssh`, `../../etc/...`, or a planted
+    /// symlink. (run_shell is the deliberate, permission-gated escape hatch.) Symlinks
+    /// are resolved BEFORE the prefix check so a link can't step out and back in.
+    func jailedPath(_ path: String) -> String? {
+        func canonical(_ p: String) -> String {
+            URL(fileURLWithPath: p).resolvingSymlinksInPath().standardizedFileURL.path
+        }
+        var root = canonical(environment.effectiveWorkdir)
+        if root.count > 1, root.hasSuffix("/") { root.removeLast() }
+        let resolved = canonical(absolutePath(path))
+        return resolved == root || resolved.hasPrefix(root + "/") ? resolved : nil
+    }
+
     // MARK: read_file
 
     private func readFile(_ args: JSONValue) async -> ToolResult {
         guard let rawPath = args["path"]?.stringValue, !rawPath.isEmpty else {
             return ToolResult(text: "read_file: missing 'path'", isError: true)
         }
-        let path = absolutePath(rawPath)
+        guard let path = jailedPath(rawPath) else {
+            return ToolResult(
+                text: "read_file: path is outside the working directory: \(rawPath)",
+                isError: true)
+        }
 
         // Prefer the client so the read is consistent with unsaved editor buffers.
         if capabilities.fsReadTextFile, let connection {
@@ -352,7 +372,11 @@ public struct ToolExecutor: Sendable {
             return ToolResult(text: "write_file: missing 'path'", isError: true)
         }
         let content = args["content"]?.stringValue ?? ""
-        let path = absolutePath(rawPath)
+        guard let path = jailedPath(rawPath) else {
+            return ToolResult(
+                text: "write_file: path is outside the working directory: \(rawPath)",
+                isError: true)
+        }
         return await writeTextContents(
             path: path, content: content, label: "write_file",
             successNote: "wrote \(content.utf8.count) bytes to \(path)")
@@ -427,7 +451,11 @@ public struct ToolExecutor: Sendable {
                 text: "edit_file: old_string and new_string are identical (no change)",
                 isError: true)
         }
-        let path = absolutePath(rawPath)
+        guard let path = jailedPath(rawPath) else {
+            return ToolResult(
+                text: "edit_file: path is outside the working directory: \(rawPath)",
+                isError: true)
+        }
         guard let current = await readTextContents(path: path) else {
             return ToolResult(text: "edit_file: cannot read \(path)", isError: true)
         }
@@ -471,7 +499,11 @@ public struct ToolExecutor: Sendable {
             return ToolResult(text: "search: missing 'query'", isError: true)
         }
         let rawPath = args["path"]?.stringValue ?? "."
-        let root = absolutePath(rawPath.isEmpty ? "." : rawPath)
+        guard let root = jailedPath(rawPath.isEmpty ? "." : rawPath) else {
+            return ToolResult(
+                text: "search: path is outside the working directory: \(rawPath)",
+                isError: true)
+        }
         let cap = Self.searchMatchCap
 
         let matches =
@@ -587,7 +619,11 @@ public struct ToolExecutor: Sendable {
 
     private func listDir(_ args: JSONValue) -> ToolResult {
         let rawPath = args["path"]?.stringValue ?? "."
-        let path = absolutePath(rawPath.isEmpty ? "." : rawPath)
+        guard let path = jailedPath(rawPath.isEmpty ? "." : rawPath) else {
+            return ToolResult(
+                text: "list_dir: path is outside the working directory: \(rawPath)",
+                isError: true)
+        }
         do {
             let entries = try FileManager.default.contentsOfDirectory(atPath: path).sorted()
             if entries.isEmpty { return ToolResult(text: "(empty directory) \(path)") }
