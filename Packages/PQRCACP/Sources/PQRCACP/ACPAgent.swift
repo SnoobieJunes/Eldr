@@ -446,6 +446,20 @@ public actor ACPAgent {
                 return ToolResult(
                     text: "The user denied permission to run \(name).", isError: true)
             }
+            // Fail closed on a cancel that RACED the permission round-trip: requesting
+            // permission is an `await`, so a session/cancel can land on the actor while
+            // it's in flight and resolve AFTER the grant. Re-check before the
+            // side-effecting `executor.run` so a cancelled turn never performs the write
+            // it was mid-asking-about — the loop-top check (runTurn) is too late, the
+            // mutation would already have happened.
+            if cancelledSessions.contains(sessionId) {
+                await connection.notify(
+                    method: "session/update",
+                    params: ACPWire.toolCallUpdate(
+                        sessionId: sessionId, toolCallId: toolCallId, status: "failed",
+                        contentText: "Cancelled before the tool ran.", isError: true))
+                return ToolResult(text: "Cancelled before \(name) ran.", isError: true)
+            }
         }
 
         // tool_call_update (in_progress)

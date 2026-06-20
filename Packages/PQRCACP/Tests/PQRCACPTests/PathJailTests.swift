@@ -105,4 +105,126 @@ struct ToolExecutorPathJailTests {
         #expect(read.isError)
         #expect(!read.text.contains("LEAK"))  // symlink can't tunnel out
     }
+
+    // MARK: edit_file — same jail as read/write, asserted both by the refusal message
+    // AND by proving the out-of-jail target file is never mutated.
+
+    @Test func editRejectsDotDotTraversalAndLeavesTargetUntouched() async throws {
+        let dir = try tempDir("edit-dotdot")
+        defer { try? FileManager.default.removeItem(atPath: dir) }
+        // A real file OUTSIDE the workdir whose contents we will prove unchanged.
+        let outside = try tempDir("edit-secret")
+        defer { try? FileManager.default.removeItem(atPath: outside) }
+        let target = (outside as NSString).appendingPathComponent("hosts")
+        try "127.0.0.1 localhost".write(toFile: target, atomically: true, encoding: .utf8)
+
+        // `../../etc/hosts`-style traversal: must refuse before reading/writing.
+        let edit = await executor(workdir: dir).run(
+            tool: "edit_file",
+            args: .object([
+                "path": .string("../../etc/hosts"),
+                "old_string": .string("127.0.0.1 localhost"),
+                "new_string": .string("0.0.0.0 evil"),
+            ]))
+        #expect(edit.isError)
+        #expect(edit.text.contains("outside the working directory"))
+        // The planted file is byte-for-byte unchanged (no read, no write happened).
+        #expect(
+            (try? String(contentsOfFile: target, encoding: .utf8)) == "127.0.0.1 localhost")
+    }
+
+    @Test func editRejectsSymlinkEscapeAndLeavesTargetUntouched() async throws {
+        let dir = try tempDir("edit-link")
+        defer { try? FileManager.default.removeItem(atPath: dir) }
+        let secretDir = try tempDir("edit-linksecret")
+        defer { try? FileManager.default.removeItem(atPath: secretDir) }
+        let target = (secretDir as NSString).appendingPathComponent("secret.txt")
+        try "ORIGINAL".write(toFile: target, atomically: true, encoding: .utf8)
+        // A symlink inside the workdir pointing at the outside file: a successful edit
+        // would resolve through it and overwrite ORIGINAL.
+        let link = (dir as NSString).appendingPathComponent("escape")
+        try FileManager.default.createSymbolicLink(atPath: link, withDestinationPath: target)
+
+        let edit = await executor(workdir: dir).run(
+            tool: "edit_file",
+            args: .object([
+                "path": .string("escape"),
+                "old_string": .string("ORIGINAL"),
+                "new_string": .string("TAMPERED"),
+            ]))
+        #expect(edit.isError)
+        #expect(edit.text.contains("outside the working directory"))
+        // Symlink can't tunnel an edit out: the target still reads ORIGINAL.
+        #expect((try? String(contentsOfFile: target, encoding: .utf8)) == "ORIGINAL")
+    }
+
+    // MARK: search — read-only, but the jail still confines WHERE it can read.
+
+    @Test func searchRejectsDotDotTraversal() async throws {
+        let dir = try tempDir("search-dotdot")
+        defer { try? FileManager.default.removeItem(atPath: dir) }
+        // Plant a secret OUTSIDE the workdir; a working `../../..` search would surface it.
+        let outside = try tempDir("search-secret")
+        defer { try? FileManager.default.removeItem(atPath: outside) }
+        let secret = (outside as NSString).appendingPathComponent("id_ed25519")
+        try "PRIVATE-KEY-MATERIAL".write(toFile: secret, atomically: true, encoding: .utf8)
+
+        let result = await executor(workdir: dir).run(
+            tool: "search",
+            args: .object([
+                "query": .string("PRIVATE-KEY-MATERIAL"), "path": .string("../../.."),
+            ]))
+        #expect(result.isError)
+        #expect(result.text.contains("outside the working directory"))
+        #expect(!result.text.contains("PRIVATE-KEY-MATERIAL"))  // never exfiltrated
+    }
+
+    @Test func searchRejectsSymlinkEscape() async throws {
+        let dir = try tempDir("search-link")
+        defer { try? FileManager.default.removeItem(atPath: dir) }
+        let secretDir = try tempDir("search-linksecret")
+        defer { try? FileManager.default.removeItem(atPath: secretDir) }
+        let secret = (secretDir as NSString).appendingPathComponent("id_ed25519")
+        try "LEAK-VIA-SEARCH".write(toFile: secret, atomically: true, encoding: .utf8)
+        // A symlinked subdir inside the workdir pointing at the outside secret dir.
+        let link = (dir as NSString).appendingPathComponent("escape")
+        try FileManager.default.createSymbolicLink(atPath: link, withDestinationPath: secretDir)
+
+        let result = await executor(workdir: dir).run(
+            tool: "search",
+            args: .object(["query": .string("LEAK-VIA-SEARCH"), "path": .string("escape")]))
+        #expect(result.isError)
+        #expect(result.text.contains("outside the working directory"))
+        #expect(!result.text.contains("LEAK-VIA-SEARCH"))  // symlink can't tunnel search out
+    }
+
+    // MARK: list_dir — escaping path is refused (no directory listing of ~ or /etc).
+
+    @Test func listDirRejectsDotDotTraversal() async throws {
+        let dir = try tempDir("ls-dotdot")
+        defer { try? FileManager.default.removeItem(atPath: dir) }
+        let ls = await executor(workdir: dir).run(
+            tool: "list_dir", args: .object(["path": .string("../../../../../../etc")]))
+        #expect(ls.isError)
+        #expect(ls.text.contains("outside the working directory"))
+    }
+
+    @Test func listDirRejectsSymlinkEscape() async throws {
+        let dir = try tempDir("ls-link")
+        defer { try? FileManager.default.removeItem(atPath: dir) }
+        let secretDir = try tempDir("ls-linksecret")
+        defer { try? FileManager.default.removeItem(atPath: secretDir) }
+        let secret = (secretDir as NSString).appendingPathComponent("secret.txt")
+        try "DIR-ENTRY-LEAK".write(toFile: secret, atomically: true, encoding: .utf8)
+        // A symlinked dir inside the workdir pointing out: listing it would enumerate
+        // the outside dir's entries.
+        let link = (dir as NSString).appendingPathComponent("escape")
+        try FileManager.default.createSymbolicLink(atPath: link, withDestinationPath: secretDir)
+
+        let ls = await executor(workdir: dir).run(
+            tool: "list_dir", args: .object(["path": .string("escape")]))
+        #expect(ls.isError)
+        #expect(ls.text.contains("outside the working directory"))
+        #expect(!ls.text.contains("secret.txt"))  // outside entries never enumerated
+    }
 }
