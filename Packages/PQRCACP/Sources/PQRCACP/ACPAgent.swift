@@ -503,23 +503,30 @@ public actor ACPAgent {
             to: config.eventsFilePath)
     }
 
-    /// Ask the client for permission. If the client can't prompt (no permission
-    /// support implied by terminal/fs caps), default to ALLOW — the client spawned
-    /// us as a trusted local subprocess, and the user expects the agent to act.
+    /// Ask the client for permission for a mutating tool, and FAIL CLOSED. The request
+    /// is time-bounded (`config.permissionTimeoutSeconds`); any non-grant outcome — an
+    /// explicit deny, a timeout (the client never answered), a transport error, or a
+    /// client that doesn't implement `session/request_permission` — is a DENIAL.
+    /// (C-1: the previous fallback to ALLOW turned the gate into a no-op the moment a
+    /// remote driver could reach it, and a non-responding client hung the turn instead.)
+    /// The trusted-local case — a client the operator spawned that genuinely can't
+    /// prompt — can disable the gate entirely with `ELDR_ACP_ALLOW_UNGATED_TOOLS`.
     private func requestPermission(
         sessionId: String, toolCallId: String, title: String, kind: String
     ) async -> Bool {
-        // ACP doesn't expose a dedicated "can request permission" capability; the
-        // method is always available on a conformant client. We attempt it and, on
-        // any transport failure, fall back to allow.
+        // Operator explicitly disabled gating for a trusted local client that can't
+        // prompt — restore allow-by-default (no wait, no prompt).
+        if config.allowUngatedTools { return true }
         do {
             let result = try await connection.request(
                 method: "session/request_permission",
                 params: ACPWire.requestPermission(
-                    sessionId: sessionId, toolCallId: toolCallId, title: title, kind: kind))
+                    sessionId: sessionId, toolCallId: toolCallId, title: title, kind: kind),
+                timeout: config.permissionTimeoutSeconds)
             return ACPWire.permissionGranted(result)
         } catch {
-            return true
+            // Timeout / transport failure / unimplemented ⇒ DENY (fail closed).
+            return false
         }
     }
 

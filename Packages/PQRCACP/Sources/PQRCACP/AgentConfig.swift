@@ -81,6 +81,16 @@ public struct AgentConfig: Sendable, Equatable {
     /// Channel/agent label so per-project graphs stay separate. nil → derived from
     /// the session cwd. Env: `ELDR_ACP_CONTEXTGRAPH_AGENT`.
     public var contextGraphAgentName: String?
+    /// C-1: seconds to wait for a `session/request_permission` answer before treating
+    /// silence as a DENIAL (deny-on-timeout), so a non-responding client can neither
+    /// hang the turn nor auto-allow a mutating tool. Env: `ELDR_ACP_PERMISSION_TIMEOUT`.
+    public var permissionTimeoutSeconds: Double
+    /// C-1 escape hatch: when true, mutating tools are NOT permission-gated at all —
+    /// restoring allow-by-default for a trusted local client that can't prompt (e.g.
+    /// one with no session/request_permission support). An EXPLICIT operator risk
+    /// acceptance; default false (fail closed: a mutating tool runs only on an explicit
+    /// grant; a timeout/error is a denial). Env: `ELDR_ACP_ALLOW_UNGATED_TOOLS`.
+    public var allowUngatedTools: Bool
 
     /// Defaults preserve/improve prior behavior: 8 KB per tool result (the loop
     /// previously fed back whole files unbounded and only capped shell at 64 KB),
@@ -101,7 +111,9 @@ public struct AgentConfig: Sendable, Equatable {
         contextFilePath: nil,
         contextGraphEnabled: false,
         contextGraphURL: "http://localhost:8302",
-        contextGraphAgentName: nil)
+        contextGraphAgentName: nil,
+        permissionTimeoutSeconds: 120,
+        allowUngatedTools: false)
 
     public init(
         maxToolResultBytes: Int = 8 * 1024,
@@ -117,7 +129,9 @@ public struct AgentConfig: Sendable, Equatable {
         contextFilePath: String? = nil,
         contextGraphEnabled: Bool = false,
         contextGraphURL: String = "http://localhost:8302",
-        contextGraphAgentName: String? = nil
+        contextGraphAgentName: String? = nil,
+        permissionTimeoutSeconds: Double = 120,
+        allowUngatedTools: Bool = false
     ) {
         // Clamp to sane floors: a non-positive byte cap would truncate everything to
         // nothing (worse than no cap), so treat ≤0 as "effectively unbounded".
@@ -135,6 +149,9 @@ public struct AgentConfig: Sendable, Equatable {
         self.contextGraphEnabled = contextGraphEnabled
         self.contextGraphURL = contextGraphURL.isEmpty ? "http://localhost:8302" : contextGraphURL
         self.contextGraphAgentName = contextGraphAgentName
+        // ≤0 ⇒ no wait (deny immediately on no answer); otherwise the given seconds.
+        self.permissionTimeoutSeconds = max(0, permissionTimeoutSeconds)
+        self.allowUngatedTools = allowUngatedTools
     }
 
     /// Build from the process environment, falling back to an optional config
@@ -164,6 +181,12 @@ public struct AgentConfig: Sendable, Equatable {
             case "0", "off", "false", "no", "disable", "disabled": return false
             default: return fallback
             }
+        }
+        func doubleEnv(_ key: String, default fallback: Double) -> Double {
+            guard let raw = env[key]?.trimmingCharacters(in: .whitespaces), !raw.isEmpty,
+                let n = Double(raw)
+            else { return fallback }
+            return n
         }
         // Env value, else a file in the config dir, else nil.
         func textEnvOrFile(_ key: String, file: String) -> String? {
@@ -200,7 +223,9 @@ public struct AgentConfig: Sendable, Equatable {
             contextFilePath: stringEnv("ELDR_ACP_CONTEXT_FILE"),
             contextGraphEnabled: boolEnv("ELDR_ACP_CONTEXTGRAPH", default: d.contextGraphEnabled),
             contextGraphURL: stringEnv("ELDR_ACP_CONTEXTGRAPH_URL") ?? d.contextGraphURL,
-            contextGraphAgentName: stringEnv("ELDR_ACP_CONTEXTGRAPH_AGENT"))
+            contextGraphAgentName: stringEnv("ELDR_ACP_CONTEXTGRAPH_AGENT"),
+            permissionTimeoutSeconds: doubleEnv("ELDR_ACP_PERMISSION_TIMEOUT", default: d.permissionTimeoutSeconds),
+            allowUngatedTools: boolEnv("ELDR_ACP_ALLOW_UNGATED_TOOLS", default: d.allowUngatedTools))
     }
 
     /// Interpret the overloaded `ELDR_ACP_SKILLS` value.

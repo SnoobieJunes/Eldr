@@ -450,6 +450,71 @@ struct ACPAgentTests {
         #expect(sid.hasPrefix("eldr-session-"))
     }
 
+    // MARK: - C-1: permission gate fails closed
+
+    /// A sink that captures outbound lines but NEVER answers session/request_permission
+    /// — a client with no permission support (or one that hangs).
+    actor SilentSink: OutputSink {
+        private(set) var lines: [String] = []
+        func write(line: String) async { lines.append(line) }
+    }
+
+    /// Drive one write_file turn against a silent client with the given config.
+    private func driveWrite(target: String, dir: String, config: AgentConfig) async throws {
+        let writeCall = LLMToolCall(
+            id: "w1", name: "write_file",
+            arguments: "{\"path\":\"\(target)\",\"content\":\"hello\"}")
+        let llm = MockLLMClient([
+            LLMResponse(content: "", toolCalls: [writeCall]),
+            LLMResponse(content: "done"),
+        ])
+        let env = ToolEnvironment(developerDir: nil, workdir: dir, baseEnvironment: [:])
+        let agent = ACPAgent(
+            connection: ClientConnection(sink: SilentSink()), llm: llm,
+            toolEnvironment: env, config: config)
+        _ = await agent.handle(line: #"{"jsonrpc":"2.0","id":0,"method":"initialize","params":{}}"#)
+        let newResult = await agent.handle(
+            line: #"{"jsonrpc":"2.0","id":1,"method":"session/new","params":{}}"#)
+        let sid = (try parse(newResult))["result"]?["sessionId"]?.stringValue ?? ""
+        _ = await agent.handle(
+            line:
+                "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"session/prompt\",\"params\":{\"sessionId\":\"\(sid)\",\"prompt\":[{\"type\":\"text\",\"text\":\"go\"}]}}"
+        )
+    }
+
+    /// C-1: a client that never answers a permission request must NOT auto-allow a
+    /// mutating tool. With a short permission timeout the request times out → DENY,
+    /// so write_file never touches disk.
+    @Test func mutatingToolDeniedWhenClientNeverAnswers() async throws {
+        let dir = (NSTemporaryDirectory() as NSString).appendingPathComponent(
+            "eldr-acp-c1-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(atPath: dir) }
+        let target = (dir as NSString).appendingPathComponent("out.txt")
+
+        try await driveWrite(
+            target: target, dir: dir, config: AgentConfig(permissionTimeoutSeconds: 0.05))
+
+        #expect(!FileManager.default.fileExists(atPath: target))  // denied ⇒ never written
+    }
+
+    /// C-1 opt-in: ELDR_ACP_ALLOW_UNGATED_TOOLS disables the gate for a trusted local
+    /// client. Same silent client, opt-in true → the write goes through.
+    @Test func mutatingToolAllowedWhenGatingDisabled() async throws {
+        let dir = (NSTemporaryDirectory() as NSString).appendingPathComponent(
+            "eldr-acp-c1opt-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(atPath: dir) }
+        let target = (dir as NSString).appendingPathComponent("out.txt")
+
+        try await driveWrite(
+            target: target, dir: dir,
+            config: AgentConfig(permissionTimeoutSeconds: 0.05, allowUngatedTools: true))
+
+        #expect(FileManager.default.fileExists(atPath: target))
+        #expect((try? String(contentsOfFile: target, encoding: .utf8)) == "hello")
+    }
+
     // MARK: - Phase 1c: project-context injection
 
     @Test func contextFile_injectedAsLeadingSystemMessage() async throws {
