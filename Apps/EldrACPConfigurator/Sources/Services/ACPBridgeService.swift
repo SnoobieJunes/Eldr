@@ -410,11 +410,23 @@ final class ACPBridgeService: ObservableObject {
                 paths: .standard,
                 bundled: Bundle.main.url(forResource: "eldr-acp", withExtension: nil))
         {
-            agentRunner = ACPDriverAgentRunner(executableURL: executable)
+            agentRunner = ACPDriverAgentRunner(
+                executableURL: executable, environmentOverrides: Self.llmTokenEnvironment())
         }
         if ownerEngine == nil, let identity = try? PQRCIdentity(randomSource: SystemRandomSource()) {
             ownerEngine = AgentEngine(myIdentity: identity, clock: clock, sink: NoopAgentSink())
         }
+    }
+
+    /// C-8: the LLM token lives in the Keychain, not the cleartext env file. Inject it
+    /// into the agent's environment when WE spawn the launcher (the launcher's own
+    /// Keychain read covers external clients like Xcode). Account/service MUST match
+    /// ConfigurationStore's (default KeychainBox service + "llm-token").
+    nonisolated static func llmTokenEnvironment() -> [String: String] {
+        guard let data = KeychainBox().load(account: "llm-token"),
+            let token = String(data: data, encoding: .utf8), !token.isEmpty
+        else { return [:] }
+        return ["ELDR_LLM_TOKEN": token]
     }
 
     /// Resolve the agent executable: prefer the installed launcher (it sources the env

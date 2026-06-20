@@ -110,6 +110,14 @@ final class InstallerService: ObservableObject {
               export DEVELOPER_DIR="/Applications/Xcode-beta.app/Contents/Developer"
             fi
             source "\(paths.envFile)" 2>/dev/null || true
+            # C-8: the LLM token is NOT in the env file (it lives in the login Keychain).
+            # If the spawning client didn't already provide it, read it from the Keychain.
+            # (The Configurator injects it directly; this covers external clients like
+            # Xcode/OpenClaw. The first read may prompt once for Keychain access.)
+            if [[ -z "${ELDR_LLM_TOKEN:-}" ]]; then
+              ELDR_LLM_TOKEN="$(security find-generic-password -w -s 'chat.eldr.acp.configurator' -a 'llm-token' 2>/dev/null)"
+              export ELDR_LLM_TOKEN
+            fi
             exec "\(paths.installedBinary)" "$@" 2>> "\(paths.logFile)"
             """
         guard let data = script.data(using: .utf8) else { throw InstallError.encodingFailed }

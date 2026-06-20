@@ -51,9 +51,14 @@ final class ConfigurationStore: ObservableObject {
     let paths: ConfigPaths
     private var saveCancellable: AnyCancellable?
     private var loaded = false
+    /// C-8: the LLM token is kept in the Keychain (WhenUnlockedThisDeviceOnly), never
+    /// in the cleartext env file. Injectable so tests can isolate to their own service.
+    private let keychain: KeychainBox
+    private static let tokenAccount = "llm-token"
 
-    init(paths: ConfigPaths = .standard) {
+    init(paths: ConfigPaths = .standard, keychain: KeychainBox = KeychainBox()) {
         self.paths = paths
+        self.keychain = keychain
 
         // Load by re-reading the files through the binary's own parsers.
         let env = ConfigurationStore.parseEnvFile(at: paths.envFile)
@@ -61,7 +66,11 @@ final class ConfigurationStore: ObservableObject {
         let agent = AgentConfig.fromEnvironment(env, configDir: paths.configDir)
 
         llmURL = llm.url
-        llmToken = llm.token
+        // C-8: prefer the Keychain token; fall back to a legacy env-file token (then
+        // migrated to the Keychain and dropped from the file on the next save).
+        llmToken =
+            keychain.load(account: Self.tokenAccount).flatMap { String(data: $0, encoding: .utf8) }
+            ?? llm.token
         llmModel = llm.model
         // AgentConfig clamps a non-positive byte cap to Int.max ("unbounded"); show 0
         // for that so the field round-trips cleanly.
@@ -92,6 +101,7 @@ final class ConfigurationStore: ObservableObject {
 
     func save() {
         guard loaded else { return }
+        saveTokenToKeychain()
         writeEnvFile()
         writeFile(paths.toolsFile, contents: toolsFileContents())
         writeFile(paths.skillsFile, contents: skillsEnabled ? "1" : "0")
@@ -105,7 +115,10 @@ final class ConfigurationStore: ObservableObject {
         var lines: [String] = [
             "# Written by EldrACPConfigurator — do not edit by hand.",
             export("ELDR_LLM_URL", llmURL),
-            export("ELDR_LLM_TOKEN", llmToken),
+            // C-8: ELDR_LLM_TOKEN is intentionally NOT written here — it used to land in
+            // cleartext at the umask (commonly world-readable). It's in the Keychain now;
+            // the Configurator injects it when spawning the launcher, and the launcher
+            // reads it from the Keychain for external clients (Xcode/OpenClaw).
             export("ELDR_LLM_MODEL", llmModel),
             export("ELDR_ACP_MAX_TOOL_RESULT_BYTES", String(maxToolResultBytes)),
             export("ELDR_ACP_MAX_HISTORY_TURNS", String(maxHistoryTurns)),
@@ -117,6 +130,16 @@ final class ConfigurationStore: ObservableObject {
         ]
         lines.append("")
         writeFile(paths.envFile, contents: lines.joined(separator: "\n"))
+    }
+
+    /// C-8: persist the LLM token to the Keychain (or delete it when blank). Replaces
+    /// the cleartext `export ELDR_LLM_TOKEN=…` that used to land in the env file.
+    private func saveTokenToKeychain() {
+        if llmToken.isEmpty {
+            keychain.delete(account: Self.tokenAccount)
+        } else if let data = llmToken.data(using: .utf8) {
+            try? keychain.save(data, account: Self.tokenAccount)
+        }
     }
 
     /// `export KEY='value'` with POSIX single-quote escaping so any URL/token/path is
@@ -141,6 +164,9 @@ final class ConfigurationStore: ObservableObject {
             atPath: (path as NSString).deletingLastPathComponent,
             withIntermediateDirectories: true)
         try? contents.data(using: .utf8)?.write(to: URL(fileURLWithPath: path), options: .atomic)
+        // C-8: owner-only (0600) — the env file previously landed at the umask
+        // (commonly 0644, world-readable). These are all user-private config files.
+        try? fm.setAttributes([.posixPermissions: 0o600], ofItemAtPath: path)
     }
 
     // MARK: - Derived config (for the in-process test chat + health checks)
