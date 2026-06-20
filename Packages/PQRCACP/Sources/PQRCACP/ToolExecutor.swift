@@ -75,6 +75,13 @@ public struct ToolResult: Sendable {
     }
 }
 
+// NODE-SIDE (macOS only): the tool executor spawns shells (`Process`) and touches the
+// filesystem to do real file/shell work. The iOS app never runs the AGENT half — the
+// phone is the remote control that drives a Mac node over an `ACPTransport` — so this
+// whole type is guarded off the iOS-compiled `PQRCACP` library. The phone-side value
+// types above (`ClientCapabilities`/`ToolEnvironment`/`ToolResult`) stay available
+// because `ACPClient`/`ACPClientDriver` reference them.
+#if os(macOS)
 /// Executes the agent's four tools, preferring client-routed I/O over Foundation
 /// fallbacks. Constructed once per prompt turn (it carries that turn's sessionId,
 /// which the fs/* and terminal/* methods require); stateless otherwise, so it's a
@@ -763,3 +770,4 @@ public struct ToolExecutor: Sendable {
         return text
     }
 }
+#endif  // os(macOS) — ToolExecutor (node-side, spawns Process)

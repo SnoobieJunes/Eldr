@@ -80,10 +80,18 @@ public enum ACPClientError: Error, Sendable, Equatable {
 }
 
 public actor ACPClientDriver {
+    /// ACP MAJOR protocol version the client negotiates at `initialize`. Lives here
+    /// (iOS-available) rather than on the macOS-only `ACPAgent` so the phone client
+    /// path can build without the agent; `ACPAgent.protocolVersion` mirrors it.
+    public static let acpProtocolVersion = 1
+
     /// How the agent process is provided.
     private enum Transport {
-        /// Spawn `eldr-acp` ourselves.
+        /// Spawn `eldr-acp` ourselves. macOS-only — `Process` is unavailable on iOS, and
+        /// the phone never spawns a local agent (it drives a remote one over `.preset`).
+        #if os(macOS)
         case spawn(executableURL: URL, arguments: [String], environment: [String: String])
+        #endif
         /// Attach to an already-running pair (input = where WE write, output = where
         /// WE read). Used by tests and the in-process bridge.
         case attach(input: FileHandle, output: FileHandle)
@@ -99,7 +107,9 @@ public actor ACPClientDriver {
     /// advertise fs/terminal only if you intend to serve those via the handler.
     private let capabilities: ClientCapabilities
 
-    private var process: Process?
+    #if os(macOS)
+    private var process: Process?  // node-side: only the spawn path holds a Process
+    #endif
     private var inputHandle: FileHandle?
     private var nextRequestID = 1
     private var pending: [Int: CheckedContinuation<JSONValue, Error>] = [:]
@@ -107,9 +117,11 @@ public actor ACPClientDriver {
     private var readerTask: Task<Void, Never>?
     private var started = false
 
+    #if os(macOS)
     /// Spawn a fresh `eldr-acp` at `executableURL`. `environmentOverrides` are merged
     /// over the inherited process environment (which already carries `ELDR_LLM_*`,
-    /// `ELDR_WORKDIR`, `DEVELOPER_DIR` when exported by the launcher).
+    /// `ELDR_WORKDIR`, `DEVELOPER_DIR` when exported by the launcher). macOS-only: spawning
+    /// uses `Process`, and the phone drives a remote agent (`.preset`) instead.
     public init(
         executableURL: URL, arguments: [String] = [],
         environmentOverrides: [String: String] = [:],
@@ -123,6 +135,7 @@ public actor ACPClientDriver {
         self.handler = handler
         self.capabilities = capabilities
     }
+    #endif
 
     /// Attach to an already-running agent over the given handles.
     public init(
@@ -162,6 +175,7 @@ public actor ACPClientDriver {
         signal(SIGPIPE, SIG_IGN)
 
         switch transport {
+        #if os(macOS)
         case .spawn(let executableURL, let arguments, let environment):
             let process = Process()
             process.executableURL = executableURL
@@ -179,6 +193,7 @@ public actor ACPClientDriver {
             self.process = process
             self.inputHandle = inPipe.fileHandleForWriting
             startReader(on: outPipe.fileHandleForReading)
+        #endif
         case .attach(let input, let output):
             self.inputHandle = input
             startReader(on: output)
@@ -244,8 +259,10 @@ public actor ACPClientDriver {
         if case .preset(let acpTransport) = transport { acpTransport.close() }
         try? inputHandle?.close()
         inputHandle = nil
+        #if os(macOS)
         if let process, process.isRunning { process.terminate() }
         process = nil
+        #endif
         failAll(ACPClientError.agentExited)
     }
 
@@ -437,7 +454,7 @@ public actor ACPClientDriver {
 
     static func initializeParams(capabilities: ClientCapabilities) -> JSONValue {
         .object([
-            "protocolVersion": .int(ACPAgent.protocolVersion),
+            "protocolVersion": .int(Self.acpProtocolVersion),
             "clientCapabilities": .object([
                 "fs": .object([
                     "readTextFile": .bool(capabilities.fsReadTextFile),

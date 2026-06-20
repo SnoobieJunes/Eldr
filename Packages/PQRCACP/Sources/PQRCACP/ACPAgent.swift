@@ -1,5 +1,13 @@
 import Foundation
 
+// NODE-SIDE (macOS only): the AGENT half of ACP. It runs the tool-calling loop and
+// executes file/shell tools via `ToolExecutor` (which spawns `Process`), so it only
+// runs on the Mac node. The iOS app drives a remote agent over an `ACPTransport` via
+// `ACPClient`/`ACPClientDriver` and never instantiates the agent itself, so this whole
+// type is guarded off the iOS-compiled `PQRCACP` library. The one wire constant the
+// client path needs (`protocolVersion`) lives on `ACPClientDriver` (iOS-available) and
+// is mirrored here so macOS keeps a single source of truth.
+#if os(macOS)
 /// EldrChat's ACP agent. An ACP CLIENT (Xcode 27) spawns it over stdio and drives
 /// it with JSON-RPC: `initialize` → `session/new` → `session/prompt`. On a prompt
 /// the agent runs a tool-calling loop against a local LLM, streaming `session/update`
@@ -13,8 +21,10 @@ import Foundation
 public actor ACPAgent {
     public static let agentName = "eldr-acp"
     public static let agentVersion = "0.1.0"
-    /// ACP MAJOR protocol version we speak (a single integer; see spec).
-    public static let protocolVersion = 1
+    /// ACP MAJOR protocol version we speak (a single integer; see spec). Defined on the
+    /// iOS-available client driver so the phone path can reference it without pulling in
+    /// this macOS-only agent; mirrored here to keep the agent's call sites unchanged.
+    public static let protocolVersion = ACPClientDriver.acpProtocolVersion
 
     private let connection: ClientConnection
     private let llm: any LLMClient
@@ -755,3 +765,4 @@ private actor StreamedTextBox {
     private(set) var value = ""
     func append(_ s: String) { value += s }
 }
+#endif  // os(macOS) — ACPAgent (node-side: tool-calling loop + ToolExecutor/Process)
