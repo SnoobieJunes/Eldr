@@ -1,4 +1,6 @@
-# APP-SPEC.md — PQRC iOS Client v1
+# APP-SPEC.md — EldrChat / PQRC iOS Client v1
+
+**Last reconciled: 2026-06-20** — refreshed to cover the June 18–20 build-out (the ACP-router architecture §24a, the at-rest key-custody reversal §3/§19 per DEVIATIONS AC31, the Private Cloud Compute tier, and the security fixes C-1…C-8 / G3 / G4). `docs/DEVIATIONS.md` remains the live, authoritative changelog; this document is the product/architecture view.
 
 What to build. This document is subordinate to `pqrc-SPEC-v1_1.md` (protocol) and `NIP-XX-pqrc.md` (wire format). Where this document adds things the protocol does not define, the addition is tagged **[Dx]** and listed in §18 for `docs/DEVIATIONS.md`.
 
@@ -7,7 +9,8 @@ What to build. This document is subordinate to `pqrc-SPEC-v1_1.md` (protocol) an
 1. **Privacy is the number one priority, without exception** (SPEC §0). Ties resolve toward privacy.
 2. **Transparency of AI is a privacy property.** No one is ever unknowingly talking to an AI. Agent authorship is always visible, always verifiable.
 3. **iMessage-grade feel.** Native, fluid, instant. The cryptography is invisible; the trust signals are not.
-4. **Honest limitations.** What PQRC does not protect (IP metadata, recipient `p`-tag against a global observer, no *message* deniability, single device) is stated plainly in-app, not hidden. (Account-*existence* deniability — multiple passphrase silos with no observable count from the running app — now ships; see §19 and THREAT_MODEL §2.3a/§2.12.)
+4. **Honest limitations.** What PQRC does not protect (IP metadata, recipient `p`-tag against a global observer, no *message* deniability, single device) is stated plainly in-app, not hidden. Account deniability protects each account's **contents** and the passphrase→data mapping against a live coercer (duress/decoy, §19) — it does **not** hide the *count* of accounts from a forensic disk image, because each account now carries its own Secure-Enclave-wrapped key blob (an accepted limit per DEVIATIONS AC31, not a pending TODO; see §3, §19 and THREAT_MODEL §2.3a/§2.12).
+5. **Router, not a coding agent.** EldrChat owns identity, E2EE, secure transport, session history, consent, and the **router** that targets a backend; the actual development work is delegated to interchangeable, swappable ACP harnesses (Xcode ACP, OpenClaw, Claude Code, Codex, Gemini CLI, …). ACP is to agents what HTTP is to the web; EldrChat speaks it to everything (§24a, `docs/ACPRouterplan.md`).
 
 ## 1. Scope
 
@@ -21,7 +24,9 @@ this is the source of truth for the rapid build-out after the first pass):
   per-AI Keychain key, and a context profile (instructions / gather-policy / depth /
   output mode); a "solo AI chat"; the in-chat **"AI here" context chip** and a unified
   context vocabulary; backends Claude / OpenAI / Gemini / **OpenRouter** / **Groq** /
-  **self-hosted (OpenAI-compatible)**, with reasoning-trace stripping **[A20, A27, A30, A31, A34]** (§20).
+  **self-hosted (OpenAI-compatible)** / **Apple Private Cloud Compute** **[A40]** /
+  **`acp` Mac coding harness** (§24a), with reasoning-trace stripping **[A20, A27, A30, A31, A34]** (§20).
+  The backend list is now **data-driven** from `BackendRegistry.all` (`App/PQRC/Engine/BackendRegistry.swift`).
 - The **egress firewall**: codename redaction + a 64 KB bound applied to everything
   sent to an off-device AI (§21).
 - The **device-hosted relay hub** over Multipeer (a "pocket relay") plus host-AI
@@ -31,7 +36,15 @@ this is the source of truth for the rapid build-out after the first pass):
 - A local **MCP server** exposing secure chat read-only **[A35]** and an **ACP agent**
   that lets the on-device model pilot Xcode **[A36]** (`PQRCMCP`, `PQRCACP`). The MCP
   server is now **hosted in-app** over a loopback Unix socket behind an OFF-by-default,
-  token-gated, stops-on-lock Settings toggle (Phase 2 shipped — §24).
+  token-gated, stops-on-lock Settings toggle (Phase 2 shipped — §24). **MCP is still
+  shipped** — the ACP-router plan's "remove MCP" step has *not* been executed (§24).
+- **EldrChat as a secure, universal ACP router** **[AC33–AC35]** — the phone is an ACP
+  *client*; coding work is delegated to a swappable harness on an "Eldr node" (Mac or
+  the standalone `eldr-node` daemon), reached over the **same** E2EE mesh as chat. Ships:
+  the phone `ACPClient` + transport seam, a data-driven backend registry, sealed
+  Nearby + relay-carried ACP transports, an owner-gated node host, and a task-routing
+  policy seam (§24a). Mac runtime is **Mac Catalyst** **[A41]**; OpenClaw is a first-class
+  ACP client **[A42]** and an optional contextgraph backend exists **[A43]**.
 - **NIP-40 expiry** on gift-wraps **[A22]**, relay **chunking** for large text
   **[N26, A25]**, native markdown/HTML rendering + full-screen reader **[A17, A19, A22]**,
   friendly local codenames **[A19]**, and a responsive iPad/Mac `NavigationSplitView` pass.
@@ -61,10 +74,13 @@ and user-toggleable (Settings → Nearby).
                │ @Observable view models (MainActor)
 ┌──────────────▼───────────── PQRCAgent ────────────────────────────┐
 │ AgentProvider → Mock | FoundationModels | Anthropic | OpenAI |    │
-│   Gemini | OpenRouter | Groq | Custom(self-hosted) | hub          │
+│   Gemini | OpenRouter | Groq | Custom(self-hosted) | PCC | hub |  │
+│   acp (ACPAgentProvider → external harness over a sealed transport)│
 │ AgentEngine: silent-by-default gate, ai_window/ai_invite/grant    │
 │   enforcement, thread turn loop + loop guard · AgentSkills (§23)  │
+│ AISelectionPolicy / CapabilityRoutingPolicy: task-type→engine seam │
 │ ConfiguredAI: per-AI profile (instructions/policy/depth/output)   │
+│   driven by data-driven BackendRegistry (App/PQRC/Engine)         │
 └──────────────┬────────────────────────────────────────────────────┘
 ┌──────────────▼───────────── PQRCCore (actors) ────────────────────┐
 │ IdentityManager · AgentKeyDeriver · BindingVerifier (10420)       │
@@ -83,10 +99,20 @@ and user-toggleable (Settings → Nearby).
 │ pqrc-relay (dev exe)         │ └──────────────────────────────────┘
 └──────────────────────────────┘
 
-Standalone agent-interop packages (no app/crypto deps; §24):
+Agent-interop + ACP-router packages (§24 / §24a):
   PQRCMCP  — MCP server: EldrChat as a read-only secure-chat source (exe pqrc-mcp)
-  PQRCACP  — ACP agent: the on-device LLM pilots Xcode 27 (exe eldr-acp)
+  PQRCACP  — ACP: eldr-acp agent + phone ACPClient + ACPTransport seam
+             + ClientConnection/ToolExecutor (path-jailed, permission-gated)
+  EldrNode — standalone macOS eldr-node daemon (EldrNodeCore.serve, owner-gated)
+  PQRCNostr/{NearbyACPTransport (per-line sealed), RelayACPTransport (relay-carried)}
+  App/PQRC/Engine/{BackendRegistry, PairedPubkeySnapshot}
+  Apps/EldrACPConfigurator — the "Eldr node + setup hub" (ACPNodeHost, ACPRelayHost,
+             RelayProvisioner) — Mac Catalyst
 ```
+
+A chat→node ACP turn becomes a `session/prompt` carried as ordinary gift-wrapped +
+Double-Ratcheted ciphertext over the **same** mesh as chat; a relay sees only
+`ACP1|…`-framed ciphertext, indistinguishable from a normal message (§24a).
 
 **Send pipeline** (mirrors SPEC §0 diagram ①–⑥): compose → pad to bucket → ratchet-encrypt (AD per SPEC §8.3, with the fuzzed timestamp chosen *before* encryption and reused on the wrap) → rumor(1420, unsigned) → seal(13, sender Nostr key) → gift wrap(1059, fresh random key, fuzzed `created_at`) → outbox → `RelayTransport.publish` to recipient's kind-10050 relays. **Receive pipeline:** subscribe `{kinds:[1059], #p:[me]}` → dedupe by event id → unwrap → unseal → blocklist check on revealed sender **[D8]** → session lookup (or handshake / message-request path) → ratchet-decrypt → unpad → store → UI.
 
@@ -96,9 +122,20 @@ Standalone agent-interop packages (no app/crypto deps; §24):
 
 Keychain items (`kSecAttrAccessibleWhenUnlockedThisDeviceOnly`, **never** iCloud-synced): Nostr private key, PQRC identity private key, prekey private halves, SE-wrapped master storage key, and per-AI provider API keys (`apikey.<id>`, with a legacy shared account read as fallback — A31). The agent seed is re-derived on demand (SPEC §3.2), never stored.
 
-**Per-silo isolation (§19, A23/A33).** Everything above is scoped to the active account ("silo"). Each silo's Keychain secrets are AES-GCM-sealed under that silo's KEK (`passphrase → PBKDF2 → {siloID, KEK}`), its store master key is wrapped under the KEK, and its store file is `silo-<siloID>.store`. Per-account *preferences* (relay list, AI context domain, per-conversation context mode, per-thread skills, contact-activity map, display name) are namespaced `<base>.<siloID>` in UserDefaults so a second silo's runtime can't read the first's and a forensic image can't correlate them; `bootSilo` migrates any legacy flat keys into the booting silo and deletes the originals. A wrong passphrase derives a different, non-existent silo — indistinguishable from "no account". (Residual: the *count* of silos is still inferable from a forensic image — tracked as A26.)
+**Per-silo isolation & at-rest key custody (§19; DEVIATIONS AC31, T1, commits KS-1…KS-4).**
+> **Corrected June 2026.** The earlier `passphrase → PBKDF2 (fixed salt) → KEK` model — where the passphrase *derived* the at-rest key — was **reverted** because a fixed-salt PBKDF2 KEK is offline-brute-forceable from a stolen disk image, violating invariant 10. The current model:
 
-`EncryptedStore` **[D9]**: a 256-bit master key wrapped via Secure Enclave P-256 key agreement (SPEC §3.4) **and, in the silo model, additionally wrapped under the silo KEK**, unwrapped into memory after the silo unlocks. Message plaintext, session/ratchet state, skipped-key cache, and thread records are stored as AES-256-GCM blobs under per-record derived keys (HKDF over master key + record UUID). The SwiftData container additionally uses `completeUntilFirstUserAuthentication` file protection (A15 — downgraded from `.complete`, which made the DB unreadable while locked; the envelope encryption under the wrapped key is the actual at-rest guarantee). SwiftData models: `Contact` (npub, identity pub, agent pub, local nickname, friendly codename, verified flag, blocked flag), `Conversation` (type 1to1|group, group meta), `Message`, `Thread`, `ThreadMessage`, `OutboxEnvelope`, `ProcessedEventID`, `SessionRecord` (opaque encrypted blob), `PrekeyState`.
+Each account's silo key is a **random 256-bit key, hardware-wrapped by the Secure Enclave** (P-256, non-exportable). The passphrase is **not** the basis of the key — it is, at most, an optional second factor *nested under* the SE wrap, and otherwise only the opaque deniable namespace selector. From `AccountVault.swift`:
+- **`.secureEnclave`** (default account): `wrapped = SE.wrap(siloKey)`.
+- **`.passphrase(p)`** (hidden account): `wrapped = SE.wrap( AES-GCM(PBKDF2(p), siloKey) )` — passphrase nested *inside* the hardware wrap.
+
+`SiloKey.swift` derives **only** the namespace `siloID` from the passphrase (`siloID(for:)`) plus the optional inner `passphraseKEK`; it never derives the storage key. **Security property:** a disk image without the live, non-exportable SE key cannot unwrap either form *even with the correct passphrase* — there is no offline-brute-force surface. A **SE-availability tripwire** (`SecureEnclaveKeyWrapper.swift`, G3) fires `assertionFailure` (debug) / OSLog `.fault` (release) if the software-KEK fallback is ever reached on SE-capable hardware, logging no key bytes.
+
+**Two account shapes (AC31):** (1) a passphrase-less **default** account (≤1 per device, namespace `"default"`, opened on Face ID / device unlock, openly present — *not* deniable) and (2) any number of passphrase-gated **hidden** accounts (passphrase derives the deniable namespace + nests under the SE wrap). **Biometric is restricted to the default account** — caching a hidden account behind Face ID would reveal it exists. A wrong passphrase derives a different, non-existent namespace — indistinguishable from "no account". **No migration:** the legacy passphrase-silo path was removed via pre-launch wipe, not migrated.
+
+Per-account *preferences* (relay list, AI context domain, per-conversation context mode, per-thread skills, contact-activity map, display name) are namespaced `<base>.<siloID>` in UserDefaults so a second silo's runtime can't read the first's; `bootSilo` migrates any legacy flat keys into the booting silo and deletes the originals. (Accepted limit: the *count* of accounts is inferable from a forensic image because each carries its own SE-wrapped key blob — AC31 resolved count-hiding as **do-not-build**, not a pending TODO.)
+
+`EncryptedStore` **[D9]**: the random per-silo master key (above) is unwrapped into memory after the silo unlocks. Message plaintext, session/ratchet state, skipped-key cache, and thread records are stored as AES-256-GCM blobs under per-record derived keys (HKDF over master key + record UUID). The SwiftData container additionally uses `completeUntilFirstUserAuthentication` file protection (A15 — downgraded from `.complete`, which made the DB unreadable while locked; the envelope encryption under the wrapped key is the actual at-rest guarantee). SwiftData models: `Contact` (npub, identity pub, agent pub, local nickname, friendly codename, verified flag, blocked flag), `Conversation` (type 1to1|group, group meta), `Message`, `Thread`, `ThreadMessage`, `OutboxEnvelope`, `ProcessedEventID`, `SessionRecord` (opaque encrypted blob), `PrekeyState`.
 
 ## 4. Transport
 
@@ -112,7 +149,7 @@ Keychain items (`kSecAttrAccessibleWhenUnlockedThisDeviceOnly`, **never** iCloud
 
 **Lock screen first (§19).** The app **always** launches to a bare passphrase screen (`AccountGateView`) and **never auto-boots** — auto-booting would reveal an account exists. Face ID / Touch ID is the default convenience unlock for the *first* account (auto-prompted at launch); the passphrase is the labelled-secondary path and the only way into a hidden account. A correct passphrase derives `{siloID, KEK}` and boots that silo; a wrong one derives a different, non-existent silo (looks like "no account yet").
 
-Account creation (a new passphrase that maps to an empty silo): pick a **display name** and that **passphrase** → generate Nostr key + PQRC identity key → derive agent key → friendly explainer screens (no phone/email/wallet; keys live only on this device) → **explicit, unskippable "No recovery — by design" warning** (lose the passphrase = that account and all its history are gone forever; recovery is a non-goal, SPEC §0) → publish kind 10420 binding + kind 10421 bundle + kind 10050 relay list to the configured relays → land on empty conversation list. Face ID is silently best-effort enabled on creation (no device passcode/biometric → the account stays passphrase-only). Settings exposes my npub as text + QR and an account **swap** (lock + return to the gate to open a different silo). New chats: paste npub or scan QR (camera permission requested just-in-time); client fetches peer's 10420/10421, verifies the binding **both directions**, and verifies prekey signatures before any handshake. Peer without a valid 10420/10421 → "hasn't set up PQRC yet" invite state, no fallback **[scope]**.
+Account creation (AC31 / KS-4): the **primary path creates the passphrase-less default account** (display name + the unskippable no-recovery acknowledgement → create; opened thereafter on Face ID / device unlock). Entering a *new passphrase* at the gate instead creates a **hidden** account mapped to that passphrase's deniable namespace. Either way: pick a **display name** (and, for a hidden account, the **passphrase**) → generate Nostr key + PQRC identity key → derive agent key → friendly explainer screens (no phone/email/wallet; keys live only on this device) → **explicit, unskippable "No recovery — by design" warning** (lose the passphrase = that account and all its history are gone forever; recovery is a non-goal, SPEC §0) → publish kind 10420 binding + kind 10421 bundle + kind 10050 relay list to the configured relays → land on empty conversation list. Face ID is silently best-effort enabled on creation (no device passcode/biometric → the account stays passphrase-only). Settings exposes my npub as text + QR and an account **swap** (lock + return to the gate to open a different silo). New chats: paste npub or scan QR (camera permission requested just-in-time); client fetches peer's 10420/10421, verifies the binding **both directions**, and verifies prekey signatures before any handshake. Peer without a valid 10420/10421 → "hasn't set up PQRC yet" invite state, no fallback **[scope]**.
 
 ## 6. Conversations
 
@@ -158,7 +195,7 @@ A human can spin up an embedded thread (Discord-style) inside any 1:1 or group c
 
 ## 9. AI integration
 
-`AgentProvider` protocol: `draftReply(context:) async throws -> Draft` and `threadTurn(context:) async throws -> AgentTurn?` (where `AgentTurn` is zero or more messages — the only way agent output enters the world). The provider list and per-AI profiles have grown substantially since the original cut — see **§20 (multi-AI)** for the full backend list, the per-AI profile model, the solo-AI chat, the "AI here" context chip, and the default-context rules; **§21** for the egress firewall; **§23** for thread skills. The protocol-level gating below is unchanged.
+`AgentProvider` protocol: `draftReply(context:) async throws -> Draft` and `threadTurn(context:) async throws -> AgentTurn?` (where `AgentTurn` is zero or more messages — the only way agent output enters the world). The provider list and per-AI profiles have grown substantially since the original cut — see **§20 (multi-AI)** for the full backend list, the per-AI profile model, the solo-AI chat, the "AI here" context chip, and the default-context rules; **§21** for the egress firewall; **§23** for thread skills; **§24a** for the ACP router (the `acp` backend that delegates to an external coding harness). Which AI handles a draft / autonomous turn is now a pluggable **`AISelectionPolicy`** (`PersonaRuntime.setAISelectionPolicy`; default `DefaultAISelectionPolicy`; opt-in `CapabilityRoutingPolicy` routes by *declared* capability, never message content). The egress firewall now also **scrubs credentials** on the remote path (G4, §21). The protocol-level gating below is unchanged.
 
 Providers in v1: **MockAgentProvider** (deterministic, for tests + Local Universe) · **FoundationModelsAgentProvider** (on-device iOS 26, availability-gated, default when available) · **AnthropicAPIProvider [D3]** and the other remote/self-hosted backends in §20. Every `isRemote` provider is **off by default** behind an explicit consent screen (*"Decrypted conversation context will be sent to a remote API … message content does [leave the device]. This trades privacy for capability."*); its key lives only in the Keychain; it sends only the firewall-redacted, bounded context window.
 
@@ -172,7 +209,8 @@ Providers in v1: **MockAgentProvider** (deterministic, for tests + Local Univers
 - **Servers / Relays** — add/remove any `ws(s)://` URL (per-account, namespaced per silo), live socket status; the keywords **`local`** (in-process simulator), **`host`** (run a pocket relay, §22) and **`nearby`** (join one) are accepted here; Debug: chaos sliders.
 - **Nearby** — the Multipeer local-first link (default ON in Debug, OFF in Release); the Local Network prompt only fires when on.
 - **Prekeys** — one-time count, "Republish bundle".
-- **AI (§20–21)** — tethered-AI list (add/remove, per-AI **on/off**, per-AI key, backend picker), per-AI **Context & behavior** profile (instructions / gather-policy / depth / output mode), the **egress firewall** toggle, the off-device-AI **consent flow**, default invite duration, **This workstation's context domain** (§23), and transparency views — **What your AI sees / View tethered LLM context** + **Test primary AI now**.
+- **AI (§20–21)** — tethered-AI list (add/remove, per-AI **on/off**, per-AI key, backend picker incl. **PCC** and **`acp`**), per-AI **Context & behavior** profile (instructions / gather-policy / depth / output mode; PCC adds a reasoning-depth control), the **egress firewall** toggle, a **per-conversation firewall override** (`off|marked|full`, default inherits the account default — AC32), the off-device-AI **consent flow**, default invite duration, **This workstation's context domain** (§23), and transparency views — **What your AI sees / View tethered LLM context** + **Test primary AI now**.
+- **Mac coding agent (ACP) (§24a)** — pair an Eldr node so its harness can answer in a conversation under the owner's AI window; **remote dev-control consent** is OFF by default, per-node, per-silo (gates whether a paired node may be driven over the relay). The standalone `eldr-acp`-in-Xcode case is still configured in Xcode, not here.
 - **Privacy** — ephemeral receiving keys toggle (present, **off, marked experimental** per SPEC §9.3); blocklist; Reachability (open inbox for a bounded window, A12).
 - **Data** — delete conversation, wipe identity (double confirm).
 - **About** — version, AGPL-3.0 license, THREAT_MODEL summary: "Relays can see your IP and that *someone* messaged you. They cannot see who sent it or what it says."
@@ -218,14 +256,19 @@ These document features built during the rapid post-v1 push. Each is grounded in
 the relevant DEVIATIONS IDs are cited inline. Where a feature is only partially
 landed it is marked **(in progress)**.
 
-## 19. Deniable multi-account silos  [A23–A26, A33]
+## 19. Deniable multi-account silos  [A23–A26, A33; superseded key model in **AC31**]
 
-One device holds **N passphrase-isolated accounts** ("silos"). The mechanism:
-`passphrase → PBKDF2 (fixed app salt) → siloID + KEK` (`SiloKey.swift` in PQRCCore).
-Each silo's Keychain secrets are AES-GCM-sealed under its KEK, and its store master
-key is wrapped under it (§3), so a silo is unreadable — **and its existence
-unprovable** — without the passphrase. Isolation is **cryptographic, not OS-enforced**
-(iOS gives one app a single sandbox; there is no Android-style secure island).
+One device holds **N isolated accounts** ("silos"): one passphrase-less **default**
+account and any number of passphrase-gated **hidden** accounts. The mechanism (corrected
+per AC31 — see §3 for the full rationale; `AccountVault.swift` + `SiloKey.swift`):
+the passphrase derives **only** the opaque deniable namespace `siloID` (`SiloKey.siloID(for:)`),
+**not** the at-rest key. Each silo's storage key is a **random 256-bit key wrapped by the
+Secure Enclave**; for a hidden account the passphrase adds a layer *nested inside* that
+hardware wrap. A silo is unreadable — **and a hidden account's existence unprovable from
+the running app** — without both the live SE key and (for hidden accounts) the passphrase.
+The earlier `passphrase → PBKDF2 → KEK`-derives-the-key model was reverted (it was
+offline-brute-forceable). Isolation is **cryptographic, not OS-enforced** (iOS gives one
+app a single sandbox; there is no Android-style secure island).
 
 - **Lock screen, never auto-boot (§5).** The app always launches to `AccountGateView`.
   A wrong passphrase maps to a *different, non-existent* silo — indistinguishable from
@@ -248,22 +291,32 @@ unprovable** — without the passphrase. Isolation is **cryptographic, not OS-en
 - **Per-silo namespacing [A33].** Per-account preferences are keyed `<base>.<siloID>`
   (§3) so a cover silo never surfaces a hidden silo's relays/contacts; `bootSilo`
   migrates legacy flat keys in and deletes the originals.
-- **Known limit [A26] (tech-debt):** the *number* of silos is still inferable from a
-  forensic image (per-silo `silo-*.store` files / `.<siloID>` UserDefaults suffixes).
-  Robust count-hiding needs a single pooled store of opaque records (Phase 2); naive
-  decoy files are distinguishable, so they are deliberately not shipped.
+- **Accepted limit [A26 / AC31] (not a TODO):** the *number* of accounts is inferable
+  from a forensic image (per-silo `silo-*.store` files / `.<siloID>` UserDefaults suffixes,
+  and now each account's own SE-wrapped key blob). AC31 **resolved count-hiding as
+  do-not-build**: it is incompatible with per-account SE-wrapping and buys ≈zero benefit
+  against a coercer who can already see the device — deniability protects each account's
+  *contents* and the passphrase→data mapping (duress/decoy), not the count. This is a
+  documented, accepted property, not pending Phase-2 work.
 
 ## 20. Multi-AI tethering, profiles, and context control  [A20, A27, A28, A30, A31, A34]
 
 An account can **tether several AIs at once** (on-device + token APIs + self-hosted),
 each independently configured.
 
-**Backends.** On-device **Core AI** (FoundationModels) · **Claude** (Anthropic) ·
-**OpenAI** · **Gemini** · **OpenRouter** (one key, many model slugs, A27) · **Groq**
-(fast, A30) · **Custom / self-hosted** — *any* OpenAI-compatible server (Ollama /
-LM Studio / vLLM or another vendor; API key OPTIONAL, base URL required; the URL
-builder accepts a bare `host:port`, a `…/v1`, or a full path, A30/A31) · **hub** (the
-nearby host's shared AI, §22) · **Demo** (stub replies). Local plaintext `http://` is
+**Backends** (data-driven from `BackendRegistry.all`). On-device **Core AI**
+(FoundationModels) · **Claude** (Anthropic) · **OpenAI** · **Gemini** · **OpenRouter**
+(one key, many model slugs, A27) · **Groq** (fast, A30) · **Custom / self-hosted** —
+*any* OpenAI-compatible server (Ollama / LM Studio / vLLM or another vendor; API key
+OPTIONAL, base URL required; the URL builder accepts a bare `host:port`, a `…/v1`, or a
+full path, A30/A31) · **Apple Private Cloud Compute** (`pcc`, A40 — `isRemote` + consent,
+but **exempt from the egress firewall** because it is attested + no-retention; gated
+behind `ELDR_PCC_SDK`, currently OFF because the SDK symbols are absent — see statusreport
+§1.3) · **`acp`** (Mac coding harness, §24a — `isRemote` + firewalled + `routingCapabilities==["code"]`;
+falls back to a Demo stub until a node is paired+consented, then swaps in `ACPAgentProvider`) ·
+**hub** (the nearby host's shared AI, §22) · **Demo** (stub replies). A new classifier
+**`appliesEgressFirewall`** decouples "firewalled" from "isRemote" (so PCC can be remote
+yet firewall-exempt). Local plaintext `http://` is
 permitted to private addresses only via `NSAllowsLocalNetworking`; the public internet
 still requires HTTPS. **Reasoning-trace stripping [A34]:** `<think>…</think>` and
 Harmony/channel-tagged chain-of-thought (gpt-oss, Gemma QAT, qwen3/DeepSeek-R1) are
@@ -364,6 +417,13 @@ pinned-skill lists and the per-account context domain live in (per-silo) UserDef
 Two **standalone SPM packages** (no app/crypto/SwiftUI deps; `swift test` headless,
 network-free) that adopt existing open protocols rather than inventing one.
 
+> **MCP status (June 2026):** the ACP-router plan (`docs/ACPRouterplan.md` step 6)
+> proposes *removing* MCP once ACP supersedes it. As of this writing **MCP is still
+> shipped and green** — `PQRCMCP` (15/15 tests), the in-app `LocalMCPServer` /
+> `RuntimeSecureChatBridge`, the "Local agent access (MCP)" Settings toggle, and the
+> PQRCMCP CI lane are all present. ACP is being built out **alongside** MCP (§24a), not
+> as a completed drop-in replacement. Removal is a future decision, not done.
+
 - **`PQRCMCP` — local MCP server [A35].** EldrChat as a **read-only secure-chat source**
   for any spec-compliant MCP client (Goose, Xcode, Claude, …) over **stdio JSON-RPC**.
   `MCPServer` exposes `initialize/ping/tools/list/tools/call/resources` behind a
@@ -394,17 +454,59 @@ network-free) that adopt existing open protocols rather than inventing one.
   `String.strippingReasoningTrace()` is **vendored** (not imported) to keep the CLI
   dependency-free; the brain is behind an `LLMClient` protocol (OpenAI-compatible,
   configured via `ELDR_LLM_URL`/`ELDR_LLM_TOKEN`/`ELDR_LLM_MODEL`; `ELDR_ACP_FAKE_LLM=1`
-  for a model-free run). Library `PQRCACP` + executable `eldr-acp` + tests.
-  **(In progress):** end-to-end ACP testing driven from Xcode 27 is being exercised in a
-  separate worktree; the committed state is the standalone agent + its headless suite.
+  for a model-free run). Library `PQRCACP` + executable `eldr-acp` + tests. **Shipped:**
+  the agent now also compiles into the iOS app as the phone-side ACP **client** (§24a);
+  the standalone `eldr-acp`-in-Xcode case remains the dual.
+
+## 24a. EldrChat as a secure, universal ACP router  [AC33, AC34, AC35; plan in `docs/ACPRouterplan.md`]
+
+The product's biggest June-2026 addition. **EldrChat is a secure ACP _router_:** the phone
+is an ACP **client**; the actual coding work is delegated to swappable ACP harnesses
+(Xcode ACP, OpenClaw, Claude Code, Codex, Gemini CLI, …) running on an **Eldr node**
+(a Mac, or the standalone `eldr-node` daemon), reached over the **same** E2EE mesh as
+chat. EldrChat owns identity, E2EE, transport, history, consent, and the router; the
+harness owns the model and the tools.
+
+1. **Phone ACP client** — `ACPClient` actor over an `ACPTransport` seam (`Packages/PQRCACP`):
+   `initialize` / `session/new` / `session/prompt`, parses `session/update` into a UI
+   stream, answers `session/request_permission`. The phone advertises **no** fs/terminal
+   capabilities (it is remote control; the harness runs on the node).
+2. **Selectable ACP backend** — `ACPAgentProvider` (`Packages/PQRCAgent`) answers a chat
+   as an ordinary `AgentProvider`; tool activity folds into the reply as plain text.
+   Selected via the `acp` entry in `BackendRegistry`.
+3. **Two sealed transports** (`Packages/PQRCNostr`): **`NearbyACPTransport`** — per-line
+   `pqrc-seal-v1` (secp256k1 ECDH + ChaChaPoly) + an identity-bound challenge-response
+   hello over Multipeer; frames from unproven peers dropped. **`RelayACPTransport`** —
+   ACP lines carried as ordinary ratcheted gift-wrap ciphertext over the relay; envelope
+   `ACP1|<lineId>|<seq>|<total>|<b64url>`, reassembled and re-ordered by a monotonic
+   per-send index; an `isACPFrame` magic prefix discriminates ACP from chat.
+4. **Node host** — `ACPNodeHost` (sealed Nearby) and `ACPRelayHost` (relay) run
+   `runACPAgent` on the Mac (`Apps/EldrACPConfigurator`, the "Eldr node + setup hub",
+   Mac Catalyst); the headless **`eldr-node`** daemon (`Packages/EldrNode`,
+   `EldrNodeCore.serve`, `--owner` required, fail-closed) is the standalone equivalent.
+5. **Task routing** — `CapabilityRoutingPolicy` (`AISelectionPolicy.swift`) routes by a
+   per-AI **declared** `routingCapabilities` vs a host-supplied scope→requirement
+   classifier; it **never reads message content** (privacy) and is **opt-in**.
+6. **Security gates (MUST):** **C-3** — relay/Nearby intake admits a frame to the agent
+   only when `isACPFrame(body) && sender == ownerIdentityHex` (the verified,
+   both-direction-bound contact identity). **C-1** — mutating tools (`write_file` /
+   `run_shell`) are permission-gated, **deny-on-timeout / deny-on-error**; the node never
+   sets `allowUngatedTools`. **C-2** — file tools jailed to the session working dir
+   (symlinks resolved before the prefix check). Remote dev-control consent is **OFF by
+   default**, per-node, per-silo. *(Known gaps as of this writing — see `statusreport.md`:
+   the in-app `acp` provider auto-grants tool permission; the cancel-vs-permission
+   ordering has an intermittent fail-open; the G4 credential scrub is not on the
+   PQRCACP→LLM path; the standalone daemon does not yet bootstrap the owner contact.)*
 
 ---
 
 ## 18. Decisions registry → copy into docs/DEVIATIONS.md
 
 > Note: `docs/DEVIATIONS.md` is the live changelog (appended by the feature work) and is
-> now the authoritative registry, including all post-v1 entries (A19–A36, N17–N26).
-> The table below is the original seed; see DEVIATIONS for everything since.
+> now the authoritative registry, including all post-v1 entries (A19–A43, AC1–AC35,
+> N17–N26). The table below is the original seed; see DEVIATIONS for everything since.
+> **ID-namespace caution:** the `A`-series and `AC`-series are distinct — e.g. **A33**
+> (per-silo namespacing) ≠ **AC33** (relay-carried ACP). Cite the exact prefix.
 
 | ID | Decision | Tag |
 |---|---|---|

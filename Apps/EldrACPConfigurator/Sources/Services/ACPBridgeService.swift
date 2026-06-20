@@ -382,10 +382,22 @@ final class ACPBridgeService: ObservableObject {
         return link
     }
 
-    /// Revoke pairing: stop, delete the identity key, and forget conversations.
+    /// Revoke pairing: stop, delete ALL node identity material, and forget
+    /// conversations. Must clear every bridge-* Keychain item the node persists
+    /// (`startMessagingNode` loads four of them); deleting only the Nostr key left the
+    /// PQRC identity seed, the identity-DH key, and the prekey state behind, so the
+    /// next pair reused a stale PQRC identity under a fresh Nostr key and the handshake
+    /// silently mismatched. Clearing all four makes re-pair a clean slate.
     func unpair() {
         disable()
-        keychain.delete(account: keyAccount)
+        for account in [
+            keyAccount,                    // bridge-nostr-identity
+            "bridge-pqrc-identity-seed",
+            "bridge-identity-dh",
+            "bridge-prekey-state",
+        ] {
+            keychain.delete(account: account)
+        }
         keypair = nil
         activeConversations.removeAll()
         inbound.removeAll()
@@ -566,7 +578,11 @@ final class ACPBridgeService: ObservableObject {
         let llmConfig = Self.relayHostLLMConfig()
         // No usable endpoint (empty URL) ⇒ don't serve a dead agent over the relay.
         guard !llmConfig.url.isEmpty else { return }
-        let llm = OpenAICompatibleLLMClient(config: llmConfig)
+        DiagnosticsLog.shared.post(
+            .node, .info, "Relay ACP host starting",
+            "owner=\(ownerIdentityHex.prefix(12))… · LLM=\(llmConfig.url) · model=\(llmConfig.model)")
+        let llm = InspectingLLMClient(
+            wrapping: OpenAICompatibleLLMClient(config: llmConfig), model: llmConfig.model)
         let toolEnvironment = ToolEnvironment(
             workdir: agentWorkdir, baseEnvironment: ProcessInfo.processInfo.environment)
         let host = ACPRelayHost(

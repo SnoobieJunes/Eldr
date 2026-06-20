@@ -106,3 +106,148 @@ Tests landed alongside the post-v1 features (DEVIATIONS A20–A36). The framewor
 - Hardware-only paths remain untested in CI: the Multipeer radio adapters for both direct-Nearby (T11) and the relay hub, and the live self-hosted/LM-Studio integrations (verified manually, noted in A30/A34).
 - Performance budgets (§11) still reference the `ptr`/blob path for the 1 MB case; the shipped large-text path is relay **chunking** (N26/A25) and is covered functionally by `ChunkingTests` (size-budget + escape-heavy bucket fit), not yet by a perf budget.
 - The frozen vectors (§2) were regenerated pre-freeze for the NIP-40 expiration tag (A22) and deferred-fold rekey semantics (N6); they remain byte-frozen now.
+
+---
+
+## 14. Live bring-up & manual end-to-end test (phone ↔ Mac node ↔ LLM ↔ Xcode) + troubleshooting
+
+This section is the **manual runbook** for the ACP-router stack — the part the headless
+suites above can't cover (real radios, real relay, real LLM, real Xcode). Use it to
+stand the system up and to self-diagnose when a piece goes dark. Added 2026-06-20.
+
+### 14.0 Topology — know what runs where
+
+```
+ iPhone: EldrChat ──┐                                   ┌── Xcode-beta (ACP client)
+ (client + router)  │                                   │     spawns ~/.local/bin/eldr-acp-xcode
+                    ▼                                    ▼
+            wss://relay.lerants.com  ◀──E2EE──▶  Mac: EldrACPConfigurator (the "Eldr node")
+            (khatru, NIP-42 AUTH)                      ├─ messaging node (PQRC identity, relay)
+                    ▲                                   ├─ ACP host (drives a harness)
+ Mac: EldrChat ─────┘                                   └─ LLM: LM Studio  http://127.0.0.1:1337/v1
+ (Catalyst, optional second client)
+```
+
+Two **separate** ACP paths — don't conflate them when debugging:
+- **Path A — eldr-acp *in Xcode*** (DEVIATIONS A36): Xcode-beta spawns `eldr-acp` over
+  stdio so your LM-Studio model pilots Xcode. This is the "agent icon in Xcode" path.
+- **Path B — EldrChat *router*** (AC33–AC35): the phone drives the Mac node's harness
+  over the relay. This is the chat/messaging path. The relay matters here, **not** for Path A.
+
+### 14.1 Pre-flight (verify each layer in isolation, bottom-up)
+
+1. **Relay reachable?** `curl -s -H "Accept: application/nostr+json" https://relay.lerants.com`
+   → must return the NIP-11 JSON (`"name":"PQRC Anchor Relay"`, `supported_nips` incl. 42).
+   If this fails, the relay/DNS/TLS is the problem — nothing client-side will help.
+   (Confirmed UP on 2026-06-20.)
+2. **LLM reachable?** `curl -s http://127.0.0.1:1337/v1/models` → must list your loaded model.
+   Empty/refused ⇒ LM Studio isn't serving; start its server + load a model. Prefer an
+   **instruct** model with tool/function-calling, not a reasoning model (A37).
+3. **Agent binary smoke test (Path A, no model needed):**
+   `ELDR_ACP_FAKE_LLM=1 ~/.local/bin/eldr-acp-xcode` then paste an `initialize` JSON-RPC
+   line — it must reply immediately. No reply ⇒ launcher/env/path problem.
+
+### 14.2 Observability — stop flying blind
+
+The planned in-app Agent Inspector / Nearby scanner are **not built yet**, so use the OS log
+and the agent log file. Run these in a terminal *while* you reproduce a problem:
+
+```bash
+# The Mac node (Configurator): relay connect/AUTH, pairing, ACP host
+log stream --level debug --predicate 'subsystem == "chat.eldr"'
+# EldrChat (iOS app on Mac/Catalyst, or via `xcrun simctl spawn booted log stream` on a sim)
+log stream --level debug --predicate 'subsystem == "chat.pqrc"'
+# The ACP agent's own stderr (tool calls, LLM errors, finish_reason):
+tail -f ~/.config/eldr-acp/eldr-acp.log
+# Opt-in structured ACP event log (set in ~/.config/eldr-acp/env, then restart):
+#   ELDR_ACP_EVENTS_FILE=~/.config/eldr-acp/events.jsonl
+tail -f ~/.config/eldr-acp/events.jsonl
+```
+
+What to look for: a relay session is healthy when you see connect → `["AUTH",challenge]`
+→ our signed `AUTH` → `["OK",...]` → `REQ`/`EOSE`. **No AUTH line = the node never loaded
+its identity** (see 14.4) and the relay will not serve it kind-1059.
+
+### 14.3 Bring-up sequence (the order that works)
+
+1. Open **`Eldr.xcworkspace`** (root) in Xcode — both apps build from here (one shared
+   package graph). Run **EldrACPConfigurator**.
+2. In the Configurator wizard: set LLM URL `http://127.0.0.1:1337/v1`, **Test** (must go
+   green), **Install** the agent + launcher.
+3. **Path A (Xcode agent icon):** in **Xcode-beta ▸ Settings ▸ Intelligence ▸ Add an Agent**,
+   Name `Eldr`, Executable `/Users/<you>/.local/bin/eldr-acp-xcode`, no interpreter/args,
+   **Add**. The agent only appears in **Xcode-beta** (the toolchain with the beta SDK),
+   not stable Xcode — that is why "I don't see the icon" usually means it was added to the
+   wrong Xcode or not at all. The Configurator writes the *launcher*; the **Add an Agent**
+   step in Xcode is still manual (Xcode exposes no API to register it).
+4. **Path B (phone ↔ Mac):** start the node (pairing screen shows a QR). On the phone,
+   EldrChat ▸ scan the QR ▸ accept the request. **Both** the phone and the Mac node must
+   list the **same** relay (`wss://relay.lerants.com`) in Settings ▸ Servers — a relay
+   mismatch is the #1 "messages don't arrive" cause after AUTH.
+5. Send a message phone→Mac; it should appear in the node's conversation within a few
+   seconds. Watch both `log stream`s if it doesn't.
+
+### 14.4 Troubleshooting by symptom (what we hit on 2026-06-20)
+
+- **5 Keychain prompts → you hit Deny → relay "broke," test chat empty.**
+  Root cause: the node reads ~5 Keychain items at startup (`bridge-nostr-identity`,
+  `bridge-pqrc-identity-seed`, `bridge-identity-dh`, `bridge-prekey-state`, plus
+  `llm-token`). On macOS, when the app's **code signature changes** (a rebuild, a new
+  `DEVELOPMENT_TEAM`, or changed entitlements — all of which happened), the legacy
+  Keychain prompts once per item because the old ACL no longer matches the new binary.
+  **Deny → the identity load returns nil → the messaging node never starts → no relay
+  AUTH → no messages.** The LLM still works because that path injects the token directly.
+  **Fix:** on each prompt click **Always Allow** (adds the new binary to the item's ACL,
+  permanently). If it's wedged, reset and re-pair:
+  ```bash
+  for a in bridge-nostr-identity bridge-pqrc-identity-seed bridge-identity-dh bridge-prekey-state; do
+    security delete-generic-password -s 'chat.eldr.acp.configurator' -a "$a" 2>/dev/null
+  done
+  # then Unpair in the Configurator and pair the phone again (see 14.3 step 4)
+  ```
+  Stale `llm-token` nagging with LM Studio (no token needed)? Remove it:
+  `security delete-generic-password -s 'chat.eldr.acp.configurator' -a 'llm-token'`.
+  *Durable code fix (recommended, not yet applied): store node Keychain items in the
+  data-protection keychain (`kSecUseDataProtectionKeychain: true`), keyed to the team's
+  access group — stable across rebuilds, never prompts. Tradeoff: the launcher's
+  `security` CLI read of `llm-token` would need the same change.*
+
+- **Messages from the phone never show on the Mac (relay).** Walk the ladder: (1) relay
+  up? (14.1.1 — it is). (2) node AUTHed? (14.2 — look for the AUTH line; if absent, it's
+  the Keychain-deny above). (3) same relay on both ends? (14.3 step 4). (4) handshake
+  done? You can only message a peer after pairing + the 10420/10421 exchange — if you
+  unpaired mid-session, re-pair cleanly (the unpair now clears all four identity items;
+  before 2026-06-20 it left three behind, so an old re-pair could be half-stale).
+
+- **Agent makes tool calls but not visible in Xcode's ACP.** That's Path A vs the
+  Configurator's *in-app* test chat (which drives the agent directly). The agent working
+  in the Configurator proves the binary/LLM are fine; to get the Xcode icon do 14.3 step 3
+  **in Xcode-beta**.
+
+- **LLM stops responding / model "went away" / test chat stops recording.** Check
+  `~/.config/eldr-acp/eldr-acp.log` and the **LM Studio server log** together. Usual
+  causes: LM Studio unloaded the model (idle TTL) — reload it; context flooded (a big
+  `read_file`/`xcodebuild` dump pushed out the system prompt) — lower the context-budget
+  knobs in `~/.config/eldr-acp/env` (A37); or a reasoning model emitted only a scratchpad —
+  switch to an instruct model. If the test chat froze right after a Keychain Deny, it's the
+  identity-load failure above, not the LLM.
+
+- **"Operation not permitted" connecting to the LLM (macOS).** The Configurator must be
+  **unsandboxed** (a sandboxed app with no `network.client` EPERMs every socket). Verify:
+  `codesign -d --entitlements - "$(mdfind -name EldrACPConfigurator.app | head -1)"` must
+  show `app-sandbox = false`. (Fixed 2026-06-20; see DEVIATIONS AC36 / statusreport §2.7.)
+
+- **"Operation not permitted" connecting to the LLM (iOS, real device).** Needs
+  `NSLocalNetworkUsageDescription` (added 2026-06-20) **and** the Local Network permission
+  granted on the device (Settings ▸ EldrChat ▸ Local Network). A plaintext `http://` LAN
+  LLM also relies on `NSAllowsLocalNetworking` (present).
+
+### 14.5 What to automate next (close the manual gaps)
+- A `make doctor` / diagnostic command that runs 14.1 + the AUTH-line check and prints a
+  green/red ladder, so bring-up isn't a manual log hunt.
+- Build the **Agent Inspector** (live ACP session: prompt, `session/update` stream, each
+  tool call + permission decision, `finish_reason`/token counts) and the **Nearby scanner**
+  promised in `docs/ACPRouterplan.md` — they replace most of 14.2.
+- A headless **relay round-trip** integration test (gated, opt-in like T9): publish a
+  gift-wrap to `relay.lerants.com` as identity A, AUTH as B, confirm delivery — catches an
+  AUTH/relay regression the in-memory `LocalRelaySimulator` (§7) can't.

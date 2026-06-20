@@ -34,7 +34,11 @@ let package = Package(
             // build green on any Xcode while leaving the iOS PCC tier untouched.
             swiftSettings: [
                 .swiftLanguageMode(.v6),
-                .define("ELDR_PCC_SDK", .when(platforms: [.iOS])),
+                // ELDR_PCC_SDK is OFF by default (DEVIATIONS A40): the Private Cloud
+                // Compute symbols (PrivateCloudComputeLanguageModel, ContextOptions)
+                // are absent from the installed iOS 26.5 and 27.0 SDKs, so defining it
+                // breaks the app build (cannot find type in scope). Opt in explicitly
+                // — `.define("ELDR_PCC_SDK")` — only on a toolchain whose SDK vends them.
             ]
         ),
         .testTarget(

@@ -62,6 +62,20 @@ extension String {
         if let r = range(of: "<channel|>", options: [.caseInsensitive, .backwards]) {
             return String(self[r.upperBound...])
         }
+        // One-pipe variant some quants emit: the opener is "<|channel>thought" /
+        // "<|channel>analysis" and the ANSWER rides a "final" channel spelled the same
+        // one-pipe way ("<|channel>final[<|message|>] ANSWER"). Without this the next
+        // line would treat the whole reply as thought-only and return "" — silently
+        // dropping a real answer. Keep what follows the LAST final marker.
+        for marker in ["<|channel>final", "<channel>final"] {
+            if let r = range(of: marker, options: [.caseInsensitive, .backwards]) {
+                var tail = String(self[r.upperBound...])
+                for lead in ["<|message|>", "<message>"] where tail.hasPrefix(lead) {
+                    tail = String(tail.dropFirst(lead.count))
+                }
+                if !tail.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { return tail }
+            }
+        }
         if range(of: "<|channel", options: .caseInsensitive) != nil { return "" }
         return self
     }

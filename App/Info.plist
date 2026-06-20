@@ -27,6 +27,12 @@
 		<string>_eldr-acp._tcp</string>
 		<string>_eldr-acp._udp</string>
 	</array>
+	<!-- REQUIRED (iOS 14+) for ANY local-network access: discovering/joining the
+	     Multipeer "Nearby" mesh AND connecting to a self-hosted LLM on your LAN.
+	     Without this key the OS denies the connection with "Operation not permitted"
+	     and never even shows the Local Network permission prompt. -->
+	<key>NSLocalNetworkUsageDescription</key>
+	<string>EldrChat uses your local network to connect to nearby devices over the encrypted Multipeer link and to reach a self-hosted AI you run on your own network. Nothing is sent to third parties.</string>
 	<!-- Allow plaintext HTTP ONLY to local/private network addresses (a
 	     self-hosted LLM on your LAN, e.g. http://192.168.x.x:11434). The public
 	     internet still requires HTTPS — every hosted AI/relay endpoint is https.

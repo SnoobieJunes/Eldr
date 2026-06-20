@@ -3,12 +3,19 @@
 <plist version="1.0">
 <dict>
 	<!-- Apple Private Cloud Compute (FoundationModels PrivateCloudComputeLanguageModel,
-	     used by PCCFoundationModelsProvider — see DEVIATIONS A40).
-	     MANAGED entitlement: Apple provisions it to the team only after the PCC
-	     access request is approved (developer.apple.com/private-cloud-compute).
-	     Until then, on-device signing/provisioning that includes this key will
-	     fail — that is expected. -->
+	     used by PCCFoundationModelsProvider — see DEVIATIONS A40 / AC36).
+	     DISABLED on purpose: PCC is OFF by default (the ELDR_PCC_SDK build flag is not
+	     defined because the symbols are absent from the installed iOS SDKs), and this is
+	     a MANAGED entitlement Apple only provisions after the PCC access request is
+	     approved. Leaving it ENABLED makes on-device signing/provisioning FAIL with
+	     "provisioning profile doesn't include the com.apple.developer.private-cloud-compute
+	     entitlement" — which blocks testing on a real device. Re-enable the key below
+	     TOGETHER with the ELDR_PCC_SDK flag once PCC is approved and the SDK vends the
+	     symbols (developer.apple.com/private-cloud-compute).
+	-->
+	<!--
 	<key>com.apple.developer.private-cloud-compute</key>
 	<true/>
+	-->
 </dict>
 </plist>

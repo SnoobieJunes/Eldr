@@ -364,7 +364,11 @@ public actor ACPAgent {
             guard response.wantsTools else {
                 // Final answer. Streaming already forwarded `alreadyStreamed`; emit only
                 // the remainder (the whole text when nothing streamed, e.g. tests/echo).
-                let text = response.content.isEmpty ? "(no response)" : response.content
+                let text = response.content.isEmpty
+                    ? "(The model returned no final answer — only private reasoning, which is "
+                        + "stripped from chat. If this is a reasoning/QAT model, switch to an "
+                        + "instruct model or disable its “thinking” mode for agentic tool use.)"
+                    : response.content
                 let remainder = Self.remainder(of: text, afterStreaming: alreadyStreamed)
                 if !remainder.isEmpty { await emitMessage(sessionId: sessionId, text: remainder) }
                 logSessionEnd(sessionId: sessionId, cwd: cwd, summary: text)

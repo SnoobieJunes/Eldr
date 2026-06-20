@@ -184,13 +184,18 @@ struct AISettingsView: View {
             }
 
             // Self-hosted / custom: an OpenAI-compatible server URL (key optional).
+            // The field is a normal, editable, clearable TextField bound to the
+            // AI's stored baseURL. The placeholder is phrased as an instruction
+            // (not a ready-made URL) so a realistic-looking address isn't mistaken
+            // for prefilled, locked-in text — the example LAN address lives in the
+            // caption below instead.
             if ConfiguredAI.needsBaseURL(currentKind) {
-                TextField("http://192.168.1.20:11434/v1", text: optionalBinding(ai.baseURL))
+                TextField("Server URL (e.g. http://192.168.1.20:11434/v1)", text: optionalBinding(ai.baseURL))
                     .keyboardType(.URL)
                     .autocorrectionDisabled()
                     .textInputAutocapitalization(.never)
                     .accessibilityIdentifier("ai-base-url")
-                Text("A machine on your network running Ollama or LM Studio (OpenAI-compatible). Same Wi-Fi, no cloud — turn on its network server and use its LAN address.")
+                Text("A machine on your network running Ollama or LM Studio (OpenAI-compatible). Same Wi-Fi, no cloud — turn on its network server and use its LAN address (e.g. http://192.168.1.20:11434/v1).")
                     .font(.caption2).foregroundStyle(.secondary)
             }
             if ConfiguredAI.supportsModelField(currentKind) {

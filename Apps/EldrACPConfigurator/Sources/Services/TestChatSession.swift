@@ -113,7 +113,9 @@ final class TestChatSession: ObservableObject {
         let llmConfig = llmConfigProvider()
         let llm: any LLMClient =
             (useFakeLLM || llmConfig.url.isEmpty)
-            ? EchoLLMClient() : OpenAICompatibleLLMClient(config: llmConfig)
+            ? EchoLLMClient()
+            : InspectingLLMClient(
+                wrapping: OpenAICompatibleLLMClient(config: llmConfig), model: llmConfig.model)
         let agent = ACPAgent(
             connection: connection, llm: llm,
             toolEnvironment: ToolEnvironment(workdir: workdir),
