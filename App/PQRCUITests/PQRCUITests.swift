@@ -89,16 +89,19 @@ final class PQRCUITests: XCTestCase {
         let app = XCUIApplication()
         app.launchArguments = ["--reset"]
         app.launch()
-        // New deniable-account flow: the lock screen opens first; create a new
-        // account (display name + passphrase + confirm + no-recovery ack).
+        // New account flow: the lock screen opens first; create the DEFAULT
+        // (passphrase-less) account — display name + no-recovery ack only. The
+        // create screen defaults to the passphrase-less default (Face ID / device
+        // unlock), so no passphrase is entered (those SecureFields aren't on screen).
         tapWhenReady(app, button: "show-create-account")
         let nameField = app.textFields["onboarding-name"]
         XCTAssertTrue(nameField.waitForExistence(timeout: 20))
         type(app, into: nameField, "Tester")
-        type(app, into: app.secureTextFields["passphrase-field"], "test passphrase 123")
-        type(app, into: app.secureTextFields["passphrase-confirm"], "test passphrase 123")
-        app.switches["onboarding-acknowledge"].firstMatch.switches.firstMatch.tap()
+        let ack = app.switches["onboarding-acknowledge"]
+        XCTAssertTrue(ack.waitForExistence(timeout: 10))
+        ack.firstMatch.switches.firstMatch.tap()
         let create = app.buttons["onboarding-create"]
+        XCTAssertTrue(create.waitForExistence(timeout: 10))
         XCTAssertTrue(create.isEnabled)
         create.tap()
         XCTAssertTrue(app.navigationBars["PQRC"].waitForExistence(timeout: 60))
