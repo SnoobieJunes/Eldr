@@ -274,7 +274,8 @@ struct BridgeWatchAlongTests {
 
         let convo = ACPBridgeService.BridgeConversation(
             id: "group-1", name: "Group", enabled: true, members: [ownerHex, otherHex])
-        await bridge.handleInboundPrompt("read config.env", conversation: convo)
+        await bridge.handleInboundPrompt(
+            "read config.env", conversation: convo, senderIdentityHex: ownerHex)
 
         // handleInboundPrompt now also sends an "On it…" ack, so assert over ALL
         // messages to each peer (not just the first): the raw answer reached the owner,
@@ -298,7 +299,8 @@ struct BridgeWatchAlongTests {
 
         let convo = ACPBridgeService.BridgeConversation(
             id: "group-1", name: "Group", enabled: true, members: [ownerHex, otherHex])
-        await bridge.handleInboundPrompt("read config.env", conversation: convo)
+        await bridge.handleInboundPrompt(
+            "read config.env", conversation: convo, senderIdentityHex: ownerHex)
 
         let sent = await recorder.all()
         #expect(sent.count == 1)  // ONLY the owner — the Mac isn't a group participant
@@ -310,6 +312,24 @@ struct BridgeWatchAlongTests {
         #expect(draft.text.contains(Self.secret))  // raw — redaction happens on the phone
         // Nothing went to the other member directly.
         #expect(await recorder.text(to: otherHex) == nil)
+    }
+
+    @MainActor
+    @Test func nonOwnerPromptIsRejected() async throws {
+        // C-3: with the owner's window open, a message from a NON-owner must not task
+        // the agent. The owner window governs autonomous *output*; intake must ALSO be
+        // owner-only, or any group member could run shell/xcodebuild on the node.
+        let recorder = RecordingMessaging()
+        let (bridge, _, otherHex) = try await Self.openGateBridge(recorder: recorder)
+        bridge.watchAlongMode = .direct
+        bridge.setAgentRunner(StubRunner(answer: "Found it: \(Self.secret)"))
+
+        let convo = ACPBridgeService.BridgeConversation(
+            id: "group-1", name: "Group", enabled: true, members: [otherHex])
+        // A non-owner (otherHex) sends the prompt — must be dropped, no agent run.
+        await bridge.handleInboundPrompt(
+            "read config.env", conversation: convo, senderIdentityHex: otherHex)
+        #expect(await recorder.all().isEmpty)
     }
 
     @Test func resolveAgentExecutablePrefersLauncherThenBinaryThenBundled() throws {

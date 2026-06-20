@@ -537,7 +537,9 @@ final class ACPBridgeService: ObservableObject {
                     id: conversationID, name: shortHex(conversationID), enabled: true,
                     members: received.body.group != nil ? [] : [received.senderIdentityHex],
                     threadID: received.body.thread?.id)
-                await handleInboundPrompt(received.body.text, conversation: conversation)
+                await handleInboundPrompt(
+                    received.body.text, conversation: conversation,
+                    senderIdentityHex: received.senderIdentityHex)
             }
         default:
             break  // protocolViolation / quarantined / nearbyContact — not used here
@@ -717,7 +719,16 @@ final class ACPBridgeService: ObservableObject {
     ///  - `.endpoint`: send the answer privately to the owner's PHONE as a draft; the
     ///    phone gates + redacts + voices it to the group as the owner's signed agent
     ///    (§13.5). No Mac-side window gate — the draft is private to the owner.
-    func handleInboundPrompt(_ text: String, conversation: BridgeConversation) async {
+    func handleInboundPrompt(
+        _ text: String, conversation: BridgeConversation, senderIdentityHex: String
+    ) async {
+        // C-3: only the pinned owner may task the agent. Autonomous agent activity is
+        // owner-authorized (SPEC §9/§13); a non-owner message in a watch-along
+        // conversation must NEVER become an agent prompt — otherwise any group member
+        // could drive run_shell/xcodebuild on the node (confused-deputy → RCE on the
+        // host). Fail closed: no owner pinned, or sender ≠ owner ⇒ drop silently (don't
+        // even ack, so a non-owner can't probe whether an agent is attached).
+        guard let ownerIdentityHex, senderIdentityHex == ownerIdentityHex else { return }
         // One run at a time: a weak/looping model can take a while, and spawning an
         // agent per queued message stacked up and read as "dead". Tell the user instead.
         guard !agentRunInFlight else {
