@@ -49,6 +49,18 @@ enum SiloKey {
         return Derived(siloID: siloID, kek: kek)
     }
 
+    /// Derive a key-encryption-key from a passphrase for the OPTIONAL passphrase layer
+    /// nested UNDER the Secure-Enclave wrap (see `AccountVault`, DEVIATIONS AC31). PBKDF2
+    /// is sufficient here because brute-forcing this layer ALSO requires the non-exportable
+    /// Secure-Enclave key — it's a second factor, not the sole barrier.
+    static func passphraseKEK(_ passphrase: String) -> SymmetricKey {
+        let accountKey = pbkdf2(
+            passphrase: passphrase, salt: appSalt, iterations: iterations, keyLength: 32)
+        return HKDF<SHA256>.deriveKey(
+            inputKeyMaterial: SymmetricKey(data: accountKey),
+            info: Data("pqrc-passphrase-kek-v1".utf8), outputByteCount: 32)
+    }
+
     /// AES-256-GCM seal of `plaintext` under the silo `kek` (for the secrets blob).
     static func seal(_ plaintext: Data, kek: SymmetricKey) throws -> Data {
         let sealed = try AES.GCM.seal(plaintext, using: kek)
