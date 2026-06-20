@@ -12,7 +12,7 @@ struct StatusBarView: View {
                 Circle()
                     .fill(dotColor)
                     .frame(width: 10, height: 10)
-                Text("Eldr ACP").font(.headline)
+                Text("Eldr node").font(.headline)
             }
             Text(healthText)
                 .font(.callout)
@@ -25,7 +25,7 @@ struct StatusBarView: View {
 
             Divider()
 
-            Button("Open Configurator") {
+            Button("Open Eldr node") {
                 NSApp.activate(ignoringOtherApps: true)
                 for window in NSApp.windows where window.canBecomeMain {
                     window.makeKeyAndOrderFront(nil)

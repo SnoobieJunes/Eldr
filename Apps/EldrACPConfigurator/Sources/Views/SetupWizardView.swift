@@ -33,7 +33,7 @@ struct SetupWizardView: View {
 
     private var header: some View {
         VStack(spacing: 4) {
-            Text("Set up Eldr ACP").font(.title2.weight(.semibold))
+            Text("Set up your Eldr node").font(.title2.weight(.semibold))
             Text("Step \(step + 1) of \(lastStep + 1)").font(.caption).foregroundStyle(.secondary)
             ProgressView(value: Double(step), total: Double(lastStep))
                 .frame(maxWidth: 280)

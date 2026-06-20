@@ -1,9 +1,10 @@
 import SwiftUI
 
-/// Eldr ACP Configurator — a macOS front end for the `eldr-acp` coding agent. It
-/// wraps the CLI in a setup wizard, live config, log viewer, in-app test chat, and
-/// (Phase 4) an EldrChat bridge, then installs the binary + launcher so Xcode 27 can
-/// drive a self-hosted LLM as a coding agent.
+/// Eldr node + setup hub — the macOS "node" for EldrChat. It pairs with your phone,
+/// hosts the `eldr-acp` coding harness (setup wizard, live config, log viewer, in-app
+/// test chat), bridges your coding session into EldrChat conversations, and provisions
+/// infrastructure (the relay-setup wizard). It installs the binary + launcher so Xcode
+/// 27 can drive a self-hosted LLM as a coding agent.
 @main
 struct EldrACPConfiguratorApp: App {
     @StateObject private var store = ConfigurationStore()
@@ -34,7 +35,7 @@ struct EldrACPConfiguratorApp: App {
         .commands { CommandGroup(replacing: .newItem) {} }  // no "New Window"
 
         // Menu-bar presence (the modern, state-sharing replacement for NSStatusItem).
-        MenuBarExtra("Eldr ACP", systemImage: "wrench.and.screwdriver") {
+        MenuBarExtra("Eldr node", systemImage: "wrench.and.screwdriver") {
             StatusBarView()
                 .environmentObject(store)
                 .environmentObject(health)
@@ -57,9 +58,11 @@ struct RootView: View {
     }
 }
 
-/// The tabbed main window. (The Bridge tab is added in Phase 4.)
+/// The tabbed main window for the Eldr node + setup hub. Tabs cover the local coding
+/// harness (Configuration, Test Chat, Logs), the phone pairing/bridge, and the
+/// infrastructure setup (Relay).
 struct MainWindow: View {
-    enum Tab: Hashable { case configuration, testChat, logs, bridge }
+    enum Tab: Hashable { case configuration, testChat, logs, bridge, relay }
     @State private var tab: Tab = .configuration
 
     var body: some View {
@@ -76,7 +79,11 @@ struct MainWindow: View {
             BridgeView()
                 .tabItem { Label("EldrChat Bridge", systemImage: "antenna.radiowaves.left.and.right") }
                 .tag(Tab.bridge)
+            RelayWizardView()
+                .tabItem { Label("Relay", systemImage: "server.rack") }
+                .tag(Tab.relay)
         }
         .padding(.top, 6)
+        .navigationTitle("Eldr node + setup hub")
     }
 }
