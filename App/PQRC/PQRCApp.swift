@@ -362,57 +362,14 @@ final class AppSession {
             // keys), then the legacy shared account for back-compat.
             read(config.apiKeyAccount) ?? read(apiKeyAccounts[provider])
         }
-        let model = config.model ?? ""
-        switch config.kind {
-        case "claude":
-            return key(for: "claude").map { AnthropicAPIProvider(apiKey: $0) } ?? DemoAgentProvider()
-        case "openai":
-            return key(for: "openai").map { OpenAIAPIProvider(apiKey: $0) } ?? DemoAgentProvider()
-        case "gemini":
-            return key(for: "gemini").map { GeminiAPIProvider(apiKey: $0) } ?? DemoAgentProvider()
-        case "openrouter":
-            return key(for: "openrouter").map {
-                model.isEmpty
-                    ? OpenRouterAPIProvider(apiKey: $0) : OpenRouterAPIProvider(apiKey: $0, model: model)
-            } ?? DemoAgentProvider()
-        case "groq":
-            return key(for: "groq").map {
-                model.isEmpty ? GroqAPIProvider(apiKey: $0) : GroqAPIProvider(apiKey: $0, model: model)
-            } ?? DemoAgentProvider()
-        case "custom":
-            // Self-hosted / any OpenAI-compatible server: needs a base URL; the
-            // key is OPTIONAL (a local Ollama/LM Studio usually has none). No URL
-            // yet → Demo stub so the AI still visibly responds.
-            let base = (config.baseURL ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
-            guard !base.isEmpty else { return DemoAgentProvider() }
-            return CustomOpenAIProvider(baseURL: base, apiKey: key(for: "custom") ?? "", model: model)
-        case "hub":
-            // Borrow a nearby host's AI over the Multipeer link. Needs an active
-            // `nearby` relay client; otherwise fall back to the Demo stub.
-            return hubClient.map { NearbyHubAIProvider(client: $0) } ?? DemoAgentProvider()
-        case "pcc":
-            // Apple Private Cloud Compute server model. No API key (on-Apple).
-            // Reasoning depth + sampling are baked into the provider instance.
-            return PCCFoundationModelsProvider.isAvailable
-                ? PCCFoundationModelsProvider(
-                    reasoningLevel: config.effectiveReasoning,
-                    temperature: config.temperature,
-                    maxResponseTokens: config.maxResponseTokens)
-                : DemoAgentProvider()
-        case "acp":
-            // Drive a paired Mac node's coding harness over the sealed
-            // NearbyACPTransport via ACPAgentProvider (PQRCAgent). The provider +
-            // transport are built and unit-proven; wiring the LIVE node link (the
-            // node-side ACP host + device-to-device pairing) is the remaining
-            // Phase-1 e2e. Until a node is connected, the Demo stub keeps the
-            // backend selectable and visibly responding.
-            return DemoAgentProvider()
-        case "demo":
-            return DemoAgentProvider()
-        default:  // "ondevice"
-            return FoundationModelsAgentProvider.isAvailable
-                ? FoundationModelsAgentProvider() : DemoAgentProvider()
-        }
+        // Look up the backend in the registry and build its provider. An unknown
+        // kind (e.g. an older config naming a backend this build dropped) has no
+        // descriptor → fall through to the on-device default, exactly as the old
+        // `switch`'s `default:` arm did.
+        let descriptor =
+            BackendRegistry.descriptor(for: config.kind)
+            ?? BackendRegistry.descriptor(for: "ondevice")!
+        return descriptor.makeProvider(config, { key(for: $0) }, hubClient)
     }
 
     private static func configuredAIsKey(_ siloID: String) -> String { "configuredAIs.\(siloID)" }

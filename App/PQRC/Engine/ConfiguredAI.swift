@@ -88,24 +88,17 @@ struct ConfiguredAI: Identifiable, Codable, Equatable, Sendable {
     /// saved by older builds keep working.
     var apiKeyAccount: String? {
         // "hub" and "pcc" are off-device but need no key (the host / Apple PCC
-        // runs the model), so they get no API-key account.
-        (Self.isRemote(kind) && kind != "hub" && kind != "pcc") ? "apikey.\(id)" : nil
+        // runs the model), so they get no API-key account. The registry's
+        // `usesPerAIKey` encodes exactly the old rule
+        // (`isRemote && kind != "hub" && kind != "pcc"`); an unknown kind has no
+        // descriptor → no per-AI account (matches the old `isRemote(unknown)==false`).
+        (BackendRegistry.descriptor(for: kind)?.usesPerAIKey ?? false) ? "apikey.\(id)" : nil
     }
 
-    /// The selectable backends and their labels.
-    static let kinds: [(tag: String, label: String)] = [
-        ("ondevice", "On-device Core AI"),
-        ("pcc", "Apple Private Cloud Compute"),
-        ("claude", "Claude (Anthropic)"),
-        ("openai", "OpenAI"),
-        ("gemini", "Gemini"),
-        ("openrouter", "OpenRouter (many models)"),
-        ("groq", "Groq (fast)"),
-        ("custom", "Custom / self-hosted (OpenAI-compatible)"),
-        ("hub", "Nearby host's AI (Multipeer)"),
-        ("acp", "Mac coding harness (ACP)"),
-        ("demo", "Demo (simulated)"),
-    ]
+    /// The selectable backends and their labels — derived from the registry (its
+    /// order IS the picker order). Adding a backend is one registry entry.
+    static let kinds: [(tag: String, label: String)] =
+        BackendRegistry.all.map { (tag: $0.tag, label: $0.label) }
 
     /// Context-gather policies and output modes, for the Settings pickers.
     /// Labels use the app-wide context vocabulary — Live / Marked only / Off —
@@ -131,21 +124,19 @@ struct ConfiguredAI: Identifiable, Codable, Equatable, Sendable {
     ]
 
     static func label(for kind: String) -> String {
-        kinds.first { $0.tag == kind }?.label ?? kind
+        BackendRegistry.descriptor(for: kind)?.label ?? kind
     }
 
     /// Backends that send conversation content off the on-device model — require
     /// explicit consent and (usually) a Keychain API key. "custom" is included
     /// even when self-hosted: content still leaves the app to a server, so the
     /// firewall/consent default applies (the user can turn the firewall off for
-    /// a server they fully control).
+    /// a server they fully control). "hub" sends content off-device too (to a
+    /// nearby host); "pcc" sends it to Apple's Private Cloud Compute; "acp" to a
+    /// paired Mac. Whether the egress firewall ALSO applies is a separate
+    /// question — see `appliesEgressFirewall`. An unknown kind → false.
     static func isRemote(_ kind: String) -> Bool {
-        // "hub" sends content off-device too (to a nearby host); "pcc" sends it to
-        // Apple's Private Cloud Compute. Both are off-device (consent + "leaves
-        // device" indicator apply). Whether the egress firewall ALSO applies is a
-        // separate question — see `appliesEgressFirewall`.
-        ["claude", "openai", "gemini", "openrouter", "groq", "custom", "hub", "pcc", "acp"]
-            .contains(kind)
+        BackendRegistry.descriptor(for: kind)?.isRemote ?? false
     }
 
     /// Off-device backends that ALSO get the name-redaction + byte-bound egress
@@ -153,27 +144,22 @@ struct ConfiguredAI: Identifiable, Codable, Equatable, Sendable {
     /// PCC is attested and retains no prompts (DEVIATIONS — Apple PCC tier), so we
     /// send full names/context for best quality while still requiring consent and
     /// showing the off-device indicator. Third-party vendors (Claude/OpenAI/…/hub)
-    /// stay firewalled.
+    /// and ACP stay firewalled. An unknown kind → false.
     static func appliesEgressFirewall(_ kind: String) -> Bool {
-        isRemote(kind) && kind != "pcc"
+        BackendRegistry.descriptor(for: kind)?.appliesEgressFirewall ?? false
     }
 
     /// Backends whose enablement shows the off-device consent alert. ALL remote
     /// backends, INCLUDING "hub" and "pcc": the content still leaves this device,
-    /// so the user is asked first.
-    static func requiresConsent(_ kind: String) -> Bool { isRemote(kind) }
+    /// so the user is asked first. An unknown kind → false.
+    static func requiresConsent(_ kind: String) -> Bool {
+        BackendRegistry.descriptor(for: kind)?.requiresConsent ?? false
+    }
 
-    /// Keychain account holding the API key for a remote backend, if any.
+    /// Legacy SHARED Keychain account holding the API key for a remote backend,
+    /// if any (read as a back-compat fallback for keys saved by older builds).
     static func keyAccount(for kind: String) -> String? {
-        switch kind {
-        case "claude": return "anthropic-api-key"
-        case "openai": return "openai-api-key"
-        case "gemini": return "gemini-api-key"
-        case "openrouter": return "openrouter-api-key"
-        case "groq": return "groq-api-key"
-        case "custom": return "custom-api-key"
-        default: return nil
-        }
+        BackendRegistry.descriptor(for: kind)?.keyAccount
     }
 
     /// "custom" needs a base URL; a self-hosted server may need no key at all.
