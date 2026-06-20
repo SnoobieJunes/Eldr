@@ -239,7 +239,10 @@ actor PersonaRuntime {
         // local autoName) instead of real display names — otherwise the skills
         // prompt would leak the very social graph the firewall withholds from the
         // redacted transcript (DEVIATIONS A19/A20).
-        let redactNames = ai.appliesEgressFirewall && firewallEnabled
+        // Per-conversation override (Settings → conversation details) wins over the
+        // account default — a private, paired chat with your own agents can pass raw.
+        let firewallOn = AppSession.conversationFirewall(conversationID, siloID: siloID) ?? firewallEnabled
+        let redactNames = ai.appliesEgressFirewall && firewallOn
         let promptDisplayName = redactNames ? "you" : displayName
         let promptPeerName =
             redactNames
@@ -264,7 +267,7 @@ actor PersonaRuntime {
             conversationID: conversationID, threadID: threadID, depth: ai.contextDepth,
             strict: policy == "strict", instructions: ai.instructions, summarize: ai.summarizes,
             systemPromptOverride: override)
-        guard ai.appliesEgressFirewall, firewallEnabled else { return ctx }
+        guard ai.appliesEgressFirewall, firewallOn else { return ctx }
         return redactedForRemote(ctx)
     }
 
@@ -1092,6 +1095,9 @@ actor PersonaRuntime {
         -> [AIContextInspection]
     {
         var out: [AIContextInspection] = []
+        // Per-conversation firewall override wins over the account default (same
+        // resolution as contextFor), so the inspector shows the EFFECTIVE state.
+        let firewallOn = AppSession.conversationFirewall(conversationID, siloID: siloID) ?? firewallEnabled
         for ai in ais {
             // Resolve the effective gather policy exactly as contextFor does: the
             // per-conversation override (Settings ▸ conversation details) wins.
@@ -1105,7 +1111,7 @@ actor PersonaRuntime {
             // The honest system-prompt text + redaction state this AI receives.
             let ctx = await contextFor(ai, conversationID: conversationID, threadID: threadID)
             let systemPrompt = threadID == nil ? ctx.draftSystemPrompt() : ctx.turnSystemPrompt()
-            let redact = ai.isRemote && firewallEnabled
+            let redact = ai.isRemote && firewallOn
 
             var entries: [AIContextInspection.Entry] = []
             if policy != "off" {
@@ -1141,7 +1147,7 @@ actor PersonaRuntime {
             out.append(
                 AIContextInspection(
                     id: ai.id, aiName: ai.name, isRemote: ai.isRemote,
-                    firewallOn: firewallEnabled, effectivePolicy: policy,
+                    firewallOn: firewallOn, effectivePolicy: policy,
                     depth: ai.contextDepth, systemPrompt: systemPrompt, entries: entries))
         }
         return out

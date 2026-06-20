@@ -196,10 +196,15 @@ struct MultiAIBehaviorTests {
     @Test func firewall_redactsRealNamesForRemoteAI() async throws {
         let spy = SpyProvider()
         let runtime = await makeRuntime(
-            "Alice", ais: [TetheredAI(id: "r", name: "remote-ai", provider: spy, isRemote: true)])
+            "Alice", ais: [TetheredAI(id: "r", name: "remote-ai", provider: spy, isRemote: true, appliesEgressFirewall: true)])
         await runtime.keychain.deleteAll()
         _ = try await runtime.bootstrap(inMemoryStore: true)
         let chatID = try await runtime.createSelfChat()
+        // Isolate from the per-conversation firewall override: the seeded test
+        // identity shares this self-chat id across the firewall tests and the
+        // override lives in persistent UserDefaults, so assert the DEFAULT (no
+        // override → account firewall ON) explicitly.
+        AppSession.setConversationFirewall(nil, conversationID: chatID, siloID: "")
         try await runtime.sendMessage("secret plan", conversationID: chatID)
         try await Task.sleep(for: .milliseconds(400))
 
@@ -213,16 +218,41 @@ struct MultiAIBehaviorTests {
     @Test func firewall_off_passesRealNames() async throws {
         let spy = SpyProvider()
         let runtime = await makeRuntime(
-            "Alice", ais: [TetheredAI(id: "r", name: "remote-ai", provider: spy, isRemote: true)])
+            "Alice", ais: [TetheredAI(id: "r", name: "remote-ai", provider: spy, isRemote: true, appliesEgressFirewall: true)])
         await runtime.keychain.deleteAll()
         _ = try await runtime.bootstrap(inMemoryStore: true)
         await runtime.setFirewallEnabled(false)
         let chatID = try await runtime.createSelfChat()
+        AppSession.setConversationFirewall(nil, conversationID: chatID, siloID: "")
         try await runtime.sendMessage("hi", conversationID: chatID)
         try await Task.sleep(for: .milliseconds(400))
 
         let names = await spy.capturedNames
         #expect(names.contains("Alice"), "with the firewall off, the real display name is sent")
+    }
+
+    /// Per-conversation override OFF while the account firewall stays ON: THIS
+    /// chat's real names reach the remote AI raw — the private-paired use-case
+    /// (your own agents), without disabling the firewall everywhere else.
+    @Test func firewall_perConversationOverrideOff_passesRealNamesForThatChatOnly() async throws {
+        let spy = SpyProvider()
+        let runtime = await makeRuntime(
+            "Alice", ais: [TetheredAI(id: "r", name: "remote-ai", provider: spy, isRemote: true, appliesEgressFirewall: true)])
+        await runtime.keychain.deleteAll()
+        _ = try await runtime.bootstrap(inMemoryStore: true)
+        // Account default stays ON (the runtime default). Only THIS conversation is
+        // overridden to Off; the runtime reads it under siloID "" (makeRuntime's).
+        let chatID = try await runtime.createSelfChat()
+        AppSession.setConversationFirewall(false, conversationID: chatID, siloID: "")
+        defer { AppSession.setConversationFirewall(nil, conversationID: chatID, siloID: "") }
+        try await runtime.sendMessage("secret plan", conversationID: chatID)
+        try await Task.sleep(for: .milliseconds(400))
+
+        let names = await spy.capturedNames
+        #expect(
+            names.contains("Alice"),
+            "a per-conversation Off override sends real names to the remote AI for that chat")
+        #expect(!names.contains("you"), "the codename redaction is bypassed for this chat only")
     }
 
     // MARK: - Context profile (instructions / policy / depth / output mode)

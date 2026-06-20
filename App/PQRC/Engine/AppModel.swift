@@ -461,7 +461,9 @@ final class AppModel {
         default: break
         }
         let isRemote = primary.map { ConfiguredAI.isRemote($0.kind) } ?? false
-        return (mode, isRemote, AppSession.firewallEnabled)
+        let firewallOn =
+            AppSession.conversationFirewall(conversationID, siloID: siloID) ?? AppSession.firewallEnabled
+        return (mode, isRemote, firewallOn)
     }
 
     func block(_ identityHex: String) async {

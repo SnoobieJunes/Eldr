@@ -14,6 +14,9 @@ struct ConversationDetailsView: View {
     /// Per-conversation AI context override: "default" (use each AI's own
     /// setting) | "off" | "marked" | "full".
     @State private var aiContextMode = "default"
+    /// Per-conversation egress-firewall override: "default" (inherit the account
+    /// setting) | "on" (redact) | "off" (raw — a private chat with your own agents).
+    @State private var firewallOverride = "default"
     /// Read-only echo of the primary AI's effective mode / remoteness / firewall
     /// for this conversation, refreshed when the override changes.
     @State private var summary: (mode: String, isRemote: Bool, firewallOn: Bool) =
@@ -84,6 +87,21 @@ struct ConversationDetailsView: View {
                     if summary.mode != "off" && summary.isRemote {
                         RemoteAIFirewallRow(firewallOn: summary.firewallOn)
                     }
+                    Picker("Egress firewall here", selection: $firewallOverride) {
+                        Text("Use default (\(AppSession.firewallEnabled ? "on" : "off"))").tag("default")
+                        Text("On — redact before a cloud AI").tag("on")
+                        Text("Off — send raw (your own agents)").tag("off")
+                    }
+                    .accessibilityIdentifier("conversation-firewall-mode")
+                    .onChange(of: firewallOverride) { _, newValue in
+                        AppSession.setConversationFirewall(
+                            newValue == "default" ? nil : (newValue == "on"),
+                            conversationID: conversationID, siloID: model.siloID)
+                        summary = model.primaryAIContextSummary(conversationID)
+                    }
+                    Text("Only affects a REMOTE (cloud) AI. \"Off\" lets this chat's real names and content reach that AI raw — for a private chat with your own agents. \"On\" redacts before anything leaves your device.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
                 } header: {
                     Text("AI in this conversation — overrides your AI's default (now: \(AIContextVocab.glance(summary)))")
                 } footer: {
@@ -115,6 +133,9 @@ struct ConversationDetailsView: View {
                 blocked = info.blocked
                 aiContextMode =
                     AppSession.conversationContextMode(conversationID, siloID: model.siloID) ?? "default"
+                firewallOverride =
+                    AppSession.conversationFirewall(conversationID, siloID: model.siloID)
+                    .map { $0 ? "on" : "off" } ?? "default"
                 summary = model.primaryAIContextSummary(conversationID)
             }
             .toolbar {

@@ -443,6 +443,26 @@ final class AppSession {
         else { UserDefaults.standard.removeObject(forKey: key) }
     }
 
+    /// Per-conversation egress-firewall override (Settings → conversation details):
+    /// `true` = redact names + bound size before a REMOTE AI sees this chat,
+    /// `false` = send it raw, `nil` = inherit the account default (`firewallEnabled`).
+    /// This is what lets a private, paired chat with your OWN agents pass data raw
+    /// while every other chat stays scrubbed (per-chat firewall, owner-directed).
+    /// `nonisolated` so the (actor) PersonaRuntime can read it without an await.
+    nonisolated static func conversationFirewall(_ conversationID: String, siloID: String = "")
+        -> Bool?
+    {
+        UserDefaults.standard.object(
+            forKey: siloDefaultsKey("egressFirewall.\(conversationID)", siloID)) as? Bool
+    }
+    nonisolated static func setConversationFirewall(
+        _ value: Bool?, conversationID: String, siloID: String = ""
+    ) {
+        let key = siloDefaultsKey("egressFirewall.\(conversationID)", siloID)
+        if let value { UserDefaults.standard.set(value, forKey: key) }
+        else { UserDefaults.standard.removeObject(forKey: key) }
+    }
+
     /// Agent-skills asymmetry knob: a short label of THIS workstation's context
     /// domain (e.g. "iOS / Xcode"), injected into shared-thread prompts so each
     /// tether advertises what it has without dumping its full context.
