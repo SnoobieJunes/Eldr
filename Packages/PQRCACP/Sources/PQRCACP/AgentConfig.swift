@@ -20,6 +20,10 @@ import Foundation
 /// All user-tunable agent behavior, read once at startup. Defaults are safe (≈ the
 /// prior behavior) so an un-tuned install just works; a user with a small model
 /// dials the budgets down, a user with a large model dials them up.
+// `Equatable` is hand-written (not synthesized) because `logRedactor` is a closure,
+// which has no equality; the conformance compares every VALUE field and ignores the
+// redactor. No call site compares whole configs (tests assert individual fields), so
+// "two configs that differ only by injected redactor compare equal" is harmless.
 public struct AgentConfig: Sendable, Equatable {
     /// Max bytes of a SINGLE tool result fed back to the model. A result larger
     /// than this is head+tail truncated with a `… N bytes elided …` marker, so one
@@ -91,6 +95,16 @@ public struct AgentConfig: Sendable, Equatable {
     /// acceptance; default false (fail closed: a mutating tool runs only on an explicit
     /// grant; a timeout/error is a denial). Env: `ELDR_ACP_ALLOW_UNGATED_TOOLS`.
     public var allowUngatedTools: Bool
+    /// C-6: redaction seam applied to the FREE-TEXT strings written to the AT-REST log
+    /// sinks (a `run_shell` cmd + its captured output → `events.jsonl`; the agent's
+    /// stderr diagnostics). Defaults to the built-in `ACPLogRedactor.scrub` so the
+    /// zero-dependency agent self-protects; the host app injects PQRCCore's canonical
+    /// `CredentialRedactor.scrub` to keep one source of truth. (The `path` field is
+    /// scrubbed separately with the path-aware `ACPLogRedactor.scrubPath`, which spares
+    /// a legitimate sha256/UUID path component.) NOT applied to the live ACP channel,
+    /// the tool results returned to the model, or anything delivered to the owner —
+    /// log hygiene on disk only.
+    public var logRedactor: ACPLogScrubber
 
     /// Defaults preserve/improve prior behavior: 8 KB per tool result (the loop
     /// previously fed back whole files unbounded and only capped shell at 64 KB),
@@ -131,7 +145,8 @@ public struct AgentConfig: Sendable, Equatable {
         contextGraphURL: String = "http://localhost:8302",
         contextGraphAgentName: String? = nil,
         permissionTimeoutSeconds: Double = 120,
-        allowUngatedTools: Bool = false
+        allowUngatedTools: Bool = false,
+        logRedactor: @escaping ACPLogScrubber = ACPLogRedactor.scrub
     ) {
         // Clamp to sane floors: a non-positive byte cap would truncate everything to
         // nothing (worse than no cap), so treat ≤0 as "effectively unbounded".
@@ -152,6 +167,28 @@ public struct AgentConfig: Sendable, Equatable {
         // ≤0 ⇒ no wait (deny immediately on no answer); otherwise the given seconds.
         self.permissionTimeoutSeconds = max(0, permissionTimeoutSeconds)
         self.allowUngatedTools = allowUngatedTools
+        self.logRedactor = logRedactor
+    }
+
+    /// Value-field equality; ignores `logRedactor` (closures have no equality). See
+    /// the note on the type declaration.
+    public static func == (lhs: AgentConfig, rhs: AgentConfig) -> Bool {
+        lhs.maxToolResultBytes == rhs.maxToolResultBytes
+            && lhs.maxReadFileBytes == rhs.maxReadFileBytes
+            && lhs.maxHistoryTurns == rhs.maxHistoryTurns
+            && lhs.maxContextChars == rhs.maxContextChars
+            && lhs.toolAllowlist == rhs.toolAllowlist
+            && lhs.promptPreamble == rhs.promptPreamble
+            && lhs.systemPromptOverride == rhs.systemPromptOverride
+            && lhs.skillsEnabled == rhs.skillsEnabled
+            && lhs.skillAllowlist == rhs.skillAllowlist
+            && lhs.eventsFilePath == rhs.eventsFilePath
+            && lhs.contextFilePath == rhs.contextFilePath
+            && lhs.contextGraphEnabled == rhs.contextGraphEnabled
+            && lhs.contextGraphURL == rhs.contextGraphURL
+            && lhs.contextGraphAgentName == rhs.contextGraphAgentName
+            && lhs.permissionTimeoutSeconds == rhs.permissionTimeoutSeconds
+            && lhs.allowUngatedTools == rhs.allowUngatedTools
     }
 
     /// Build from the process environment, falling back to an optional config

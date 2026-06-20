@@ -41,8 +41,13 @@ struct EldrACPMain {
 
         let environment = ProcessInfo.processInfo.environment
 
+        // C-6: stderr is an at-rest diagnostic sink — the Configurator launcher tees
+        // it to a logfile. Scrub credential-shaped substrings (e.g. a token embedded
+        // in ELDR_LLM_URL) before they hit disk. Standalone binary, so it uses the
+        // built-in redactor; the in-app path injects PQRCCore's via AgentConfig.
         func log(_ message: String) {
-            FileHandle.standardError.write(Data("eldr-acp: \(message)\n".utf8))
+            FileHandle.standardError.write(
+                Data("eldr-acp: \(ACPLogRedactor.scrub(message))\n".utf8))
         }
 
         // Choose the brain.

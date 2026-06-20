@@ -400,8 +400,10 @@ public actor ACPAgent {
             let budget = max(1, config.maxContextChars / 4)
             return try await cg.assemble(userText: userText, tokenBudget: budget)
         } catch {
+            // C-6: stderr is an at-rest diagnostic sink (the launcher tees it to a
+            // logfile); scrub the error text in case it echoes a request body/header.
             FileHandle.standardError.write(
-                Data("contextgraph assemble failed: \(Self.describe(error))\n".utf8))
+                Data(config.logRedactor("contextgraph assemble failed: \(Self.describe(error))\n").utf8))
             return nil
         }
     }
@@ -476,6 +478,9 @@ public actor ACPAgent {
         case "write_file" where !result.isError:
             sessionWriteCounts[sessionId, default: 0] += 1
             let path = Self.resolvePath(args["path"]?.stringValue ?? "", cwd: cwd)
+            // Path uses the PATH-AWARE default scrub (catches an embedded credential
+            // but preserves legitimate sha256/UUID path components ContextLearner
+            // reads), NOT the free-text `config.logRedactor`.
             ACPEventLog.writeFile(
                 path: path, session: sessionId, cwd: cwd, to: config.eventsFilePath)
         case "run_shell":
@@ -487,7 +492,8 @@ public actor ACPAgent {
             }
             ACPEventLog.shellResult(
                 cmd: cmd, exit: exit, summary: String(result.text.prefix(200)),
-                session: sessionId, cwd: cwd, to: config.eventsFilePath)
+                session: sessionId, cwd: cwd, to: config.eventsFilePath,
+                redact: config.logRedactor)
         default:
             break
         }
@@ -500,7 +506,7 @@ public actor ACPAgent {
             cwd: cwd, session: sessionId, summary: String(summary.prefix(200)),
             files: sessionWriteCounts[sessionId] ?? 0,
             build: sessionBuildStatus[sessionId] ?? "unknown",
-            to: config.eventsFilePath)
+            to: config.eventsFilePath, redact: config.logRedactor)
     }
 
     /// Ask the client for permission for a mutating tool, and FAIL CLOSED. The request

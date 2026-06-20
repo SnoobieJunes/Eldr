@@ -7,6 +7,122 @@ import Foundation
 // EXACT same path math — agent and learner MUST agree on where a project's
 // `eldr.md` lives or the self-learning loop silently writes/reads different files.
 
+/// C-6: redacts credential-shaped substrings before they're written to the node's
+/// AT-REST diagnostic sinks (`events.jsonl`, the agent's stderr trace, the launcher
+/// logfile). A `run_shell("echo $OPENAI_API_KEY")` or a tool result carrying a token
+/// would otherwise land in cleartext on disk; this scrubs the *strings that get
+/// written to the log* — NOT the live ACP data channel, the tool results returned to
+/// the model, or anything delivered to the owner's paired device. Log hygiene on
+/// disk only.
+///
+/// Self-contained on purpose: PQRCACP is deliberately ZERO-dependency (see
+/// `Package.swift`), so it can't import PQRCCore's `CredentialRedactor`. This mirrors
+/// that redactor's high-risk patterns. The app can supersede it by injecting the
+/// canonical one through `AgentConfig.logRedactor` (one source of truth where it
+/// matters); the built-in default means the agent self-protects even if the app
+/// forgets to wire the seam (defense in depth). The duplication is the cost of the
+/// zero-dependency boundary — flagged for the audit's redactor-as-single-source note.
+///
+/// Like its PQRCCore twin it leans CONSERVATIVE toward leaking: a false positive only
+/// redacts a non-secret in an on-disk log; a false negative would leak a real secret,
+/// so the patterns are broad. The marker never echoes the secret.
+public enum ACPLogRedactor {
+    /// Marker substituted for key-shaped secrets.
+    public static let apiKeyMarker = "‹redacted:api-key›"
+    /// Marker substituted for token/password-shaped secrets.
+    public static let tokenMarker = "‹redacted:token›"
+
+    /// Replace every detected secret in `text` with a marker. Returns the input
+    /// unchanged when nothing matched. Runs the full rule set (labeled shapes AND the
+    /// generic high-entropy catch-alls) — use for FREE-TEXT fields (a shell command,
+    /// captured output, a model message) where any long high-entropy run is suspect.
+    public static func scrub(_ text: String) -> String { apply(rules, to: text) }
+
+    /// Path-aware scrub: runs ONLY the unambiguous labeled credential shapes (sk-…,
+    /// AKIA…, Bearer …, key=value, …) and NOT the generic high-entropy / bare-hex
+    /// catch-alls. A filesystem path legitimately contains long high-entropy runs that
+    /// are NOT secrets — a UUID temp dir, and (critically) this codebase's own
+    /// `projects/<sha256(cwd)>/…` layout, a 64-char hex id the Configurator's
+    /// ContextLearner consumes verbatim. Redacting those would both corrupt a
+    /// downstream consumer and over-redact a non-secret; an embedded real credential
+    /// (e.g. `…/sk-…/…`) is still caught by the labeled rules.
+    public static func scrubPath(_ text: String) -> String { apply(labeledRules, to: text) }
+
+    private static func apply(_ rules: [Rule], to text: String) -> String {
+        guard !text.isEmpty else { return text }
+        var result = text
+        for rule in rules {
+            let range = NSRange(result.startIndex..<result.endIndex, in: result)
+            result = rule.regex.stringByReplacingMatches(
+                in: result, options: [], range: range, withTemplate: rule.template)
+        }
+        return result
+    }
+
+    private struct Rule { let regex: NSRegularExpression; let template: String }
+
+    /// Full set used by `scrub`: labeled shapes first (so they get the right marker),
+    /// then the generic high-entropy catch-alls last (over text the earlier rules have
+    /// already turned into inert markers).
+    private static let rules: [Rule] = labeledRules + entropyRules
+
+    /// Unambiguous, prefix-anchored or key-named credential shapes. Safe to run over a
+    /// path. Mirrors `PQRCCore.CredentialRedactor`'s specific rules; keep in sync.
+    private static let labeledRules: [Rule] = compile([
+        // OpenAI / Anthropic secret keys: sk-… and sk-ant-… (the `ant-` is in the
+        // char class, so one pattern covers both).
+        ("sk-[A-Za-z0-9_-]{12,}", apiKeyMarker, []),
+        // AWS access key ids (AKIA/ASIA/AROA/AIDA + 12+ uppercase/digits).
+        ("(?:AKIA|ASIA|AROA|AIDA)[A-Z0-9]{12,}", apiKeyMarker, []),
+        // GitHub tokens (ghp_/gho_/ghu_/ghs_/ghr_ + 20+).
+        ("gh[pousr]_[A-Za-z0-9]{20,}", tokenMarker, []),
+        // Slack tokens (xoxb-/xoxp-/…).
+        ("xox[baprs]-[A-Za-z0-9-]{10,}", tokenMarker, []),
+        // Google API keys.
+        ("AIza[A-Za-z0-9_-]{20,}", apiKeyMarker, []),
+        // Bearer tokens — keep the "Bearer " prefix, redact the credential.
+        ("(Bearer )[A-Za-z0-9._~+/=-]{12,}", "$1\(tokenMarker)", [.caseInsensitive]),
+        // key=value / key: "value" assignments for secret-named keys. Preserve the
+        // key, separator, and any quotes; redact only the value.
+        (
+            "((?:api[_-]?key|secret|access[_-]?token|auth[_-]?token|access[_-]?key|token|password|passwd|pwd))(\\s*[:=]\\s*)([\"']?)([^\\s\"']{6,})([\"']?)",
+            "$1$2$3\(tokenMarker)$5", [.caseInsensitive]
+        ),
+    ])
+
+    /// Generic high-entropy catch-alls. NOT run over paths (false-positives a UUID /
+    /// sha256 dir). Mirrors `PQRCCore.CredentialRedactor`'s catch-all rules.
+    private static let entropyRules: [Rule] = compile([
+        // High-entropy base64/base64url run with BOTH a letter and a digit (the dual
+        // lookahead skips long all-letter words and slash-only paths).
+        (
+            "(?=[A-Za-z0-9+/=_-]*[0-9])(?=[A-Za-z0-9+/=_-]*[A-Za-z])[A-Za-z0-9+/=_-]{40,}",
+            tokenMarker, []
+        ),
+        // Long hex runs (sha1/sha256, 40+ hex chars).
+        ("\\b[0-9a-fA-F]{40,}\\b", tokenMarker, []),
+    ])
+
+    private static func compile(
+        _ specs: [(String, String, NSRegularExpression.Options)]
+    ) -> [Rule] {
+        specs.compactMap { pattern, template, options in
+            // Patterns are compile-time constants; `try?` (not `try!`, per CLAUDE.md)
+            // degrades safely — a (never-expected) bad pattern is simply skipped.
+            (try? NSRegularExpression(pattern: pattern, options: options))
+                .map { Rule(regex: $0, template: template) }
+        }
+    }
+}
+
+/// The redaction seam: a pure, synchronous `String → String` applied at every
+/// at-rest log write. Each write site defaults to the right built-in
+/// (`ACPLogRedactor.scrub` for free-text fields, `.scrubPath` for the path field), so
+/// PQRCACP self-protects with zero wiring; the app can inject PQRCCore's canonical
+/// `CredentialRedactor.scrub` for the free-text fields to keep one source of truth.
+/// `@Sendable` so it crosses the agent actor boundary.
+public typealias ACPLogScrubber = @Sendable (String) -> String
+
 /// Appends one JSON object per line to a JSONL file. The agent calls this after
 /// significant turn events (write_file, run_shell, session end); the Configurator
 /// tails the file to drive live monitoring + ContextLearner. Best-effort: a logging
@@ -14,13 +130,20 @@ import Foundation
 public enum ACPEventLog {
 
     /// `{"type":"write_file","path":…,"session":…,"cwd":…,"ts":…}`
+    /// C-6: `path` (an attacker-influenced free string — a model can `write_file` to a
+    /// path that embeds a token) is scrubbed before it hits disk. Defaults to the
+    /// PATH-AWARE scrub (`scrubPath`): it catches an embedded `sk-…`/Bearer/etc. but
+    /// NOT the generic high-entropy catch-all, so a legitimate UUID/sha256 path
+    /// component (e.g. the `projects/<sha256(cwd)>` layout ContextLearner reads) isn't
+    /// mangled.
     public static func writeFile(
-        path filePath: String, session: String, cwd: String, to eventsFile: String?
+        path filePath: String, session: String, cwd: String, to eventsFile: String?,
+        redact: ACPLogScrubber = ACPLogRedactor.scrubPath
     ) {
         append(
             [
                 ("type", .string("write_file")),
-                ("path", .string(filePath)),
+                ("path", .string(redact(filePath))),
                 ("session", .string(session)),
                 ("cwd", .string(cwd)),
                 ("ts", .string(nowISO8601())),
@@ -29,16 +152,19 @@ public enum ACPEventLog {
 
     /// `{"type":"shell_result","cmd":…,"exit":<int>,"summary":…,"session":…,"cwd":…,"ts":…}`
     /// `summary` is the caller-truncated first slice of the command's output.
+    /// C-6: both `cmd` (e.g. `echo $OPENAI_API_KEY` — but more to the point a literal
+    /// `--token sk-…`) and `summary` (the command's captured output) are scrubbed
+    /// before the line is written, the two highest-risk at-rest leak vectors.
     public static func shellResult(
         cmd: String, exit code: Int, summary: String, session: String, cwd: String,
-        to eventsFile: String?
+        to eventsFile: String?, redact: ACPLogScrubber = ACPLogRedactor.scrub
     ) {
         append(
             [
                 ("type", .string("shell_result")),
-                ("cmd", .string(cmd)),
+                ("cmd", .string(redact(cmd))),
                 ("exit", .int(code)),
-                ("summary", .string(summary)),
+                ("summary", .string(redact(summary))),
                 ("session", .string(session)),
                 ("cwd", .string(cwd)),
                 ("ts", .string(nowISO8601())),
@@ -47,16 +173,17 @@ public enum ACPEventLog {
 
     /// `{"type":"session_end","cwd":…,"session":…,"summary":…,"files":<int>,"build":…,"ts":…}`
     /// `build` is `"green" | "red" | "unknown"`.
+    /// C-6: `summary` (the model's free-text final message) is scrubbed before disk.
     public static func sessionEnd(
         cwd: String, session: String, summary: String, files: Int, build: String,
-        to eventsFile: String?
+        to eventsFile: String?, redact: ACPLogScrubber = ACPLogRedactor.scrub
     ) {
         append(
             [
                 ("type", .string("session_end")),
                 ("cwd", .string(cwd)),
                 ("session", .string(session)),
-                ("summary", .string(summary)),
+                ("summary", .string(redact(summary))),
                 ("files", .int(files)),
                 ("build", .string(build)),
                 ("ts", .string(nowISO8601())),
