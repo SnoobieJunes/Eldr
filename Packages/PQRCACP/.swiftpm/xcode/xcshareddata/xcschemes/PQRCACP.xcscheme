@@ -17,6 +17,7 @@
                BuildableIdentifier = "primary"
                BlueprintIdentifier = "PQRCACP"
                BuildableName = "PQRCACP"
+               BlueprintName = "PQRCACP"
                ReferencedContainer = "container:">
             </BuildableReference>
          </BuildActionEntry>
@@ -52,6 +53,7 @@
             BuildableIdentifier = "primary"
             BlueprintIdentifier = "PQRCACP"
             BuildableName = "PQRCACP"
+            BlueprintName = "PQRCACP"
             ReferencedContainer = "container:">
          </BuildableReference>
       </MacroExpansion>

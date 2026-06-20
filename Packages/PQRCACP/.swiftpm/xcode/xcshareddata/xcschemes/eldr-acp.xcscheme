@@ -17,6 +17,7 @@
                BuildableIdentifier = "primary"
                BlueprintIdentifier = "eldr-acp"
                BuildableName = "eldr-acp"
+               BlueprintName = "eldr-acp"
                ReferencedContainer = "container:">
             </BuildableReference>
          </BuildActionEntry>
@@ -46,6 +47,7 @@
             BuildableIdentifier = "primary"
             BlueprintIdentifier = "eldr-acp"
             BuildableName = "eldr-acp"
+            BlueprintName = "eldr-acp"
             ReferencedContainer = "container:">
          </BuildableReference>
       </BuildableProductRunnable>
@@ -62,6 +64,7 @@
             BuildableIdentifier = "primary"
             BlueprintIdentifier = "eldr-acp"
             BuildableName = "eldr-acp"
+            BlueprintName = "eldr-acp"
             ReferencedContainer = "container:">
          </BuildableReference>
       </BuildableProductRunnable>
