@@ -88,7 +88,9 @@ actor PersonaRuntime {
     /// Verified contacts by identity hex. The parallel `contactRecords` map
     /// carries nicknames/aliases/flags and is persisted encrypted — both are
     /// restored at bootstrap so contacts survive relaunch.
-    private(set) var verifiedContacts: [String: VerifiedContact] = [:]
+    private(set) var verifiedContacts: [String: VerifiedContact] = [:] {
+        didSet { publishPairedPubkeys() }
+    }
     private(set) var contactRecords: [String: ContactRecord] = [:]
     /// Nearby peers discovered + binding-verified over the local link (SPEC §10),
     /// identity hex -> display name. Not yet contacts — the user starts the
@@ -196,6 +198,25 @@ actor PersonaRuntime {
 
     func setFirewallEnabled(_ enabled: Bool) {
         firewallEnabled = enabled
+    }
+
+    // MARK: - Nearby AUTH allowlist (C-5)
+
+    /// The PAIRED peers' NOSTR pubkeys (hex) — the key space a kind-22242 AUTH is
+    /// signed by (NOT the PQRC identity hex). This is the `NearbyRelayHost`
+    /// allowlist: only a peer you've bidirectionally bound (kind-10420) may AUTH.
+    func pairedNostrPubkeys() -> Set<String> {
+        Set(verifiedContacts.values.map(\.nostrPubkeyHex))
+    }
+    private var pairedPubkeysPublisher: (@Sendable (Set<String>) -> Void)?
+    /// Wire the live allowlist snapshot: republishes the paired Nostr pubkeys now
+    /// and on every subsequent change to `verifiedContacts` (via its didSet).
+    func setPairedPubkeysPublisher(_ publisher: @escaping @Sendable (Set<String>) -> Void) {
+        pairedPubkeysPublisher = publisher
+        publishPairedPubkeys()
+    }
+    private func publishPairedPubkeys() {
+        pairedPubkeysPublisher?(pairedNostrPubkeys())
     }
 
     /// Apply a changed per-silo loop-guard threshold (DEVIATIONS D14) to the live

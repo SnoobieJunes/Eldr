@@ -144,6 +144,10 @@ final class AppSession {
         let kek: SymmetricKey
     }
     private var activeSilo: UnlockedSilo?
+    /// The Nearby relay host's AUTH allowlist (C-5): the live set of paired peers'
+    /// Nostr pubkeys. The host captures this (empty at first ⇒ fail-closed); the
+    /// runtime republishes it after boot and on every verified-contact change.
+    private let pairedSnapshot = PairedPubkeySnapshot()
     /// Set when the user opens the demo from Settings or launch args.
     var demoRunning = false
     /// npub arriving via a `pqrc:add?npub=…` deep link (QR scan from the
@@ -282,9 +286,11 @@ final class AppSession {
                 // path is verified on hardware, not the simulator.
                 let relay = LocalRelaySimulator(url: "nearby://host")
                 #if canImport(MultipeerConnectivity)
+                    pairedSnapshot.replace(with: [])  // fail closed until the runtime publishes
                     let host = NearbyRelayHost(
                         link: MultipeerNearbyLink(serviceType: "pqrc-relay"),
-                        relay: relay, aiAnswer: Self.onDeviceHubAI())
+                        relay: relay, aiAnswer: Self.onDeviceHubAI(),
+                        authorize: { [pairedSnapshot] pubkey in pairedSnapshot.contains(pubkey) })
                     try? await host.start()
                     relayHost = host
                 #endif
@@ -736,6 +742,11 @@ final class AppSession {
                 inMemoryStore: false, storeURL: Self.siloStoreURL(siloID),
                 relayURLs: Self.configuredRelayURLs(siloID: siloID))
             mode = .single(model)
+            // C-5: feed the live paired-contact set (verified peers' Nostr pubkeys)
+            // into the Nearby host's allowlist, now and on every change.
+            await runtime.setPairedPubkeysPublisher { [pairedSnapshot] set in
+                pairedSnapshot.replace(with: set)
+            }
         } catch {
             bootError = String(describing: error)
         }

@@ -255,6 +255,52 @@ struct MultiAIBehaviorTests {
         #expect(!names.contains("you"), "the codename redaction is bypassed for this chat only")
     }
 
+    /// C-5 wiring: the Nearby AUTH allowlist is built from a verified peer's NOSTR
+    /// pubkey (what a kind-22242 AUTH is signed by), NOT its PQRC identity hex — a
+    /// naive `verifiedContacts.keys` allowlist would match no AUTH and lock out
+    /// every paired contact. Also proves the live snapshot publishes on pairing.
+    @Test func pairedAllowlist_usesNostrPubkeys_notIdentityHex_andPublishesLive() async throws {
+        let relay = LocalRelaySimulator()
+        let alice = PersonaRuntime(
+            displayName: "Alice", transports: [await relay.connect()],
+            blobStore: LocalBlossomSimulator(),
+            ais: [TetheredAI(id: "a", name: "ai", provider: DemoAgentProvider())],
+            randomSource: SeededRandomSource(seed: 431), nonceSource: SeededRandomSource(seed: 432),
+            keychainService: "chat.pqrc.test-c5-alice-\(UUID().uuidString)")
+        let bob = PersonaRuntime(
+            displayName: "Bob", transports: [await relay.connect()],
+            blobStore: LocalBlossomSimulator(),
+            ais: [TetheredAI(id: "b", name: "ai", provider: DemoAgentProvider())],
+            randomSource: SeededRandomSource(seed: 433), nonceSource: SeededRandomSource(seed: 434),
+            keychainService: "chat.pqrc.test-c5-bob-\(UUID().uuidString)")
+        await alice.keychain.deleteAll()
+        await bob.keychain.deleteAll()
+        _ = try await alice.bootstrap(inMemoryStore: true)
+        _ = try await bob.bootstrap(inMemoryStore: true)
+
+        // Live snapshot wiring: capture what the runtime publishes (the host reads this).
+        let snapshot = PairedPubkeySnapshot()
+        await alice.setPairedPubkeysPublisher { set in snapshot.replace(with: set) }
+
+        let bobIdentity = await bob.identityHex
+        #expect(await alice.pairedNostrPubkeys().isEmpty, "no paired contacts before pairing")
+
+        try await alice.addVerifiedPeer(bob)
+
+        let paired = await alice.pairedNostrPubkeys()
+        #expect(paired.count == 1, "exactly one paired peer")
+        #expect(
+            !paired.contains(bobIdentity),
+            "the allowlist uses the peer's NOSTR pubkey, not its PQRC identity hex")
+        #expect(paired.allSatisfy { $0.count == 64 }, "x-only nostr pubkeys are 32 bytes hex")
+        // The live snapshot got the same set via the publisher; a non-paired key is refused.
+        for pk in paired { #expect(snapshot.contains(pk)) }
+        #expect(!snapshot.contains(bobIdentity), "a non-paired key is refused by the allowlist")
+
+        await alice.shutdown()
+        await bob.shutdown()
+    }
+
     // MARK: - Context profile (instructions / policy / depth / output mode)
 
     /// Custom per-AI instructions (the persona profile field) reach the provider.
