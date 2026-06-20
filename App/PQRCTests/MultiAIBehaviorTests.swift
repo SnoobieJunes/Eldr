@@ -428,6 +428,59 @@ struct MultiAIBehaviorTests {
             "the pinned skill's contract reached the AI's thread-turn prompt")
     }
 
+    // MARK: - Router policy indirection (Phase 2: AISelectionPolicy seam)
+
+    /// Injecting a custom policy whose `primary` returns the SECOND AI reroutes the
+    /// DRAFT path: `draftReply` consults the policy-chosen primary, not `ais[0]`.
+    /// Proves the seam actually routes the primary selection (vs. the hardcoded
+    /// first AI it replaced).
+    @Test func customPolicy_primary_reroutesDraftToSecondAI() async throws {
+        let runtime = await makeRuntime(
+            "Me",
+            ais: [
+                TetheredAI(id: "a", name: "first-ai", provider: LabeledProvider(label: "FIRST")),
+                TetheredAI(id: "b", name: "second-ai", provider: LabeledProvider(label: "SECOND")),
+            ])
+        await runtime.keychain.deleteAll()
+        _ = try await runtime.bootstrap(inMemoryStore: true)
+        await runtime.setAISelectionPolicy(SecondPrimaryPolicy())
+
+        let chatID = try await runtime.createSelfChat()
+        let draft = try await runtime.draftReply(conversationID: chatID)
+        #expect(
+            draft.text == "SECOND",
+            "the draft path used the policy-chosen primary (second AI), not ais[0]")
+    }
+
+    /// Injecting a policy whose `participants` returns only ONE specific AI gates
+    /// the autonomous solo path: only that AI posts, even though BOTH are otherwise
+    /// `participatesAutonomously`. Proves the seam routes the participation set.
+    @Test func customPolicy_participants_gatesAutonomousPostingToOneAI() async throws {
+        let runtime = await makeRuntime(
+            "Me",
+            ais: [
+                TetheredAI(id: "a", name: "ai-alpha", provider: DemoAgentProvider()),
+                TetheredAI(id: "b", name: "ai-beta", provider: DemoAgentProvider()),
+            ])
+        await runtime.keychain.deleteAll()
+        _ = try await runtime.bootstrap(inMemoryStore: true)
+        // Default policy would let BOTH reply (proven by
+        // soloChat_eachTetheredAIRepliesToMe_locally). This policy admits only "b".
+        await runtime.setAISelectionPolicy(OnlyParticipantPolicy(id: "b"))
+
+        let chatID = try await runtime.createSelfChat()
+        try await runtime.sendMessage("plan my week", conversationID: chatID)
+        try await Task.sleep(for: .milliseconds(400))
+
+        let names = Set(
+            await runtime.messages(conversationID: chatID)
+                .filter { $0.participantType == .agent }
+                .compactMap(\.agentName))
+        #expect(
+            names == ["ai-beta"],
+            "only the single policy-selected AI posted autonomously — the seam routes participation")
+    }
+
     /// Tier 2 companion side: an AI set to the "Nearby host's AI" backend runs its
     /// inference on a nearby HOST over the Multipeer link (no cloud, no key).
     @Test func nearbyHubAIProvider_runsOnHostOverLink() async throws {
@@ -542,5 +595,42 @@ actor SpyProvider: AgentProvider {
     func threadTurn(context: AgentContext) async throws -> AgentTurn? {
         capture(context)
         return AgentTurn(messages: [AgentMessage(text: "ok")])
+    }
+}
+
+/// Returns a FIXED label as its draft/turn text, so a test can prove WHICH provider
+/// the runtime routed a request to.
+struct LabeledProvider: AgentProvider {
+    let label: String
+    func draftReply(context: AgentContext) async throws -> Draft { Draft(text: label) }
+    func threadTurn(context: AgentContext) async throws -> AgentTurn? {
+        AgentTurn(messages: [AgentMessage(text: label)])
+    }
+}
+
+/// Routing policy whose `primary` is the SECOND AI (the default is the first), to
+/// prove the draft path consults the policy. `participants` keeps the default
+/// `participatesAutonomously` filter.
+struct SecondPrimaryPolicy: AISelectionPolicy {
+    func primary(from ais: [TetheredAI]) -> TetheredAI? {
+        ais.count >= 2 ? ais[1] : ais.first
+    }
+    func participants(
+        from ais: [TetheredAI], conversationID: String, threadID: String?
+    ) -> [TetheredAI] {
+        ais.filter { $0.participatesAutonomously }
+    }
+}
+
+/// Routing policy whose participation set is the single AI with a given id, to
+/// prove the autonomous (window/thread/solo) path consults the policy. `primary`
+/// keeps the default (first AI).
+struct OnlyParticipantPolicy: AISelectionPolicy {
+    let id: String
+    func primary(from ais: [TetheredAI]) -> TetheredAI? { ais.first }
+    func participants(
+        from ais: [TetheredAI], conversationID: String, threadID: String?
+    ) -> [TetheredAI] {
+        ais.filter { $0.id == id }
     }
 }

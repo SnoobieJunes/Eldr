@@ -205,6 +205,11 @@ struct TetheredAI: Sendable {
     var summarizes: Bool { outputMode == "summarize" }
 }
 
+/// `TetheredAI` already exposes `participatesAutonomously`, so it satisfies the
+/// `AISelectionCandidate` requirement with no new members — this conformance just
+/// lets the routing policy (`AISelectionPolicy`, in PQRCAgent) operate on it.
+extension TetheredAI: AISelectionCandidate {}
+
 /// One line of the read-only "what your AI sees" context preview (Settings).
 struct ContextPreviewLine: Identifiable, Sendable {
     let id = UUID()

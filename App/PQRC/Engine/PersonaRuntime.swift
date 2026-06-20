@@ -161,8 +161,10 @@ actor PersonaRuntime {
         keychainService: String,
         siloKEK: SymmetricKey? = nil,
         siloID: String = "",
-        enableLocalLink: Bool = false
+        enableLocalLink: Bool = false,
+        aiSelection: (any AISelectionPolicy<TetheredAI>)? = nil
     ) {
+        if let aiSelection { self.aiSelection = aiSelection }
         self.siloKEK = siloKEK
         self.siloID = siloID
         self.displayName = displayName
@@ -182,9 +184,18 @@ actor PersonaRuntime {
     var identityHex: String { identity.publicKeyData.hexString }
     var npub: String { nostrKeypair.npub }
 
-    /// The primary AI used for private drafts and the Settings probe.
-    private var primaryAI: TetheredAI { ais[0] }
-    private var primaryProvider: any AgentProvider { ais[0].provider }
+    /// Router policy (Phase 2): decides the PRIMARY AI (private drafts / Settings
+    /// probe) and the PARTICIPATION set (solo/window/thread autonomous turns).
+    /// Injectable; the default reproduces today's behavior EXACTLY (`ais.first` +
+    /// the `participatesAutonomously` filter). A future policy can route by task —
+    /// e.g. code/dev requests to the paired Mac ("acp") backend.
+    private var aiSelection: any AISelectionPolicy<TetheredAI> = DefaultAISelectionPolicy<TetheredAI>()
+
+    /// The primary AI used for private drafts and the Settings probe. Routed via
+    /// the policy; falls back to the first AI so it is NEVER nil (the runtime
+    /// guarantees `ais` is non-empty, matching the old `ais[0]`).
+    private var primaryAI: TetheredAI { aiSelection.primary(from: ais) ?? ais[0] }
+    private var primaryProvider: any AgentProvider { primaryAI.provider }
     /// Egress firewall: when on, context handed to a REMOTE AI is name-redacted
     /// (real names → local codenames) and byte-bounded before it leaves the
     /// device. On-device AIs always bypass it.
@@ -198,6 +209,12 @@ actor PersonaRuntime {
 
     func setFirewallEnabled(_ enabled: Bool) {
         firewallEnabled = enabled
+    }
+
+    /// Inject a routing policy at runtime (Phase 2). Defaults to
+    /// `DefaultAISelectionPolicy` (today's behavior) until set.
+    func setAISelectionPolicy(_ policy: any AISelectionPolicy<TetheredAI>) {
+        aiSelection = policy
     }
 
     // MARK: - Nearby AUTH allowlist (C-5)
@@ -1001,7 +1018,9 @@ actor PersonaRuntime {
         guard !aiSuppressed(in: conversationID) else { return }
         var posted = 0
         var lastError: String?
-        for ai in ais where ai.participatesAutonomously {
+        for ai in aiSelection.participants(
+            from: ais, conversationID: conversationID, threadID: nil)
+        {
             let context = await contextFor(ai, conversationID: conversationID, threadID: nil)
             do {
                 // Race generation against a timeout so a wedged/slow on-device
@@ -1622,7 +1641,9 @@ actor PersonaRuntime {
     func takeAgentThreadTurn(threadID: String) async {
         let conversationID = threadConversations[threadID] ?? ""
         guard !conversationID.isEmpty, !aiSuppressed(in: conversationID) else { return }
-        for ai in ais where ai.participatesAutonomously {
+        for ai in aiSelection.participants(
+            from: ais, conversationID: conversationID, threadID: threadID)
+        {
             _ = await engine.runThreadTurn(
                 provider: ai.provider,
                 context: await contextFor(ai, conversationID: conversationID, threadID: threadID),
@@ -1989,7 +2010,9 @@ actor PersonaRuntime {
             // Conversation scope: only during MY active ai_window. Each tethered
             // AI that participates replies in turn (the engine gate fails closed
             // when no window; draft-only/off AIs never auto-post).
-            for ai in ais where ai.participatesAutonomously {
+            for ai in aiSelection.participants(
+                from: ais, conversationID: conversationID, threadID: nil)
+            {
                 _ = await engine.runWindowReply(
                     provider: ai.provider,
                     context: await contextFor(ai, conversationID: conversationID, threadID: nil),
