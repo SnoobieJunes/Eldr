@@ -65,6 +65,18 @@ struct SecureEnclaveKeyWrapper: MasterKeyWrapper {
     }
 
     private func softwareWrapper() throws -> SoftwareKeyWrapper {
+        // Tripwire (invariant 10, DEVIATIONS AC31): this software-KEK path is
+        // legitimate ONLY where no Secure Enclave exists. If the SE is present
+        // yet we reach here, a regression has silently downgraded at-rest
+        // wrapping to a software key — the exact stolen-disk-image brute-force
+        // risk AC31 closes. Fail loudly in debug, fault-log in release. No key
+        // bytes are ever logged; the message is a static `.public` string.
+        if SecureEnclave.isAvailable {
+            assertionFailure(
+                "SE available but software KEK used — invariant 10 regression")
+            Log.store.fault(
+                "SE available but software KEK used — invariant 10 regression")
+        }
         let kek: Data
         if let stored = keychain.loadIfPresent(account: Self.softwareKEKAccount) {
             kek = stored
