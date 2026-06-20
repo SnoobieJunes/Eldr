@@ -85,6 +85,17 @@ struct RelayHubFrame: Codable, Sendable {
 /// Ollama) with companions over the same link. Injected by the app layer.
 public typealias HubAIAnswer = @Sendable (_ system: String, _ prompt: String) async -> String?
 
+/// `(pubkey hex) -> allowed`. Paired-contact allowlist gate for NIP-42 AUTH: a
+/// peer's signed kind-22242 is accepted ONLY if its pubkey is approved here
+/// (SPEC §0 — "no one other than the intended recipients"). The radio
+/// authenticates a valid signature, but signature ≠ trust: a STRANGER in radio
+/// range can sign a fresh key and self-AUTH, then publish into the host's store
+/// and spend its shared AI (audit C-5 / G1). Gating AUTH behind the host owner's
+/// paired contacts closes that abuse/metadata/DoS hole. Injected by the app
+/// layer; defaults to allow-all where unwired so the relay-only path is
+/// unchanged.
+public typealias HubAuthorize = @Sendable (_ pubkeyHex: String) -> Bool
+
 // MARK: - Host
 
 /// Hosts a relay (and optionally shares an AI) to nearby companions over a
@@ -95,6 +106,7 @@ public actor NearbyRelayHost {
     private let relay: LocalRelaySimulator
     private let randomSource: any RandomSource
     private let aiAnswer: HubAIAnswer?
+    private let authorize: HubAuthorize
 
     private var started = false
     private var pumpTask: Task<Void, Never>?
@@ -105,12 +117,14 @@ public actor NearbyRelayHost {
 
     public init(
         link: any NearbyLink, relay: LocalRelaySimulator,
-        randomSource: any RandomSource = SystemRandomSource(), aiAnswer: HubAIAnswer? = nil
+        randomSource: any RandomSource = SystemRandomSource(), aiAnswer: HubAIAnswer? = nil,
+        authorize: @escaping HubAuthorize = { _ in true }
     ) {
         self.link = link
         self.relay = relay
         self.randomSource = randomSource
         self.aiAnswer = aiAnswer
+        self.authorize = authorize
     }
 
     public func start() async throws {
@@ -167,13 +181,30 @@ public actor NearbyRelayHost {
                 let authEvent = RelayHubFrame.decodeEvent(blob),
                 authEvent.kind == 22242,
                 authEvent.firstTagValue("challenge") == challenge,
-                NostrKeypair.verify(authEvent)
+                NostrKeypair.verify(authEvent),
+                // Signature ≠ trust (C-5): a valid signature only proves the peer
+                // holds *some* key. Accept AUTH only from a paired contact the host
+                // owner approved, so a stranger in radio range can't self-AUTH.
+                // Failure is a SILENT drop — no authOK, the peer stays un-authed,
+                // and the publish / subscribe / AI guards below reject it.
+                authorize(authEvent.pubkey)
             else { return }
             challenges[peer] = nil
             authedPubkey[peer] = authEvent.pubkey
             await send(.init(kind: .authOK), to: peer)
         case .event:
             guard let blob = frame.event, let ev = RelayHubFrame.decodeEvent(blob) else { return }
+            // Gate publish behind AUTH (mirroring the `req` and `ai_request`
+            // gates): an un-authed / un-allowlisted peer must not be able to push
+            // events into the host's store (abuse / metadata / DoS — C-5). Authed
+            // companions are unaffected.
+            guard authedPubkey[peer] != nil else {
+                await send(
+                    .init(
+                        kind: .ok, eventID: ev.id, accepted: false, message: "Authenticate first."),
+                    to: peer)
+                return
+            }
             let ack = (try? await relay.handlePublish(ev))
                 ?? PublishAck(eventID: ev.id, accepted: false, message: "relay error")
             await send(

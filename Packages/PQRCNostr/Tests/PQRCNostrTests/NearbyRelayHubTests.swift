@@ -45,13 +45,13 @@ struct NearbyRelayHubTests {
     }
 
     private func makeHostAndClient(
-        ai: HubAIAnswer? = nil
+        ai: HubAIAnswer? = nil, authorize: @escaping HubAuthorize = { _ in true }
     ) async throws -> (LocalRelaySimulator, NearbyRelayHost, MultipeerRelayClient) {
         let relay = LocalRelaySimulator()
         let hub = LocalLinkSimulator()
         let host = NearbyRelayHost(
             link: await hub.makeLink(name: "host"), relay: relay,
-            randomSource: SeededRandomSource(seed: 1), aiAnswer: ai)
+            randomSource: SeededRandomSource(seed: 1), aiAnswer: ai, authorize: authorize)
         let client = MultipeerRelayClient(
             link: await hub.makeLink(name: "client"), randomSource: SeededRandomSource(seed: 2))
         try await host.start()
@@ -62,6 +62,9 @@ struct NearbyRelayHubTests {
 
     @Test func client_publishesAndReceives_throughNearbyHost() async throws {
         let (relay, host, client) = try await makeHostAndClient()
+        // Publish is AUTH-gated (C-5): authenticate first. The default allowlist
+        // is allow-all, so this is the ordinary relay path.
+        try await client.authenticate(keypair: try keypair("44"), randomSource: SystemRandomSource())
         let stream = await client.subscribe([NostrFilter(kinds: [1])])
         let ack = try await client.publish(try signed(try keypair("44"), content: "over the radio"))
         #expect(ack.accepted, "the nearby host accepted the publish")
@@ -88,6 +91,9 @@ struct NearbyRelayHubTests {
         try await bob.start()
         try await Task.sleep(for: .milliseconds(150))
 
+        // Publish is AUTH-gated (C-5); the publisher authenticates first (default
+        // allow-all allowlist). Bob only reads, so he needs no AUTH for kind-1.
+        try await alice.authenticate(keypair: try keypair("77"), randomSource: SystemRandomSource())
         let bobStream = await bob.subscribe([NostrFilter(kinds: [1])])
         _ = try await alice.publish(try signed(try keypair("77"), content: "hi bob"))
         let received = await firstEvent(bobStream)
@@ -188,6 +194,75 @@ struct NearbyRelayHubTests {
             "after reconnect the companion re-auths + re-subscribes and still gets its wraps")
 
         await client.stop()
+        await host.stop()
+    }
+
+    /// C-5 (audit G1, HIGH): a STRANGER in radio range — one whose pubkey is NOT
+    /// in the host owner's paired-contact allowlist — must not be able to AUTH,
+    /// even with a perfectly valid kind-22242 signature over the host's challenge.
+    /// Without the allowlist a stranger self-AUTHs and then publishes into the
+    /// host's store and spends its shared AI. With it, the AUTH is silently
+    /// dropped (no `auth_ok`) and the existing un-authed guards reject the peer's
+    /// publish and AI request. A paired contact (alice) is unaffected.
+    @Test func strangerNotInAllowlist_isRefusedAuthPublishAndAI() async throws {
+        let alice = try keypair("a1")
+        let mallory = try keypair("33")  // a valid keypair — just not a paired contact
+
+        let relay = LocalRelaySimulator()
+        let hub = LocalLinkSimulator()
+        let answer: HubAIAnswer = { _, prompt in "echo: \(prompt)" }
+        // Allowlist admits ONLY alice; mallory's signature is valid but unapproved.
+        let aliceKey = alice.publicKeyHex
+        let host = NearbyRelayHost(
+            link: await hub.makeLink(name: "host"), relay: relay,
+            randomSource: SeededRandomSource(seed: 1), aiAnswer: answer,
+            authorize: { $0 == aliceKey })
+        // Short host timeout so the refused AUTH (no auth_ok ever arrives) resolves
+        // fast instead of waiting out the default 12s.
+        let malloryClient = MultipeerRelayClient(
+            link: await hub.makeLink(name: "mallory"), randomSource: SeededRandomSource(seed: 2),
+            hostTimeoutSeconds: 1)
+        try await host.start()
+        try await malloryClient.start()
+        try await Task.sleep(for: .milliseconds(150))
+
+        // 1) AUTH is refused: the host never sends auth_ok for an unapproved
+        // pubkey, so authenticate() resolves un-authed and throws. (The host's
+        // `authedPubkey[mallory]` is therefore never set — `private`, so we prove
+        // "not authed" through its only observable consequence: the refusal here
+        // plus the rejected publish/AI below.)
+        await #expect(throws: NostrError.notAuthenticated) {
+            try await malloryClient.authenticate(
+                keypair: mallory, randomSource: SystemRandomSource())
+        }
+
+        // 2) Publish is rejected and the host store is unchanged.
+        let storeBefore = await relay.storedEventCount
+        let ack = try await malloryClient.publish(try signed(mallory, content: "spam into your store"))
+        #expect(!ack.accepted, "the host refused a publish from an un-allowlisted, un-authed stranger")
+        #expect(ack.message == "Authenticate first.", "publish gated behind AUTH")
+        #expect(
+            await relay.storedEventCount == storeBefore,
+            "nothing from the stranger landed in the host's store")
+
+        // 3) AI request is refused with the "authenticate first" path (no reply,
+        // so the stranger can't spend the host's compute/battery).
+        let reply = await malloryClient.requestAI(system: "be brief", prompt: "drain the battery")
+        #expect(reply == nil, "the host refused inference for an un-authed stranger")
+
+        await malloryClient.stop()
+
+        // Control: alice IS in the allowlist, so she authenticates and publishes.
+        let aliceClient = MultipeerRelayClient(
+            link: await hub.makeLink(name: "alice"), randomSource: SeededRandomSource(seed: 3))
+        try await aliceClient.start()
+        try await Task.sleep(for: .milliseconds(150))
+        try await aliceClient.authenticate(keypair: alice, randomSource: SystemRandomSource())
+        let aliceAck = try await aliceClient.publish(try signed(alice, content: "i'm a paired contact"))
+        #expect(aliceAck.accepted, "a paired, allowlisted contact authenticates and publishes normally")
+        #expect(await relay.storedEventCount == 1, "only the paired contact's event is stored")
+
+        await aliceClient.stop()
         await host.stop()
     }
 }
