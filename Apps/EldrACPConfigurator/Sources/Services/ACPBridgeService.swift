@@ -247,6 +247,21 @@ final class ACPBridgeService: ObservableObject {
     /// The relay the node publishes to / subscribes on. MUST match the phone's relay.
     static let defaultRelayURL = "wss://relay.lerants.com"
 
+    /// The relay-carried ACP host (Phase 3 LIVE node side): serves the FULL ACP protocol
+    /// to the OWNER's phone over the relay, so the phone can drive the agent REMOTELY.
+    /// Complements the watch-along drafts (this path) and `ACPNodeHost` (local Multipeer).
+    /// Stood up alongside the messenger once an owner is pinned + an LLM is configured;
+    /// nil otherwise (fail-closed — no owner / no model ⇒ no remote agent host). The C-3
+    /// gate lives inside it.
+    private var relayHost: ACPRelayHost?
+    /// True while `relayHostStreamingEnabled` should stream the agent's answer over the
+    /// relay. OFF by default to match the watch-along's whole-message redaction doctrine,
+    /// though the relay ACP path is the OWNER's own E2EE session (no fan-out redaction).
+    private let relayHostStreamingEnabled = false
+    /// Whether the relay ACP host is currently serving the owner. Drives the BridgeView
+    /// status row alongside the existing pairing state.
+    @Published private(set) var relayACPServing = false
+
     init(
         keychain: KeychainBox = KeychainBox(),
         serviceType: String = MultipeerNearbyLink.bridgeServiceType,
@@ -443,6 +458,25 @@ final class ACPBridgeService: ObservableObject {
         return bundled
     }
 
+    /// The PRODUCTION in-process LLM config for the relay ACP host. The watch-along path
+    /// SPAWNS `eldr-acp` (the launcher sources the env file); the relay host instead drives
+    /// `runACPAgent` in-process, so it needs the same LLM config materialized here: the
+    /// `ELDR_LLM_URL`/`ELDR_LLM_MODEL` from the shared env file, the token from the Keychain
+    /// (C-8 — never the cleartext env file). An empty URL ⇒ no usable model ⇒ the caller
+    /// does NOT stand up the relay host (fail-closed).
+    static func relayHostLLMConfig(paths: ConfigPaths = .standard) -> LLMConfig {
+        var env = ConfigurationStore.parseEnvFile(at: paths.envFile)
+        // Layer the Keychain token over the env file (the env file omits it by C-8).
+        for (k, v) in llmTokenEnvironment() { env[k] = v }
+        return LLMConfig.fromEnvironment(env)
+    }
+
+    /// The relay's per-message byte budget for framing/chunking ACP lines: the relay's
+    /// event-size cap minus gift-wrap overhead. 16 KiB matches the proven e2e budget and
+    /// stays well under the relay's 65 535-byte limit even after wrapping. `nonisolated`
+    /// so the host construction and tests share one source of truth off the main actor.
+    nonisolated static let relayACPMaxFrameBytes = 16 * 1024
+
     // MARK: PQRC messaging node (AC25 — the live BridgeMessaging seam)
 
     /// Stand up the Mac's PQRC node: load/persist the identity + prekeys (under the SAME
@@ -495,6 +529,11 @@ final class ACPBridgeService: ObservableObject {
             nodeTask = Task { [weak self] in
                 for await event in events { await self?.handleMessengerEvent(event) }
             }
+            // Stand up the relay-carried ACP host so the OWNER's phone can drive the agent
+            // REMOTELY over this same messenger (Phase 3 LIVE node side). Needs the pinned
+            // owner (the C-3 gate target) + a usable LLM; absent either, it stays off
+            // (fail-closed) and only the watch-along path runs.
+            startRelayACPHost(messenger: messenger)
             // Publish our keys so the phone can find us and start the encrypted chat.
             try await messenger.announce(relayURLs: relayURLs)
         } catch {
@@ -506,10 +545,67 @@ final class ACPBridgeService: ObservableObject {
     private func stopMessagingNode() {
         nodeTask?.cancel()
         nodeTask = nil
+        stopRelayACPHost()
         let messenger = self.messenger
         self.messenger = nil
         Task { await messenger?.stop() }
         messaging = UnpairedMessaging()
+    }
+
+    // MARK: Relay-carried ACP host (Phase 3 LIVE node side)
+
+    /// Stand up the relay ACP host over `messenger`: serve the FULL ACP protocol to the
+    /// OWNER's phone over the relay (remote drive), with the C-3 gate admitting ONLY the
+    /// owner's frames and the permission gate left fail-closed. No-op (fail-closed) unless
+    /// an owner is pinned AND a usable LLM is configured — without an owner there is no
+    /// gate target, and without a model the agent can't answer. Idempotent. The host's
+    /// publish seam is `messenger.send(framed, to: owner)`; its inbound is fed by
+    /// `handleMessengerEvent`'s ACP-frame routing.
+    private func startRelayACPHost(messenger: PQRCMessenger) {
+        guard relayHost == nil, let ownerIdentityHex else { return }
+        let llmConfig = Self.relayHostLLMConfig()
+        // No usable endpoint (empty URL) ⇒ don't serve a dead agent over the relay.
+        guard !llmConfig.url.isEmpty else { return }
+        let llm = OpenAICompatibleLLMClient(config: llmConfig)
+        let toolEnvironment = ToolEnvironment(
+            workdir: agentWorkdir, baseEnvironment: ProcessInfo.processInfo.environment)
+        let host = ACPRelayHost(
+            ownerIdentityHex: ownerIdentityHex,
+            maxFrameBytes: Self.relayACPMaxFrameBytes,
+            llm: llm,
+            toolEnvironment: toolEnvironment,
+            config: .default,
+            streamingEnabled: relayHostStreamingEnabled,
+            publish: { [weak messenger] framed in
+                // The transport's send seam: publish ONE framed chunk to the owner as an
+                // ordinary PQRC message. participant_type stays .human — the frame is the
+                // node↔owner ACP control channel, not an agent-authored chat message
+                // (invariant 8 governs CHAT authorship; this is transport, like the phone's
+                // outbound frames in the proven e2e). Send failures are swallowed so a
+                // relay hiccup doesn't wedge the agent's turn loop.
+                try? await messenger?.send(
+                    MessageBody(text: framed, sentAt: Int64(Date().timeIntervalSince1970)),
+                    to: ownerIdentityHex)
+            })
+        relayHost = host
+        host.start()
+        relayACPServing = host.currentStatus() == .serving
+    }
+
+    /// Tear down the relay ACP host (stops the agent loop + closes its transport).
+    private func stopRelayACPHost() {
+        relayHost?.stop()
+        relayHost = nil
+        relayACPServing = false
+    }
+
+    /// Restart the relay host so a freshly-pinned owner (or a changed workdir/LLM) takes
+    /// effect on the live node. No live messenger ⇒ a no-op (the host comes up with the
+    /// node next time). Call after `setOwnerIdentity`/`setAgentWorkdir` while serving.
+    func refreshRelayACPHost() {
+        guard let messenger else { return }
+        stopRelayACPHost()
+        startRelayACPHost(messenger: messenger)
     }
 
     /// Route one inbound messenger event. New peers are auto-accepted (the user
@@ -527,6 +623,17 @@ final class ACPBridgeService: ObservableObject {
                 bridgeState = .paired(contactName: shortHex(contact.identityHex))
             }
         case .message(let received):
+            // Relay-carried ACP frame? Route it to the relay host (Phase 3 LIVE node
+            // side) and STOP — an ACP frame is the node↔owner control channel, never a
+            // chat message: it must not become a watch-along prompt or a paired
+            // conversation. The host's C-3 gate admits ONLY the owner's frames; a
+            // non-owner's `ACP1|…` frame is swallowed here (returns from routeInbound as
+            // a drop) and goes no further (so a non-owner can't probe the agent either).
+            if ACPRelayHost.wasACPFrame(received.body.text) {
+                await relayHost?.routeInbound(
+                    senderIdentityHex: received.senderIdentityHex, body: received.body.text)
+                return
+            }
             // Owner-signed window/grant → into the engine (gate opens only for the
             // pinned owner; non-owner senders are rejected inside these).
             if let window = received.aiWindow {
@@ -618,6 +725,9 @@ final class ACPBridgeService: ObservableObject {
         let trimmed = hex?.trimmingCharacters(in: .whitespacesAndNewlines)
         ownerIdentityHex = (trimmed?.isEmpty ?? true) ? nil : trimmed
         saveOwner()
+        // A changed owner re-targets the C-3 gate; restart the live relay host so the new
+        // owner can drive it (and the old one can't). No-op when the node isn't running.
+        refreshRelayACPHost()
     }
 
     private func saveOwner() {
