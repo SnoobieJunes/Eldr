@@ -399,6 +399,14 @@ final class AppSession {
                     temperature: config.temperature,
                     maxResponseTokens: config.maxResponseTokens)
                 : DemoAgentProvider()
+        case "acp":
+            // Drive a paired Mac node's coding harness over the sealed
+            // NearbyACPTransport via ACPAgentProvider (PQRCAgent). The provider +
+            // transport are built and unit-proven; wiring the LIVE node link (the
+            // node-side ACP host + device-to-device pairing) is the remaining
+            // Phase-1 e2e. Until a node is connected, the Demo stub keeps the
+            // backend selectable and visibly responding.
+            return DemoAgentProvider()
         case "demo":
             return DemoAgentProvider()
         default:  // "ondevice"

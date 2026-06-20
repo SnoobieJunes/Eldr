@@ -301,6 +301,32 @@ struct MultiAIBehaviorTests {
         await bob.shutdown()
     }
 
+    /// G4/P-6: a credential-shaped secret pasted into a chat is SCRUBBED from the
+    /// context a third-party cloud AI receives (firewall on) — names AND secrets.
+    @Test func cloudEgress_scrubsCredentialSecretsFromTranscript() async throws {
+        let spy = SpyProvider()
+        let runtime = await makeRuntime(
+            "Alice",
+            ais: [
+                TetheredAI(
+                    id: "r", name: "remote-ai", provider: spy, isRemote: true,
+                    appliesEgressFirewall: true)
+            ])
+        await runtime.keychain.deleteAll()
+        _ = try await runtime.bootstrap(inMemoryStore: true)
+        let chatID = try await runtime.createSelfChat()
+        AppSession.setConversationFirewall(nil, conversationID: chatID, siloID: "")  // default ON
+        try await runtime.sendMessage(
+            "my key is sk-ABC123def456GHI789jkl012MNO ok", conversationID: chatID)
+        try await Task.sleep(for: .milliseconds(400))
+
+        let texts = await spy.capturedTexts
+        #expect(
+            !texts.joined(separator: " ").contains("sk-ABC123def456GHI789jkl012MNO"),
+            "the API key must be scrubbed before it reaches a third-party cloud AI")
+        #expect(!texts.isEmpty, "the message still reached the AI (scrubbed, not dropped)")
+    }
+
     // MARK: - Context profile (instructions / policy / depth / output mode)
 
     /// Custom per-AI instructions (the persona profile field) reach the provider.
@@ -496,12 +522,14 @@ struct SiloRuntimeTests {
 /// tests can assert exactly what would leave the device for a remote AI.
 actor SpyProvider: AgentProvider {
     private(set) var capturedNames: [String] = []
+    private(set) var capturedTexts: [String] = []
     private(set) var capturedInstructions: String?
     private(set) var capturedSummarize = false
     private(set) var capturedCount = 0
     private(set) var capturedSystemPrompt: String?
     private func capture(_ context: AgentContext) {
         capturedNames = context.transcript.map(\.senderDisplayName)
+        capturedTexts = context.transcript.map(\.text)
         capturedInstructions = context.instructions
         capturedSummarize = context.summarize
         capturedCount = context.transcript.count

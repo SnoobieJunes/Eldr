@@ -103,6 +103,7 @@ struct ConfiguredAI: Identifiable, Codable, Equatable, Sendable {
         ("groq", "Groq (fast)"),
         ("custom", "Custom / self-hosted (OpenAI-compatible)"),
         ("hub", "Nearby host's AI (Multipeer)"),
+        ("acp", "Mac coding harness (ACP)"),
         ("demo", "Demo (simulated)"),
     ]
 
@@ -143,7 +144,8 @@ struct ConfiguredAI: Identifiable, Codable, Equatable, Sendable {
         // Apple's Private Cloud Compute. Both are off-device (consent + "leaves
         // device" indicator apply). Whether the egress firewall ALSO applies is a
         // separate question — see `appliesEgressFirewall`.
-        ["claude", "openai", "gemini", "openrouter", "groq", "custom", "hub", "pcc"].contains(kind)
+        ["claude", "openai", "gemini", "openrouter", "groq", "custom", "hub", "pcc", "acp"]
+            .contains(kind)
     }
 
     /// Off-device backends that ALSO get the name-redaction + byte-bound egress

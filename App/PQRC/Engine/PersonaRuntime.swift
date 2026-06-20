@@ -294,8 +294,12 @@ actor PersonaRuntime {
 
     /// Replaces real display names with each identity's LOCAL codename (and self
     /// with "you"), so a remote vendor never receives a labeled social graph
-    /// (DEVIATIONS A19/A20: names are device-local). Text/flags are unchanged;
-    /// the byte bound was already applied in `agentContext`.
+    /// (DEVIATIONS A19/A20: names are device-local). ALSO scrubs credential-shaped
+    /// secrets from the message text via `CredentialRedactor` (G4/P-6) — an API
+    /// key / token pasted into a chat must not reach a third-party cloud AI. The
+    /// byte bound was already applied in `agentContext`. (When the per-chat
+    /// firewall is OFF this path is skipped — the user chose to send that chat raw
+    /// to their own trusted agents.)
     private func redactedForRemote(_ context: AgentContext) -> AgentContext {
         let entries = context.transcript.map { entry -> TranscriptEntry in
             let codename =
@@ -306,7 +310,7 @@ actor PersonaRuntime {
                 senderIdentityHex: entry.senderIdentityHex,
                 senderDisplayName: codename,
                 participantType: entry.participantType,
-                text: entry.text,
+                text: CredentialRedactor.scrub(entry.text),
                 isContext: entry.isContext,
                 isSharedContext: entry.isSharedContext)
         }
