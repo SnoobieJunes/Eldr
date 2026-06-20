@@ -87,6 +87,9 @@ public actor ACPClientDriver {
         /// Attach to an already-running pair (input = where WE write, output = where
         /// WE read). Used by tests and the in-process bridge.
         case attach(input: FileHandle, output: FileHandle)
+        /// Drive the agent over an abstract `ACPTransport` (Multipeer / LAN / in-memory)
+        /// — no Process, no FileHandle. The phone path (Phase 1).
+        case preset(any ACPTransport)
     }
 
     private let transport: Transport
@@ -132,6 +135,19 @@ public actor ACPClientDriver {
         self.capabilities = capabilities
     }
 
+    /// Drive the agent over an abstract `ACPTransport` (Phase 1): the phone speaks ACP to
+    /// a remote agent over Multipeer/LAN, and tests speak it over an in-memory pair — the
+    /// same protocol logic, no stdio.
+    public init(
+        transport: any ACPTransport,
+        handler: ACPClientHandler = ACPClientHandler(),
+        capabilities: ClientCapabilities = ClientCapabilities()
+    ) {
+        self.transport = .preset(transport)
+        self.handler = handler
+        self.capabilities = capabilities
+    }
+
     // MARK: - Lifecycle
 
     /// Spawn (if spawning), begin reading, then `initialize` + `session/new`. Returns
@@ -145,7 +161,6 @@ public actor ACPClientDriver {
         // broken pipe surfaces as a catchable write error instead.
         signal(SIGPIPE, SIG_IGN)
 
-        let outputHandle: FileHandle
         switch transport {
         case .spawn(let executableURL, let arguments, let environment):
             let process = Process()
@@ -163,13 +178,18 @@ public actor ACPClientDriver {
             }
             self.process = process
             self.inputHandle = inPipe.fileHandleForWriting
-            outputHandle = outPipe.fileHandleForReading
+            startReader(on: outPipe.fileHandleForReading)
         case .attach(let input, let output):
             self.inputHandle = input
-            outputHandle = output
+            startReader(on: output)
+        case .preset(let acpTransport):
+            // Abstract transport: consume its line stream directly — no Process, no
+            // FileHandle. Writes go out via `acpTransport.send` (see `writeLine`).
+            readerTask = Task { [weak self] in
+                for await line in acpTransport.inboundLines() { await self?.route(line) }
+                await self?.failAll(ACPClientError.agentExited)
+            }
         }
-
-        startReader(on: outputHandle)
 
         // initialize → capture agentInfo + any commands advertised here.
         let initResult = try await request(
@@ -221,6 +241,7 @@ public actor ACPClientDriver {
     public func shutdown() async {
         readerTask?.cancel()
         readerTask = nil
+        if case .preset(let acpTransport) = transport { acpTransport.close() }
         try? inputHandle?.close()
         inputHandle = nil
         if let process, process.isRunning { process.terminate() }
@@ -343,7 +364,7 @@ public actor ACPClientDriver {
 
     /// Send a request and await the agent's response (resolved by `route`).
     private func request(method: String, params: JSONValue) async throws -> JSONValue {
-        guard inputHandle != nil else { throw ACPClientError.notStarted }
+        guard readerTask != nil else { throw ACPClientError.notStarted }
         let id = nextRequestID
         nextRequestID += 1
         let envelope: JSONValue = .object([
@@ -402,10 +423,14 @@ public actor ACPClientDriver {
         for continuation in waiters { continuation.resume(throwing: error) }
     }
 
-    /// Write one newline-terminated line to the agent's stdin.
+    /// Write one JSON-RPC line out: over the abstract transport for the preset path,
+    /// else to the agent's stdin (spawn/attach).
     private func writeLine(_ line: String) {
-        guard let inputHandle else { return }
-        try? inputHandle.write(contentsOf: Data((line + "\n").utf8))
+        if case .preset(let acpTransport) = transport {
+            acpTransport.send(line)
+        } else if let inputHandle {
+            try? inputHandle.write(contentsOf: Data((line + "\n").utf8))
+        }
     }
 
     // MARK: - Static helpers
