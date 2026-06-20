@@ -69,7 +69,7 @@ Packages/
   PQRCNostr/       # Nostr event model, BIP-340 signing, NIP-01 codec,
                    # RelayTransport protocol, LocalRelaySimulator, LocalBlossomSimulator.
   PQRCAgent/       # AgentProvider protocol + Mock / FoundationModels / Anthropic providers.
-App/               # Thin SwiftUI app target (PQRC.xcodeproj), UI tests, perf tests.
+App/               # Thin SwiftUI app target (EldrChat.xcodeproj), UI tests, perf tests.
 TestVectors/       # Frozen JSON vectors (see TEST-PLAN §2).
 docs/              # The four documents above + generated THREAT_MODEL.md, DEMO.md, DEVIATIONS.md.
 ```

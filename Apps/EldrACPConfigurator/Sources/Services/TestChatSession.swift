@@ -33,6 +33,16 @@ final class TestChatSession: ObservableObject {
     /// Force the built-in echo "LLM" (offline). The UI sets this when the health
     /// check is red so the chat still demonstrates the tool loop.
     @Published var useFakeLLM = false
+    /// Show the RAW model stream (pre reasoning-trace stripping) in the chat. OFF by
+    /// default. When ON, the next bootstrap attaches a `rawObserver` to the real LLM
+    /// client so a reasoning model's chain-of-thought (`<think>…`, `<|channel>thought…`)
+    /// is captured into `rawStream` for display. Toggling `reset()`s the session so the
+    /// observer is attached/detached on the rebuilt client (no capture cost when off).
+    @Published var showRawStream = false
+    /// The raw, pre-strip model output captured for the LAST turn, accumulated as it
+    /// streams. Empty until a turn runs with `showRawStream` on. Reset at the start of
+    /// each turn so the disclosure shows only the most recent reply's raw trace.
+    @Published private(set) var rawStream = ""
 
     /// Pulled fresh each bootstrap so config edits take effect after `reset()`.
     /// `@MainActor`-isolated because the UI wires these to MainActor store state.
@@ -72,6 +82,8 @@ final class TestChatSession: ObservableObject {
         // session/prompt on the same agent actor — which duplicated every tool call
         // and flooded the UI (the reported "blew up / froze").
         isResponding = true
+        // Start a fresh raw capture for this turn (the disclosure shows the LAST turn).
+        rawStream = ""
         await bootstrap()
         guard let agent, let sid = sessionId else {
             append(.assistantMessage("Could not start the agent session."))
@@ -99,6 +111,7 @@ final class TestChatSession: ObservableObject {
         sessionId = nil
         isResponding = false
         items.removeAll()
+        rawStream = ""
     }
 
     // MARK: - Agent bootstrap
@@ -111,9 +124,23 @@ final class TestChatSession: ObservableObject {
         await sink.attach(connection)
 
         let llmConfig = llmConfigProvider()
+        // Only build a raw tap when the toggle is on — when off, `rawObserver` stays nil
+        // so the client does ZERO raw capture (same path as the relay host / CLI).
+        // `@Sendable`: the SSE read invokes this off the MainActor, so it hops back to
+        // append into the published `rawStream` (and drops a diagnostics breadcrumb).
+        var rawObserver: (@Sendable (String) -> Void)?
+        if showRawStream {
+            rawObserver = { [weak self] piece in
+                Task { @MainActor in self?.rawStream += piece }
+                DiagnosticsLog.shared.post(.llm, .info, "raw", String(piece.prefix(200)))
+            }
+        }
         let llm: any LLMClient =
             (useFakeLLM || llmConfig.url.isEmpty)
-            ? EchoLLMClient() : OpenAICompatibleLLMClient(config: llmConfig)
+            ? EchoLLMClient()
+            : InspectingLLMClient(
+                wrapping: OpenAICompatibleLLMClient(config: llmConfig, rawObserver: rawObserver),
+                model: llmConfig.model)
         let agent = ACPAgent(
             connection: connection, llm: llm,
             toolEnvironment: ToolEnvironment(workdir: workdir),

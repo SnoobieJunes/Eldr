@@ -8,14 +8,20 @@ public struct RatchetSnapshot: Codable, Equatable, Sendable {
     public struct SkippedEntry: Codable, Equatable, Sendable {
         public let chain: Data
         public let n: Int
-        public let messageKey: Data
+        // `var` so `RatchetSnapshot.zeroize()` can wipe the cached message key.
+        public internal(set) var messageKey: Data
     }
 
-    public let rootKey: Data
-    public let dhs: Data
+    // Secret-bearing fields are `var` so `zeroize()` can wipe the in-memory
+    // plaintext after it has been serialized + encrypted at rest (call sites in
+    // the app layer). Public-key material (`dhr`, `peerKEM`) and counters stay
+    // `let`. `internal(set)` keeps the public surface read-only while permitting
+    // the in-package wipe.
+    public internal(set) var rootKey: Data
+    public internal(set) var dhs: Data
     public let dhr: Data?
-    public let cks: Data?
-    public let ckr: Data?
+    public internal(set) var cks: Data?
+    public internal(set) var ckr: Data?
     public let ns: Int
     public let nr: Int
     public let pn: Int
@@ -23,11 +29,29 @@ public struct RatchetSnapshot: Codable, Equatable, Sendable {
     public let rekeyCounter: Int
     public let peerRekeyCounter: Int
     /// Retained KEM private seeds, oldest→newest (current = last).
-    public let myKEMSeeds: [Data]
+    public internal(set) var myKEMSeeds: [Data]
     public let peerKEM: Data
-    public let skipped: [SkippedEntry]
-    public let pendingOutboundRootFolds: [Data]
-    public let pendingInboundRootFolds: [Data]
+    public internal(set) var skipped: [SkippedEntry]
+    public internal(set) var pendingOutboundRootFolds: [Data]
+    public internal(set) var pendingInboundRootFolds: [Data]
+
+    /// Wipes every secret byte buffer this snapshot holds: root key, send/recv
+    /// chain keys, our DH private half, KEM private seeds, cached message keys,
+    /// and the pending root-fold shared secrets. Call ONCE the snapshot has been
+    /// serialized and the resulting blob encrypted at rest — never before, or
+    /// the persisted ciphertext would be built from zeroed plaintext. Public
+    /// keys (`dhr`, `peerKEM`) and `Int` counters are not secret and left
+    /// intact. After this the snapshot is no longer usable for restore.
+    public mutating func zeroize() {
+        rootKey.zeroize()
+        dhs.zeroize()
+        cks?.zeroize()
+        ckr?.zeroize()
+        for i in myKEMSeeds.indices { myKEMSeeds[i].zeroize() }
+        for i in skipped.indices { skipped[i].messageKey.zeroize() }
+        for i in pendingOutboundRootFolds.indices { pendingOutboundRootFolds[i].zeroize() }
+        for i in pendingInboundRootFolds.indices { pendingInboundRootFolds[i].zeroize() }
+    }
 }
 
 extension DoubleRatchet {
@@ -49,8 +73,15 @@ extension DoubleRatchet {
             skipped: skipped.map {
                 RatchetSnapshot.SkippedEntry(chain: $0.chain, n: $0.n, messageKey: $0.messageKey.rawData)
             },
-            pendingOutboundRootFolds: pendingOutboundRootFolds,
-            pendingInboundRootFolds: pendingInboundRootFolds
+            // Deep-copy the fold shared-secrets so each element owns a fresh,
+            // independent buffer (like every other secret field above, which go
+            // through `.rawData` / `.rawRepresentation`). A plain by-value
+            // `[Data]` copy shares copy-on-write backing with the LIVE ratchet's
+            // pending folds, so a future in-place wipe of the snapshot
+            // (`zeroize()`) could corrupt the running session. `Data(_:)` forces
+            // a unique copy per element, breaking the aliasing.
+            pendingOutboundRootFolds: pendingOutboundRootFolds.map { Data($0) },
+            pendingInboundRootFolds: pendingInboundRootFolds.map { Data($0) }
         )
     }
 

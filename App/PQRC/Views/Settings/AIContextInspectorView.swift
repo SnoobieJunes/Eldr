@@ -124,7 +124,7 @@ struct AIContextInspectorView: View {
             }
         } header: {
             Text("Instructions sent")
-                .helpInfo("The exact system prompt this AI receives — its persona/instructions plus, in a shared thread, the PQRC guardrails and any pinned skills. Word for word, read-only.")
+                .helpInfo("The exact system prompt this AI receives — its persona/instructions plus, in a shared thread, the EldrChat guardrails and any pinned skills. Word for word, read-only.")
         }
 
         // The transcript — every entry, each with a real include/exclude toggle.

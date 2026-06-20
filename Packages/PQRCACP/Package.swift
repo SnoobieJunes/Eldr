@@ -1,4 +1,4 @@
-// swift-tools-version: 6.0
+// swift-tools-version:6.2
 import PackageDescription
 
 // PQRCACP — EldrChat's Agent Client Protocol (ACP) AGENT. A standalone Swift
@@ -19,7 +19,7 @@ import PackageDescription
 // swift-secp256k1 in through PQRCAgent.
 let package = Package(
     name: "PQRCACP",
-    platforms: [.macOS(.v14)],
+    platforms: [.iOS(.v26), .macOS(.v14)],
     products: [
         .library(name: "PQRCACP", targets: ["PQRCACP"]),
         .executable(name: "eldr-acp", targets: ["eldr-acp"]),

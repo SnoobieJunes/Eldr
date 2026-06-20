@@ -32,6 +32,23 @@ struct MainView: View {
     // home of the app); .automatic hid it in iPad portrait until the user found
     // "Show Sidebar". Ignored on compact iPhone widths (which stack).
     @State private var columnVisibility: NavigationSplitViewVisibility = .all
+    /// Pending destructive confirmations (statusreport §2.6): deleting a
+    /// conversation wipes it + all its messages/threads on this device, and
+    /// blocking drops the contact's messages — both fired silently before. We
+    /// hold the target conversation here so the confirm alert knows what it's
+    /// acting on; the swipe and context-menu Delete share one target since they
+    /// do the same thing. `nil` = no dialog showing (the alert binds presence to
+    /// this being non-nil).
+    @State private var pendingDelete: ConversationVM?
+    @State private var pendingBlock: ConversationVM?
+    /// Bridge for "Message" taps inside the modal Settings sheet (Contacts ▸ a
+    /// row's message button). Contacts lives several pushes deep inside Settings'
+    /// own NavigationStack, so a NavigationLink there would open the chat INSIDE
+    /// the sheet (disconnected from this split view; "Done" would dismiss it).
+    /// Instead Contacts writes the target id here; we observe it, dismiss Settings,
+    /// and select the conversation in the real split view. Injected ONLY into the
+    /// Settings subtree (below), so it stays scoped.
+    @State private var settingsNav = SettingsNavigation()
 
     /// Conversations after applying the search filter (Mac ⌘F).
     private var visibleConversations: [ConversationVM] {
@@ -77,7 +94,21 @@ struct MainView: View {
             NewGroupView(model: model)
         }
         .sheet(isPresented: $showSettings) {
+            // Contacts (deep inside Settings) can ask to open a chat in the MAIN
+            // split view rather than pushing it inside the sheet. Scope the bridge
+            // to this subtree so it isn't visible app-wide.
             SettingsView(model: model)
+                .environment(settingsNav)
+        }
+        // A "Message" tap in Contacts set the target: close Settings and select
+        // that conversation in the split view (the same `selection` the sidebar
+        // drives), so the chat opens in the detail pane — not stranded in the
+        // dismissed sheet. Clearing the bridge afterward re-arms it.
+        .onChange(of: settingsNav.openConversationID) { _, id in
+            guard let id else { return }
+            showSettings = false
+            selection = id
+            settingsNav.openConversationID = nil
         }
         .onAppear { mutes.load(siloID: session.activeSiloID ?? "") }
         .onChange(of: session.pendingNpub) { _, npub in
@@ -145,7 +176,8 @@ struct MainView: View {
                         }
                         .swipeActions(edge: .trailing) {
                             Button(role: .destructive) {
-                                Task { await model.deleteConversation(conversation.id) }
+                                // Confirm first (§2.6) — delete is unrecoverable.
+                                pendingDelete = conversation
                             } label: {
                                 Label("Delete", systemImage: "trash")
                             }
@@ -177,7 +209,7 @@ struct MainView: View {
                 personaSwitcher
             }
         }
-        .navigationTitle("PQRC")
+        .navigationTitle("EldrChat")
         .toolbar {
             ToolbarItem(placement: .topBarLeading) {
                 Button {
@@ -216,6 +248,37 @@ struct MainView: View {
                 .help("New conversation (⌘N)")
             }
         }
+        // Destructive-action confirmations (§2.6). Same shape as Settings'
+        // wipe/regenerate alerts: a destructive confirm button + Cancel, with a
+        // message spelling out the irreversible effect. Presence is driven by
+        // the pending-target state being non-nil (cleared on Cancel/confirm so
+        // the alert dismisses).
+        .alert("Delete conversation?", isPresented: presenting($pendingDelete)) {
+            let id = pendingDelete?.id
+            Button("Delete", role: .destructive) {
+                guard let id else { return }
+                Task { await model.deleteConversation(id) }
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("This permanently removes this conversation and all its messages on this device. This can't be undone.")
+        }
+        .alert("Block \(pendingBlock?.title ?? "contact")?", isPresented: presenting($pendingBlock)) {
+            let id = pendingBlock?.id
+            Button("Block", role: .destructive) {
+                guard let id else { return }
+                Task { await model.block(id) }
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("You'll stop receiving messages from \(pendingBlock?.title ?? "this contact"), and their pending messages are dropped on this device. You can unblock them later in the conversation's details.")
+        }
+    }
+
+    /// Bridges an optional-target `@State` to the `Bool` binding `.alert` wants:
+    /// the alert shows while the target is set, and dismissing clears it.
+    private func presenting<T>(_ target: Binding<T?>) -> Binding<Bool> {
+        Binding(get: { target.wrappedValue != nil }, set: { if !$0 { target.wrappedValue = nil } })
     }
 
     /// Right-click / long-press actions for a conversation list row. Open, pin,
@@ -253,7 +316,8 @@ struct MainView: View {
             }
             Divider()
             Button(role: .destructive) {
-                Task { await model.block(conversation.id) }
+                // Confirm first (§2.6) — blocking drops their messages.
+                pendingBlock = conversation
             } label: {
                 Label("Block", systemImage: "hand.raised")
             }
@@ -261,7 +325,8 @@ struct MainView: View {
             Divider()
         }
         Button(role: .destructive) {
-            Task { await model.deleteConversation(conversation.id) }
+            // Confirm first (§2.6) — delete is unrecoverable.
+            pendingDelete = conversation
         } label: {
             Label("Delete", systemImage: "trash")
         }
@@ -297,6 +362,21 @@ final class MutedConversations {
     }
 }
 
+/// One-shot bridge from the modal Settings sheet back to `MainView`'s split-view
+/// selection. Contacts (pushed deep inside Settings' own NavigationStack) sets
+/// `openConversationID` when its "Message" button is tapped; `MainView` observes
+/// it, dismisses Settings, and drives the real `selection`, then clears this back
+/// to `nil`. A tiny @Observable seam — the same shape as `AppCommands` — so the
+/// chat opens in the detail pane instead of being pushed (and stranded) inside
+/// the sheet. Injected only into the Settings subtree, so it isn't app-global.
+@MainActor
+@Observable
+final class SettingsNavigation {
+    /// Identity-hex of the conversation a Settings child wants opened in the main
+    /// split view. `nil` = nothing pending (the binding re-arms after each use).
+    var openConversationID: String?
+}
+
 /// A pending request: explains who is asking (by key — identity is only
 /// proven after accept fetches + verifies their binding) and offers
 /// Accept / Decline. Accepting opens the conversation ready to type.
@@ -305,6 +385,9 @@ struct MessageRequestRow: View {
     let sender: String
     let onAccepted: (String) -> Void
     @State private var working = false
+    /// Gate Decline behind a confirm (§2.6): it silently drops the held
+    /// handshake, clearing the request with no undo from here.
+    @State private var showDeclineConfirm = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
@@ -331,7 +414,7 @@ struct MessageRequestRow: View {
                 .disabled(working)
                 .accessibilityIdentifier("accept-request")
                 Button(role: .destructive) {
-                    Task { await model.declineRequest(sender) }
+                    showDeclineConfirm = true
                 } label: {
                     Text("Decline")
                         .font(.body.weight(.semibold))
@@ -345,6 +428,16 @@ struct MessageRequestRow: View {
             }
         }
         .padding(.vertical, 4)
+        // Confirm Decline (§2.6) — mirrors Settings' alert shape: destructive
+        // confirm + Cancel, with a message stating the irreversible effect.
+        .alert("Decline this request?", isPresented: $showDeclineConfirm) {
+            Button("Decline", role: .destructive) {
+                Task { await model.declineRequest(sender) }
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("This removes the request and drops their unopened message. If they message you again, a new request will appear.")
+        }
     }
 }
 
@@ -517,9 +610,9 @@ struct NewChatView: View {
                     if offerInvite {
                         ShareLink(
                             item:
-                                "Let's talk privately on PQRC — end-to-end encrypted. Open the app, then add me: \(model.myNpub)"
+                                "Let's talk privately on EldrChat — end-to-end encrypted. Open the app, then add me: \(model.myNpub)"
                         ) {
-                            Label("Invite them to PQRC", systemImage: "square.and.arrow.up")
+                            Label("Invite them to EldrChat", systemImage: "square.and.arrow.up")
                         }
                     }
                 }
@@ -538,7 +631,7 @@ struct NewChatView: View {
                         } catch PQRCError.relayUnreachable {
                             self.error = "Can't reach your relay right now. Check your connection or your relay in Settings — or use Nearby below to connect in person, no server needed."
                         } catch PQRCError.peerKeysNotPublished {
-                            self.error = "You're connected, but this contact hasn't opened PQRC on this relay yet, so their keys aren't here to start the encrypted chat. Ask them to open the app on the same relay, then try again — or use Nearby below if you're together."
+                            self.error = "You're connected, but this contact hasn't opened EldrChat on this relay yet, so their keys aren't here to start the encrypted chat. Ask them to open the app on the same relay, then try again — or use Nearby below if you're together."
                             offerInvite = true
                         } catch {
                             self.error = "Couldn't start the conversation. If you're together in person, use Nearby below — no server needed."

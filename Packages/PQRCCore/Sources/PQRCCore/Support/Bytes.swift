@@ -69,6 +69,21 @@ extension Data {
         return (UInt32(self[i]) << 24) | (UInt32(self[i + 1]) << 16)
             | (UInt32(self[i + 2]) << 8) | UInt32(self[i + 3])
     }
+
+    /// Overwrites every byte of this buffer with zero, in place.
+    ///
+    /// Best-effort heap hygiene for transient secret copies (key/IKM bytes
+    /// extracted from CryptoKit, which zeroes only its own `SymmetricKey` /
+    /// `SharedSecret`). Call once the value has been fully consumed. Routed
+    /// through Foundation's `resetBytes(in:)` — an opaque, non-inlinable call
+    /// the optimizer cannot prove dead and elide. Not a substitute for keeping
+    /// secrets out of swappable memory; it only shortens the window a copy
+    /// lingers in the heap. No-op on an empty buffer.
+    @inlinable
+    public mutating func zeroize() {
+        guard !isEmpty else { return }
+        resetBytes(in: startIndex..<endIndex)
+    }
 }
 
 extension SymmetricKey {

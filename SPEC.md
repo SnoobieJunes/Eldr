@@ -338,8 +338,10 @@ The `participant_type` field is cryptographically meaningful: a message signed b
 The AES-256-GCM associated data (AD) binds context and provides replay/freshness protection:
 
 ```
-AD = pqrc_version || sender_role || message_number || created_at_fuzzed
+AD = pqrc_version || participant_type || message_number || created_at_fuzzed
 ```
+
+`participant_type` (the `"human"` | `"agent"` field of §8.2) is the AEAD-bound field here: binding it into the associated data means the human/agent authorship claim is authenticated by AES-256-GCM and cannot be flipped in transit without breaking the tag. (This matches the wire format in NIP-XX and the implementation in `AssociatedData.build`.)
 
 This is the one legitimate place a timestamp appears: as authenticated associated data for freshness, **not** as a source of key material.
 

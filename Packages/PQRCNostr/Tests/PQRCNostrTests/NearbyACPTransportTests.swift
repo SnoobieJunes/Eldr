@@ -295,6 +295,75 @@ struct NearbyACPTransportTests {
         #expect(after.last == #"{"method":"session/cancel"}"#)
     }
 
+    /// A captured, perfectly-valid frame from the PROVEN peer, re-injected
+    /// verbatim, must be dropped — the per-connection counter (sealed under the
+    /// AEAD tag) is no longer strictly increasing on the replay, so it never
+    /// reaches the ACP layer. Without this, a captured `fs/write_text_file` could
+    /// be replayed by anyone who can inject on the link (statusreport.md §3).
+    @Test func replayedFrameFromProvenPeer_isDropped_channelSurvives() async throws {
+        let hub = LocalLinkSimulator()
+        let (alice, bob) = try await Self.makePair(hub: hub)
+
+        // A genuine line Alice sealed + sent; Bob accepts it once.
+        let line = #"{"method":"fs/write_text_file","params":{"path":"/x","text":"y"}}"#
+        alice.transport.send(line)
+        let got = await bob.lines.waitFor(1)
+        #expect(got.first == line)
+
+        // Capture exactly that frame off the link and re-inject it verbatim — a
+        // bit-perfect replay (same counter inside the seal, valid tag).
+        let framePayload = try #require(
+            await hub.payloads(from: alice.peerID, to: bob.peerID).first {
+                (try? WireJSON.decoder().decode(ACPLinkPayload.self, from: $0))?.kind == .frame
+            })
+        let droppedBefore = await bob.transport.droppedFrameCount
+        await hub.inject(framePayload, from: alice.peerID, to: bob.peerID)
+        try? await Task.sleep(for: .milliseconds(150))
+
+        // The replay decrypts fine but its counter is not strictly increasing →
+        // dropped, not delivered. Bob still has exactly the one genuine line.
+        #expect(await bob.lines.all().count == 1, "a replayed frame must be rejected")
+        #expect(await bob.transport.droppedFrameCount > droppedBefore)
+
+        // Channel intact: the next genuine line (higher counter) still arrives.
+        let next = #"{"method":"session/cancel"}"#
+        alice.transport.send(next)
+        let after = await bob.lines.waitFor(2)
+        #expect(after.last == next)
+    }
+
+    /// Frames delivered out of order (a later frame re-injected before / in place
+    /// of an earlier one) are rejected once a higher counter has been accepted —
+    /// the receiver only ever advances, never rewinds. Proves the gate catches
+    /// reorder, not just exact replay.
+    @Test func reorderedEarlierFrame_isDropped() async throws {
+        let hub = LocalLinkSimulator()
+        let (alice, bob) = try await Self.makePair(hub: hub)
+
+        // Two genuine frames in order; capture the FIRST (lower counter) before
+        // sending the second.
+        let first = #"{"id":1,"method":"session/update"}"#
+        alice.transport.send(first)
+        _ = await bob.lines.waitFor(1)
+        let firstFrame = try #require(
+            await hub.payloads(from: alice.peerID, to: bob.peerID).first {
+                (try? WireJSON.decoder().decode(ACPLinkPayload.self, from: $0))?.kind == .frame
+            })
+
+        let second = #"{"id":2,"method":"session/update"}"#
+        alice.transport.send(second)
+        let afterSecond = await bob.lines.waitFor(2)
+        #expect(afterSecond == [first, second])
+
+        // Now re-inject the FIRST frame after the second was accepted: its counter
+        // is below the window → dropped, no third line.
+        let droppedBefore = await bob.transport.droppedFrameCount
+        await hub.inject(firstFrame, from: alice.peerID, to: bob.peerID)
+        try? await Task.sleep(for: .milliseconds(150))
+        #expect(await bob.lines.all().count == 2, "an out-of-order earlier frame must be rejected")
+        #expect(await bob.transport.droppedFrameCount > droppedBefore)
+    }
+
     /// Frames addressed to / sealed for a DIFFERENT peer than the one we paired
     /// with are rejected — a proven peer can't smuggle in frames sealed to a key
     /// we never authenticated (the seal key is bound to the proven identity).

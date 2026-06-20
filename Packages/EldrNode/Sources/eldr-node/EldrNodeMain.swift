@@ -190,8 +190,13 @@ struct EldrNodeMain {
                 identity: identity, randomSource: SystemRandomSource(), oneTimeCount: 16)
         }
         _ = try await manager.replenish(to: 16)
-        try keychain.save(
-            JSONEncoder().encode(await manager.snapshot()), account: "node-prekey-state")
+        // `snapshot()` is a fresh copy of the private halves (every field
+        // deep-copied); the live actor state is untouched. Wipe the transient
+        // plaintext once the encrypted blob has been handed to the Keychain
+        // (AC40).
+        var state = await manager.snapshot()
+        defer { state.zeroize() }
+        try keychain.save(JSONEncoder().encode(state), account: "node-prekey-state")
         return manager
     }
 

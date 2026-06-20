@@ -62,7 +62,7 @@ struct RootView: View {
 /// harness (Configuration, Test Chat, Logs), the phone pairing/bridge, and the
 /// infrastructure setup (Relay).
 struct MainWindow: View {
-    enum Tab: Hashable { case configuration, testChat, logs, bridge, relay }
+    enum Tab: Hashable { case configuration, testChat, inspector, logs, bridge, nearby, relay }
     @State private var tab: Tab = .configuration
 
     var body: some View {
@@ -73,12 +73,18 @@ struct MainWindow: View {
             TestChatView()
                 .tabItem { Label("Test Chat", systemImage: "bubble.left.and.bubble.right") }
                 .tag(Tab.testChat)
+            AgentInspectorView()
+                .tabItem { Label("Inspector", systemImage: "scope") }
+                .tag(Tab.inspector)
             LogView()
                 .tabItem { Label("Logs", systemImage: "text.alignleft") }
                 .tag(Tab.logs)
             BridgeView()
                 .tabItem { Label("EldrChat Bridge", systemImage: "antenna.radiowaves.left.and.right") }
                 .tag(Tab.bridge)
+            NearbyScannerView()
+                .tabItem { Label("Nearby", systemImage: "dot.radiowaves.left.and.right") }
+                .tag(Tab.nearby)
             RelayWizardView()
                 .tabItem { Label("Relay", systemImage: "server.rack") }
                 .tag(Tab.relay)

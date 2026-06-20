@@ -7,6 +7,10 @@ struct TestChatView: View {
     @EnvironmentObject private var health: LLMHealthChecker
     @StateObject private var session = TestChatSession()
     @State private var draft = ""
+    /// Whether the raw-stream disclosure is expanded. Independent of the toggle that
+    /// enables capture: the panel only appears when `session.showRawStream` is on, and
+    /// starts collapsed so it stays out of the way.
+    @State private var rawExpanded = false
 
     var body: some View {
         VStack(spacing: 0) {
@@ -32,9 +36,44 @@ struct TestChatView: View {
                     if let last = session.items.last { proxy.scrollTo(last.id, anchor: .bottom) }
                 }
             }
+            if session.showRawStream {
+                Divider()
+                rawStreamPanel
+            }
             Divider()
             composer
         }
+    }
+
+    /// Collapsible view of the LAST turn's RAW model output — what the model emitted
+    /// BEFORE reasoning-trace stripping, so the reasoning chain (`<think>…`,
+    /// `<|channel>thought…`) is visible. Only shown while the toggle is on; collapsed
+    /// by default so it stays out of the way.
+    private var rawStreamPanel: some View {
+        DisclosureGroup(isExpanded: $rawExpanded) {
+            ScrollView {
+                Text(session.rawStream.isEmpty
+                    ? "No raw output captured yet. Send a message to capture this turn's raw stream."
+                    : session.rawStream)
+                    .font(.system(.caption2, design: .monospaced))
+                    .foregroundStyle(session.rawStream.isEmpty ? .secondary : .primary)
+                    .textSelection(.enabled)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(8)
+            }
+            .frame(maxHeight: 220)
+            .background(Color.secondary.opacity(0.08), in: RoundedRectangle(cornerRadius: 8))
+        } label: {
+            HStack(spacing: 6) {
+                Image(systemName: "brain").font(.caption)
+                Text("Raw LLM stream (pre-strip, last turn)").font(.caption.weight(.semibold))
+                Spacer()
+            }
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 8)
+        .frame(maxWidth: 720, alignment: .leading)
+        .frame(maxWidth: .infinity)
     }
 
     private var header: some View {
@@ -45,6 +84,13 @@ struct TestChatView: View {
                 .toggleStyle(.switch)
                 .controlSize(.small)
                 .onChange(of: session.useFakeLLM) { _, _ in session.reset() }
+            Toggle("Raw LLM stream", isOn: $session.showRawStream)
+                .toggleStyle(.switch)
+                .controlSize(.small)
+                .help("Show the model's raw output BEFORE reasoning-trace stripping — "
+                    + "e.g. a reasoning model's <think>… / <|channel>thought… chain-of-thought. "
+                    + "Off by default. Rebuilds the session so the next turn is captured.")
+                .onChange(of: session.showRawStream) { _, _ in session.reset() }
             Button("Reset") { session.reset() }
                 .controlSize(.small)
         }

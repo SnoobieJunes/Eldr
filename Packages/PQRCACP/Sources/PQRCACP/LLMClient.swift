@@ -158,10 +158,23 @@ public struct LLMConfig: Sendable {
 public struct OpenAICompatibleLLMClient: LLMClient {
     public let config: LLMConfig
     private let session: URLSession
+    /// Optional tap on the model's RAW output, BEFORE reasoning-trace stripping. When
+    /// non-nil it is called with each raw `delta.content` slice as it streams in
+    /// (`stream`) and with the full raw `message.content` of a one-shot reply
+    /// (`complete`) — so a debugging UI can show a reasoning model's chain-of-thought
+    /// (`<think>…`, `<|channel>thought…`) that the chat itself never sees. Default nil
+    /// ⇒ NO observation and ZERO behavior change for every existing caller (the relay
+    /// host, the node, the CLI): the stripped `LLMResponse`/`onDelta` path is identical.
+    /// Must be `@Sendable` (the SSE read runs off the caller's actor).
+    private let rawObserver: (@Sendable (String) -> Void)?
 
-    public init(config: LLMConfig, session: URLSession? = nil) {
+    public init(
+        config: LLMConfig, session: URLSession? = nil,
+        rawObserver: (@Sendable (String) -> Void)? = nil
+    ) {
         self.config = config
         self.session = session ?? Self.makeSession(timeout: config.requestTimeoutSeconds)
+        self.rawObserver = rawObserver
     }
 
     /// An ephemeral session whose request/resource timeouts match the configured
@@ -187,6 +200,35 @@ public struct OpenAICompatibleLLMClient: LLMClient {
         return URL(string: base + "/chat/completions")
     }
 
+    /// G4 (statusreport §2.4): is the configured LLM endpoint on the loopback
+    /// interface — i.e. an on-device model server (LM Studio / Ollama / vLLM)? Only
+    /// `127.0.0.1`, `localhost`, and IPv6 `::1` count; anything else (a LAN IP, a
+    /// hostname, a cloud vendor) is treated as a real network target. Used to decide
+    /// whether outgoing prompts must be credential-scrubbed before egress: loopback
+    /// stays on-device, so it keeps full fidelity; non-loopback leaves the device, so
+    /// it gets scrubbed. Delegates the host classification (and its conservative
+    /// nil/unparseable → NOT-loopback fallback) to the shared `isLoopbackHost` below.
+    func isLoopbackEndpoint() -> Bool {
+        Self.isLoopbackHost(endpoint()?.host)
+    }
+
+    /// G4 (statusreport §2.4): the single source of truth for "is this host the loopback
+    /// interface?" — shared by the LLM endpoint check above and `ContextGraphClient`'s
+    /// egress gate so the on-device hostname set is defined exactly once. Only
+    /// `127.0.0.1`, `localhost`, and IPv6 `::1` count. Conservative on ambiguity: a nil or
+    /// empty host is NOT loopback (so the caller scrubs — the privacy-maximizing default,
+    /// SPEC §0). Case-insensitive; strips an IPv6 literal's brackets (`URL.host` already
+    /// removes them, but we normalize defensively).
+    static func isLoopbackHost(_ host: String?) -> Bool {
+        guard let host = host?.trimmingCharacters(in: CharacterSet(charactersIn: "[]")),
+            !host.isEmpty
+        else { return false }
+        switch host.lowercased() {
+        case "127.0.0.1", "localhost", "::1": return true
+        default: return false
+        }
+    }
+
     public func complete(messages: [LLMMessage], tools: [LLMTool]) async throws -> LLMResponse {
         let request = try makeRequest(messages: messages, tools: tools, stream: false)
         let (data, response) = try await session.data(for: request)
@@ -196,7 +238,16 @@ public struct OpenAICompatibleLLMClient: LLMClient {
         guard let object = try? JSONSerialization.jsonObject(with: data) else {
             throw LLMError.badResponse("non-JSON response")
         }
-        return try Self.decode(JSONValue(foundation: object))
+        let json = JSONValue(foundation: object)
+        // RAW tap (pre-strip): hand the unmodified assistant text to the observer so a
+        // debugging UI can show the model's reasoning trace. No-op when unset.
+        if let rawObserver,
+            let raw = json["choices"]?.arrayValue?.first?["message"]?["content"]?.stringValue,
+            !raw.isEmpty
+        {
+            rawObserver(raw)
+        }
+        return try Self.decode(json)
     }
 
     /// Streaming completion over SSE (`"stream": true`). Reads the chunked `data:`
@@ -224,6 +275,15 @@ public struct OpenAICompatibleLLMClient: LLMClient {
             let payload = line.dropFirst("data:".count).trimmingCharacters(in: .whitespaces)
             if payload == "[DONE]" { break }
             guard let json = JSONValue.parse(payload) else { continue }
+            // RAW tap (pre-strip): forward the unmodified `delta.content` slice — incl.
+            // any in-progress reasoning trace — to the observer BEFORE the assembler
+            // strips it. No-op when unset, so the relay/node/CLI path is untouched.
+            if let rawObserver,
+                let rawPiece = json["choices"]?.arrayValue?.first?["delta"]?["content"]?
+                    .stringValue, !rawPiece.isEmpty
+            {
+                rawObserver(rawPiece)
+            }
             if let emit = assembler.consume(json), !emit.isEmpty { await onDelta(emit) }
         }
         return assembler.finish()
@@ -245,12 +305,24 @@ public struct OpenAICompatibleLLMClient: LLMClient {
         }
         request.setValue("application/json", forHTTPHeaderField: "content-type")
 
+        // G4 (statusreport §2.4): cloud-egress credential scrub. When the endpoint is
+        // NON-loopback the prompt is about to leave the device for a real network /
+        // cloud target, so scrub each outgoing message's free-text `content` (incl.
+        // `tool` result content) with the vendored redactor before it hits the wire —
+        // a secret pasted into a prompt must not egress in cleartext. An on-device
+        // (loopback) model server keeps full fidelity: no scrub, identical to before.
+        // This is the single choke point for both `complete` and `stream` (both build
+        // their request here). NOTE: the `rawObserver` debug tap fires later, in
+        // `complete`/`stream` on the model's RESPONSE, so it is unaffected; the request
+        // body is what we harden here. `toolCalls`/`tool_call_id`/role are control
+        // plane, not free text, and are left as-is.
+        let outgoing = isLoopbackEndpoint() ? messages : messages.map(Self.scrubbed)
         var payload: [String: JSONValue] = [
             "model": .string(config.model),
             // Coding agents loop tool calls; give reasoning models room before the
             // trace is stripped.
             "max_tokens": .int(2048),
-            "messages": .array(messages.map(Self.encode(message:))),
+            "messages": .array(outgoing.map(Self.encode(message:))),
         ]
         if stream { payload["stream"] = .bool(true) }
         if !tools.isEmpty {
@@ -271,6 +343,33 @@ public struct OpenAICompatibleLLMClient: LLMClient {
     }
 
     // MARK: Encoding (OpenAI request shape)
+
+    /// G4 (statusreport §2.4): return a copy of `m` with its free-text fields
+    /// credential-scrubbed via the vendored `ACPLogRedactor` (which mirrors
+    /// `PQRCCore.CredentialRedactor` — PQRCACP is zero-dependency and can't import the
+    /// canonical one). Applied to EVERY role's `content`, which covers a secret pasted
+    /// into a `user` turn AND one captured in a `tool` result's content — AND to each
+    /// assistant `toolCall.arguments`. The arguments are the model-produced JSON string
+    /// for a call (`write_file` content, `run_shell` command, …); an assistant tool-call
+    /// turn is re-sent every loop iteration (`ACPAgent` rebuilds the running transcript),
+    /// so a credential echoed inside those arguments would otherwise egress in cleartext
+    /// on each iteration. The redactor is conservative and string-safe, so scrubbing the
+    /// raw JSON string is fine (a marker only ever replaces a key-shaped run). `toolCall.id`,
+    /// `toolCall.name`, and `toolCallId` are control-plane identifiers, not free text, so
+    /// they pass through unchanged. Caller gates this on a non-loopback endpoint.
+    static func scrubbed(_ m: LLMMessage) -> LLMMessage {
+        let scrubbedCalls = m.toolCalls.map { call in
+            call.arguments.isEmpty
+                ? call
+                : LLMToolCall(
+                    id: call.id, name: call.name,
+                    arguments: ACPLogRedactor.scrub(call.arguments))
+        }
+        let scrubbedContent = m.content.isEmpty ? m.content : ACPLogRedactor.scrub(m.content)
+        return LLMMessage(
+            role: m.role, content: scrubbedContent,
+            toolCalls: scrubbedCalls, toolCallId: m.toolCallId)
+    }
 
     static func encode(message m: LLMMessage) -> JSONValue {
         var obj: [String: JSONValue] = [

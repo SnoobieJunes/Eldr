@@ -68,6 +68,11 @@ private struct ContactRow: View {
     @Bindable var model: AppModel
     let contact: ContactRecord
     let onRename: () -> Void
+    /// Bridge to MainView's split-view selection. "Message" must open the chat in
+    /// the MAIN window, not push it inside the modal Settings sheet (where it would
+    /// be disconnected and dismissed by "Done"). Set by MainView when it presents
+    /// Settings; nil in any context that doesn't provide it (we no-op then).
+    @Environment(SettingsNavigation.self) private var settingsNav: SettingsNavigation?
 
     /// Name ⇄ key are interchangeable: tap the identifier to flip.
     @State private var showKey = false
@@ -131,9 +136,13 @@ private struct ContactRow: View {
             .buttonStyle(.borderless)
             .frame(minWidth: 44, minHeight: 44)
             .accessibilityLabel(justCopied ? "Key copied" : "Copy \(contact.displayName)'s key")
-            // Send a message — opens the chat (pushed within this nav stack).
-            NavigationLink {
-                ConversationView(model: model, conversationID: contact.identityHex)
+            // Send a message — opens the chat in the MAIN split view, not pushed
+            // inside this modal Settings sheet (which would strand it: it'd be
+            // disconnected from the split-view selection, and "Done" would dismiss
+            // it). We hand the target to MainView via the bridge; it dismisses
+            // Settings and selects this conversation in the detail pane.
+            Button {
+                settingsNav?.openConversationID = contact.identityHex
             } label: {
                 Image(systemName: "message")
             }

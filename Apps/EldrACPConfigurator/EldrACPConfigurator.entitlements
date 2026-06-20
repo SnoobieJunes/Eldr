@@ -2,11 +2,21 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-	<!-- The Configurator is a developer tool: it installs the eldr-acp CLI to
-	     ~/.local/bin and writes config to ~/.config/eldr-acp, spawns the local LLM
-	     client + shell tools, and pairs over the local network. The App Sandbox
-	     would block all of that, so this ships UNSANDBOXED (Developer ID +
-	     notarization + hardened runtime is the Gatekeeper story instead). -->
+	<!-- The Eldr node ships UNSANDBOXED on purpose. Its whole job is to spawn arbitrary
+	     developer harnesses (Claude Code, OpenClaw, Xcode/xcodebuild, /bin/zsh), write
+	     launcher/config files under ~/.local/bin and ~/.config/eldr-acp, and make
+	     outbound connections to a local LLM and a Nostr relay. App Sandbox is
+	     fundamentally incompatible with that: a sandboxed app with no network-client
+	     entitlement fails EVERY outbound connection with NSPOSIXErrorDomain 1
+	     ("The operation couldn't be completed. Operation not permitted") — which is
+	     exactly the LLM-connection error this reverts. Distribute via Developer ID +
+	     notarization + Hardened Runtime (set in the project), NOT the App Sandbox / Mac
+	     App Store. If you ever DO require the sandbox you must add at minimum
+	     com.apple.security.network.client, com.apple.security.network.server, and a
+	     user-selected/files exception for ~/.local/bin and ~/.config/eldr-acp — but
+	     spawned harnesses inherit the sandbox and break, so unsandboxed is the
+	     supported model. (Reverts the 2026-06-20 uncommitted "sandbox=true, no
+	     exceptions" change — see statusreport.md §2.7 / DEVIATIONS AC36.) -->
 	<key>com.apple.security.app-sandbox</key>
 	<false/>
 </dict>

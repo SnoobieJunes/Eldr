@@ -23,7 +23,6 @@ struct ConversationView: View {
     /// Multi-select mode for batch "Add to AI Context" (Feature 3).
     @State private var selecting = false
     @State private var selection: Set<String> = []
-    @State private var now = Int64(Date().timeIntervalSince1970)
     /// The "AI here" toolbar chip's sheet.
     @State private var showAIHere = false
     /// Read-only summary of the primary AI's effective mode for THIS conversation,
@@ -33,8 +32,6 @@ struct ConversationView: View {
         ("active", false, true)
 
     private var conversationScope: AIContextGrant.Scope { .conversation(conversationID) }
-
-    private let ticker = Timer.publish(every: 1, on: .main, in: .common).autoconnect()
 
     var body: some View {
         VStack(spacing: 0) {
@@ -50,25 +47,24 @@ struct ConversationView: View {
                 .background(.red)
                 .accessibilityIdentifier("safety-change-banner")
             }
-            if let banner = model.activeWindowBanner(conversationID: conversationID, now: now) {
-                AIWindowBanner(name: banner.name, until: banner.until, now: now)
-            }
+            // The live AI-window countdown + context-sharing indicator are
+            // isolated into their own view that owns a 1 Hz clock. This keeps
+            // the per-second tick from invalidating THIS body (and therefore
+            // the message ForEach below) — only the small header re-evaluates
+            // each second. It reads the same @Observable model state, so it
+            // updates on banner/grant changes exactly as before.
+            ConversationStatusHeader(
+                model: model, conversationID: conversationID, scope: conversationScope)
             threadChips
-            if model.iGrantedContext(scope: conversationScope, now: now) {
-                Label("AI context sharing is on", systemImage: "brain.head.profile")
-                    .font(.caption.weight(.medium))
-                    .frame(maxWidth: .infinity)
-                    .padding(.vertical, 6)
-                    .background(Color.purple.opacity(0.12))
-                    .accessibilityIdentifier("context-sharing-banner")
-            }
             messageList
             if selecting { selectionBar } else { composer }
         }
-        // Reading-width cap so chat doesn't sprawl edge-to-edge on iPad/Mac/
-        // landscape detail panes (CLAUDE.md responsive roadmap); centered, with
-        // no effect on compact iPhone widths.
-        .frame(maxWidth: 760)
+        // Full-width pane: the message bubbles get the reading-width cap (applied
+        // on `messageList` itself), but the banners, status header, thread chips,
+        // composer, and selection bar span the whole pane — like iMessage, which
+        // caps the bubbles, not the input bar. (Previously the 760pt cap wrapped
+        // this whole VStack, so on iPad/Mac the composer + banners floated in a
+        // centered column with empty gutters; CLAUDE.md responsive roadmap.)
         .frame(maxWidth: .infinity)
         .navigationTitle(model.contactNames[conversationID] ?? "Conversation")
         .navigationBarTitleDisplayMode(.inline)
@@ -79,9 +75,6 @@ struct ConversationView: View {
                 largePaste = String(repeating: "PQRC large paste demo line.\n", count: 8000)
             }
             aiSummary = model.primaryAIContextSummary(conversationID)
-        }
-        .onReceive(ticker) { _ in
-            now = Int64(Date().timeIntervalSince1970)
         }
         .toolbar {
             ToolbarItem(placement: .topBarLeading) {
@@ -134,7 +127,11 @@ struct ConversationView: View {
                     showDraftSheet = aiDraft != nil
                 }
             }
-            if model.iGrantedContext(scope: conversationScope, now: now) {
+            // One-shot read at presentation time (no per-second tick needed in
+            // this body): the grant's live/expired state when the sheet opens.
+            if model.iGrantedContext(
+                scope: conversationScope, now: Int64(Date().timeIntervalSince1970))
+            {
                 Button("Stop sharing AI context", role: .destructive) {
                     Task { await model.withdrawContextSharing(scope: conversationScope) }
                 }
@@ -271,6 +268,13 @@ struct ConversationView: View {
                 }
             }
         }
+        // Reading-width cap on the BUBBLES only (iMessage caps the bubble column,
+        // not the input bar): keep the message list from sprawling edge-to-edge on
+        // iPad/Mac/landscape detail panes, centered in the pane. The composer +
+        // full-width banners live outside this and still span the whole width.
+        // No effect on compact iPhone widths (already < 760).
+        .frame(maxWidth: 760)
+        .frame(maxWidth: .infinity)
     }
 
     @ViewBuilder private func messageRow(_ message: StoredMessage) -> some View {
@@ -483,6 +487,40 @@ struct ConversationView: View {
             draftText = text
         } else {
             draftText += (draftText.hasSuffix("\n") ? "" : "\n") + text
+        }
+    }
+}
+
+/// Isolated 1 Hz status strip for a conversation: the active AI-window banner
+/// (with its live mm:ss countdown) and the "AI context sharing is on" label.
+/// It owns its OWN `now` clock so the per-second tick re-evaluates only this
+/// small view — NOT `ConversationView.body`, and therefore not the message
+/// `ForEach`/`ScrollView` (the cause of the per-second full re-render). Reads
+/// the same `@Observable` model state the parent did, so banner/grant changes
+/// still flow through immediately; only the tick is scoped here.
+private struct ConversationStatusHeader: View {
+    let model: AppModel
+    let conversationID: String
+    let scope: AIContextGrant.Scope
+    @State private var now = Int64(Date().timeIntervalSince1970)
+    private let ticker = Timer.publish(every: 1, on: .main, in: .common).autoconnect()
+
+    var body: some View {
+        VStack(spacing: 0) {
+            if let banner = model.activeWindowBanner(conversationID: conversationID, now: now) {
+                AIWindowBanner(name: banner.name, until: banner.until, now: now)
+            }
+            if model.iGrantedContext(scope: scope, now: now) {
+                Label("AI context sharing is on", systemImage: "brain.head.profile")
+                    .font(.caption.weight(.medium))
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 6)
+                    .background(Color.purple.opacity(0.12))
+                    .accessibilityIdentifier("context-sharing-banner")
+            }
+        }
+        .onReceive(ticker) { _ in
+            now = Int64(Date().timeIntervalSince1970)
         }
     }
 }

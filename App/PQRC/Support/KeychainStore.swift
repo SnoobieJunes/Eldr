@@ -29,6 +29,14 @@ struct KeychainStore: Sendable {
 
     func save(_ data: Data, account: String) throws {
         let query: [String: Any] = [
+            // Use the modern data-protection keychain on EVERY platform. On iOS / "Designed
+            // for iPad" this is already the default, but a Mac Catalyst binary otherwise
+            // defaults to the legacy FILE keychain, which rejects our Secure-Enclave-bound
+            // key writes + `…ThisDeviceOnly` items — that broke account create/sign-in the
+            // moment the app switched to Catalyst (DEVIATIONS AC39). No-op on iOS; required
+            // on Catalyst. The app's application-identifier (automatic signing) supplies the
+            // access group, so no `keychain-access-groups` entitlement is needed.
+            kSecUseDataProtectionKeychain as String: true,
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: service,
             kSecAttrAccount as String: account,
@@ -44,6 +52,14 @@ struct KeychainStore: Sendable {
 
     func load(account: String) throws -> Data {
         let query: [String: Any] = [
+            // Use the modern data-protection keychain on EVERY platform. On iOS / "Designed
+            // for iPad" this is already the default, but a Mac Catalyst binary otherwise
+            // defaults to the legacy FILE keychain, which rejects our Secure-Enclave-bound
+            // key writes + `…ThisDeviceOnly` items — that broke account create/sign-in the
+            // moment the app switched to Catalyst (DEVIATIONS AC39). No-op on iOS; required
+            // on Catalyst. The app's application-identifier (automatic signing) supplies the
+            // access group, so no `keychain-access-groups` entitlement is needed.
+            kSecUseDataProtectionKeychain as String: true,
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: service,
             kSecAttrAccount as String: account,
@@ -65,6 +81,14 @@ struct KeychainStore: Sendable {
 
     func delete(account: String) {
         let query: [String: Any] = [
+            // Use the modern data-protection keychain on EVERY platform. On iOS / "Designed
+            // for iPad" this is already the default, but a Mac Catalyst binary otherwise
+            // defaults to the legacy FILE keychain, which rejects our Secure-Enclave-bound
+            // key writes + `…ThisDeviceOnly` items — that broke account create/sign-in the
+            // moment the app switched to Catalyst (DEVIATIONS AC39). No-op on iOS; required
+            // on Catalyst. The app's application-identifier (automatic signing) supplies the
+            // access group, so no `keychain-access-groups` entitlement is needed.
+            kSecUseDataProtectionKeychain as String: true,
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: service,
             kSecAttrAccount as String: account,
@@ -74,6 +98,14 @@ struct KeychainStore: Sendable {
 
     func deleteAll() {
         let query: [String: Any] = [
+            // Use the modern data-protection keychain on EVERY platform. On iOS / "Designed
+            // for iPad" this is already the default, but a Mac Catalyst binary otherwise
+            // defaults to the legacy FILE keychain, which rejects our Secure-Enclave-bound
+            // key writes + `…ThisDeviceOnly` items — that broke account create/sign-in the
+            // moment the app switched to Catalyst (DEVIATIONS AC39). No-op on iOS; required
+            // on Catalyst. The app's application-identifier (automatic signing) supplies the
+            // access group, so no `keychain-access-groups` entitlement is needed.
+            kSecUseDataProtectionKeychain as String: true,
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: service,
         ]
@@ -90,6 +122,14 @@ struct KeychainStore: Sendable {
             nil, kSecAttrAccessibleWhenUnlockedThisDeviceOnly, .userPresence, &error)
         else { throw KeychainError.unexpectedStatus(errSecParam) }
         let attributes: [String: Any] = [
+            // Use the modern data-protection keychain on EVERY platform. On iOS / "Designed
+            // for iPad" this is already the default, but a Mac Catalyst binary otherwise
+            // defaults to the legacy FILE keychain, which rejects our Secure-Enclave-bound
+            // key writes + `…ThisDeviceOnly` items — that broke account create/sign-in the
+            // moment the app switched to Catalyst (DEVIATIONS AC39). No-op on iOS; required
+            // on Catalyst. The app's application-identifier (automatic signing) supplies the
+            // access group, so no `keychain-access-groups` entitlement is needed.
+            kSecUseDataProtectionKeychain as String: true,
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: service,
             kSecAttrAccount as String: account,
@@ -110,6 +150,14 @@ struct KeychainStore: Sendable {
         let context = LAContext()
         context.localizedReason = prompt
         let query: [String: Any] = [
+            // Use the modern data-protection keychain on EVERY platform. On iOS / "Designed
+            // for iPad" this is already the default, but a Mac Catalyst binary otherwise
+            // defaults to the legacy FILE keychain, which rejects our Secure-Enclave-bound
+            // key writes + `…ThisDeviceOnly` items — that broke account create/sign-in the
+            // moment the app switched to Catalyst (DEVIATIONS AC39). No-op on iOS; required
+            // on Catalyst. The app's application-identifier (automatic signing) supplies the
+            // access group, so no `keychain-access-groups` entitlement is needed.
+            kSecUseDataProtectionKeychain as String: true,
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: service,
             kSecAttrAccount as String: account,
@@ -135,6 +183,14 @@ struct KeychainStore: Sendable {
 
     func contains(account: String) -> Bool {
         let query: [String: Any] = [
+            // Use the modern data-protection keychain on EVERY platform. On iOS / "Designed
+            // for iPad" this is already the default, but a Mac Catalyst binary otherwise
+            // defaults to the legacy FILE keychain, which rejects our Secure-Enclave-bound
+            // key writes + `…ThisDeviceOnly` items — that broke account create/sign-in the
+            // moment the app switched to Catalyst (DEVIATIONS AC39). No-op on iOS; required
+            // on Catalyst. The app's application-identifier (automatic signing) supplies the
+            // access group, so no `keychain-access-groups` entitlement is needed.
+            kSecUseDataProtectionKeychain as String: true,
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: service,
             kSecAttrAccount as String: account,
@@ -148,6 +204,14 @@ struct KeychainStore: Sendable {
     /// Test hook: raw attributes of an item, for asserting accessibility flags.
     func attributes(account: String) -> [String: Any]? {
         let query: [String: Any] = [
+            // Use the modern data-protection keychain on EVERY platform. On iOS / "Designed
+            // for iPad" this is already the default, but a Mac Catalyst binary otherwise
+            // defaults to the legacy FILE keychain, which rejects our Secure-Enclave-bound
+            // key writes + `…ThisDeviceOnly` items — that broke account create/sign-in the
+            // moment the app switched to Catalyst (DEVIATIONS AC39). No-op on iOS; required
+            // on Catalyst. The app's application-identifier (automatic signing) supplies the
+            // access group, so no `keychain-access-groups` entitlement is needed.
+            kSecUseDataProtectionKeychain as String: true,
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: service,
             kSecAttrAccount as String: account,

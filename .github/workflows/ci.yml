@@ -5,11 +5,10 @@ on:
     branches: [main]
   pull_request:
 
-# TEST-PLAN §12. Project/scheme is EldrChat (renamed from PQRC). NOTE: the app
-# target uses the iOS 27 Private Cloud Compute SDK, so the `app`/`perf` jobs need
-# a runner whose selected Xcode ships the iOS 27 SDK + a matching simulator
-# runtime — the bare `macos-26` + `/Applications/Xcode.app` below may need a bump;
-# confirm with a real CI run. The headless `packages` job has no such dependency.
+# TEST-PLAN §12. Project/scheme is EldrChat (renamed from PQRC). The app builds
+# against the iOS 26.5 SDK: the Private Cloud Compute tier is gated OFF by default
+# (ELDR_PCC_SDK opt-in, DEVIATIONS AC36), so no iOS-27 SDK/runner is required —
+# `macos-26` + `/Applications/Xcode.app` is sufficient for the `app`/`perf` jobs.
 jobs:
   packages:
     name: swift test (${{ matrix.package }})
@@ -17,7 +16,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        package: [PQRCCore, PQRCNostr, PQRCAgent, PQRCACP, PQRCMCP]
+        package: [PQRCCore, PQRCNostr, PQRCAgent, PQRCACP, PQRCMCP, EldrNode]
     steps:
       - uses: actions/checkout@v4
       - name: Select Xcode 26
@@ -100,4 +99,4 @@ jobs:
           name: perf-results
           path: |
             PerfResults.xcresult
-            App/PQRC.xcodeproj/xcshareddata/xcbaselines
+            App/EldrChat.xcodeproj/xcshareddata/xcbaselines

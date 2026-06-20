@@ -33,4 +33,20 @@ public struct PQRCNodeMessenger: NodeMessenger {
             to: peerIdentityHex,
             participantType: .human)
     }
+
+    /// Accept a pending message-request and return the resolved IDENTITY hex.
+    /// `PQRCMessenger.acceptRequest` fetches + fully verifies the sender's 10420/10421
+    /// binding (both directions — invariant 7), adds the verified contact, and replays the
+    /// held opening handshake so a responder session is built; the returned
+    /// `VerifiedContact.identityHex` is the identity `serve` compares to the pinned owner.
+    public func acceptRequest(senderNostrPubkeyHex: String) async throws -> String {
+        let contact = try await messenger.acceptRequest(senderNostrPubkeyHex: senderNostrPubkeyHex)
+        return contact.identityHex
+    }
+
+    /// Decline a pending message-request: `PQRCMessenger.declineRequest` drops the
+    /// sender's held envelopes without establishing a session (and does not block them).
+    public func declineRequest(senderNostrPubkeyHex: String) async {
+        await messenger.declineRequest(senderNostrPubkeyHex: senderNostrPubkeyHex)
+    }
 }

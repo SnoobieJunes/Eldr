@@ -272,6 +272,12 @@ actor SwiftDataMessageStore: MessageStore {
     // MARK: Session persistence
 
     func saveSession(peerIdentityHex: String, snapshot: RatchetSnapshot) throws {
+        // Local mutable copy so we can wipe the transient plaintext secrets after
+        // sealing (AC40). `snapshot` is already a fresh copy produced by
+        // `makeSnapshot()` (every secret field deep-copied), so this never
+        // touches the live ratchet the running session needs.
+        var snapshot = snapshot
+        defer { snapshot.zeroize() }
         let crypter = try requireCrypter()
         let blob = try crypter.seal(
             try JSONEncoder().encode(snapshot), recordID: "session-\(peerIdentityHex)")

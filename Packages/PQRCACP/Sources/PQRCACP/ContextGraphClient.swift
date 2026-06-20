@@ -24,18 +24,41 @@ public protocol ContextGraphAssembling: Sendable {
 /// HTTP client for `rdevaul/contextgraph` (graph-based context manager). Talks to
 /// its REST service (default `http://localhost:8302`): `GET /health`,
 /// `POST /assemble`, `POST /ingest`. Request/response shapes mirror the project's
-/// OpenClaw plugin (`plugin/index.ts`). All calls are localhost-only.
+/// OpenClaw plugin (`plugin/index.ts`).
+///
+/// G4 (statusreport §2.4): the base URL is operator-configurable
+/// (`ELDR_ACP_CONTEXTGRAPH_URL`), so the "localhost-only" assumption is NOT guaranteed.
+/// The bodies carry conversation free text (`user_text`/`assistant_text`), the same
+/// leak vector the LLM client hardens. So: when the configured host is loopback (the
+/// default — `localhost`/`127.0.0.1`/`::1`), nothing leaves the device and the texts are
+/// sent full-fidelity, byte-identical to before. When it is NON-loopback the texts are
+/// about to egress to a real network target, so each is credential-scrubbed via the same
+/// vendored `ACPLogRedactor` the LLM path uses before it hits the wire. Loopback is
+/// classified by the shared `OpenAICompatibleLLMClient.isLoopbackHost` (one source of
+/// truth for the on-device hostname set).
 public struct ContextGraphClient: ContextGraphAssembling {
     private let baseURL: URL
     private let session: URLSession
+    /// True when `baseURL`'s host is the loopback interface. When false the service is
+    /// off-device, so egress free text is scrubbed (see `scrubEgress`).
+    private let isLoopback: Bool
 
     public init(baseURL: String, timeout: TimeInterval = 4.0) {
         // Fall back to the documented default if the URL is malformed.
-        self.baseURL = URL(string: baseURL) ?? URL(string: "http://localhost:8302")!
+        let resolved = URL(string: baseURL) ?? URL(string: "http://localhost:8302")!
+        self.baseURL = resolved
+        self.isLoopback = OpenAICompatibleLLMClient.isLoopbackHost(resolved.host)
         let cfg = URLSessionConfiguration.ephemeral
         cfg.timeoutIntervalForRequest = timeout
         cfg.timeoutIntervalForResource = timeout
         self.session = URLSession(configuration: cfg)
+    }
+
+    /// G4: scrub one outgoing free-text field iff the service is off-device. Loopback →
+    /// returned unchanged (full fidelity); non-loopback → credential-scrubbed before
+    /// egress. Empty in, empty out (the redactor is a no-op on empty).
+    private func scrubEgress(_ text: String) -> String {
+        isLoopback ? text : ACPLogRedactor.scrub(text)
     }
 
     public func health() async -> Bool {
@@ -52,7 +75,7 @@ public struct ContextGraphClient: ContextGraphAssembling {
 
     public func assemble(userText: String, tokenBudget: Int) async throws -> String {
         let body: [String: Any] = [
-            "user_text": userText,
+            "user_text": scrubEgress(userText),
             "token_budget": tokenBudget,
             "tool_state": NSNull(),
         ]
@@ -67,8 +90,8 @@ public struct ContextGraphClient: ContextGraphAssembling {
         var body: [String: Any] = [
             "id": id,
             "external_id": id,
-            "user_text": userText,
-            "assistant_text": assistantText,
+            "user_text": scrubEgress(userText),
+            "assistant_text": scrubEgress(assistantText),
             "timestamp": now,
         ]
         if let channelLabel { body["channel_label"] = channelLabel }

@@ -454,6 +454,32 @@ final class AppSession {
         else { UserDefaults.standard.removeObject(forKey: key) }
     }
 
+    /// Per-node AUTONOMOUS-CHANGES consent (statusreport §2.3, P0): whether the
+    /// owner has consented to let a paired `coding_agent` node's agent perform
+    /// MUTATING tool calls — `write_file` / `edit_file` / `run_shell` (ACP
+    /// ToolKind `edit` / `execute`) — WITHOUT a per-action prompt on the phone.
+    /// OFF by default — the cardinal rule. This is STRICTLY NARROWER than, and
+    /// distinct from, `remoteDevControlConsent`: that gate decides whether the
+    /// node may be driven AT ALL (it admits the relay-ACP path); THIS gate decides
+    /// whether, once driven, the agent may autonomously change files / run shell on
+    /// the node. With this OFF, the phone-side permission handler FAILS CLOSED on
+    /// every mutating tool — read-only tools (`read`) still run — so a destructive
+    /// op is never auto-approved without an explicit, separate opt-in. `nodeID` is
+    /// the node contact's PQRC identity hex (the only ACP peer — C-3). Per-silo
+    /// (deniability — A33), same store as `remoteDevControlConsent`. `nonisolated`
+    /// so the (actor) `PersonaRuntime` reads it without an await.
+    nonisolated static func autonomousChangesConsent(nodeID: String, siloID: String = "") -> Bool {
+        UserDefaults.standard.bool(
+            forKey: siloDefaultsKey("acpAutonomousChanges.\(nodeID)", siloID))
+    }
+    nonisolated static func setAutonomousChangesConsent(
+        _ value: Bool, nodeID: String, siloID: String = ""
+    ) {
+        let key = siloDefaultsKey("acpAutonomousChanges.\(nodeID)", siloID)
+        if value { UserDefaults.standard.set(true, forKey: key) }
+        else { UserDefaults.standard.removeObject(forKey: key) }
+    }
+
     /// Agent-skills asymmetry knob: a short label of THIS workstation's context
     /// domain (e.g. "iOS / Xcode"), injected into shared-thread prompts so each
     /// tether advertises what it has without dumping its full context.

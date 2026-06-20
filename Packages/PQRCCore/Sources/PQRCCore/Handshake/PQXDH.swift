@@ -189,11 +189,17 @@ public enum PQXDH {
         info.append(initiatorIdentityPub)
         info.append(responderIdentityPub)
 
-        return HKDF<SHA256>.deriveKey(
+        // `SymmetricKey(data:)` copies the IKM into its own zeroed storage, so we
+        // own the only other copy of the dh1‖dh2‖dh3‖ss_kem handshake secret;
+        // wipe it once HKDF has consumed it (mirrors `kdfRootKey`). Same derived
+        // key, just not left lingering in the heap.
+        let sk = HKDF<SHA256>.deriveKey(
             inputKeyMaterial: SymmetricKey(data: ikm),
             salt: Data(PQRCConstants.handshakeHKDFSalt.utf8),
             info: info,
             outputByteCount: 32
         )
+        ikm.zeroize()
+        return sk
     }
 }
