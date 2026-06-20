@@ -82,6 +82,23 @@ actor PersonaRuntime {
     private let enableLocalLink: Bool
     private var localLink: MultipeerLinkTransport?
 
+    /// Relay-carried ACP transports (ACPRouterplan Phase 3), one per paired
+    /// `coding_agent` node, keyed by the node's PQRC identity hex. Each carries the
+    /// ACP line protocol to that node over the SAME gift-wrapped + Double-Ratcheted
+    /// message mesh a normal chat uses (`RelayACPTransport`): the relay only ever
+    /// sees the same E2EE ciphertext, never the ACP frames. The transport's `send`
+    /// closure publishes a framed chunk via `messenger.send(_, to: nodeHex)`; inbound
+    /// ACP frames received FROM that node are fed to `deliverInbound` in
+    /// `handleReceived` (and NEVER stored/rendered as chat). Created lazily by
+    /// `ensureRelayACPTransport(nodeHex:)` only when the node is consented (C-3 /
+    /// `AppSession.remoteDevControlConsent`); torn down on `shutdown()`.
+    private var relayACPTransports: [String: RelayACPTransport] = [:]
+    /// The relay's per-message byte budget for an ACP frame chunk. Sized well under
+    /// the strict-relay event ceiling so a framed chunk fits one gift-wrapped event
+    /// even after the wrap overhead; `RelayACPTransport` chunks longer ACP lines to
+    /// fit. Conservative on purpose (correctness over throughput).
+    private let relayACPMaxFrameBytes = 16 * 1024
+
     private var store: SwiftDataMessageStore!
     private var crypter: EncryptedStore!
 
@@ -205,6 +222,46 @@ actor PersonaRuntime {
         ais = newAIs.isEmpty
             ? [TetheredAI(id: "demo", name: "demo-otter-naps-000", provider: DemoAgentProvider())]
             : newAIs
+        rebindRelayACPProviders()
+    }
+
+    /// Make any enabled "acp" backend LIVE over the relay (ACPRouterplan Phase 3).
+    /// The static `makeProvider` cannot reach the messenger or the node identity, so
+    /// it hands back a Demo stub for "acp"; here, where both are available, we swap in
+    /// a relay-backed `ACPAgentProvider` driving the owner's CONSENTED `coding_agent`
+    /// node over its `RelayACPTransport`. Until a node is paired AND consented (C-3),
+    /// the Demo stub stays — the `acp` tier is selectable and visibly responds, but
+    /// nothing reaches a node. Idempotent: re-binds in place; called after bootstrap
+    /// and on every `setAIs` (Settings refresh), so toggling consent / pairing a node
+    /// flips the backend live without a reboot.
+    private func rebindRelayACPProviders() {
+        guard ais.contains(where: { $0.kind == "acp" }) else { return }
+        guard let nodeHex = consentedCodingAgentNode(),
+            let transport = ensureRelayACPTransport(nodeHex: nodeHex)
+        else { return }  // no consented node yet — leave the Demo stub in place
+        // Permission for a mutating tool call is governed by the per-node remote
+        // dev-control consent the owner already gave (the gate that admitted this
+        // path at all): driving the agent IS authorizing its tool work on the node.
+        // The node still enforces its own C-2 cwd jail.
+        let provider = ACPAgentProvider(
+            transport: transport,
+            permissionHandler: { _, _ in true })
+        ais = ais.map { ai in
+            guard ai.kind == "acp" else { return ai }
+            var live = ai
+            live.provider = provider
+            return live
+        }
+    }
+
+    /// The owner's paired `coding_agent` node to drive over the relay, if one is
+    /// consented (C-3). Deterministic pick (lowest identity hex) when more than one
+    /// is consented, so the choice is stable across refreshes.
+    private func consentedCodingAgentNode() -> String? {
+        verifiedContacts.keys
+            .filter { isConsentedCodingAgentNode($0) }
+            .sorted()
+            .first
     }
 
     func setFirewallEnabled(_ enabled: Bool) {
@@ -527,6 +584,9 @@ actor PersonaRuntime {
         // Dispatched AFTER the continuation is wired so the publish-status event
         // is never yielded into a nil continuation and lost.
         Task { [weak self] in await self?.publishKeys(relayURLs: publishURLs) }
+        // Now that contacts (incl. any consented `coding_agent` node) and the
+        // messenger are up, make any enabled "acp" backend live over the relay.
+        rebindRelayACPProviders()
         return stream
     }
 
@@ -540,6 +600,10 @@ actor PersonaRuntime {
             await persistPrekeyState()
         }
         pumpTask?.cancel()
+        // Close every relay-ACP transport so its inbound stream finishes and any
+        // ACP client/consumer awaiting it unwinds (no orphaned reassembly state).
+        for transport in relayACPTransports.values { transport.close() }
+        relayACPTransports.removeAll()
         await localLink?.stop()
         await messenger?.stop()
         eventContinuation?.finish()
@@ -732,6 +796,57 @@ actor PersonaRuntime {
         contactRecords[identityHex]?.contactType = (type?.isEmpty ?? true) ? nil : type
         persistContact(identityHex)
         eventContinuation?.yield(.conversationChanged(identityHex))
+    }
+
+    // MARK: - Relay-carried ACP (ACPRouterplan Phase 3 — drive a paired Mac node)
+
+    /// C-3 gate: an identity may be an ACP peer ONLY when it is the owner's paired
+    /// `coding_agent` node AND remote dev-control is consented for it. This is the
+    /// SINGLE predicate every relay-ACP path (inbound routing, transport binding, the
+    /// live provider) checks, so the path stays inert (privacy-first) until the owner
+    /// opts in. A node that is un-tagged, or consent revoked, fails closed.
+    private func isConsentedCodingAgentNode(_ identityHex: String) -> Bool {
+        contactType(identityHex) == "coding_agent"
+            && AppSession.remoteDevControlConsent(nodeID: identityHex, siloID: siloID)
+    }
+
+    /// The live relay-ACP transport bound to a consented `coding_agent` node, creating
+    /// it on first use. Returns nil (fails closed) when the node is not a consented
+    /// coding agent (C-3) — so no transport is ever wired to a non-owner-node peer.
+    /// The transport's `send` closure publishes each framed chunk to the node over the
+    /// relay as an ordinary ratcheted message; inbound frames are delivered by
+    /// `handleReceived`. Idempotent: the same transport is reused across turns so the
+    /// node's reassembly ids stay coherent.
+    func ensureRelayACPTransport(nodeHex: String) -> RelayACPTransport? {
+        guard isConsentedCodingAgentNode(nodeHex) else { return nil }
+        if let existing = relayACPTransports[nodeHex] { return existing }
+        let transport = RelayACPTransport(maxFrameBytes: relayACPMaxFrameBytes) {
+            [weak self] framedBody in
+            guard let self else { return }
+            // Publish the framed chunk as a normal message to the node. Best-effort:
+            // a relay hiccup surfaces to the ACP client as a timed-out turn, not a
+            // crash. `sentAt` is the live clock so each chunk is a distinct ratchet
+            // message number.
+            try? await self.sendRelayACPFrame(framedBody, to: nodeHex)
+        }
+        relayACPTransports[nodeHex] = transport
+        return transport
+    }
+
+    /// Publish ONE framed ACP chunk to the node over the relay as an ordinary
+    /// (agent-typed) ratcheted message. Hops onto the actor so `messenger.send` is
+    /// serialized with every other send; persists the advanced ratchet afterwards.
+    private func sendRelayACPFrame(_ framedBody: String, to nodeHex: String) async throws {
+        let body = MessageBody(text: framedBody, sentAt: clock.now())
+        try await messenger.send(body, to: nodeHex, participantType: .agent)
+        await persistSession(nodeHex)
+    }
+
+    /// Tear down a node's relay-ACP transport (and drop it), e.g. when consent is
+    /// revoked or the node is unpaired. Safe when none exists.
+    func teardownRelayACPTransport(nodeHex: String) async {
+        guard let transport = relayACPTransports.removeValue(forKey: nodeHex) else { return }
+        transport.close()
     }
 
     /// Sets my alias and broadcasts it to every connected contact over the
@@ -1869,6 +1984,23 @@ actor PersonaRuntime {
         if body.chunk != nil {
             guard let whole = accumulateChunk(body, from: senderHex) else { return }
             body = whole
+        }
+
+        // Relay-carried ACP frame (ACPRouterplan Phase 3): an ACP line from the
+        // owner's consented `coding_agent` node, riding the message mesh. Route it to
+        // that node's transport and RETURN — it is the ACP control channel, NEVER a
+        // chat message, so it is neither stored nor rendered. The C-3 gate
+        // (`isConsentedCodingAgentNode`) is what makes this safe: only the paired,
+        // consented node's frames are admitted; anyone else's "ACP1|…" text falls
+        // through to the normal chat path (and renders as the literal text it is).
+        // `ensureRelayACPTransport` returns nil for a non-consented sender, so an
+        // un-consented node's frame is NOT swallowed here — it stays visible as chat,
+        // never silently routed.
+        if RelayACPTransport.isACPFrame(body.text),
+            let transport = ensureRelayACPTransport(nodeHex: senderHex)
+        {
+            await transport.deliverInbound(body.text)
+            return
         }
 
         // Watch-along DRAFT (SPEC §13.5 endpoint model): the owner's Mac coding agent

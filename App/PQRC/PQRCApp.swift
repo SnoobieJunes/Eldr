@@ -434,6 +434,26 @@ final class AppSession {
         else { UserDefaults.standard.removeObject(forKey: key) }
     }
 
+    /// Per-node REMOTE DEV-CONTROL consent (ACPRouterplan Phase 3, C-3): whether the
+    /// owner has consented to drive a paired `coding_agent` node's real ACP agent over
+    /// the relay. OFF by default — privacy-first, the cardinal rule. The relay-carried
+    /// ACP path (frame routing AND the live `acp` provider) stays INERT for a node
+    /// until this is explicitly turned on; nothing about a paired Mac's agent is
+    /// reachable until the owner opts in. `nodeID` is the node contact's PQRC identity
+    /// hex (the ONLY ever ACP peer — C-3). Per-silo (deniability — A33), mirroring
+    /// `conversationFirewall`. `nonisolated` so the (actor) `PersonaRuntime` reads it
+    /// without an await.
+    nonisolated static func remoteDevControlConsent(nodeID: String, siloID: String = "") -> Bool {
+        UserDefaults.standard.bool(forKey: siloDefaultsKey("remoteDevControl.\(nodeID)", siloID))
+    }
+    nonisolated static func setRemoteDevControlConsent(
+        _ value: Bool, nodeID: String, siloID: String = ""
+    ) {
+        let key = siloDefaultsKey("remoteDevControl.\(nodeID)", siloID)
+        if value { UserDefaults.standard.set(true, forKey: key) }
+        else { UserDefaults.standard.removeObject(forKey: key) }
+    }
+
     /// Agent-skills asymmetry knob: a short label of THIS workstation's context
     /// domain (e.g. "iOS / Xcode"), injected into shared-thread prompts so each
     /// tether advertises what it has without dumping its full context.
@@ -526,6 +546,7 @@ final class AppSession {
             TetheredAI(
                 id: config.id, name: config.name,
                 provider: makeProvider(config: config, siloID: siloID, hubClient: hubClient),
+                kind: config.kind,
                 isRemote: ConfiguredAI.isRemote(config.kind),
                 appliesEgressFirewall: ConfiguredAI.appliesEgressFirewall(config.kind),
                 instructions: config.instructions,

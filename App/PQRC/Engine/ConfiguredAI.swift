@@ -178,7 +178,16 @@ struct ConfiguredAI: Identifiable, Codable, Equatable, Sendable {
 struct TetheredAI: Sendable {
     let id: String
     let name: String
-    let provider: any AgentProvider
+    /// `var` so the runtime can swap in a live, messenger-aware provider after
+    /// construction — see `kind` (the "acp" relay-backed rebinding).
+    var provider: any AgentProvider
+    /// The backend tag this AI was configured with ("ondevice" | "claude" | "acp" |
+    /// …), carried through so the RUNTIME can recognize a backend that needs live,
+    /// messenger-aware wiring the static `makeProvider` can't do. Today only "acp"
+    /// uses it: the static factory hands back a Demo stub, and the runtime swaps in a
+    /// relay-backed `ACPAgentProvider` once a consented `coding_agent` node exists
+    /// (ACPRouterplan Phase 3). Empty for AIs built without a kind (e.g. tests).
+    var kind: String = ""
     /// True for backends that send context off the on-device model (drives the
     /// "leaves device" indicator + consent). Includes Apple Private Cloud Compute.
     var isRemote: Bool = false
