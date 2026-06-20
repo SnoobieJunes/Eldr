@@ -1,11 +1,12 @@
 import SwiftUI
 
-/// The always-first screen: a passphrase gate for deniable multi-account.
-/// - Unlock an existing silo by typing its passphrase.
-/// - Create a brand-new account (a fresh silo).
-/// - Migrate a pre-silo account from an older build (one-time).
-/// No account list is ever shown — entering a passphrase is the ONLY way to
-/// reveal a silo, so a wrong passphrase and a non-existent account look the same.
+/// The always-first screen: a lock gate for the device's accounts.
+/// - Unlock the default account with Face ID / Touch ID (or device unlock).
+/// - Unlock a hidden account by typing its passphrase.
+/// - Create a new account — a passphrase-less default, or a passphrase-gated
+///   hidden one (the user chooses at setup).
+/// No account list is ever shown — entering a passphrase is the ONLY way to reveal
+/// a HIDDEN silo, so a wrong passphrase and a non-existent account look the same.
 struct AccountGateView: View {
     @Environment(AppSession.self) private var session
 
@@ -15,6 +16,10 @@ struct AccountGateView: View {
     @State private var creating = false
     @State private var acknowledged = false
     @State private var working = false
+    /// Setup choices: a passphrase-gated hidden account vs the passphrase-less
+    /// default account, and (for the default) whether to enroll Face ID / Touch ID.
+    @State private var usePassphrase = false
+    @State private var useBiometric = true
     /// Fire the launch Face ID attempt at most once (it's a convenience, not a
     /// gate — the passphrase field is always available as the fallback).
     @State private var autoTriedBiometric = false
@@ -22,9 +27,7 @@ struct AccountGateView: View {
     var body: some View {
         NavigationStack {
             Form {
-                if session.hasLegacyAccount {
-                    migrateSection
-                } else if creating {
+                if creating {
                     createSection
                 } else {
                     unlockSection
@@ -35,16 +38,15 @@ struct AccountGateView: View {
                     }
                 }
             }
-            .navigationTitle(session.hasLegacyAccount ? "Protect your account" : "EldrChat")
+            .navigationTitle("EldrChat")
             .disabled(working)
             .overlay { if working { ProgressView() } }
             .task {
-                // Opt-in Face ID convenience: if the user turned it on, prompt
+                // Opt-in Face ID convenience: if the user enrolled it, prompt
                 // automatically on launch so unlocking is a glance, not a tap.
                 // Silent on cancel/failure — the passphrase field stays available
                 // (including for hidden accounts not stored behind biometrics).
-                guard !session.hasLegacyAccount, !creating, session.hasBiometricUnlock,
-                    !autoTriedBiometric
+                guard !creating, session.hasBiometricUnlock, !autoTriedBiometric
                 else { return }
                 autoTriedBiometric = true
                 await session.biometricUnlock(autoTriggered: true)
@@ -56,10 +58,9 @@ struct AccountGateView: View {
 
     private var unlockSection: some View {
         Group {
-            // Face ID first: when this device's primary account is stored behind
-            // biometrics it's the prominent, default way in (and it auto-prompts
-            // at launch). The passphrase is the secondary path below — always
-            // available, and the only way into a hidden/different account.
+            // Face ID first: when the default account is stored behind biometrics
+            // it's the prominent way in (and it auto-prompts at launch). The
+            // passphrase below is the only way into a hidden account.
             if session.hasBiometricUnlock {
                 Section {
                     Button {
@@ -73,7 +74,23 @@ struct AccountGateView: View {
                     .buttonStyle(.borderedProminent)
                     .accessibilityIdentifier("biometric-unlock")
                 } footer: {
-                    Text("This device's account unlocks with Face ID. Use a passphrase below for a different or hidden account.")
+                    Text("This device's account unlocks with Face ID. Use a passphrase below for a hidden account.")
+                }
+            } else if session.hasDefaultAccount {
+                // A default account with no biometric enrolled: open on device unlock.
+                Section {
+                    Button {
+                        run { await session.unlockDefault() }
+                    } label: {
+                        Label("Open my account", systemImage: "lock.open")
+                            .font(.headline)
+                            .frame(maxWidth: .infinity)
+                            .padding(.vertical, 4)
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .accessibilityIdentifier("default-unlock")
+                } footer: {
+                    Text("Use a passphrase below for a hidden account.")
                 }
             }
             Section {
@@ -86,13 +103,16 @@ struct AccountGateView: View {
                     .disabled(passphrase.isEmpty)
                     .accessibilityIdentifier("unlock-button")
             } header: {
-                Text(session.hasBiometricUnlock ? "Or use a passphrase" : "Unlock")
+                Text(session.hasBiometricUnlock || session.hasDefaultAccount
+                    ? "Or use a passphrase" : "Unlock")
             } footer: {
                 Text("Each passphrase opens its own private, separate account on this device — nothing reveals how many exist.")
             }
             Section {
                 Button("Create a new account") {
                     session.unlockError = nil
+                    // A second account must be hidden — the default already exists.
+                    usePassphrase = session.hasDefaultAccount
                     creating = true
                 }
                 .accessibilityIdentifier("show-create-account")
@@ -104,30 +124,52 @@ struct AccountGateView: View {
 
     private var createSection: some View {
         Group {
-            Section("New account") {
+            Section {
                 TextField("Display name", text: $displayName)
                     .accessibilityIdentifier("onboarding-name")
-                SecureField("Passphrase", text: $passphrase)
-                    .autocorrectionDisabled()
-                    .textInputAutocapitalization(.never)
-                    .accessibilityIdentifier("passphrase-field")
-                SecureField("Confirm passphrase", text: $confirm)
-                    .autocorrectionDisabled()
-                    .textInputAutocapitalization(.never)
-                    .accessibilityIdentifier("passphrase-confirm")
+                Toggle("Protect with a passphrase (hidden account)", isOn: $usePassphrase)
+                    .disabled(session.hasDefaultAccount)
+                    .accessibilityIdentifier("onboarding-use-passphrase")
+                if usePassphrase {
+                    SecureField("Passphrase", text: $passphrase)
+                        .autocorrectionDisabled()
+                        .textInputAutocapitalization(.never)
+                        .accessibilityIdentifier("passphrase-field")
+                    SecureField("Confirm passphrase", text: $confirm)
+                        .autocorrectionDisabled()
+                        .textInputAutocapitalization(.never)
+                        .accessibilityIdentifier("passphrase-confirm")
+                } else {
+                    Toggle("Unlock with Face ID / Touch ID", isOn: $useBiometric)
+                        .accessibilityIdentifier("onboarding-use-biometric")
+                }
+            } header: {
+                Text("New account")
+            } footer: {
+                Text(usePassphrase
+                    ? "A separate, HIDDEN account. Its passphrase is the only way in, and nothing on this device reveals it exists."
+                    : "Your DEFAULT account on this device — it opens with Face ID / Touch ID or your device passcode.")
             }
             Section {
                 Toggle(
-                    "I understand: there is NO recovery. If I lose this passphrase, this account and all its messages are gone forever.",
+                    "I understand: there is NO recovery. If I lose access, this account and all its messages are gone forever.",
                     isOn: $acknowledged
                 )
                 .accessibilityIdentifier("onboarding-acknowledge")
             } footer: {
-                Text("Your account lives only on this device, encrypted under this passphrase. It is never backed up, synced, or exported. We cannot reset it for you.")
+                Text("Your account lives only on this device, encrypted by its secure hardware. It is never backed up, synced, or exported. We cannot reset it for you.")
             }
             Section {
                 Button("Create account") {
-                    run { await session.createAccount(passphrase: passphrase, displayName: displayName) }
+                    run {
+                        if usePassphrase {
+                            await session.createAccount(
+                                passphrase: passphrase, displayName: displayName)
+                        } else {
+                            await session.createDefaultAccount(
+                                displayName: displayName, enableBiometric: useBiometric)
+                        }
+                    }
                 }
                 .disabled(!canCreate)
                 .accessibilityIdentifier("onboarding-create")
@@ -137,40 +179,9 @@ struct AccountGateView: View {
     }
 
     private var canCreate: Bool {
-        !passphrase.isEmpty && passphrase == confirm && acknowledged
-    }
-
-    // MARK: Migrate (one-time, from a pre-silo build)
-
-    private var migrateSection: some View {
-        Group {
-            Section("Set a passphrase") {
-                SecureField("New passphrase", text: $passphrase)
-                    .autocorrectionDisabled()
-                    .textInputAutocapitalization(.never)
-                    .accessibilityIdentifier("passphrase-field")
-                SecureField("Confirm passphrase", text: $confirm)
-                    .autocorrectionDisabled()
-                    .textInputAutocapitalization(.never)
-                    .accessibilityIdentifier("passphrase-confirm")
-            }
-            Section {
-                Toggle(
-                    "I understand: there is NO recovery if I lose this passphrase.",
-                    isOn: $acknowledged
-                )
-                .accessibilityIdentifier("onboarding-acknowledge")
-            } footer: {
-                Text("Your existing account will be locked under this passphrase. From now on you'll enter it to open the app, and you can create additional separate accounts too.")
-            }
-            Section {
-                Button("Protect my account") {
-                    run { await session.migrateLegacyAccount(passphrase: passphrase) }
-                }
-                .disabled(!canCreate)
-                .accessibilityIdentifier("onboarding-create")
-            }
-        }
+        guard acknowledged else { return false }
+        if usePassphrase { return !passphrase.isEmpty && passphrase == confirm }
+        return true
     }
 
     private func run(_ action: @escaping () async -> Void) {

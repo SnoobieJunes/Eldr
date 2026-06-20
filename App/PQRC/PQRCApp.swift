@@ -136,7 +136,14 @@ final class AppSession {
     /// Surfaced on the lock screen when a passphrase doesn't unlock anything.
     var unlockError: String?
     /// The currently-unlocked silo (so reboots reuse the same key/store).
-    private var activeSilo: SiloKey.Derived?
+    /// An unlocked account's namespace + at-rest key, held only while unlocked.
+    /// Per AC31 the `kek` is the Secure-Enclave-wrapped RANDOM silo key recovered
+    /// via `AccountVault`, not a passphrase derivation.
+    struct UnlockedSilo: Sendable {
+        let siloID: String
+        let kek: SymmetricKey
+    }
+    private var activeSilo: UnlockedSilo?
     /// Set when the user opens the demo from Settings or launch args.
     var demoRunning = false
     /// npub arriving via a `pqrc:add?npub=…` deep link (QR scan from the
@@ -147,16 +154,12 @@ final class AppSession {
     /// agent (enables the §13.5 watch-along draft path). nil for an ordinary add.
     var pendingContactType: String?
 
-    /// A pre-silo account from an older build is present and must be migrated
-    /// (wrapped under a passphrase) before it can be unlocked.
-    var hasLegacyAccount: Bool {
-        KeychainStore(service: "chat.pqrc.keys").loadIfPresent(account: "identity-seed") != nil
-    }
-
     init() {
         let arguments = ProcessInfo.processInfo.arguments
         if arguments.contains("--reset") {
             KeychainStore(service: "chat.pqrc.keys").deleteAll()
+            KeychainStore(service: Self.siloService(Self.defaultSiloID)).deleteAll()
+            KeychainStore(service: Self.biometricService).deleteAll()
             UserDefaults.standard.removeObject(forKey: "displayName")
             Self.deleteAllStoreFiles()
         }
@@ -165,18 +168,16 @@ final class AppSession {
         }
         #if DEBUG
             if arguments.contains("--uitest-biometric") {
-                // Deterministic Face ID harness: wipe the test silo, create it
-                // fresh (which auto-enables Face ID when the device/Simulator has
-                // it enrolled), then lock — landing on the lock screen, which
+                // Deterministic Face ID harness: wipe the default account, create it
+                // fresh (which auto-enables Face ID when the device/Simulator has it
+                // enrolled), then lock — landing on the lock screen, which
                 // auto-prompts Face ID at launch. Lets a UI driver verify the
                 // glance-unlock path end to end.
-                let derived = SiloKey.derive(passphrase: "faceid-test-pass")
-                KeychainStore(service: Self.siloService(derived.siloID)).deleteAll()
+                KeychainStore(service: Self.siloService(Self.defaultSiloID)).deleteAll()
                 disableBiometricUnlock()
                 Self.deleteAllStoreFiles()
                 Task {
-                    await createAccount(
-                        passphrase: "faceid-test-pass", displayName: "FaceID Test")
+                    await createDefaultAccount(displayName: "FaceID Test", enableBiometric: true)
                     // Present the lock screen directly (a full lockSilo/shutdown
                     // races the still-in-flight startup in this harness); the
                     // running runtime just leaks for the duration of the test.
@@ -566,10 +567,16 @@ final class AppSession {
     static func siloStoreURL(_ siloID: String) -> URL {
         URL.applicationSupportDirectory.appendingPathComponent("silo-\(siloID).store")
     }
-    /// A silo exists iff its wrapped master key is present under its service.
+    /// The fixed namespace of the single passphrase-less DEFAULT account (AC31).
+    /// Openly present (not deniable); hidden accounts use passphrase-derived ids.
+    static let defaultSiloID = "default"
+    /// A silo exists iff its Secure-Enclave-wrapped silo key is present under its
+    /// service (written first, at account creation — the source of truth).
     static func siloExists(_ siloID: String) -> Bool {
-        KeychainStore(service: siloService(siloID)).loadIfPresent(account: "wrapped-master-key") != nil
+        AccountVault(keychain: KeychainStore(service: siloService(siloID))).exists()
     }
+    /// Whether the single passphrase-less default account exists on this device.
+    var hasDefaultAccount: Bool { Self.siloExists(Self.defaultSiloID) }
     static func displayNameKey(_ siloID: String) -> String { "displayName.\(siloID)" }
 
     /// One-time migration of pre-silo (flat) UserDefaults into a silo namespace,
@@ -598,92 +605,81 @@ final class AppSession {
         }
     }
 
-    /// Unlock an existing silo by passphrase. Wrong passphrase / no such silo is
-    /// reported generically — a typo and a non-existent account are
-    /// indistinguishable (deniable).
+    /// Unlock a HIDDEN account by its passphrase. A wrong passphrase / no such silo
+    /// is reported generically — a typo and a non-existent account are
+    /// indistinguishable (deniable). The passphrase selects the namespace AND is the
+    /// nested factor that unwraps the Secure-Enclave-wrapped silo key (AC31).
     func unlock(passphrase: String) async {
         unlockError = nil
-        let derived = SiloKey.derive(passphrase: passphrase)
-        guard Self.siloExists(derived.siloID) else {
+        let siloID = SiloKey.siloID(for: passphrase)
+        let vault = AccountVault(keychain: KeychainStore(service: Self.siloService(siloID)))
+        do {
+            let siloKEK = try vault.open(unlock: .passphrase(passphrase))
+            await bootSilo(siloID: siloID, kek: siloKEK)
+        } catch {
             unlockError = "Couldn't unlock. Check your passphrase, or create a new account."
-            return
         }
-        await bootSilo(derived)
     }
 
-    /// Create a brand-new silo for a passphrase that has none yet.
+    /// Open the passphrase-less DEFAULT account (device-unlock path; the Face ID
+    /// button uses `biometricUnlock` instead). Generic error if there is none.
+    func unlockDefault() async {
+        unlockError = nil
+        let siloID = Self.defaultSiloID
+        let vault = AccountVault(keychain: KeychainStore(service: Self.siloService(siloID)))
+        do {
+            let siloKEK = try vault.open(unlock: .secureEnclave)
+            await bootSilo(siloID: siloID, kek: siloKEK)
+        } catch {
+            unlockError = "Couldn't open your account on this device."
+        }
+    }
+
+    /// Create a brand-new HIDDEN account, gated by a passphrase (deniable). Its
+    /// namespace is passphrase-derived; its at-rest key is a RANDOM Secure-Enclave-
+    /// wrapped KEK with the passphrase nested UNDER the SE wrap (AC31). No biometric
+    /// is enrolled — caching a hidden account's key behind Face ID would reveal it.
     func createAccount(passphrase: String, displayName: String) async {
         unlockError = nil
-        let derived = SiloKey.derive(passphrase: passphrase)
-        guard !Self.siloExists(derived.siloID) else {
+        let siloID = SiloKey.siloID(for: passphrase)
+        let vault = AccountVault(keychain: KeychainStore(service: Self.siloService(siloID)))
+        guard !vault.exists() else {
             unlockError = "An account already exists for that passphrase. Unlock it instead."
             return
         }
-        UserDefaults.standard.set(
-            displayName.isEmpty ? "Me" : displayName, forKey: Self.displayNameKey(derived.siloID))
-        await bootSilo(derived)
-        // Face ID is the default for the primary account: save its key behind
-        // Face ID / Touch ID so the next launch unlocks with a glance. Best-effort
-        // and silent — if the device has no biometric/passcode enrolled we just
-        // stay passphrase-only (turn it on later in Settings). Only the FIRST
-        // account is stored biometrically; hidden accounts stay passphrase-only
-        // and deniable.
-        enableBiometricByDefault()
+        do {
+            let siloKEK = try vault.create(unlock: .passphrase(passphrase))
+            UserDefaults.standard.set(
+                displayName.isEmpty ? "Me" : displayName, forKey: Self.displayNameKey(siloID))
+            await bootSilo(siloID: siloID, kek: siloKEK)
+        } catch {
+            unlockError = "Couldn't create the account on this device's secure hardware."
+        }
     }
 
-    /// Migrate a pre-silo (legacy, Secure-Enclave-wrapped) account into a
-    /// passphrase silo, then unlock it. Re-wraps the SAME store master key under
-    /// the passphrase (so the store isn't re-encrypted) and moves the store file
-    /// to the silo's deterministic name.
-    func migrateLegacyAccount(passphrase: String) async {
+    /// Create the single passphrase-less DEFAULT account: a RANDOM Secure-Enclave-
+    /// wrapped KEK at a fixed namespace, opening on Face ID / device unlock. This is
+    /// the personal account — openly present on the device (NOT deniable). At most
+    /// one exists; additional accounts must be passphrase-gated (hidden).
+    func createDefaultAccount(displayName: String, enableBiometric: Bool) async {
         unlockError = nil
-        let derived = SiloKey.derive(passphrase: passphrase)
-        let legacy = KeychainStore(service: "chat.pqrc.keys")
-        let silo = KeychainStore(service: Self.siloService(derived.siloID))
-        let kekData = derived.kek.withUnsafeBytes { Data($0) }
-        let nonce = SystemNonceSource()
-        // Identity + small secrets: raw → sealed under the silo key.
-        for account in [
-            "identity-seed", "nostr-key", "identity-dh", "prekey-state", "my-alias",
-            "open-inbox-until",
-        ] {
-            if let raw = legacy.loadIfPresent(account: account),
-                let sealed = try? SiloKey.seal(raw, kek: derived.kek)
-            {
-                try? silo.save(sealed, account: account)
-            }
+        let siloID = Self.defaultSiloID
+        let vault = AccountVault(keychain: KeychainStore(service: Self.siloService(siloID)))
+        guard !vault.exists() else {
+            unlockError = "A default account already exists. Unlock it, or create a passphrase account."
+            return
         }
-        // Store master key: unwrap from Secure Enclave, re-wrap under the kek.
-        let se = SecureEnclaveKeyWrapper(keychain: legacy)
-        if let wrapped = legacy.loadIfPresent(account: "wrapped-master-key"),
-            let master = try? se.unwrap(wrapped: wrapped),
-            let rewrapped = try? SoftwareKeyWrapper(keyEncryptionKey: kekData, nonceSource: nonce)
-                .wrap(masterKey: master)
-        {
-            try? silo.save(rewrapped, account: "wrapped-master-key")
+        do {
+            let siloKEK = try vault.create(unlock: .secureEnclave)
+            UserDefaults.standard.set(
+                displayName.isEmpty ? "Me" : displayName, forKey: Self.displayNameKey(siloID))
+            await bootSilo(siloID: siloID, kek: siloKEK)
+            // Opt-in Face ID convenience for the default account only (best-effort,
+            // silent if the device has no passcode/biometric enrolled).
+            if enableBiometric { enableBiometricByDefault() }
+        } catch {
+            unlockError = "Couldn't create the account on this device's secure hardware."
         }
-        // Carry AI API keys (raw, under the silo's service) and the configured-AI
-        // list across so the migrated account keeps its AI setup.
-        for account in Self.apiKeyAccounts.values {
-            if let raw = legacy.loadIfPresent(account: account) {
-                try? silo.save(raw, account: account)
-            }
-        }
-        if let aiData = UserDefaults.standard.data(forKey: "configuredAIs") {
-            UserDefaults.standard.set(aiData, forKey: Self.configuredAIsKey(derived.siloID))
-            UserDefaults.standard.removeObject(forKey: "configuredAIs")
-        }
-        // Move the store file (and SQLite sidecars) to the silo's name.
-        Self.moveStore(
-            from: URL.applicationSupportDirectory.appendingPathComponent("default.store"),
-            to: Self.siloStoreURL(derived.siloID))
-        // Carry the display name across, then erase the legacy footprint.
-        let name = UserDefaults.standard.string(forKey: "displayName") ?? "Me"
-        UserDefaults.standard.set(name, forKey: Self.displayNameKey(derived.siloID))
-        UserDefaults.standard.removeObject(forKey: "displayName")
-        legacy.deleteAll()
-        await bootSilo(derived)
-        enableBiometricByDefault()
     }
 
     /// Onboarding default: turn on Face ID unlock for the first account, silently.
@@ -696,29 +692,29 @@ final class AppSession {
         biometricError = nil
     }
 
-    private func bootSilo(_ derived: SiloKey.Derived) async {
-        activeSilo = derived
+    private func bootSilo(siloID: String, kek: SymmetricKey) async {
+        activeSilo = UnlockedSilo(siloID: siloID, kek: kek)
         // Pull any pre-silo (flat, device-global) UserDefaults into THIS silo's
         // namespace and delete the flat originals, so an older build's settings
         // don't linger readable at rest or bleed across accounts (A33).
-        Self.migrateFlatDefaults(into: derived.siloID)
-        let name = UserDefaults.standard.string(forKey: Self.displayNameKey(derived.siloID)) ?? "Me"
-        let transports = await makeRelayTransports(siloID: derived.siloID)
+        Self.migrateFlatDefaults(into: siloID)
+        let name = UserDefaults.standard.string(forKey: Self.displayNameKey(siloID)) ?? "Me"
+        let transports = await makeRelayTransports(siloID: siloID)
         let runtime = PersonaRuntime(
             displayName: name,
             transports: transports,
             blobStore: LocalBlossomSimulator(),
-            ais: Self.makeRuntimeAIs(siloID: derived.siloID, hubClient: relayClient),
-            keychainService: Self.siloService(derived.siloID),
-            siloKEK: derived.kek,
-            siloID: derived.siloID,
+            ais: Self.makeRuntimeAIs(siloID: siloID, hubClient: relayClient),
+            keychainService: Self.siloService(siloID),
+            siloKEK: kek,
+            siloID: siloID,
             enableLocalLink: Self.localLinkEnabled)
         await runtime.setFirewallEnabled(Self.firewallEnabled)
-        let model = AppModel(runtime: runtime, personaName: name, siloID: derived.siloID)
+        let model = AppModel(runtime: runtime, personaName: name, siloID: siloID)
         do {
             try await model.start(
-                inMemoryStore: false, storeURL: Self.siloStoreURL(derived.siloID),
-                relayURLs: Self.configuredRelayURLs(siloID: derived.siloID))
+                inMemoryStore: false, storeURL: Self.siloStoreURL(siloID),
+                relayURLs: Self.configuredRelayURLs(siloID: siloID))
             mode = .single(model)
         } catch {
             bootError = String(describing: error)
@@ -871,9 +867,11 @@ final class AppSession {
     /// false (and sets `biometricError`) if the system refuses to store it.
     @discardableResult
     func enableBiometricUnlock() -> Bool {
-        guard let derived = activeSilo else { return false }
+        // Biometric is the default (open) account's convenience ONLY — caching a
+        // hidden account's key behind Face ID would reveal it exists (deniability).
+        guard let silo = activeSilo, silo.siloID == Self.defaultSiloID else { return false }
         let record = BiometricSilo(
-            siloID: derived.siloID, kek: derived.kek.withUnsafeBytes { Data($0) })
+            siloID: silo.siloID, kek: silo.kek.withUnsafeBytes { Data($0) })
         guard let blob = try? JSONEncoder().encode(record) else { return false }
         do {
             try KeychainStore(service: Self.biometricService)
@@ -915,8 +913,7 @@ final class AppSession {
                 }
                 return
             }
-            await bootSilo(
-                SiloKey.Derived(siloID: record.siloID, kek: SymmetricKey(data: record.kek)))
+            await bootSilo(siloID: record.siloID, kek: SymmetricKey(data: record.kek))
         case .cancelled, .missing:
             // Quiet: the user cancelled, or nothing is enrolled — fall back to
             // the passphrase field that's always on screen.
@@ -954,7 +951,7 @@ final class AppSession {
     /// Tears the current silo down and boots it again — the apply path for
     /// relay-list and Nearby changes from Settings (reuses the unlocked key).
     func rebootSingle() async {
-        guard let derived = activeSilo else { return }
+        guard let silo = activeSilo else { return }
         // Stop the MCP server: its bridge points at the model we're about to
         // replace, so it must not outlive the reboot (the user re-enables it).
         await stopLocalMCP()
@@ -962,7 +959,7 @@ final class AppSession {
             await model.runtime.shutdown()
         }
         mode = .locked
-        await bootSilo(derived)
+        await bootSilo(siloID: silo.siloID, kek: silo.kek)
     }
 
     /// The unlocked silo's id, for per-account AI settings (nil while locked).

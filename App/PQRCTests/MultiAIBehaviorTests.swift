@@ -372,10 +372,12 @@ struct MultiAIBehaviorTests {
 @Suite("Deniable account silos", .serialized)
 struct SiloRuntimeTests {
     @Test func silo_persistsAndReopensWithItsKEK_isolatedFromOthers() async throws {
-        let a = SiloKey.derive(passphrase: "alpha-passphrase")
-        let b = SiloKey.derive(passphrase: "beta-passphrase")
-        let svcA = "chat.pqrc.test-silo-\(a.siloID)"
-        let svcB = "chat.pqrc.test-silo-\(b.siloID)"
+        let aID = SiloKey.siloID(for: "alpha-passphrase")
+        let bID = SiloKey.siloID(for: "beta-passphrase")
+        let aKEK = SiloKey.passphraseKEK("alpha-passphrase")
+        let bKEK = SiloKey.passphraseKEK("beta-passphrase")
+        let svcA = "chat.pqrc.test-silo-\(aID)"
+        let svcB = "chat.pqrc.test-silo-\(bID)"
         let tmp = FileManager.default.temporaryDirectory
         let storeA = tmp.appendingPathComponent("siloA-\(UUID().uuidString).store")
         let storeB = tmp.appendingPathComponent("siloB-\(UUID().uuidString).store")
@@ -404,9 +406,9 @@ struct SiloRuntimeTests {
             return hex
         }
 
-        let hexA1 = try await bootIdentity(service: svcA, kek: a.kek, store: storeA)
-        let hexB = try await bootIdentity(service: svcB, kek: b.kek, store: storeB)
-        let hexA2 = try await bootIdentity(service: svcA, kek: a.kek, store: storeA)
+        let hexA1 = try await bootIdentity(service: svcA, kek: aKEK, store: storeA)
+        let hexB = try await bootIdentity(service: svcB, kek: bKEK, store: storeB)
+        let hexA2 = try await bootIdentity(service: svcA, kek: aKEK, store: storeA)
 
         #expect(hexA1 == hexA2, "a silo reopens to the same identity with its passphrase key")
         #expect(hexA1 != hexB, "different passphrases are separate, isolated identities")
