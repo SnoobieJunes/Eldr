@@ -21,6 +21,29 @@ public protocol AgentMessageSink: Sendable {
     /// tethering); it is stored locally for labeling and NEVER put on the wire.
     func postAgentMessage(_ body: MessageBody, threadID: String, agentName: String?) async throws
     func postAgentReply(_ body: MessageBody, agentName: String?) async throws  // conversation scope (ai_window)
+
+    /// Voice a watch-along DRAFT (SPEC §13.5 endpoint model): `body` carries the
+    /// REDACTED text that goes on the wire to the group; `rawText` is the owner's
+    /// local-only view (so the owner sees the real answer the agent produced). A sink
+    /// that can't split the two falls back (default) to posting the redacted body.
+    /// `threadID == nil` ⇒ conversation scope.
+    func postAgentDraft(
+        _ body: MessageBody, rawText: String, threadID: String?, agentName: String?
+    ) async throws
+}
+
+extension AgentMessageSink {
+    /// Default: no raw/redacted split available — post the SAFE (redacted) `body` so a
+    /// secret never reaches the wire even if a sink doesn't implement the local view.
+    public func postAgentDraft(
+        _ body: MessageBody, rawText: String, threadID: String?, agentName: String?
+    ) async throws {
+        if let threadID {
+            try await postAgentMessage(body, threadID: threadID, agentName: agentName)
+        } else {
+            try await postAgentReply(body, agentName: agentName)
+        }
+    }
 }
 
 /// Enforcement core for AI participation (SPEC §13, APP-SPEC §8–9).
@@ -43,12 +66,31 @@ public actor AgentEngine {
     private var contextGrants: [String: [String: Int64]] = [:]
     /// Loop guard (D14): consecutive agent messages per thread.
     private var consecutiveAgentMessages: [String: Int] = [:]
+    /// Loop-guard threshold: pause a thread's agents once this many consecutive
+    /// agent messages accumulate with no human in between. Configurable per
+    /// account (the app reads a per-silo setting and passes it in); defaults to
+    /// `PQRCConstants.agentLoopGuardLimit`. A value `<= 0` means the guard is
+    /// OFF (unbounded) — agents can ping-pong without an automatic pause.
+    private var loopGuardLimit: Int
 
-    public init(myIdentity: PQRCIdentity, clock: any Clock, sink: any AgentMessageSink) {
+    public init(
+        myIdentity: PQRCIdentity, clock: any Clock, sink: any AgentMessageSink,
+        loopGuardLimit: Int = PQRCConstants.agentLoopGuardLimit
+    ) {
         self.myIdentity = myIdentity
         self.clock = clock
         self.sink = sink
+        self.loopGuardLimit = loopGuardLimit
     }
+
+    /// Update the loop-guard threshold live (e.g. the user changed the per-silo
+    /// setting while a session is running). `<= 0` turns the guard off.
+    public func setLoopGuardLimit(_ limit: Int) {
+        loopGuardLimit = limit
+    }
+
+    /// Whether the loop guard is enforcing at all (a positive threshold).
+    private var loopGuardEnabled: Bool { loopGuardLimit > 0 }
 
     private var myIdentityHex: String { myIdentity.publicKeyData.hexString }
 
@@ -197,13 +239,75 @@ public actor AgentEngine {
             guard let until = threadInvites[threadID]?[myIdentityHex], now < until else {
                 throw AgentEngineError.autonomousSendNotAuthorized
             }
-            if consecutiveAgentMessages[threadID, default: 0] >= PQRCConstants.agentLoopGuardLimit {
+            if loopGuardEnabled,
+                consecutiveAgentMessages[threadID, default: 0] >= loopGuardLimit
+            {
                 throw AgentEngineError.loopGuardPaused
             }
         } else {
             guard let until = conversationWindows[myIdentityHex], now < until else {
                 throw AgentEngineError.autonomousSendNotAuthorized
             }
+        }
+    }
+
+    // MARK: - Owner-gated authorization (PQRC watch-along bridge, SPEC §13)
+
+    /// Whether a PINNED OWNER currently authorizes autonomous agent sends. Mirrors
+    /// `authorizeAutonomousSend`/`activeWindow`, but keyed on the owner's identity
+    /// rather than mine: the Mac bridge participates as an openly-AI agent whose
+    /// autonomy is governed by a *designated owner's* live, signed window/invite, not
+    /// its own. `threadID == nil` ⇒ conversation scope (owner's `ai_window`); a thread
+    /// id ⇒ the owner's `ai_invite` for that thread.
+    ///
+    /// Fail closed: no live owner window/invite ⇒ `false`. A link drop simply lets the
+    /// window go stale, so the agent stops sending — the correct behavior (invariant 9).
+    /// The owner's window/invite is populated by `receiveWindow(_,fromSenderIdentityHex:)`
+    /// / `receiveInvite(_,fromSenderIdentityHex:)`, which already verify the signature
+    /// is the owner's and the duration is bounded before storing it.
+    public func isAuthorizedForOwner(_ ownerHex: String, threadID: String? = nil) -> Bool {
+        let now = clock.now()
+        if let threadID {
+            guard let until = threadInvites[threadID]?[ownerHex], now < until else { return false }
+            return true
+        }
+        guard let until = conversationWindows[ownerHex], now < until else { return false }
+        return true
+    }
+
+    // MARK: - Watch-along draft voicing (§13.5 endpoint model, DEVIATIONS AC24)
+
+    /// Voice a watch-along DRAFT — produced by the owner's Mac coding agent and
+    /// delivered to this (the owner's) phone — to the group, as the owner's
+    /// cryptographically-bound agent. The wire copy is REDACTED here (the scrub lives in
+    /// the engine so it can't be bypassed); the raw text is handed to the sink only for
+    /// the owner's local view. Gated by MY (the owner's) own active window/invite, fail
+    /// closed (invariant 9). `threadID == nil` ⇒ conversation scope. Returns true iff
+    /// posted.
+    ///
+    /// This is the §13.5 win: the agent's words are signed with MY agent key (the sink
+    /// posts as `.agent`, which signs with this device's agent key) and the raw secret
+    /// never leaves my device — only the redacted copy goes to the group.
+    @discardableResult
+    public func voiceAgentDraft(
+        rawText: String, threadID: String? = nil, agentName: String? = nil
+    ) async -> Bool {
+        do {
+            try authorizeAutonomousSend(threadID: threadID)
+        } catch {
+            return false  // no active owner window/invite (or loop-guard) ⇒ fail closed
+        }
+        let redacted = CredentialRedactor.scrub(rawText)
+        let body = MessageBody(
+            text: redacted, sentAt: clock.now(),
+            thread: threadID.map { RumorContent.ThreadRef(id: $0) })
+        do {
+            try await sink.postAgentDraft(
+                body, rawText: rawText, threadID: threadID, agentName: agentName)
+            if let threadID { recordThreadMessage(threadID: threadID, participantType: .agent) }
+            return true
+        } catch {
+            return false
         }
     }
 
@@ -294,6 +398,7 @@ public actor AgentEngine {
     }
 
     public func loopGuardActive(threadID: String) -> Bool {
-        consecutiveAgentMessages[threadID, default: 0] >= PQRCConstants.agentLoopGuardLimit
+        guard loopGuardEnabled else { return false }
+        return consecutiveAgentMessages[threadID, default: 0] >= loopGuardLimit
     }
 }

@@ -443,6 +443,10 @@ public struct MessageBody: Codable, Equatable, Sendable {
     /// relay-only chunking, the §11 alternative to a Blossom pointer). Inside
     /// the ciphertext only; nil for ordinary single-envelope messages.
     public var chunk: MessageChunk?
+    /// Set when this body is a watch-along DRAFT from the owner's Mac coding agent for
+    /// the owner's phone to voice to the group (SPEC §13.5 endpoint model). Inside the
+    /// ciphertext only, owner↔agent; nil for ordinary messages.
+    public var agentDraft: AgentDraft?
 
     enum CodingKeys: String, CodingKey {
         case text
@@ -459,6 +463,7 @@ public struct MessageBody: Codable, Equatable, Sendable {
         case aiContextGrant = "ai_context_grant"
         case alias
         case chunk
+        case agentDraft = "agent_draft"
     }
 
     public init(
@@ -468,7 +473,7 @@ public struct MessageBody: Codable, Equatable, Sendable {
         aiInvite: AIInvite? = nil, isContext: Bool? = nil,
         aiContext: Bool? = nil, aiContextMark: AIContextMark? = nil,
         aiContextGrant: AIContextGrant? = nil, alias: String? = nil,
-        chunk: MessageChunk? = nil
+        chunk: MessageChunk? = nil, agentDraft: AgentDraft? = nil
     ) {
         self.text = text
         self.sentAt = sentAt
@@ -484,6 +489,7 @@ public struct MessageBody: Codable, Equatable, Sendable {
         self.aiContextGrant = aiContextGrant
         self.alias = alias
         self.chunk = chunk
+        self.agentDraft = agentDraft
     }
 }
 
@@ -533,6 +539,33 @@ public struct ThreadCreate: Codable, Equatable, Sendable {
         self.title = title
         self.anchorMessageID = anchorMessageID
         self.createdBy = createdBy
+    }
+}
+
+/// A watch-along DRAFT the owner's Mac coding agent produced, delivered to the owner's
+/// phone so the PHONE voices it to the group as the owner's cryptographically-bound
+/// agent (SPEC §13.5 endpoint model, DEVIATIONS AC24). It rides inside the ciphertext on
+/// the owner↔agent pairwise link — only the owner can read it — and tells the phone where
+/// to speak it. The phone redacts before voicing; the raw draft never reaches the group.
+/// Optional + tolerated by older clients (SPEC §12).
+public struct AgentDraft: Codable, Equatable, Sendable {
+    /// Local codename of the producing AI (labeling only; never required).
+    public let agentName: String?
+    /// The conversation the phone should VOICE this draft into (group id / peer hex).
+    public let voiceInto: String?
+    /// Optional thread scope within that conversation.
+    public let threadID: String?
+
+    enum CodingKeys: String, CodingKey {
+        case agentName = "agent_name"
+        case voiceInto = "voice_into"
+        case threadID = "thread_id"
+    }
+
+    public init(agentName: String? = nil, voiceInto: String? = nil, threadID: String? = nil) {
+        self.agentName = agentName
+        self.voiceInto = voiceInto
+        self.threadID = threadID
     }
 }
 

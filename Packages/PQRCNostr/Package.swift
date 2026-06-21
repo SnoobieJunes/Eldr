@@ -12,6 +12,12 @@ let package = Package(
     ],
     dependencies: [
         .package(path: "../PQRCCore"),
+        // The ACP line-transport seam (`ACPTransport`). PQRCACP is zero-dependency,
+        // so PQRCNostr → PQRCACP is a clean one-way edge (no cycle): PQRCACP imports
+        // nothing from here. `NearbyACPTransport` conforms PQRCNostr's sealed Nearby
+        // link to that seam, so the phone↔Mac ACP channel is confidential +
+        // authenticated per line (ACPRouterplan P-4/P-8).
+        .package(path: "../PQRCACP"),
         // SPEC §2 pin: >= 4.3.1 (CVE-2026-28815). Do not lower.
         .package(url: "https://github.com/apple/swift-crypto.git", from: "4.3.1"),
         // BIP-340 Schnorr for Nostr event signing (CryptoKit has no secp256k1).
@@ -22,6 +28,7 @@ let package = Package(
             name: "PQRCNostr",
             dependencies: [
                 "PQRCCore",
+                .product(name: "PQRCACP", package: "PQRCACP"),
                 .product(name: "Crypto", package: "swift-crypto"),
                 .product(name: "P256K", package: "swift-secp256k1"),
             ],

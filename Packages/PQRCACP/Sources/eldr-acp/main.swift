@@ -30,10 +30,24 @@ actor InFlight {
 @main
 struct EldrACPMain {
     static func main() async {
+        if CommandLine.arguments.contains("--version") {
+            print("eldr-acp/\(ACPAgent.agentVersion)")
+            return
+        }
+
+        // If the client closes our stdout (it went away mid-write), don't die from
+        // SIGPIPE — let the write fail and the read loop hit EOF and exit cleanly.
+        signal(SIGPIPE, SIG_IGN)
+
         let environment = ProcessInfo.processInfo.environment
 
+        // C-6: stderr is an at-rest diagnostic sink — the Configurator launcher tees
+        // it to a logfile. Scrub credential-shaped substrings (e.g. a token embedded
+        // in ELDR_LLM_URL) before they hit disk. Standalone binary, so it uses the
+        // built-in redactor; the in-app path injects PQRCCore's via AgentConfig.
         func log(_ message: String) {
-            FileHandle.standardError.write(Data("eldr-acp: \(message)\n".utf8))
+            FileHandle.standardError.write(
+                Data("eldr-acp: \(ACPLogRedactor.scrub(message))\n".utf8))
         }
 
         // Choose the brain.
@@ -47,12 +61,40 @@ struct EldrACPMain {
             log("LLM url=\(config.url) model=\(config.model)")
         }
 
+        // Context-budget / tool / prompt tuning (ELDR_ACP_* env + ~/.config/eldr-acp).
+        let config = AgentConfig.fromEnvironment(environment)
+        let toolList = config.toolAllowlist.isEmpty ? "all" : config.toolAllowlist.joined(separator: ",")
+        log(
+            "context budget: maxToolResultBytes=\(config.maxToolResultBytes == Int.max ? "∞" : String(config.maxToolResultBytes)) "
+                + "maxHistoryTurns=\(config.maxHistoryTurns) maxContextChars=\(config.maxContextChars) tools=\(toolList)")
+
+        let skillSet = AgentSkillSet.from(config: config)
+        let skillList =
+            skillSet.isEmpty
+            ? "none (disabled)" : skillSet.skills.map { "/\($0.name)" }.joined(separator: " ")
+        log("skills: \(skillList)")
+
+        // Streaming on by default; ELDR_ACP_STREAM=0/off/false disables it (echo/tests).
+        let streamingEnabled: Bool = {
+            switch (environment["ELDR_ACP_STREAM"] ?? "").lowercased() {
+            case "0", "off", "false", "no": return false
+            default: return true
+            }
+        }()
+        // The turn-level timeout mirrors the LLM's own request timeout.
+        let timeoutSeconds = LLMConfig.fromEnvironment(environment).requestTimeoutSeconds
+        log("streaming=\(streamingEnabled) request-timeout=\(Int(timeoutSeconds))s")
+
         let sink = FileHandleOutputSink(FileHandle.standardOutput)
         let connection = ClientConnection(sink: sink)
         let agent = ACPAgent(
             connection: connection,
             llm: llm,
-            toolEnvironment: .fromEnvironment(environment))
+            toolEnvironment: .fromEnvironment(environment),
+            config: config,
+            configDir: AgentConfig.defaultConfigDir(environment),
+            streamingEnabled: streamingEnabled,
+            requestTimeoutSeconds: timeoutSeconds)
         let inFlight = InFlight()
 
         log("ready on stdio")

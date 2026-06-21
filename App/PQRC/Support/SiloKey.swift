@@ -3,23 +3,26 @@ import CryptoKit
 import Foundation
 import PQRCCore
 
-/// Derives a "silo" (an isolated account) deterministically from a passphrase —
-/// the cryptographic heart of deniable multi-account on one device.
+/// Resolves the OPAQUE namespace ("siloID") of a deniable hidden account from its
+/// passphrase. Per AC31 (SPEC §3.4) the passphrase determines ONLY which namespace
+/// to open — NOT the at-rest key. The silo's key-encryption-key is a RANDOM key
+/// hardware-wrapped by the Secure Enclave (see `AccountVault`), so a stolen-device
+/// image can't be brute-forced even if the namespace is guessed; the passphrase is
+/// an optional second factor (`passphraseKEK`), never the sole barrier.
 ///
-/// `passphrase → PBKDF2 → accountKey → { siloID, kek }`
-/// - `siloID` is the OPAQUE namespace for the silo's keychain service + store
-///   file. Nothing on disk lists accounts; a silo exists iff someone enters its
-///   passphrase. A wrong passphrase derives a *different* siloID whose files
-///   simply don't exist — indistinguishable from "no account here" (deniable).
-/// - `kek` (key-encryption-key) wraps the silo's secrets (identity + store master
-///   key). Without the passphrase the silo's blobs are opaque AES-GCM.
+/// `passphrase → PBKDF2 → HKDF("…-id-v1") → siloID`
+/// - `siloID` is the namespace for the silo's keychain service + store file.
+///   Nothing on disk lists accounts; a hidden silo exists iff someone enters its
+///   passphrase. A wrong passphrase yields a *different* siloID whose files don't
+///   exist — indistinguishable from "no account here" (deniable).
 ///
 /// PBKDF2-HMAC-SHA256 is a vetted system primitive (CommonCrypto), not a custom
 /// one — consistent with CLAUDE.md ("compose vetted building blocks"). A FIXED
 /// app-wide salt is deliberate: a stored per-account salt would itself reveal that
-/// an account exists / how many exist, defeating deniability. We rely on
-/// passphrase entropy + a high iteration count instead (encourage strong
-/// passphrases). Trade-off recorded in docs/DEVIATIONS.md.
+/// an account exists / how many. Confidentiality no longer rests on passphrase
+/// entropy (the SE wrap does), so the fixed salt costs only a passphrase-guessing
+/// *confirmation* oracle to someone who can already enumerate the keychain — not a
+/// confidentiality break. Trade-off recorded in DEVIATIONS AC31.
 enum SiloKey {
     /// Fixed, app-wide. NOT secret (it ships in the binary); its job is domain
     /// separation, not entropy. Per-account randomness comes from the passphrase.
@@ -28,25 +31,30 @@ enum SiloKey {
     /// it exceeds ~400 ms on the oldest supported device.
     static let iterations: UInt32 = 600_000
 
-    struct Derived: Sendable {
-        /// Hex namespace for `keychainService` ("chat.pqrc.silo.<siloID>") and the
-        /// store file ("<siloID>.store").
-        let siloID: String
-        /// Wraps the silo's secrets (identity material + EncryptedStore master key).
-        let kek: SymmetricKey
-    }
-
-    static func derive(passphrase: String) -> Derived {
+    /// The opaque namespace a passphrase resolves to. Same passphrase → same
+    /// siloID (so a hidden account reopens); a different passphrase → a different,
+    /// non-existent namespace (deniable). 16 bytes, hex. This is ONLY a selector —
+    /// the at-rest key is the SE-wrapped random KEK held by `AccountVault`.
+    static func siloID(for passphrase: String) -> String {
         let accountKey = pbkdf2(
             passphrase: passphrase, salt: appSalt, iterations: iterations, keyLength: 32)
-        let prk = SymmetricKey(data: accountKey)
         let idKey = HKDF<SHA256>.deriveKey(
-            inputKeyMaterial: prk, info: Data("pqrc-silo-id-v1".utf8), outputByteCount: 16)
-        let kek = HKDF<SHA256>.deriveKey(
-            inputKeyMaterial: prk, info: Data("pqrc-silo-kek-v1".utf8), outputByteCount: 32)
-        let siloID = idKey.withUnsafeBytes { Data($0) }
+            inputKeyMaterial: SymmetricKey(data: accountKey),
+            info: Data("pqrc-silo-id-v1".utf8), outputByteCount: 16)
+        return idKey.withUnsafeBytes { Data($0) }
             .map { String(format: "%02x", $0) }.joined()
-        return Derived(siloID: siloID, kek: kek)
+    }
+
+    /// Derive a key-encryption-key from a passphrase for the OPTIONAL passphrase layer
+    /// nested UNDER the Secure-Enclave wrap (see `AccountVault`, DEVIATIONS AC31). PBKDF2
+    /// is sufficient here because brute-forcing this layer ALSO requires the non-exportable
+    /// Secure-Enclave key — it's a second factor, not the sole barrier.
+    static func passphraseKEK(_ passphrase: String) -> SymmetricKey {
+        let accountKey = pbkdf2(
+            passphrase: passphrase, salt: appSalt, iterations: iterations, keyLength: 32)
+        return HKDF<SHA256>.deriveKey(
+            inputKeyMaterial: SymmetricKey(data: accountKey),
+            info: Data("pqrc-passphrase-kek-v1".utf8), outputByteCount: 32)
     }
 
     /// AES-256-GCM seal of `plaintext` under the silo `kek` (for the secrets blob).

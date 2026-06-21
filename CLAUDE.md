@@ -13,6 +13,20 @@ This repository contains the v1 iOS client and test suite for **PQRC (Post-Quant
 
 **The cardinal rule (SPEC §0): user privacy is the number one priority, without exception.** Every tie resolves in favor of privacy, even at the cost of convenience, features, or performance.
 
+## Communication — no sycophancy, no placating
+
+The user does **not** want a yes-man. This is a hard rule, not a style preference.
+
+- **Banned:** flattery, validation openers ("You're right", "Great question",
+  "Absolutely"), reflexive apologies, and agreeing just to be agreeable. Lead with the
+  fact or the action, never with reassurance.
+- **Tell the truth even when it's unwelcome.** If something is broken, can't be done,
+  or was claimed done but wasn't, say so plainly and show the evidence.
+- **Never report a build, test, or feature as working without having run it and seen it
+  pass.** Distinguish what is *proven* (ran it, saw the output) from what is *inferred*
+  or *compile-checked only*. Label every unverified claim as unverified.
+- Don't soften bad news with hedges or padding. Disagree when the evidence warrants it.
+
 ## Stack
 
 - **Language:** Swift 6.x, strict concurrency enabled everywhere (`-strict-concurrency=complete`). No `@unchecked Sendable` without a written justification comment.
@@ -90,7 +104,7 @@ These come straight from the SPEC/NIP. Violating any of them is a failed build, 
 7. The kind-10420 binding is verified **in both directions** before any key from it is trusted (SPEC §3.3).
 8. `participant_type` is honest: agent-signed messages MUST carry `"agent"` and MUST render as AI-authored. A human label under an agent signature is rejected as a protocol violation (SPEC §8.2, §13.4).
 9. `ai_window` announcements are valid only when signed by the **human identity key**, are time-bounded, and produce a visible indicator in every client for the duration. Agents cannot self-activate, and autonomous sends outside an active window/thread-invite MUST fail closed (SPEC §13).
-10. All long-term secrets: Keychain `kSecAttrAccessibleWhenUnlockedThisDeviceOnly`, wrapped via Secure Enclave P-256, never exported, never synced, never logged (SPEC §3.1, §3.4).
+10. All long-term secrets: Keychain `kSecAttrAccessibleWhenUnlockedThisDeviceOnly`, never exported, never synced, never logged. The at-rest master key MUST be wrapped by the device's **secure element** — Secure Enclave P-256 on Apple platforms (iOS + modern Mac), the platform-equivalent hardware keystore (StrongBox/TPM) elsewhere, and a hardened-passphrase KEK **only** where no secure element exists. The passphrase-only silo KEK that made accounts offline-brute-forceable from a stolen-device image is reverted. Each account chooses, at setup, an optional **passphrase** (layered under the hardware wrap) and/or **biometric** unlock (SPEC §2 — no invented primitives — §3.1, §3.4; full tradeoffs + the deniability cost in DEVIATIONS AC31).
 11. Consumed one-time prekey private halves are deleted; exhaustion falls back to the last-resort key with the documented unlinkability caveat surfaced in DEVIATIONS/THREAT_MODEL, never a confidentiality downgrade (SPEC §4.1).
 12. Every payload-adjacent value in logs uses OSLog `privacy: .private`. A canary-scan test enforces no plaintext in logs or at rest.
 

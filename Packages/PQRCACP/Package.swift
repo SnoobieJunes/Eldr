@@ -1,4 +1,4 @@
-// swift-tools-version: 6.0
+// swift-tools-version:6.2
 import PackageDescription
 
 // PQRCACP — EldrChat's Agent Client Protocol (ACP) AGENT. A standalone Swift
@@ -19,10 +19,13 @@ import PackageDescription
 // swift-secp256k1 in through PQRCAgent.
 let package = Package(
     name: "PQRCACP",
-    platforms: [.macOS(.v14)],
+    platforms: [.iOS(.v26), .macOS(.v14)],
     products: [
         .library(name: "PQRCACP", targets: ["PQRCACP"]),
         .executable(name: "eldr-acp", targets: ["eldr-acp"]),
+        // Terminal ACP client that drives the agent by hand (and exposes the reusable
+        // ACPClientDriver the PQRC watch-along bridge also uses).
+        .executable(name: "eldr-acp-run", targets: ["eldr-acp-run"]),
     ],
     targets: [
         .target(
@@ -34,9 +37,16 @@ let package = Package(
             dependencies: ["PQRCACP"],
             swiftSettings: [.swiftLanguageMode(.v6)]
         ),
+        .executableTarget(
+            name: "eldr-acp-run",
+            dependencies: ["PQRCACP"],
+            swiftSettings: [.swiftLanguageMode(.v6)]
+        ),
         .testTarget(
             name: "PQRCACPTests",
-            dependencies: ["PQRCACP"],
+            // Depend on the `eldr-acp` executable so `swift test` builds it into the
+            // products dir — RunnerE2ETests spawns the real binary through ACPClientDriver.
+            dependencies: ["PQRCACP", "eldr-acp"],
             swiftSettings: [.swiftLanguageMode(.v6)]
         ),
     ]

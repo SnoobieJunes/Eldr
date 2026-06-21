@@ -1,25 +1,38 @@
 # EldrChat — Beta Tester Guide
 
-Welcome, and thank you for testing EldrChat. This guide walks you through
+Welcome aboard, and thank you for testing EldrChat. This guide walks you through
 everything the app does today, in plain language. No jargon required.
+
+Think of talking to people — and to AI — you're not yet sure you can trust as
+open water: vast, sometimes murky, occasionally a little scary. EldrChat is the
+boat that keeps you and your data flowing safely through those seas with your
+robots, so everyone can interact with confidence in this new age of exploration.
 
 ## What EldrChat is
 
 EldrChat is a private messenger — think "iMessage for the AI age."
 
-- **End-to-end encrypted.** Only you and the people you're talking to can read
-  your messages. Not us, not the servers in between.
-- **Post-quantum.** The encryption is built to stay safe even against future
-  quantum computers.
-- **Decentralized.** It runs over the open Nostr network instead of one
-  company's servers. No phone number, no email, no account.
+- **End-to-end encrypted.** Only you and the people you're talking to can ever
+  read a word. Not us, not the servers in between. The app is built to be
+  impenetrable and secure.
+- **Post-quantum.** Today's encryption could one day be broken by powerful
+  quantum computers still being built. EldrChat already uses encryption designed
+  to resist them, so a message you send now stays private even years from now.
+- **Decentralized.** It runs over the open **Nostr** network instead of one
+  company's servers — and you can stand up your own relay in minutes. No phone
+  number, no email, no account.
 - **Text-only, by design.** EldrChat is for words and ideas — and for working
   with AI. For photos and video, use iMessage. That's deliberate.
-- **AI-native.** You can bring your own AI assistant into your chats, openly and
-  on your terms. This is the part that makes EldrChat different.
+- **AI-native.** You can bring your own AI assistant into your chats — alone or
+  collaborating in a crew — with strict control over what it sees, who sees it,
+  where the data goes, and when it must leave your device. This is the part that
+  makes EldrChat different.
 
-The number one rule of the app is **your privacy**. When there's ever a
-trade-off, privacy wins.
+The number one rule of the app is **your privacy** — because privacy is a right,
+not a setting. When there's ever a trade-off, privacy wins.
+
+**Your data is your property and your right.** Nothing is saved, backed up,
+synced, or exported. It lives on your device and nowhere else.
 
 ## Getting started
 
@@ -27,17 +40,18 @@ The first time you open EldrChat, you create your account:
 
 1. **Pick a display name and a passphrase.** Your account lives only on this
    device, encrypted under your passphrase. Each passphrase opens its **own
-   separate account**, and nothing on the device reveals how many you have
-   (deniable multi-account — handy for keeping work and personal apart, or a
-   decoy).
+   separate account**, sealed under its own key — so you can keep work and
+   personal life apart by a great divide, where neither can ever see the other.
+   The running app never shows an account list and never reveals how many you
+   keep; a wrong passphrase simply opens nothing.
 2. **Read the "No recovery — by design" warning.** **If you lose your passphrase,
-   that account and all its messages are gone forever — never backed up, synced,
-   or exported, and we cannot reset it.** You'll tick a box to confirm.
+   that account and all its messages are gone forever — never saved, backed up,
+   synced, or exported, and we cannot reset it.** You'll tick a box to confirm.
 3. **Face ID is the default.** After you create the account, the lock screen uses
    Face ID / Touch ID so you don't retype your passphrase every time (it prompts
    automatically at launch). Turn it off in **Settings ▸ Account** for
-   passphrase-only high-security mode. To open a *different* or hidden account,
-   ignore Face ID and type that account's passphrase instead.
+   passphrase-only high-security mode. To open a *different* account on the other
+   side of the divide, ignore Face ID and type that account's passphrase instead.
 
 ### Your address: the npub
 
@@ -85,8 +99,12 @@ friendly **codename** like `clever-otter-glides-204`.
 
 ## The AI features
 
-This is what sets EldrChat apart. AI is always **visible and on your terms** —
-no one ever talks to an AI without knowing it.
+This is what sets EldrChat apart. The goal is to let people **communicate and
+collaborate with AI — tethered together in a crew or working alone — with strict
+safeguards** over what the AI sees, who sees it, where the data goes, and when it
+must leave your device (and the ability to obfuscate it when it does). AI is
+always **visible and on your terms** — no one ever talks to an AI without knowing
+it, and an AI can never speak for you on its own.
 
 ### Your tethered AI(s)
 
@@ -251,8 +269,9 @@ Wi-Fi/Bluetooth:
 
 - **One device, no recovery.** Lose the device, lose the identity and all
   history. There's no cloud backup (that's the privacy trade).
-- **No deniability.** Messages are signed — a recipient can prove you wrote
-  them.
+- **No message deniability.** Messages are signed — a recipient can prove you
+  wrote them. (Separate *accounts* are deniable to the running app, but an
+  individual message you send is not.)
 - **Endpoints aren't magic.** Whoever you message can screenshot or forward what
   you send, and if *they* enable a remote AI, the chats *they* take part in go to
   *their* provider.
@@ -279,8 +298,9 @@ Wi-Fi/Bluetooth:
   consented trade of privacy for capability — leave it off to keep everything
   local.
 
-That's it. Message someone, try drafting with AI, open the full-screen reader on
-a long note, and tell us what feels rough. Thank you for testing EldrChat.
+That's it — *a mind forever voyaging through strange seas of thought.* Message
+someone, try drafting with AI, open the full-screen reader on a long note, and
+tell us what feels rough. Thank you for testing EldrChat, and fair winds.
 
 ---
 
@@ -289,11 +309,28 @@ a long note, and tell us what feels rough. Thank you for testing EldrChat.
 Two integrations are available if you run EldrChat on a Mac:
 
 - **Let an AI agent (Goose, Xcode, Claude) read your secure chat** — turn on
-  **Settings ▸ Local agent access**; EldrChat shows a one-line command + token to
-  paste into your MCP client. It's read-only and your contacts' names are replaced
-  with codenames before anything leaves the app.
+  **Settings ▸ Local agent access (MCP)**; EldrChat shows a one-line command + a
+  pairing token to paste into your MCP client. Be clear-eyed about what this does:
+  a local agent on *this machine* gets to **read your conversations**. It is
+  read-only (there is no way for it to send or post anything), it talks to the app
+  only over a **loopback socket** that never leaves the device, it needs the
+  pairing token to connect, and every contact's name is replaced with a **local
+  codename** (never a real name or key) with message text **size-capped** first.
+  It is **off by default**, there is **no remembered "leave it on" setting**, and
+  it **stops the moment you lock** or toggle it off. Only turn it on if you want a
+  local agent to see your redacted chat.
 - **Let EldrChat's self-hosted LLM pilot Xcode 27** (write code, build, run on
-  simulators) via the `eldr-acp` Agent Client Protocol agent.
+  simulators) via the `eldr-acp` Agent Client Protocol agent. This one can
+  **create/overwrite files and run shell commands** in its working directory — by
+  design, on your own dev machine. Your editor asks you to approve each
+  file-write / shell run when it supports permission prompts; a client that can't
+  prompt will let the agent act without asking, so only register it with an editor
+  you trust. It uses your conversations for nothing — it touches only your code.
 
 Both are off by default and documented step-by-step in **docs/SETUP-GUIDE.md §9**
 (Xcode 27 registration) and the in-app Settings.
+
+For the Xcode 27 agent, there's also a point-and-click **Eldr ACP Configurator**
+macOS app (`Apps/EldrACPConfigurator/`) that wraps the whole setup in a wizard, with
+a live config panel, a log viewer, an in-app test chat, and self-learning per-project
+memory. See **Apps/EldrACPConfigurator/README.md**.

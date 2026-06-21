@@ -12,8 +12,10 @@ struct AISettingsView: View {
     @Environment(AppSession.self) private var session
 
     @State private var ais: [ConfiguredAI] = []
-    @State private var aiTesting = false
-    @State private var aiTestResult: String?
+    /// Per-row test state, keyed by ConfiguredAI.id, so each tethered AI can be
+    /// tested independently (not just the primary one).
+    @State private var rowTesting: Set<String> = []
+    @State private var rowTestResult: [String: String] = [:]
     /// The AI (by id) awaiting remote-consent confirmation.
     @State private var pendingRemote: ConfiguredAI?
     /// Egress firewall: ON by default. Disabling is gated behind a warning.
@@ -51,36 +53,9 @@ struct AISettingsView: View {
                 .accessibilityIdentifier("add-ai")
             } header: {
                 Text("Tethered AIs")
+                    .helpInfo("Bring your own AI into your chats — openly and on your terms. Pick on-device Core AI (nothing leaves your phone), a cloud provider via your own API key, or a model on your own machine. Add several and they can collaborate. No one ever talks to an AI without seeing it.")
             } footer: {
-                Text("Add several to let them share context with each other in a chat or thread. Each gets a local, private name you can edit; names are never broadcast.")
-            }
-
-            Section {
-                Button {
-                    aiTesting = true
-                    aiTestResult = nil
-                    Task {
-                        let result = await model.testAI()
-                        aiTestResult = result
-                        aiTesting = false
-                    }
-                } label: {
-                    HStack {
-                        Label("Test primary AI now", systemImage: "stethoscope")
-                        if aiTesting { Spacer(); ProgressView() }
-                    }
-                }
-                .disabled(aiTesting)
-                .accessibilityIdentifier("test-ai-button")
-                if let aiTestResult {
-                    Text(aiTestResult)
-                        .font(.caption)
-                        .foregroundStyle(aiTestResult.hasPrefix("⚠️") ? .orange : .primary)
-                        .textSelection(.enabled)
-                        .accessibilityIdentifier("test-ai-result")
-                }
-            } footer: {
-                Text("Runs the first AI against a sample so you see a real reply or the exact failure reason.")
+                Text("Add several to let them share context with each other in a chat or thread. Each gets a local, private name you can edit; names are never broadcast. Use each AI's “Test” button to check it against a sample.")
             }
 
             Section {
@@ -103,6 +78,7 @@ struct AISettingsView: View {
                     .accessibilityIdentifier("egress-firewall-toggle")
             } header: {
                 Text("Egress firewall")
+                    .helpInfo("Your privacy guard for remote AI. Before anything reaches a cloud provider it swaps every real name for your private codename and trims the context to a safe size. On-device AI never leaves your phone, so it's untouched. On by default — turning it off is not recommended.")
             } footer: {
                 Text("On by default. When on, anything sent to a REMOTE AI is stripped of real names (replaced with your private codenames) and trimmed to a safe size before it leaves your device. On-device AI is never affected. Disabling it is not recommended.")
             }
@@ -120,13 +96,24 @@ struct AISettingsView: View {
                 Text("A short label of what THIS device brings to a shared AI thread (e.g. \"iOS / Xcode\" or \"backend / staging\"). Each person's AI advertises its domain so two of them divide work without dumping full context. Optional — used by the thread Skills feature.")
             }
 
-            Section("What your AI sees") {
+            Section {
+                NavigationLink {
+                    AIContextInspectorView(model: model)
+                } label: {
+                    Label("Context inspector", systemImage: "doc.text.magnifyingglass")
+                }
+                .accessibilityIdentifier("ai-context-inspector")
                 NavigationLink {
                     AIContextView(model: model)
                 } label: {
-                    Label("View tethered LLM context", systemImage: "doc.text.magnifyingglass")
+                    Label("Quick view (read-only)", systemImage: "eye")
                 }
                 .accessibilityIdentifier("view-ai-context")
+            } header: {
+                Text("What your AI sees")
+                    .helpInfo("Transparency first, with control. The Context inspector shows EXACTLY what each AI receives for a conversation — its instructions, how much it gathers, and every message — and lets you adjust the depth and include/exclude individual messages, live. The quick view is the same context, read-only. A remote AI always sees your private codenames, never real names.")
+            } footer: {
+                Text("The inspector's edits map to real, saved controls (per-AI depth and the per-message \"Add to AI Context\" marker) — not a separate copy.")
             }
         }
         .navigationTitle("AI")
@@ -197,13 +184,18 @@ struct AISettingsView: View {
             }
 
             // Self-hosted / custom: an OpenAI-compatible server URL (key optional).
+            // The field is a normal, editable, clearable TextField bound to the
+            // AI's stored baseURL. The placeholder is phrased as an instruction
+            // (not a ready-made URL) so a realistic-looking address isn't mistaken
+            // for prefilled, locked-in text — the example LAN address lives in the
+            // caption below instead.
             if ConfiguredAI.needsBaseURL(currentKind) {
-                TextField("http://192.168.1.20:11434/v1", text: optionalBinding(ai.baseURL))
+                TextField("Server URL (e.g. http://192.168.1.20:11434/v1)", text: optionalBinding(ai.baseURL))
                     .keyboardType(.URL)
                     .autocorrectionDisabled()
                     .textInputAutocapitalization(.never)
                     .accessibilityIdentifier("ai-base-url")
-                Text("A machine on your network running Ollama or LM Studio (OpenAI-compatible). Same Wi-Fi, no cloud — turn on its network server and use its LAN address.")
+                Text("A machine on your network running Ollama or LM Studio (OpenAI-compatible). Same Wi-Fi, no cloud — turn on its network server and use its LAN address (e.g. http://192.168.1.20:11434/v1).")
                     .font(.caption2).foregroundStyle(.secondary)
             }
             if ConfiguredAI.supportsModelField(currentKind) {
@@ -211,6 +203,16 @@ struct AISettingsView: View {
                     .autocorrectionDisabled()
                     .textInputAutocapitalization(.never)
                     .accessibilityIdentifier("ai-model")
+            }
+
+            // Apple Private Cloud Compute: reasoning depth (PCC-only capability).
+            if currentKind == "pcc" {
+                Picker("Reasoning depth", selection: reasoningBinding(ai)) {
+                    ForEach(ConfiguredAI.reasoningLevels, id: \.tag) { Text($0.label).tag($0.tag) }
+                }
+                .accessibilityIdentifier("ai-reasoning")
+                Text("Runs on Apple's Private Cloud Compute — attested and stores no prompts. Deeper reasoning is more thorough but uses more of your daily PCC quota.")
+                    .font(.caption2).foregroundStyle(.secondary)
             }
 
             if ConfiguredAI.isRemote(currentKind), let account = ai.wrappedValue.apiKeyAccount {
@@ -232,6 +234,7 @@ struct AISettingsView: View {
                     .font(.caption.weight(.semibold))
                     .foregroundStyle(.secondary)
                     .accessibilityIdentifier("ai-context-behavior-header")
+                    .helpInfo("Three knobs per AI. Instructions give it a persona. Gathers sets what it can read: the live conversation while it's active, only messages you add to context, or nothing. Does sets whether it participates, drafts for your approval, or just summarizes. Depth is how many recent messages it sees.")
                 VStack(alignment: .leading, spacing: 2) {
                     Text("Instructions (custom persona)")
                         .font(.caption).foregroundStyle(.secondary)
@@ -259,6 +262,36 @@ struct AISettingsView: View {
             Text(statusLine(for: ai.wrappedValue))
                 .font(.caption2)
                 .foregroundStyle(statusOK(for: ai.wrappedValue) ? .green : .orange)
+
+            // Per-AI connection test — runs THIS AI against a sample so you see a
+            // real reply or its exact failure, independent of the other AIs.
+            let aiID = ai.wrappedValue.id
+            HStack(spacing: 8) {
+                Button {
+                    let cfg = ai.wrappedValue
+                    rowTesting.insert(cfg.id)
+                    rowTestResult[cfg.id] = nil
+                    Task {
+                        let result = await session.testProvider(for: cfg)
+                        rowTestResult[cfg.id] = result
+                        rowTesting.remove(cfg.id)
+                    }
+                } label: {
+                    Label("Test", systemImage: "stethoscope")
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+                .disabled(rowTesting.contains(aiID))
+                .accessibilityIdentifier("test-ai-row")
+                if rowTesting.contains(aiID) { ProgressView().controlSize(.small) }
+            }
+            if let result = rowTestResult[aiID] {
+                Text(result)
+                    .font(.caption)
+                    .foregroundStyle(result.hasPrefix("⚠️") ? .orange : .secondary)
+                    .textSelection(.enabled)
+                    .accessibilityIdentifier("test-ai-row-result")
+            }
         }
         .padding(.vertical, 2)
     }
@@ -292,6 +325,11 @@ struct AISettingsView: View {
             get: { ai.wrappedValue.effectiveDepth },
             set: { ai.wrappedValue.contextDepth = $0; persist() })
     }
+    private func reasoningBinding(_ ai: Binding<ConfiguredAI>) -> Binding<String> {
+        Binding(
+            get: { ai.wrappedValue.effectiveReasoning },
+            set: { ai.wrappedValue.reasoningLevel = $0; persist() })
+    }
 
     /// What this AI will actually use, surfacing the Demo fallback.
     private func statusLine(for ai: ConfiguredAI) -> String {
@@ -305,6 +343,12 @@ struct AISettingsView: View {
             return base.isEmpty
                 ? "Add a server URL to use this self-hosted AI (Demo stub until then)."
                 : "Active: self-hosted at \(base)"
+        }
+        if ai.kind == "pcc" {
+            if let reason = PCCFoundationModelsProvider.availabilityReason {
+                return "\(reason)"
+            }
+            return "Active: Apple Private Cloud Compute (\(ai.effectiveReasoning) reasoning)."
         }
         if ConfiguredAI.isRemote(ai.kind) {
             return hasKey(for: ai)
@@ -325,6 +369,7 @@ struct AISettingsView: View {
         if ai.kind == "custom" {
             return !(ai.baseURL ?? "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
         }
+        if ai.kind == "pcc" { return PCCFoundationModelsProvider.availabilityReason == nil }
         if ConfiguredAI.isRemote(ai.kind) { return hasKey(for: ai) }
         if ai.kind == "demo" { return false }
         return FoundationModelsAgentProvider.availabilityReason == nil

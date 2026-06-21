@@ -196,10 +196,15 @@ struct MultiAIBehaviorTests {
     @Test func firewall_redactsRealNamesForRemoteAI() async throws {
         let spy = SpyProvider()
         let runtime = await makeRuntime(
-            "Alice", ais: [TetheredAI(id: "r", name: "remote-ai", provider: spy, isRemote: true)])
+            "Alice", ais: [TetheredAI(id: "r", name: "remote-ai", provider: spy, isRemote: true, appliesEgressFirewall: true)])
         await runtime.keychain.deleteAll()
         _ = try await runtime.bootstrap(inMemoryStore: true)
         let chatID = try await runtime.createSelfChat()
+        // Isolate from the per-conversation firewall override: the seeded test
+        // identity shares this self-chat id across the firewall tests and the
+        // override lives in persistent UserDefaults, so assert the DEFAULT (no
+        // override → account firewall ON) explicitly.
+        AppSession.setConversationFirewall(nil, conversationID: chatID, siloID: "")
         try await runtime.sendMessage("secret plan", conversationID: chatID)
         try await Task.sleep(for: .milliseconds(400))
 
@@ -213,16 +218,113 @@ struct MultiAIBehaviorTests {
     @Test func firewall_off_passesRealNames() async throws {
         let spy = SpyProvider()
         let runtime = await makeRuntime(
-            "Alice", ais: [TetheredAI(id: "r", name: "remote-ai", provider: spy, isRemote: true)])
+            "Alice", ais: [TetheredAI(id: "r", name: "remote-ai", provider: spy, isRemote: true, appliesEgressFirewall: true)])
         await runtime.keychain.deleteAll()
         _ = try await runtime.bootstrap(inMemoryStore: true)
         await runtime.setFirewallEnabled(false)
         let chatID = try await runtime.createSelfChat()
+        AppSession.setConversationFirewall(nil, conversationID: chatID, siloID: "")
         try await runtime.sendMessage("hi", conversationID: chatID)
         try await Task.sleep(for: .milliseconds(400))
 
         let names = await spy.capturedNames
         #expect(names.contains("Alice"), "with the firewall off, the real display name is sent")
+    }
+
+    /// Per-conversation override OFF while the account firewall stays ON: THIS
+    /// chat's real names reach the remote AI raw — the private-paired use-case
+    /// (your own agents), without disabling the firewall everywhere else.
+    @Test func firewall_perConversationOverrideOff_passesRealNamesForThatChatOnly() async throws {
+        let spy = SpyProvider()
+        let runtime = await makeRuntime(
+            "Alice", ais: [TetheredAI(id: "r", name: "remote-ai", provider: spy, isRemote: true, appliesEgressFirewall: true)])
+        await runtime.keychain.deleteAll()
+        _ = try await runtime.bootstrap(inMemoryStore: true)
+        // Account default stays ON (the runtime default). Only THIS conversation is
+        // overridden to Off; the runtime reads it under siloID "" (makeRuntime's).
+        let chatID = try await runtime.createSelfChat()
+        AppSession.setConversationFirewall(false, conversationID: chatID, siloID: "")
+        defer { AppSession.setConversationFirewall(nil, conversationID: chatID, siloID: "") }
+        try await runtime.sendMessage("secret plan", conversationID: chatID)
+        try await Task.sleep(for: .milliseconds(400))
+
+        let names = await spy.capturedNames
+        #expect(
+            names.contains("Alice"),
+            "a per-conversation Off override sends real names to the remote AI for that chat")
+        #expect(!names.contains("you"), "the codename redaction is bypassed for this chat only")
+    }
+
+    /// C-5 wiring: the Nearby AUTH allowlist is built from a verified peer's NOSTR
+    /// pubkey (what a kind-22242 AUTH is signed by), NOT its PQRC identity hex — a
+    /// naive `verifiedContacts.keys` allowlist would match no AUTH and lock out
+    /// every paired contact. Also proves the live snapshot publishes on pairing.
+    @Test func pairedAllowlist_usesNostrPubkeys_notIdentityHex_andPublishesLive() async throws {
+        let relay = LocalRelaySimulator()
+        let alice = PersonaRuntime(
+            displayName: "Alice", transports: [await relay.connect()],
+            blobStore: LocalBlossomSimulator(),
+            ais: [TetheredAI(id: "a", name: "ai", provider: DemoAgentProvider())],
+            randomSource: SeededRandomSource(seed: 431), nonceSource: SeededRandomSource(seed: 432),
+            keychainService: "chat.pqrc.test-c5-alice-\(UUID().uuidString)")
+        let bob = PersonaRuntime(
+            displayName: "Bob", transports: [await relay.connect()],
+            blobStore: LocalBlossomSimulator(),
+            ais: [TetheredAI(id: "b", name: "ai", provider: DemoAgentProvider())],
+            randomSource: SeededRandomSource(seed: 433), nonceSource: SeededRandomSource(seed: 434),
+            keychainService: "chat.pqrc.test-c5-bob-\(UUID().uuidString)")
+        await alice.keychain.deleteAll()
+        await bob.keychain.deleteAll()
+        _ = try await alice.bootstrap(inMemoryStore: true)
+        _ = try await bob.bootstrap(inMemoryStore: true)
+
+        // Live snapshot wiring: capture what the runtime publishes (the host reads this).
+        let snapshot = PairedPubkeySnapshot()
+        await alice.setPairedPubkeysPublisher { set in snapshot.replace(with: set) }
+
+        let bobIdentity = await bob.identityHex
+        #expect(await alice.pairedNostrPubkeys().isEmpty, "no paired contacts before pairing")
+
+        try await alice.addVerifiedPeer(bob)
+
+        let paired = await alice.pairedNostrPubkeys()
+        #expect(paired.count == 1, "exactly one paired peer")
+        #expect(
+            !paired.contains(bobIdentity),
+            "the allowlist uses the peer's NOSTR pubkey, not its PQRC identity hex")
+        #expect(paired.allSatisfy { $0.count == 64 }, "x-only nostr pubkeys are 32 bytes hex")
+        // The live snapshot got the same set via the publisher; a non-paired key is refused.
+        for pk in paired { #expect(snapshot.contains(pk)) }
+        #expect(!snapshot.contains(bobIdentity), "a non-paired key is refused by the allowlist")
+
+        await alice.shutdown()
+        await bob.shutdown()
+    }
+
+    /// G4/P-6: a credential-shaped secret pasted into a chat is SCRUBBED from the
+    /// context a third-party cloud AI receives (firewall on) — names AND secrets.
+    @Test func cloudEgress_scrubsCredentialSecretsFromTranscript() async throws {
+        let spy = SpyProvider()
+        let runtime = await makeRuntime(
+            "Alice",
+            ais: [
+                TetheredAI(
+                    id: "r", name: "remote-ai", provider: spy, isRemote: true,
+                    appliesEgressFirewall: true)
+            ])
+        await runtime.keychain.deleteAll()
+        _ = try await runtime.bootstrap(inMemoryStore: true)
+        let chatID = try await runtime.createSelfChat()
+        AppSession.setConversationFirewall(nil, conversationID: chatID, siloID: "")  // default ON
+        try await runtime.sendMessage(
+            "my key is sk-ABC123def456GHI789jkl012MNO ok", conversationID: chatID)
+        try await Task.sleep(for: .milliseconds(400))
+
+        let texts = await spy.capturedTexts
+        #expect(
+            !texts.joined(separator: " ").contains("sk-ABC123def456GHI789jkl012MNO"),
+            "the API key must be scrubbed before it reaches a third-party cloud AI")
+        #expect(!texts.isEmpty, "the message still reached the AI (scrubbed, not dropped)")
     }
 
     // MARK: - Context profile (instructions / policy / depth / output mode)
@@ -326,6 +428,59 @@ struct MultiAIBehaviorTests {
             "the pinned skill's contract reached the AI's thread-turn prompt")
     }
 
+    // MARK: - Router policy indirection (Phase 2: AISelectionPolicy seam)
+
+    /// Injecting a custom policy whose `primary` returns the SECOND AI reroutes the
+    /// DRAFT path: `draftReply` consults the policy-chosen primary, not `ais[0]`.
+    /// Proves the seam actually routes the primary selection (vs. the hardcoded
+    /// first AI it replaced).
+    @Test func customPolicy_primary_reroutesDraftToSecondAI() async throws {
+        let runtime = await makeRuntime(
+            "Me",
+            ais: [
+                TetheredAI(id: "a", name: "first-ai", provider: LabeledProvider(label: "FIRST")),
+                TetheredAI(id: "b", name: "second-ai", provider: LabeledProvider(label: "SECOND")),
+            ])
+        await runtime.keychain.deleteAll()
+        _ = try await runtime.bootstrap(inMemoryStore: true)
+        await runtime.setAISelectionPolicy(SecondPrimaryPolicy())
+
+        let chatID = try await runtime.createSelfChat()
+        let draft = try await runtime.draftReply(conversationID: chatID)
+        #expect(
+            draft.text == "SECOND",
+            "the draft path used the policy-chosen primary (second AI), not ais[0]")
+    }
+
+    /// Injecting a policy whose `participants` returns only ONE specific AI gates
+    /// the autonomous solo path: only that AI posts, even though BOTH are otherwise
+    /// `participatesAutonomously`. Proves the seam routes the participation set.
+    @Test func customPolicy_participants_gatesAutonomousPostingToOneAI() async throws {
+        let runtime = await makeRuntime(
+            "Me",
+            ais: [
+                TetheredAI(id: "a", name: "ai-alpha", provider: DemoAgentProvider()),
+                TetheredAI(id: "b", name: "ai-beta", provider: DemoAgentProvider()),
+            ])
+        await runtime.keychain.deleteAll()
+        _ = try await runtime.bootstrap(inMemoryStore: true)
+        // Default policy would let BOTH reply (proven by
+        // soloChat_eachTetheredAIRepliesToMe_locally). This policy admits only "b".
+        await runtime.setAISelectionPolicy(OnlyParticipantPolicy(id: "b"))
+
+        let chatID = try await runtime.createSelfChat()
+        try await runtime.sendMessage("plan my week", conversationID: chatID)
+        try await Task.sleep(for: .milliseconds(400))
+
+        let names = Set(
+            await runtime.messages(conversationID: chatID)
+                .filter { $0.participantType == .agent }
+                .compactMap(\.agentName))
+        #expect(
+            names == ["ai-beta"],
+            "only the single policy-selected AI posted autonomously — the seam routes participation")
+    }
+
     /// Tier 2 companion side: an AI set to the "Nearby host's AI" backend runs its
     /// inference on a nearby HOST over the Multipeer link (no cloud, no key).
     @Test func nearbyHubAIProvider_runsOnHostOverLink() async throws {
@@ -372,10 +527,12 @@ struct MultiAIBehaviorTests {
 @Suite("Deniable account silos", .serialized)
 struct SiloRuntimeTests {
     @Test func silo_persistsAndReopensWithItsKEK_isolatedFromOthers() async throws {
-        let a = SiloKey.derive(passphrase: "alpha-passphrase")
-        let b = SiloKey.derive(passphrase: "beta-passphrase")
-        let svcA = "chat.pqrc.test-silo-\(a.siloID)"
-        let svcB = "chat.pqrc.test-silo-\(b.siloID)"
+        let aID = SiloKey.siloID(for: "alpha-passphrase")
+        let bID = SiloKey.siloID(for: "beta-passphrase")
+        let aKEK = SiloKey.passphraseKEK("alpha-passphrase")
+        let bKEK = SiloKey.passphraseKEK("beta-passphrase")
+        let svcA = "chat.pqrc.test-silo-\(aID)"
+        let svcB = "chat.pqrc.test-silo-\(bID)"
         let tmp = FileManager.default.temporaryDirectory
         let storeA = tmp.appendingPathComponent("siloA-\(UUID().uuidString).store")
         let storeB = tmp.appendingPathComponent("siloB-\(UUID().uuidString).store")
@@ -404,9 +561,9 @@ struct SiloRuntimeTests {
             return hex
         }
 
-        let hexA1 = try await bootIdentity(service: svcA, kek: a.kek, store: storeA)
-        let hexB = try await bootIdentity(service: svcB, kek: b.kek, store: storeB)
-        let hexA2 = try await bootIdentity(service: svcA, kek: a.kek, store: storeA)
+        let hexA1 = try await bootIdentity(service: svcA, kek: aKEK, store: storeA)
+        let hexB = try await bootIdentity(service: svcB, kek: bKEK, store: storeB)
+        let hexA2 = try await bootIdentity(service: svcA, kek: aKEK, store: storeA)
 
         #expect(hexA1 == hexA2, "a silo reopens to the same identity with its passphrase key")
         #expect(hexA1 != hexB, "different passphrases are separate, isolated identities")
@@ -418,12 +575,14 @@ struct SiloRuntimeTests {
 /// tests can assert exactly what would leave the device for a remote AI.
 actor SpyProvider: AgentProvider {
     private(set) var capturedNames: [String] = []
+    private(set) var capturedTexts: [String] = []
     private(set) var capturedInstructions: String?
     private(set) var capturedSummarize = false
     private(set) var capturedCount = 0
     private(set) var capturedSystemPrompt: String?
     private func capture(_ context: AgentContext) {
         capturedNames = context.transcript.map(\.senderDisplayName)
+        capturedTexts = context.transcript.map(\.text)
         capturedInstructions = context.instructions
         capturedSummarize = context.summarize
         capturedCount = context.transcript.count
@@ -436,5 +595,44 @@ actor SpyProvider: AgentProvider {
     func threadTurn(context: AgentContext) async throws -> AgentTurn? {
         capture(context)
         return AgentTurn(messages: [AgentMessage(text: "ok")])
+    }
+}
+
+/// Returns a FIXED label as its draft/turn text, so a test can prove WHICH provider
+/// the runtime routed a request to.
+struct LabeledProvider: AgentProvider {
+    let label: String
+    func draftReply(context: AgentContext) async throws -> Draft { Draft(text: label) }
+    func threadTurn(context: AgentContext) async throws -> AgentTurn? {
+        AgentTurn(messages: [AgentMessage(text: label)])
+    }
+}
+
+/// Routing policy whose `primary` is the SECOND AI (the default is the first), to
+/// prove the draft path consults the policy. `participants` keeps the default
+/// `participatesAutonomously` filter.
+struct SecondPrimaryPolicy: AISelectionPolicy {
+    func primary(from ais: [TetheredAI], conversationID: String, threadID: String?) -> TetheredAI? {
+        ais.count >= 2 ? ais[1] : ais.first
+    }
+    func participants(
+        from ais: [TetheredAI], conversationID: String, threadID: String?
+    ) -> [TetheredAI] {
+        ais.filter { $0.participatesAutonomously }
+    }
+}
+
+/// Routing policy whose participation set is the single AI with a given id, to
+/// prove the autonomous (window/thread/solo) path consults the policy. `primary`
+/// keeps the default (first AI).
+struct OnlyParticipantPolicy: AISelectionPolicy {
+    let id: String
+    func primary(from ais: [TetheredAI], conversationID: String, threadID: String?) -> TetheredAI? {
+        ais.first
+    }
+    func participants(
+        from ais: [TetheredAI], conversationID: String, threadID: String?
+    ) -> [TetheredAI] {
+        ais.filter { $0.id == id }
     }
 }

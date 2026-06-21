@@ -35,6 +35,31 @@ enum Vectors {
     }
 }
 
+/// Test-integrity guard (TEST-PLAN §2). `Vectors.loadOrGenerate` regenerates a
+/// vector when its file is absent, so a deleted or never-committed vector would
+/// let the generator's own output stand in for the frozen contract — silently
+/// disarming the regression lock. This fails loudly if any frozen vector this
+/// package's tests assert against is missing, so a fresh checkout / deletion is
+/// a HARD failure, not a quiet regenerate.
+@Suite("Frozen vector integrity (TEST-PLAN §2)", .tags(.envelope, .security))
+struct FrozenVectorIntegrityTests {
+    /// Every frozen vector loaded by PQRCNostr's tests (`Vectors.loadOrGenerate(...)`).
+    static let required = [
+        "giftwrap.json"  // EnvelopeTests
+    ]
+
+    @Test func frozenVectors_arePresent() {
+        // A vacuous guard would pass on an empty list; assert there is work to do.
+        #expect(!Self.required.isEmpty)
+        for name in Self.required {
+            let url = Vectors.directory.appendingPathComponent(name)
+            let comment: Comment =
+                "Frozen vector \(name) is missing at \(url.path) — restore it from version control; never let loadOrGenerate regenerate the regression-lock contract."
+            #expect(FileManager.default.fileExists(atPath: url.path), comment)
+        }
+    }
+}
+
 func hexData(_ hex: String) -> Data {
     Data(hexString: hex) ?? Data()
 }

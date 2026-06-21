@@ -34,6 +34,15 @@ public final class MultipeerNearbyLink: NSObject, NearbyLink, Sendable {
     /// device-hosted relay hub uses a distinct one ("pqrc-relay") so the two
     /// don't cross-discover. Both must be listed in Info.plist NSBonjourServices.
     public static let serviceType = "pqrc-local"
+
+    /// The ACP **bridge** service (Configurator ⇄ EldrChat coding-agent pairing).
+    /// Deliberately distinct from `serviceType`: the bridge is NOT a member of the
+    /// paired-peer message mesh (it performs no `pqrc-local-hello` proof), so it
+    /// must advertise on its own service and never cross-discover the transport.
+    /// This is the single source of truth both the Configurator advertiser and any
+    /// app-side bridge browser reference, so the two can't drift (DEVIATIONS AC10).
+    /// Listed in both Info.plists as `_eldr-acp._tcp`/`_udp`.
+    public static let bridgeServiceType = "eldr-acp"
     private let serviceType: String
 
     /// MCSession is not marked Sendable, but Apple documents its methods as

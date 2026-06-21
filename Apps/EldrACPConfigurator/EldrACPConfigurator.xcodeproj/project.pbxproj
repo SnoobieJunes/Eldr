@@ -1,0 +1,511 @@
+// !$*UTF8*$!
+{
+	archiveVersion = 1;
+	classes = {
+	};
+	objectVersion = 77;
+	objects = {
+
+/* Begin PBXBuildFile section */
+		BB0000000000000000000101 /* PQRCACP in Frameworks */ = {isa = PBXBuildFile; productRef = BB0000000000000000000201 /* PQRCACP */; };
+		BB0000000000000000000102 /* PQRCNostr in Frameworks */ = {isa = PBXBuildFile; productRef = BB0000000000000000000202 /* PQRCNostr */; };
+		BB0000000000000000000103 /* PQRCCore in Frameworks */ = {isa = PBXBuildFile; productRef = BB0000000000000000000203 /* PQRCCore */; };
+		BB0000000000000000000104 /* PQRCACP in Frameworks */ = {isa = PBXBuildFile; productRef = BB0000000000000000000204 /* PQRCACP */; };
+		BB0000000000000000000105 /* PQRCNostr in Frameworks */ = {isa = PBXBuildFile; productRef = BB0000000000000000000205 /* PQRCNostr */; };
+		BB0000000000000000000106 /* PQRCCore in Frameworks */ = {isa = PBXBuildFile; productRef = BB0000000000000000000206 /* PQRCCore */; };
+		BB0000000000000000000107 /* PQRCAgent in Frameworks */ = {isa = PBXBuildFile; productRef = BB0000000000000000000207 /* PQRCAgent */; };
+		BB0000000000000000000108 /* PQRCAgent in Frameworks */ = {isa = PBXBuildFile; productRef = BB0000000000000000000208 /* PQRCAgent */; };
+/* End PBXBuildFile section */
+
+/* Begin PBXContainerItemProxy section */
+		BB0000000000000000000301 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = BB0000000000000000000001 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = BB0000000000000000000011;
+			remoteInfo = EldrACPConfigurator;
+		};
+/* End PBXContainerItemProxy section */
+
+/* Begin PBXFileReference section */
+		BB0000000000000000000701 /* EldrACPConfigurator.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = EldrACPConfigurator.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		BB0000000000000000000702 /* EldrACPConfiguratorTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = EldrACPConfiguratorTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+		BB0000000000000000000F01 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
+		BB0000000000000000000F02 /* EldrACPConfigurator.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = EldrACPConfigurator.entitlements; sourceTree = "<group>"; };
+/* End PBXFileReference section */
+
+/* Begin PBXFileSystemSynchronizedRootGroup section */
+		BB0000000000000000000401 /* Sources */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			path = Sources;
+			sourceTree = "<group>";
+		};
+		BB0000000000000000000402 /* Resources */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			path = Resources;
+			sourceTree = "<group>";
+		};
+		BB0000000000000000000403 /* Tests */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			path = Tests;
+			sourceTree = "<group>";
+		};
+/* End PBXFileSystemSynchronizedRootGroup section */
+
+/* Begin PBXFrameworksBuildPhase section */
+		BB0000000000000000000501 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				BB0000000000000000000101 /* PQRCACP in Frameworks */,
+				BB0000000000000000000102 /* PQRCNostr in Frameworks */,
+				BB0000000000000000000103 /* PQRCCore in Frameworks */,
+				BB0000000000000000000107 /* PQRCAgent in Frameworks */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		BB0000000000000000000502 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				BB0000000000000000000104 /* PQRCACP in Frameworks */,
+				BB0000000000000000000105 /* PQRCNostr in Frameworks */,
+				BB0000000000000000000106 /* PQRCCore in Frameworks */,
+				BB0000000000000000000108 /* PQRCAgent in Frameworks */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXFrameworksBuildPhase section */
+
+/* Begin PBXGroup section */
+		BB0000000000000000000601 = {
+			isa = PBXGroup;
+			children = (
+				BB0000000000000000000401 /* Sources */,
+				BB0000000000000000000403 /* Tests */,
+				BB0000000000000000000402 /* Resources */,
+				BB0000000000000000000F01 /* Info.plist */,
+				BB0000000000000000000F02 /* EldrACPConfigurator.entitlements */,
+				BB0000000000000000000602 /* Products */,
+			);
+			sourceTree = "<group>";
+		};
+		BB0000000000000000000602 /* Products */ = {
+			isa = PBXGroup;
+			children = (
+				BB0000000000000000000701 /* EldrACPConfigurator.app */,
+				BB0000000000000000000702 /* EldrACPConfiguratorTests.xctest */,
+			);
+			name = Products;
+			sourceTree = "<group>";
+		};
+/* End PBXGroup section */
+
+/* Begin PBXNativeTarget section */
+		BB0000000000000000000011 /* EldrACPConfigurator */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = BB0000000000000000000801 /* Build configuration list for PBXNativeTarget "EldrACPConfigurator" */;
+			buildPhases = (
+				BB0000000000000000000901 /* Sources */,
+				BB0000000000000000000501 /* Frameworks */,
+				BB0000000000000000000A01 /* Resources */,
+				BB0000000000000000000A02 /* Build and bundle eldr-acp */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			fileSystemSynchronizedGroups = (
+				BB0000000000000000000401 /* Sources */,
+				BB0000000000000000000402 /* Resources */,
+			);
+			name = EldrACPConfigurator;
+			packageProductDependencies = (
+				BB0000000000000000000201 /* PQRCACP */,
+				BB0000000000000000000202 /* PQRCNostr */,
+				BB0000000000000000000203 /* PQRCCore */,
+				BB0000000000000000000207 /* PQRCAgent */,
+			);
+			productName = EldrACPConfigurator;
+			productReference = BB0000000000000000000701 /* EldrACPConfigurator.app */;
+			productType = "com.apple.product-type.application";
+		};
+		BB0000000000000000000012 /* EldrACPConfiguratorTests */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = BB0000000000000000000802 /* Build configuration list for PBXNativeTarget "EldrACPConfiguratorTests" */;
+			buildPhases = (
+				BB0000000000000000000902 /* Sources */,
+				BB0000000000000000000502 /* Frameworks */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				BB0000000000000000000B01 /* PBXTargetDependency */,
+			);
+			fileSystemSynchronizedGroups = (
+				BB0000000000000000000403 /* Tests */,
+			);
+			name = EldrACPConfiguratorTests;
+			packageProductDependencies = (
+				BB0000000000000000000204 /* PQRCACP */,
+				BB0000000000000000000205 /* PQRCNostr */,
+				BB0000000000000000000206 /* PQRCCore */,
+				BB0000000000000000000208 /* PQRCAgent */,
+			);
+			productName = EldrACPConfiguratorTests;
+			productReference = BB0000000000000000000702 /* EldrACPConfiguratorTests.xctest */;
+			productType = "com.apple.product-type.bundle.unit-test";
+		};
+/* End PBXNativeTarget section */
+
+/* Begin PBXProject section */
+		BB0000000000000000000001 /* Project object */ = {
+			isa = PBXProject;
+			attributes = {
+				BuildIndependentTargetsInParallel = 1;
+				LastSwiftUpdateCheck = 2650;
+				LastUpgradeCheck = 2650;
+				TargetAttributes = {
+					BB0000000000000000000011 = {
+						CreatedOnToolsVersion = 26.5;
+					};
+					BB0000000000000000000012 = {
+						CreatedOnToolsVersion = 26.5;
+						TestTargetID = BB0000000000000000000011;
+					};
+				};
+			};
+			buildConfigurationList = BB0000000000000000000804 /* Build configuration list for PBXProject "EldrACPConfigurator" */;
+			developmentRegion = en;
+			hasScannedForEncodings = 0;
+			knownRegions = (
+				en,
+				Base,
+			);
+			mainGroup = BB0000000000000000000601;
+			minimizedProjectReferenceProxies = 1;
+			packageReferences = (
+				BB0000000000000000000C01 /* XCLocalSwiftPackageReference "../../Packages/PQRCACP" */,
+				BB0000000000000000000C02 /* XCLocalSwiftPackageReference "../../Packages/PQRCNostr" */,
+				BB0000000000000000000C03 /* XCLocalSwiftPackageReference "../../Packages/PQRCCore" */,
+				BB0000000000000000000C04 /* XCLocalSwiftPackageReference "../../Packages/PQRCAgent" */,
+			);
+			preferredProjectObjectVersion = 77;
+			productRefGroup = BB0000000000000000000602 /* Products */;
+			projectDirPath = "";
+			projectRoot = "";
+			targets = (
+				BB0000000000000000000011 /* EldrACPConfigurator */,
+				BB0000000000000000000012 /* EldrACPConfiguratorTests */,
+			);
+		};
+/* End PBXProject section */
+
+/* Begin PBXResourcesBuildPhase section */
+		BB0000000000000000000A01 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXResourcesBuildPhase section */
+
+/* Begin PBXShellScriptBuildPhase section */
+		BB0000000000000000000A02 /* Build and bundle eldr-acp */ = {
+			isa = PBXShellScriptBuildPhase;
+			alwaysOutOfDate = 1;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			inputFileListPaths = (
+			);
+			inputPaths = (
+			);
+			name = "Build and bundle eldr-acp";
+			outputFileListPaths = (
+			);
+			outputPaths = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+			shellPath = /bin/sh;
+			shellScript = "set -e\n# Compile the eldr-acp CLI (Release) and bundle it into the app's Resources\n# so InstallerService can copy it to ~/.local/bin. PQRCACP has zero external\n# dependencies, so this build is fully offline.\nPKG=\"$SRCROOT/../../Packages/PQRCACP\"\nSWIFT=\"$(xcrun --find swift)\"\n\"$SWIFT\" build -c release --package-path \"$PKG\" --product eldr-acp\nBIN=\"$PKG/.build/release/eldr-acp\"\nif [ ! -f \"$BIN\" ]; then echo \"error: eldr-acp was not built at $BIN\" >&2; exit 1; fi\nDEST=\"$BUILT_PRODUCTS_DIR/$CONTENTS_FOLDER_PATH/Resources\"\nmkdir -p \"$DEST\"\ncp -f \"$BIN\" \"$DEST/eldr-acp\"\nchmod 0755 \"$DEST/eldr-acp\"\necho \"bundled eldr-acp -> $DEST/eldr-acp\"\n";
+		};
+/* End PBXShellScriptBuildPhase section */
+
+/* Begin PBXSourcesBuildPhase section */
+		BB0000000000000000000901 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		BB0000000000000000000902 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXSourcesBuildPhase section */
+
+/* Begin PBXTargetDependency section */
+		BB0000000000000000000B01 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = BB0000000000000000000011 /* EldrACPConfigurator */;
+			targetProxy = BB0000000000000000000301 /* PBXContainerItemProxy */;
+		};
+/* End PBXTargetDependency section */
+
+/* Begin XCBuildConfiguration section */
+		BB0000000000000000000D01 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CLANG_WARN_BOOL_CONVERSION = YES;
+				CLANG_WARN_CONSTANT_CONVERSION = YES;
+				CLANG_WARN_EMPTY_BODY = YES;
+				CLANG_WARN_ENUM_CONVERSION = YES;
+				CLANG_WARN_INFINITE_RECURSION = YES;
+				CLANG_WARN_INT_CONVERSION = YES;
+				CLANG_WARN_UNREACHABLE_CODE = YES;
+				COPY_PHASE_STRIP = NO;
+				DEBUG_INFORMATION_FORMAT = dwarf;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				ENABLE_TESTABILITY = YES;
+				ENABLE_USER_SCRIPT_SANDBOXING = NO;
+				GCC_DYNAMIC_NO_PIC = NO;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_OPTIMIZATION_LEVEL = 0;
+				GCC_PREPROCESSOR_DEFINITIONS = (
+					"DEBUG=1",
+					"$(inherited)",
+				);
+				GCC_WARN_ABOUT_RETURN_TYPE = YES;
+				GCC_WARN_UNUSED_FUNCTION = YES;
+				GCC_WARN_UNUSED_VARIABLE = YES;
+				MACOSX_DEPLOYMENT_TARGET = 26.0;
+				MTL_ENABLE_DEBUG_INFO = INCLUDE_SOURCE;
+				MTL_FAST_MATH = YES;
+				ONLY_ACTIVE_ARCH = YES;
+				SDKROOT = macosx;
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = "DEBUG $(inherited)";
+				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
+				SWIFT_STRICT_CONCURRENCY = complete;
+				SWIFT_VERSION = 6.0;
+			};
+			name = Debug;
+		};
+		BB0000000000000000000D02 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CLANG_WARN_BOOL_CONVERSION = YES;
+				CLANG_WARN_CONSTANT_CONVERSION = YES;
+				CLANG_WARN_EMPTY_BODY = YES;
+				CLANG_WARN_ENUM_CONVERSION = YES;
+				CLANG_WARN_INFINITE_RECURSION = YES;
+				CLANG_WARN_INT_CONVERSION = YES;
+				CLANG_WARN_UNREACHABLE_CODE = YES;
+				COPY_PHASE_STRIP = NO;
+				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
+				ENABLE_NS_ASSERTIONS = NO;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				ENABLE_USER_SCRIPT_SANDBOXING = NO;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_WARN_ABOUT_RETURN_TYPE = YES;
+				GCC_WARN_UNUSED_FUNCTION = YES;
+				GCC_WARN_UNUSED_VARIABLE = YES;
+				MACOSX_DEPLOYMENT_TARGET = 26.0;
+				MTL_ENABLE_DEBUG_INFO = NO;
+				MTL_FAST_MATH = YES;
+				SDKROOT = macosx;
+				SWIFT_COMPILATION_MODE = wholemodule;
+				SWIFT_STRICT_CONCURRENCY = complete;
+				SWIFT_VERSION = 6.0;
+			};
+			name = Release;
+		};
+		BB0000000000000000000D11 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
+				CODE_SIGN_ENTITLEMENTS = EldrACPConfigurator.entitlements;
+				"CODE_SIGN_IDENTITY[sdk=macosx*]" = "Apple Development";
+				CODE_SIGN_STYLE = Automatic;
+				COMBINE_HIDPI_IMAGES = YES;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = 49CQA5YX6U;
+				ENABLE_HARDENED_RUNTIME = YES;
+				ENABLE_PREVIEWS = YES;
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = Info.plist;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+				);
+				MARKETING_VERSION = 0.1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = chat.eldr.acp.configurator;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SWIFT_EMIT_LOC_STRINGS = YES;
+			};
+			name = Debug;
+		};
+		BB0000000000000000000D12 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
+				CODE_SIGN_ENTITLEMENTS = EldrACPConfigurator.entitlements;
+				"CODE_SIGN_IDENTITY[sdk=macosx*]" = "Apple Development";
+				CODE_SIGN_STYLE = Automatic;
+				COMBINE_HIDPI_IMAGES = YES;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = 49CQA5YX6U;
+				ENABLE_HARDENED_RUNTIME = YES;
+				ENABLE_PREVIEWS = YES;
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = Info.plist;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+				);
+				MARKETING_VERSION = 0.1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = chat.eldr.acp.configurator;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SWIFT_EMIT_LOC_STRINGS = YES;
+			};
+			name = Release;
+		};
+		BB0000000000000000000D21 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = 49CQA5YX6U;
+				GENERATE_INFOPLIST_FILE = YES;
+				MACOSX_DEPLOYMENT_TARGET = 26.0;
+				MARKETING_VERSION = 0.1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = chat.eldr.acp.configurator.tests;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = macosx;
+				SWIFT_STRICT_CONCURRENCY = complete;
+				SWIFT_VERSION = 6.0;
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/EldrACPConfigurator.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/EldrACPConfigurator";
+			};
+			name = Debug;
+		};
+		BB0000000000000000000D22 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = 49CQA5YX6U;
+				GENERATE_INFOPLIST_FILE = YES;
+				MACOSX_DEPLOYMENT_TARGET = 26.0;
+				MARKETING_VERSION = 0.1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = chat.eldr.acp.configurator.tests;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = macosx;
+				SWIFT_STRICT_CONCURRENCY = complete;
+				SWIFT_VERSION = 6.0;
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/EldrACPConfigurator.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/EldrACPConfigurator";
+			};
+			name = Release;
+		};
+/* End XCBuildConfiguration section */
+
+/* Begin XCConfigurationList section */
+		BB0000000000000000000801 /* Build configuration list for PBXNativeTarget "EldrACPConfigurator" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				BB0000000000000000000D11 /* Debug */,
+				BB0000000000000000000D12 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		BB0000000000000000000802 /* Build configuration list for PBXNativeTarget "EldrACPConfiguratorTests" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				BB0000000000000000000D21 /* Debug */,
+				BB0000000000000000000D22 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		BB0000000000000000000804 /* Build configuration list for PBXProject "EldrACPConfigurator" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				BB0000000000000000000D01 /* Debug */,
+				BB0000000000000000000D02 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+/* End XCConfigurationList section */
+
+/* Begin XCLocalSwiftPackageReference section */
+		BB0000000000000000000C01 /* XCLocalSwiftPackageReference "../../Packages/PQRCACP" */ = {
+			isa = XCLocalSwiftPackageReference;
+			relativePath = ../../Packages/PQRCACP;
+		};
+		BB0000000000000000000C02 /* XCLocalSwiftPackageReference "../../Packages/PQRCNostr" */ = {
+			isa = XCLocalSwiftPackageReference;
+			relativePath = ../../Packages/PQRCNostr;
+		};
+		BB0000000000000000000C03 /* XCLocalSwiftPackageReference "../../Packages/PQRCCore" */ = {
+			isa = XCLocalSwiftPackageReference;
+			relativePath = ../../Packages/PQRCCore;
+		};
+		BB0000000000000000000C04 /* XCLocalSwiftPackageReference "../../Packages/PQRCAgent" */ = {
+			isa = XCLocalSwiftPackageReference;
+			relativePath = ../../Packages/PQRCAgent;
+		};
+/* End XCLocalSwiftPackageReference section */
+
+/* Begin XCSwiftPackageProductDependency section */
+		BB0000000000000000000201 /* PQRCACP */ = {
+			isa = XCSwiftPackageProductDependency;
+			productName = PQRCACP;
+		};
+		BB0000000000000000000202 /* PQRCNostr */ = {
+			isa = XCSwiftPackageProductDependency;
+			productName = PQRCNostr;
+		};
+		BB0000000000000000000203 /* PQRCCore */ = {
+			isa = XCSwiftPackageProductDependency;
+			productName = PQRCCore;
+		};
+		BB0000000000000000000204 /* PQRCACP */ = {
+			isa = XCSwiftPackageProductDependency;
+			productName = PQRCACP;
+		};
+		BB0000000000000000000205 /* PQRCNostr */ = {
+			isa = XCSwiftPackageProductDependency;
+			productName = PQRCNostr;
+		};
+		BB0000000000000000000206 /* PQRCCore */ = {
+			isa = XCSwiftPackageProductDependency;
+			productName = PQRCCore;
+		};
+		BB0000000000000000000207 /* PQRCAgent */ = {
+			isa = XCSwiftPackageProductDependency;
+			productName = PQRCAgent;
+		};
+		BB0000000000000000000208 /* PQRCAgent */ = {
+			isa = XCSwiftPackageProductDependency;
+			productName = PQRCAgent;
+		};
+/* End XCSwiftPackageProductDependency section */
+	};
+	rootObject = BB0000000000000000000001 /* Project object */;
+}

@@ -1,6 +1,7 @@
 import PQRCAgent
 import PQRCCore
 import SwiftUI
+import UIKit
 
 /// Full-screen embedded AI thread (APP-SPEC §8): pinned header with live AI
 /// status per human, invite/withdraw control with bounded durations, loop
@@ -64,6 +65,7 @@ struct ThreadView: View {
                         systemImage: "puzzlepiece.extension")
                 }
                 .accessibilityIdentifier("thread-skills")
+                .help("Pin shared skills — a common vocabulary (plan-sync, tech-spec, code-debug…) so each person's AI can hand off work the other can act on, instead of free-form chatter.")
             }
         }
         .sheet(isPresented: $showSkills) {
@@ -116,6 +118,7 @@ struct ThreadView: View {
                     }
                     .buttonStyle(.borderedProminent)
                     .accessibilityIdentifier("invite-ai")
+                    .help("Let your AI converse in this thread for a set time. Everything it says is recorded here; it can never join on its own.")
                 }
                 if model.iGrantedContext(scope: threadScope, now: now) {
                     Button("Stop sharing context") {
@@ -202,6 +205,15 @@ struct ThreadView: View {
                 .lineLimit(1...4)
                 .textFieldStyle(.roundedBorder)
                 .accessibilityIdentifier("thread-composer-field")
+                // Explicit Paste for iPad/Mac (right-click / long-press) — the
+                // main composer has the same affordance.
+                .contextMenu {
+                    Button {
+                        if let clip = UIPasteboard.general.string { draftText += clip }
+                    } label: {
+                        Label("Paste", systemImage: "doc.on.clipboard")
+                    }
+                }
             Button {
                 let text = draftText
                 draftText = ""
@@ -224,12 +236,16 @@ struct ThreadView: View {
 /// Pin agent-to-agent **skills** to a thread (docs/eldrchat-agent-skills.md):
 /// a shared vocabulary so two people's AIs hand off work cleanly. Pinned skills
 /// are appended to every AI's thread-turn prompt; the AIs use whichever fits.
+/// The picker shows the 20 fixed built-ins (`AgentSkills.catalog`, the package's
+/// source of truth) plus this account's custom skills (the app-layer overlay,
+/// `AppSession.loadCustomSkills`) — both pin and inject identically.
 struct ThreadSkillsView: View {
     let threadID: String
-    /// The unlocked silo, so pinned skills are stored per-account (A33).
+    /// The unlocked silo, so pinned skills AND custom skills are stored per-account (A33).
     let siloID: String
     @Environment(\.dismiss) private var dismiss
     @State private var selected: Set<String> = []
+    @State private var customSkills: [CustomSkill] = []
 
     var body: some View {
         NavigationStack {
@@ -239,28 +255,32 @@ struct ThreadSkillsView: View {
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
-                ForEach(AgentSkills.catalog) { skill in
-                    Button {
-                        if selected.contains(skill.id) {
-                            selected.remove(skill.id)
-                        } else {
-                            selected.insert(skill.id)
-                        }
-                        AppSession.setThreadSkills(Array(selected), threadID: threadID, siloID: siloID)
-                    } label: {
-                        HStack(alignment: .top, spacing: 10) {
-                            Image(
-                                systemName: selected.contains(skill.id)
-                                    ? "checkmark.circle.fill" : "circle")
-                                .foregroundStyle(selected.contains(skill.id) ? Color.accentColor : .secondary)
-                            VStack(alignment: .leading, spacing: 2) {
-                                Text(skill.name).font(.headline)
-                                Text(skill.summary).font(.caption).foregroundStyle(.secondary)
-                            }
+
+                if !customSkills.isEmpty {
+                    Section("Your custom skills") {
+                        ForEach(customSkills) { skill in
+                            skillRow(skill.asAgentSkill)
                         }
                     }
-                    .tint(.primary)
-                    .accessibilityIdentifier("skill-\(skill.id)")
+                }
+
+                Section(customSkills.isEmpty ? "Skills" : "Built-in skills") {
+                    ForEach(AgentSkills.catalog) { skill in
+                        skillRow(skill)
+                    }
+                }
+
+                Section {
+                    NavigationLink {
+                        CustomSkillsManagerView(siloID: siloID) {
+                            customSkills = AppSession.loadCustomSkills(siloID: siloID)
+                        }
+                    } label: {
+                        Label("Manage custom skills + export", systemImage: "slider.horizontal.3")
+                    }
+                    .accessibilityIdentifier("manage-custom-skills")
+                } footer: {
+                    Text("Create your own handoff formats, or export the whole catalog (built-in + custom) to share.")
                 }
             }
             .navigationTitle("Thread skills")
@@ -268,7 +288,34 @@ struct ThreadSkillsView: View {
             .toolbar {
                 ToolbarItem(placement: .confirmationAction) { Button("Done") { dismiss() } }
             }
-            .task { selected = Set(AppSession.threadSkills(threadID, siloID: siloID)) }
+            .task {
+                selected = Set(AppSession.threadSkills(threadID, siloID: siloID))
+                customSkills = AppSession.loadCustomSkills(siloID: siloID)
+            }
         }
+    }
+
+    @ViewBuilder private func skillRow(_ skill: AgentSkill) -> some View {
+        Button {
+            if selected.contains(skill.id) {
+                selected.remove(skill.id)
+            } else {
+                selected.insert(skill.id)
+            }
+            AppSession.setThreadSkills(Array(selected), threadID: threadID, siloID: siloID)
+        } label: {
+            HStack(alignment: .top, spacing: 10) {
+                Image(
+                    systemName: selected.contains(skill.id)
+                        ? "checkmark.circle.fill" : "circle")
+                    .foregroundStyle(selected.contains(skill.id) ? Color.accentColor : .secondary)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(skill.name).font(.headline)
+                    Text(skill.summary).font(.caption).foregroundStyle(.secondary)
+                }
+            }
+        }
+        .tint(.primary)
+        .accessibilityIdentifier("skill-\(skill.id)")
     }
 }

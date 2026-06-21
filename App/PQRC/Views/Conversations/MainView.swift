@@ -1,5 +1,7 @@
 import PQRCCore
+import PQRCNostr
 import SwiftUI
+import UIKit  // UIPasteboard (Copy npub) — available on iOS + Mac Catalyst.
 
 /// Conversation list + navigation shell (APP-SPEC §6.1).
 struct MainView: View {
@@ -7,10 +9,21 @@ struct MainView: View {
     /// Local Universe persona switcher, shown above the list (demo/debug only).
     var personaSwitcher: PersonaSwitcher?
     @Environment(AppSession.self) private var session
+    @Environment(AppCommands.self) private var commands
     @State private var showNewChat = false
     @State private var showNewGroup = false
     @State private var showSettings = false
     @State private var deepLinkNpub: String?
+    @State private var deepLinkContactType: String?
+    /// Conversation-list search text (⌘F on Mac). Filters the list by title.
+    @State private var searchText = ""
+    /// Bound to `.searchable`'s focus so ⌘F can pop the cursor into it on Mac.
+    @FocusState private var searchFocused: Bool
+    /// Per-silo "muted" conversations: their unread badge is suppressed in the
+    /// list. A pure UI preference (the app has no push notifications), kept here
+    /// so muting needs no engine change. Persisted per-silo so accounts don't
+    /// share the set (matches AppSession.siloDefaultsKey namespacing).
+    @State private var mutes = MutedConversations()
     /// Selected conversation drives the detail pane on wide screens (iPad/Mac/
     /// landscape) and pushes on compact widths (iPhone portrait) — one binding,
     /// both layouts, via NavigationSplitView (CLAUDE.md responsive roadmap).
@@ -20,9 +33,23 @@ struct MainView: View {
     // "Show Sidebar". Ignored on compact iPhone widths (which stack).
     @State private var columnVisibility: NavigationSplitViewVisibility = .all
 
+    /// Conversations after applying the search filter (Mac ⌘F).
+    private var visibleConversations: [ConversationVM] {
+        let query = searchText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !query.isEmpty else { return model.conversations }
+        return model.conversations.filter {
+            $0.title.localizedCaseInsensitiveContains(query)
+        }
+    }
+
     var body: some View {
         NavigationSplitView(columnVisibility: $columnVisibility) {
             sidebar
+                // A draggable, collapsible sidebar like every native Mac app —
+                // bounded so it can't be dragged uselessly narrow or hog a 27"
+                // display. iOS uses its own fixed column metrics, so this is a
+                // no-op there.
+                .navigationSplitViewColumnWidth(min: 260, ideal: 320, max: 420)
         } detail: {
             // Each conversation gets its own stack so threads/details push within
             // the detail pane on wide screens; rebuilds per selection so state
@@ -36,13 +63,15 @@ struct MainView: View {
                     ContentUnavailableView(
                         "No conversation selected",
                         systemImage: "bubble.left.and.bubble.right",
-                        description: Text("Pick a conversation, or start a new one."))
+                        description: Text("Pick a conversation, or start a new one. The brain icon opens a private chat with just you and your AI."))
                 }
             }
         }
         .sheet(isPresented: $showNewChat) {
-            NewChatView(model: model, prefilledNpub: deepLinkNpub ?? "")
-                .onDisappear { deepLinkNpub = nil }
+            NewChatView(
+                model: model, prefilledNpub: deepLinkNpub ?? "",
+                prefilledContactType: deepLinkContactType)
+                .onDisappear { deepLinkNpub = nil; deepLinkContactType = nil }
         }
         .sheet(isPresented: $showNewGroup) {
             NewGroupView(model: model)
@@ -50,13 +79,29 @@ struct MainView: View {
         .sheet(isPresented: $showSettings) {
             SettingsView(model: model)
         }
+        .onAppear { mutes.load(siloID: session.activeSiloID ?? "") }
         .onChange(of: session.pendingNpub) { _, npub in
             // QR deep link (pqrc:add?npub=…): open New Conversation
             // prefilled with the scanned address.
             guard let npub else { return }
             deepLinkNpub = npub
+            deepLinkContactType = session.pendingContactType
             session.pendingNpub = nil
+            session.pendingContactType = nil
             showNewChat = true
+        }
+        // Menu-bar commands (Mac). Each is a counter the command bumps; reacting
+        // to the change keeps the action one-shot. No-ops on iPhone/iPad, where
+        // nothing ever bumps them.
+        .onChange(of: commands.newConversationTick) { _, _ in showNewChat = true }
+        .onChange(of: commands.newGroupTick) { _, _ in showNewGroup = true }
+        .onChange(of: commands.newAIChatTick) { _, _ in
+            Task { if let id = await model.createSelfChat() { selection = id } }
+        }
+        .onChange(of: commands.openSettingsTick) { _, _ in showSettings = true }
+        .onChange(of: commands.findTick) { _, _ in searchFocused = true }
+        .onChange(of: commands.toggleSidebarTick) { _, _ in
+            withAnimation { columnVisibility = columnVisibility == .all ? .detailOnly : .all }
         }
     }
 
@@ -64,17 +109,20 @@ struct MainView: View {
     private var sidebar: some View {
         List(selection: $selection) {
             if !model.messageRequests.isEmpty {
-                Section("Message Requests") {
+                Section {
                     ForEach(model.messageRequests, id: \.self) { sender in
                         MessageRequestRow(model: model, sender: sender) { conversationID in
                             selection = conversationID
                         }
                     }
+                } header: {
+                    Text("Message Requests")
+                        .helpInfo("First messages from people you haven't talked to wait here — nothing is shown until you Accept. Decline to ignore them. Their identity is only confirmed after you accept and verify their safety code.")
                 }
             }
             Section {
-                ForEach(model.conversations) { conversation in
-                    ConversationRow(conversation: conversation)
+                ForEach(visibleConversations) { conversation in
+                    ConversationRow(conversation: conversation, muted: mutes.contains(conversation.id))
                         .tag(conversation.id)
                         // Combine the identicon + text into ONE accessibility
                         // element so the WHOLE row is the identified, hittable
@@ -102,13 +150,28 @@ struct MainView: View {
                                 Label("Delete", systemImage: "trash")
                             }
                         }
+                        // Secondary-click (right-click) menu on every list row —
+                        // the core Mac affordance. Also long-press on iPhone/iPad,
+                        // so it's a pure addition everywhere.
+                        .contextMenu {
+                            conversationMenu(conversation)
+                        }
                 }
             } header: {
                 if model.conversations.isEmpty {
                     Text("No conversations yet — start one with a contact's npub.")
+                } else if visibleConversations.isEmpty {
+                    Text("No conversations match “\(searchText)”.")
                 }
             }
         }
+        // ⌘F-focusable, type-to-filter conversation search. On iPhone/iPad it's
+        // the familiar pull-to-reveal search bar; on Mac it's always visible in
+        // the sidebar and the menu-bar Find command jumps the cursor here.
+        .searchable(
+            text: $searchText, placement: .sidebar, prompt: "Search conversations"
+        )
+        .searchFocused($searchFocused)
         .safeAreaInset(edge: .top) {
             if let personaSwitcher {
                 personaSwitcher
@@ -123,6 +186,7 @@ struct MainView: View {
                     Image(systemName: "gearshape")
                 }
                 .accessibilityLabel("Settings")
+                .help("Settings (⌘,)")
             }
             ToolbarItemGroup(placement: .topBarTrailing) {
                 Button {
@@ -134,12 +198,14 @@ struct MainView: View {
                 }
                 .accessibilityLabel("New AI chat")
                 .accessibilityIdentifier("new-ai-chat")
+                .help("Open a private solo chat with just you and your AI(s) — a staging ground to brainstorm or draft. Add people later to make it a real conversation. (⌥⌘N)")
                 Button {
                     showNewGroup = true
                 } label: {
                     Image(systemName: "person.3")
                 }
                 .accessibilityLabel("New group")
+                .help("New group (⇧⌘N)")
                 Button {
                     showNewChat = true
                 } label: {
@@ -147,8 +213,87 @@ struct MainView: View {
                 }
                 .accessibilityLabel("New conversation")
                 .accessibilityIdentifier("new-chat")
+                .help("New conversation (⌘N)")
             }
         }
+    }
+
+    /// Right-click / long-press actions for a conversation list row. Open, pin,
+    /// mute (suppress its unread badge), copy npub (1:1 only), block (1:1 only),
+    /// delete — the standard Messages/Mail set.
+    @ViewBuilder
+    private func conversationMenu(_ conversation: ConversationVM) -> some View {
+        Button {
+            selection = conversation.id
+        } label: {
+            Label("Open", systemImage: "bubble.left.and.bubble.right")
+        }
+        Button {
+            Task { await model.togglePinned(conversation.id) }
+        } label: {
+            Label(
+                conversation.pinned ? "Unpin" : "Pin",
+                systemImage: conversation.pinned ? "pin.slash" : "pin")
+        }
+        Button {
+            mutes.toggle(conversation.id, siloID: session.activeSiloID ?? "")
+        } label: {
+            Label(
+                mutes.contains(conversation.id) ? "Unmute" : "Mute",
+                systemImage: mutes.contains(conversation.id) ? "bell" : "bell.slash")
+        }
+        // npub / block only make sense for a 1:1 contact (a group's id is not an
+        // identity key). For 1:1 chats the conversation id IS the contact's
+        // identity-key hex, so it npub-encodes directly.
+        if !conversation.isGroup {
+            Button {
+                UIPasteboard.general.string = Bech32.npub(conversation.id)
+            } label: {
+                Label("Copy npub", systemImage: "doc.on.doc")
+            }
+            Divider()
+            Button(role: .destructive) {
+                Task { await model.block(conversation.id) }
+            } label: {
+                Label("Block", systemImage: "hand.raised")
+            }
+        } else {
+            Divider()
+        }
+        Button(role: .destructive) {
+            Task { await model.deleteConversation(conversation.id) }
+        } label: {
+            Label("Delete", systemImage: "trash")
+        }
+    }
+}
+
+/// Per-silo set of muted conversation ids, persisted in UserDefaults under the
+/// same silo namespace the rest of the app uses. A muted conversation simply
+/// hides its unread badge in the list — a UI-only preference (there are no push
+/// notifications to silence), which is why it lives in the View layer and needs
+/// no engine/runtime change. Hidden silos keep their own set, so muting one
+/// account never reveals or affects another (deniability — A33).
+@Observable
+final class MutedConversations {
+    private var ids: Set<String> = []
+    private var loadedSiloID: String?
+
+    private static func key(_ siloID: String) -> String {
+        AppSession.siloDefaultsKey("mutedConversations", siloID)
+    }
+
+    func load(siloID: String) {
+        guard loadedSiloID != siloID else { return }
+        loadedSiloID = siloID
+        ids = Set(UserDefaults.standard.stringArray(forKey: Self.key(siloID)) ?? [])
+    }
+
+    func contains(_ id: String) -> Bool { ids.contains(id) }
+
+    func toggle(_ id: String, siloID: String) {
+        if ids.contains(id) { ids.remove(id) } else { ids.insert(id) }
+        UserDefaults.standard.set(Array(ids), forKey: Self.key(siloID))
     }
 }
 
@@ -205,6 +350,11 @@ struct MessageRequestRow: View {
 
 struct ConversationRow: View {
     let conversation: ConversationVM
+    /// When muted, the unread badge is suppressed and a bell-slash is shown.
+    var muted = false
+    /// Pointer hover (Mac / iPad trackpad). Drives a subtle row tint so the list
+    /// feels alive under a mouse; `false` and inert on touch-only iPhone.
+    @State private var hovering = false
 
     var body: some View {
         HStack(spacing: 12) {
@@ -225,6 +375,18 @@ struct ConversationRow: View {
                             .font(.caption2)
                             .foregroundStyle(.orange)
                             .accessibilityLabel("Pinned")
+                    }
+                    if muted {
+                        Image(systemName: "bell.slash.fill")
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                            .accessibilityLabel("Muted")
+                    }
+                    if conversation.isCodingAgent {
+                        Image(systemName: "wrench.and.screwdriver.fill")
+                            .font(.caption2)
+                            .foregroundStyle(.blue)
+                            .accessibilityLabel("Coding agent")
                     }
                     if conversation.isGroup {
                         Text("\(conversation.memberCount)")
@@ -248,7 +410,7 @@ struct ConversationRow: View {
                         .foregroundStyle(.secondary)
                         .lineLimit(1)
                     Spacer()
-                    if conversation.unread > 0 {
+                    if conversation.unread > 0, !muted {
                         // Darkened accent: white small text on plain system
                         // accent is ~3.5:1 and fails the contrast audit (A7).
                         Text("\(conversation.unread)")
@@ -264,6 +426,17 @@ struct ConversationRow: View {
             }
         }
         .frame(minHeight: 44)
+        // Subtle hover highlight for pointer devices (Mac / iPad trackpad). The
+        // overlay is transparent until the pointer is over the row; on touch-only
+        // iPhone `onHover` never fires, so the row looks exactly as before.
+        .contentShape(Rectangle())
+        .background(
+            RoundedRectangle(cornerRadius: 8)
+                .fill(Color.primary.opacity(hovering ? 0.06 : 0))
+                .padding(.vertical, -4)
+                .padding(.horizontal, -8)
+                .allowsHitTesting(false))
+        .onHover { hovering = $0 }
         .privacySensitive()
     }
 }
@@ -310,6 +483,10 @@ import PQRCNostr
 struct NewChatView: View {
     @Bindable var model: AppModel
     var prefilledNpub: String = ""
+    /// When the deep link declared one (e.g. the Eldr ACP Configurator's
+    /// `…&type=coding_agent`), tag the new contact so the phone recognizes it as the
+    /// owner's coding agent — required for the §13.5 watch-along draft path to fire.
+    var prefilledContactType: String? = nil
     @Environment(\.dismiss) private var dismiss
     @State private var npub = ""
     @State private var firstMessage = ""
@@ -350,8 +527,13 @@ struct NewChatView: View {
                     offerInvite = false
                     Task {
                         do {
-                            _ = try await model.runtime.startConversation(
+                            let identityHex = try await model.runtime.startConversation(
                                 npub: npub, firstMessage: firstMessage.isEmpty ? "👋" : firstMessage)
+                            // Tag a coding-agent contact (from the Configurator deep link)
+                            // so its watch-along drafts are recognized + voiced (§13.5).
+                            if let type = prefilledContactType, !type.isEmpty {
+                                await model.runtime.setContactType(identityHex, type: type)
+                            }
                             dismiss()
                         } catch PQRCError.relayUnreachable {
                             self.error = "Can't reach your relay right now. Check your connection or your relay in Settings — or use Nearby below to connect in person, no server needed."

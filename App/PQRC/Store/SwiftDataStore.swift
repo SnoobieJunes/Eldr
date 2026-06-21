@@ -136,6 +136,10 @@ struct ContactRecord: Codable, Sendable {
     /// Locally-generated friendly codename for this contact's AI (so a peer's
     /// assistant reads as a name, not "Contact …'s AI"). Also never broadcast.
     var autoAIName: String? = nil
+    /// Local type tag — `"coding_agent"` for a paired Eldr ACP Configurator. PURELY
+    /// LOCAL (never broadcast, SPEC §0); only drives a distinct icon. Optional →
+    /// tolerant decode of records written before this field existed.
+    var contactType: String? = nil
 
     var identityHex: String { binding.identityPubkey.hexString }
 

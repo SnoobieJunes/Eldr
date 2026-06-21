@@ -14,7 +14,7 @@ struct ConfiguredAI: Identifiable, Codable, Equatable, Sendable {
     var id: String
     /// Friendly, user-editable display name (a friendly codename by default).
     var name: String
-    /// Inference backend: "ondevice" | "claude" | "openai" | "gemini" |
+    /// Inference backend: "ondevice" | "pcc" | "claude" | "openai" | "gemini" |
     /// "openrouter" | "groq" | "custom" | "demo".
     var kind: String
 
@@ -41,10 +41,21 @@ struct ConfiguredAI: Identifiable, Codable, Equatable, Sendable {
     /// Optional → older configs default to enabled.
     var enabled: Bool?
 
+    // MARK: Private Cloud Compute tuning (kind == "pcc"; all optional → default)
+
+    /// PCC reasoning depth: "light" | "moderate" | "deep". nil → "moderate".
+    /// Reasoning is PCC-only and consumes tokens against the 32K window.
+    var reasoningLevel: String?
+    /// Optional sampling temperature (0.0–2.0) for PCC. nil → framework default.
+    var temperature: Double?
+    /// Optional response-length cap for PCC. nil → framework default.
+    var maxResponseTokens: Int?
+
     init(
         id: String, name: String, kind: String, instructions: String? = nil,
         contextPolicy: String? = nil, contextDepth: Int? = nil, outputMode: String? = nil,
-        baseURL: String? = nil, model: String? = nil, enabled: Bool? = nil
+        baseURL: String? = nil, model: String? = nil, enabled: Bool? = nil,
+        reasoningLevel: String? = nil, temperature: Double? = nil, maxResponseTokens: Int? = nil
     ) {
         self.id = id
         self.name = name
@@ -56,6 +67,9 @@ struct ConfiguredAI: Identifiable, Codable, Equatable, Sendable {
         self.baseURL = baseURL
         self.model = model
         self.enabled = enabled
+        self.reasoningLevel = reasoningLevel
+        self.temperature = temperature
+        self.maxResponseTokens = maxResponseTokens
     }
 
     static let defaultDepth = 20
@@ -64,6 +78,8 @@ struct ConfiguredAI: Identifiable, Codable, Equatable, Sendable {
     var effectiveOutputMode: String { outputMode ?? "participate" }
     var effectiveDepth: Int { max(1, contextDepth ?? Self.defaultDepth) }
     var isEnabled: Bool { enabled ?? true }
+    /// PCC reasoning depth, defaulting to the balanced middle when unset.
+    var effectiveReasoning: String { reasoningLevel ?? "moderate" }
 
     /// Per-AI Keychain account for the API key, so two AIs of the SAME provider
     /// can hold DIFFERENT keys (e.g. two Claude accounts) just by adding a second
@@ -71,22 +87,18 @@ struct ConfiguredAI: Identifiable, Codable, Equatable, Sendable {
     /// shared account (`keyAccount(for:)`) is still read as a fallback so keys
     /// saved by older builds keep working.
     var apiKeyAccount: String? {
-        // "hub" is remote but needs no key (the host runs the model).
-        (Self.isRemote(kind) && kind != "hub") ? "apikey.\(id)" : nil
+        // "hub" and "pcc" are off-device but need no key (the host / Apple PCC
+        // runs the model), so they get no API-key account. The registry's
+        // `usesPerAIKey` encodes exactly the old rule
+        // (`isRemote && kind != "hub" && kind != "pcc"`); an unknown kind has no
+        // descriptor → no per-AI account (matches the old `isRemote(unknown)==false`).
+        (BackendRegistry.descriptor(for: kind)?.usesPerAIKey ?? false) ? "apikey.\(id)" : nil
     }
 
-    /// The selectable backends and their labels.
-    static let kinds: [(tag: String, label: String)] = [
-        ("ondevice", "On-device Core AI"),
-        ("claude", "Claude (Anthropic)"),
-        ("openai", "OpenAI"),
-        ("gemini", "Gemini"),
-        ("openrouter", "OpenRouter (many models)"),
-        ("groq", "Groq (fast)"),
-        ("custom", "Custom / self-hosted (OpenAI-compatible)"),
-        ("hub", "Nearby host's AI (Multipeer)"),
-        ("demo", "Demo (simulated)"),
-    ]
+    /// The selectable backends and their labels — derived from the registry (its
+    /// order IS the picker order). Adding a backend is one registry entry.
+    static let kinds: [(tag: String, label: String)] =
+        BackendRegistry.all.map { (tag: $0.tag, label: $0.label) }
 
     /// Context-gather policies and output modes, for the Settings pickers.
     /// Labels use the app-wide context vocabulary — Live / Marked only / Off —
@@ -103,38 +115,51 @@ struct ConfiguredAI: Identifiable, Codable, Equatable, Sendable {
         ("draft", "Draft only — suggests to me, never posts"),
         ("summarize", "Summarize — shares summaries, not verbatim"),
     ]
+    /// PCC reasoning depths, for the Settings picker (kind == "pcc"). Deeper
+    /// reasoning is more thorough but spends more of the per-user daily PCC quota.
+    static let reasoningLevels: [(tag: String, label: String)] = [
+        ("light", "Light — fastest"),
+        ("moderate", "Moderate — balanced"),
+        ("deep", "Deep — most thorough"),
+    ]
 
     static func label(for kind: String) -> String {
-        kinds.first { $0.tag == kind }?.label ?? kind
+        BackendRegistry.descriptor(for: kind)?.label ?? kind
     }
 
     /// Backends that send conversation content off the on-device model — require
     /// explicit consent and (usually) a Keychain API key. "custom" is included
     /// even when self-hosted: content still leaves the app to a server, so the
     /// firewall/consent default applies (the user can turn the firewall off for
-    /// a server they fully control).
+    /// a server they fully control). "hub" sends content off-device too (to a
+    /// nearby host); "pcc" sends it to Apple's Private Cloud Compute; "acp" to a
+    /// paired Mac. Whether the egress firewall ALSO applies is a separate
+    /// question — see `appliesEgressFirewall`. An unknown kind → false.
     static func isRemote(_ kind: String) -> Bool {
-        // "hub" sends content off-device too (to a nearby host), so the egress
-        // firewall applies; it just needs no API key and no consent gate.
-        ["claude", "openai", "gemini", "openrouter", "groq", "custom", "hub"].contains(kind)
+        BackendRegistry.descriptor(for: kind)?.isRemote ?? false
+    }
+
+    /// Off-device backends that ALSO get the name-redaction + byte-bound egress
+    /// firewall. This is `isRemote` MINUS the Apple Private Cloud Compute tier:
+    /// PCC is attested and retains no prompts (DEVIATIONS — Apple PCC tier), so we
+    /// send full names/context for best quality while still requiring consent and
+    /// showing the off-device indicator. Third-party vendors (Claude/OpenAI/…/hub)
+    /// and ACP stay firewalled. An unknown kind → false.
+    static func appliesEgressFirewall(_ kind: String) -> Bool {
+        BackendRegistry.descriptor(for: kind)?.appliesEgressFirewall ?? false
     }
 
     /// Backends whose enablement shows the off-device consent alert. ALL remote
-    /// backends, INCLUDING "hub": using a nearby host's AI still sends your
-    /// message content to that other device, so the user is asked first.
-    static func requiresConsent(_ kind: String) -> Bool { isRemote(kind) }
+    /// backends, INCLUDING "hub" and "pcc": the content still leaves this device,
+    /// so the user is asked first. An unknown kind → false.
+    static func requiresConsent(_ kind: String) -> Bool {
+        BackendRegistry.descriptor(for: kind)?.requiresConsent ?? false
+    }
 
-    /// Keychain account holding the API key for a remote backend, if any.
+    /// Legacy SHARED Keychain account holding the API key for a remote backend,
+    /// if any (read as a back-compat fallback for keys saved by older builds).
     static func keyAccount(for kind: String) -> String? {
-        switch kind {
-        case "claude": return "anthropic-api-key"
-        case "openai": return "openai-api-key"
-        case "gemini": return "gemini-api-key"
-        case "openrouter": return "openrouter-api-key"
-        case "groq": return "groq-api-key"
-        case "custom": return "custom-api-key"
-        default: return nil
-        }
+        BackendRegistry.descriptor(for: kind)?.keyAccount
     }
 
     /// "custom" needs a base URL; a self-hosted server may need no key at all.
@@ -153,11 +178,24 @@ struct ConfiguredAI: Identifiable, Codable, Equatable, Sendable {
 struct TetheredAI: Sendable {
     let id: String
     let name: String
-    let provider: any AgentProvider
-    /// True for backends that send context off the on-device model. The egress
-    /// firewall (name redaction + byte bound) applies only to these; on-device
-    /// AIs bypass it entirely.
+    /// `var` so the runtime can swap in a live, messenger-aware provider after
+    /// construction — see `kind` (the "acp" relay-backed rebinding).
+    var provider: any AgentProvider
+    /// The backend tag this AI was configured with ("ondevice" | "claude" | "acp" |
+    /// …), carried through so the RUNTIME can recognize a backend that needs live,
+    /// messenger-aware wiring the static `makeProvider` can't do. Today only "acp"
+    /// uses it: the static factory hands back a Demo stub, and the runtime swaps in a
+    /// relay-backed `ACPAgentProvider` once a consented `coding_agent` node exists
+    /// (ACPRouterplan Phase 3). Empty for AIs built without a kind (e.g. tests).
+    var kind: String = ""
+    /// True for backends that send context off the on-device model (drives the
+    /// "leaves device" indicator + consent). Includes Apple Private Cloud Compute.
     var isRemote: Bool = false
+    /// True for off-device backends that ALSO get the name-redaction + byte-bound
+    /// egress firewall. This is `isRemote` for third-party vendors, but FALSE for
+    /// Apple Private Cloud Compute (attested, no retention → send full context for
+    /// quality). On-device AIs are false for both. See `ConfiguredAI.appliesEgressFirewall`.
+    var appliesEgressFirewall: Bool = false
     /// Custom system prompt, or nil for the backend default.
     var instructions: String? = nil
     /// "active" | "strict" | "off".
@@ -174,6 +212,18 @@ struct TetheredAI: Sendable {
     }
     /// Whether the model should contribute summaries rather than verbatim text.
     var summarizes: Bool { outputMode == "summarize" }
+}
+
+/// `TetheredAI` already exposes `participatesAutonomously`; this conformance also
+/// supplies `routingCapabilities` so the optional task router
+/// (`CapabilityRoutingPolicy`, in PQRCAgent) can route by engine. Only the `acp`
+/// backend — a paired coding node/harness — advertises `"code"`, so a coding-scope
+/// requirement routes to it; every other backend stays general (empty → no special
+/// routing, identical to the default policy).
+extension TetheredAI: AISelectionCandidate {
+    var routingCapabilities: Set<String> {
+        kind == "acp" ? ["code"] : []
+    }
 }
 
 /// One line of the read-only "what your AI sees" context preview (Settings).

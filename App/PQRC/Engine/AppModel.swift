@@ -15,6 +15,8 @@ struct ConversationVM: Identifiable, Hashable {
     var verified: Bool
     var memberCount: Int
     var unread: Int = 0
+    /// A paired Eldr ACP coding agent (local tag only) — drives the wrench icon.
+    var isCodingAgent: Bool = false
 }
 
 struct ThreadVM: Identifiable, Hashable {
@@ -222,6 +224,8 @@ final class AppModel {
             if let aiName = await runtime.contactAIName(id) { aiNames[id] = aiName }
         }
         contactNames[id] = title
+        var isCodingAgent = false
+        if roster == nil { isCodingAgent = await runtime.contactType(id) == "coding_agent" }
         var row = conversations.first { $0.id == id }
             ?? ConversationVM(
                 id: id, title: title, isGroup: roster != nil, lastMessage: "",
@@ -229,6 +233,7 @@ final class AppModel {
                 memberCount: roster?.members.count ?? 2)
         row.title = title
         row.verified = verified
+        row.isCodingAgent = isCodingAgent
         row.memberCount = roster?.members.count ?? 2
         if let lastMessage, lastMessage.threadID == nil {
             row.lastMessage = lastMessage.text
@@ -415,6 +420,15 @@ final class AppModel {
         await runtime.contextPreview(conversationID: conversationID)
     }
 
+    /// Per-AI assembled context windows — exactly what each tethered AI receives
+    /// for a conversation (system prompt + policy + depth + transcript), for the
+    /// Context inspector. Remote AIs are already codename-redacted.
+    func contextInspections(conversationID: String) async
+        -> [PersonaRuntime.AIContextInspection]
+    {
+        await runtime.contextInspections(conversationID: conversationID)
+    }
+
     /// Names of the AIs tethered to me right now.
     func tetheredAINames() async -> [String] {
         await runtime.tetheredAINames()
@@ -447,7 +461,9 @@ final class AppModel {
         default: break
         }
         let isRemote = primary.map { ConfiguredAI.isRemote($0.kind) } ?? false
-        return (mode, isRemote, AppSession.firewallEnabled)
+        let firewallOn =
+            AppSession.conversationFirewall(conversationID, siloID: siloID) ?? AppSession.firewallEnabled
+        return (mode, isRemote, firewallOn)
     }
 
     func block(_ identityHex: String) async {
@@ -506,6 +522,13 @@ final class AppModel {
     func setMyAlias(_ alias: String?) async {
         await runtime.setMyAlias(alias)
         contactNames[myIdentityHex] = alias ?? personaName
+    }
+
+    /// Persist the per-silo loop-guard threshold (DEVIATIONS D14) and push it into
+    /// the live engine so it takes effect immediately. `0` turns the guard OFF.
+    func setLoopGuardLimit(_ limit: Int) async {
+        AppSession.setAgentLoopGuardLimit(limit, siloID: siloID)
+        await runtime.setLoopGuardLimit(AppSession.agentLoopGuardLimit(siloID: siloID))
     }
 
     func togglePinned(_ conversationID: String) async {

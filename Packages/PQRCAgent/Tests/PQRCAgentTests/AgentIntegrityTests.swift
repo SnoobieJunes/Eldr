@@ -288,4 +288,42 @@ struct AgentIntegrityTests {
         #expect(posted == 1)
         #expect(await fx.engine.loopGuardActive(threadID: "mix"))
     }
+
+    @Test func loopGuard_configurableThreshold_pausesAtCustomLimit() async throws {
+        // A per-account override (DEVIATIONS D14): pause after 3 instead of 6.
+        let clock = FixedClock(now: 1_756_000_000)
+        let alice = try PQRCIdentity(seed: hexData(String(repeating: "a7", count: 32)))
+        let sink = SpySink()
+        let engine = AgentEngine(myIdentity: alice, clock: clock, sink: sink, loopGuardLimit: 3)
+        let provider = MockAgentProvider(eager: true)
+        _ = try await engine.startMyInvite(threadID: "loop", durationSeconds: 7200)
+
+        var totalPosted = 0
+        for _ in 0..<10 {
+            totalPosted += await engine.runThreadTurn(
+                provider: provider, context: Self.context(threadID: "loop"), threadID: "loop")
+        }
+        #expect(totalPosted == 3, "honors the configured limit, not the default 6")
+        #expect(await engine.loopGuardActive(threadID: "loop"))
+    }
+
+    @Test func loopGuard_off_neverPauses() async throws {
+        // limit <= 0 disables the guard: agents may ping-pong unbounded. Also
+        // exercises the live setter path used when the user flips the setting.
+        let clock = FixedClock(now: 1_756_000_000)
+        let alice = try PQRCIdentity(seed: hexData(String(repeating: "a7", count: 32)))
+        let sink = SpySink()
+        let engine = AgentEngine(myIdentity: alice, clock: clock, sink: sink, loopGuardLimit: 6)
+        await engine.setLoopGuardLimit(0)
+        let provider = MockAgentProvider(eager: true)
+        _ = try await engine.startMyInvite(threadID: "loop", durationSeconds: 7200)
+
+        var totalPosted = 0
+        for _ in 0..<10 {
+            totalPosted += await engine.runThreadTurn(
+                provider: provider, context: Self.context(threadID: "loop"), threadID: "loop")
+        }
+        #expect(totalPosted == 10, "guard OFF — no automatic pause")
+        #expect(!(await engine.loopGuardActive(threadID: "loop")))
+    }
 }

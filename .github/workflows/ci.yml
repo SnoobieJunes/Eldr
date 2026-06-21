@@ -5,7 +5,11 @@ on:
     branches: [main]
   pull_request:
 
-# TEST-PLAN §12. Runner label must point at an image hosting Xcode 26.
+# TEST-PLAN §12. Project/scheme is EldrChat (renamed from PQRC). NOTE: the app
+# target uses the iOS 27 Private Cloud Compute SDK, so the `app`/`perf` jobs need
+# a runner whose selected Xcode ships the iOS 27 SDK + a matching simulator
+# runtime — the bare `macos-26` + `/Applications/Xcode.app` below may need a bump;
+# confirm with a real CI run. The headless `packages` job has no such dependency.
 jobs:
   packages:
     name: swift test (${{ matrix.package }})
@@ -13,7 +17,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        package: [PQRCCore, PQRCNostr, PQRCAgent]
+        package: [PQRCCore, PQRCNostr, PQRCAgent, PQRCACP, PQRCMCP]
     steps:
       - uses: actions/checkout@v4
       - name: Select Xcode 26
@@ -41,20 +45,20 @@ jobs:
       - name: Security suite (no retries)
         run: |
           xcodebuild test \
-            -project App/PQRC.xcodeproj \
-            -scheme PQRC \
+            -project App/EldrChat.xcodeproj \
+            -scheme EldrChat \
             -destination 'platform=iOS Simulator,name=iPhone 17 Pro,OS=26.5' \
             -skipPackagePluginValidation \
-            -only-testing:PQRCTests/SecuritySuiteTests \
+            -only-testing:EldrChatTests/SecuritySuiteTests \
             -resultBundlePath SecurityResults.xcresult
       - name: Test (remaining unit + UI, retried once for simulator flakes)
         run: |
           xcodebuild test \
-            -project App/PQRC.xcodeproj \
-            -scheme PQRC \
+            -project App/EldrChat.xcodeproj \
+            -scheme EldrChat \
             -destination 'platform=iOS Simulator,name=iPhone 17 Pro,OS=26.5' \
             -skipPackagePluginValidation \
-            -skip-testing:PQRCTests/SecuritySuiteTests \
+            -skip-testing:EldrChatTests/SecuritySuiteTests \
             -retry-tests-on-failure -test-iterations 2 \
             -resultBundlePath TestResults.xcresult
       - name: Upload result bundle
@@ -76,18 +80,18 @@ jobs:
       - name: Restore perf baselines
         uses: actions/cache@v4
         with:
-          path: App/PQRC.xcodeproj/xcshareddata/xcbaselines
+          path: App/EldrChat.xcodeproj/xcshareddata/xcbaselines
           key: perf-baselines-${{ github.ref_name }}
           restore-keys: perf-baselines-
       - name: Run performance suites
         run: |
           xcodebuild test \
-            -project App/PQRC.xcodeproj \
-            -scheme PQRC \
+            -project App/EldrChat.xcodeproj \
+            -scheme EldrChat \
             -destination 'platform=iOS Simulator,name=iPhone 17 Pro,OS=26.5' \
             -skipPackagePluginValidation \
-            -only-testing:PQRCTests/PerformancePipelineTests \
-            -only-testing:PQRCUITests/PerformanceUITests \
+            -only-testing:EldrChatTests/PerformancePipelineTests \
+            -only-testing:EldrChatUITests/PerformanceUITests \
             -resultBundlePath PerfResults.xcresult
       - name: Upload perf artifact (first run records the baseline)
         if: always()

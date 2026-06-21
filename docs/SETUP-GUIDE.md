@@ -77,7 +77,7 @@ chaos for resilience demos.
 
 ```bash
 # Build + run (default port 7777):
-swift run --package-path Packages/PQRCNostr pqrc-relay
+1
 
 # Custom port and chaos injection:
 swift run --package-path Packages/PQRCNostr pqrc-relay \
@@ -300,6 +300,20 @@ EldrChat ships an **Agent Client Protocol** agent so a self-hosted LLM can pilot
 Xcode 27 (write code, build, run on simulators). Xcode 27 is the ACP *client*;
 `eldr-acp` is the *agent* it spawns over stdio (A36).
 
+> **GUI alternative — the Eldr ACP Configurator.** If you'd rather not do the manual
+> steps below, the **Eldr ACP Configurator** macOS app
+> (`Apps/EldrACPConfigurator/`) wraps all of this in a 5-step setup wizard: connect
+> your LLM, test it, install the binary + launcher, register it in Xcode, and start
+> using it — plus a live config panel, a log viewer, an in-app test chat, and
+> self-learning per-project memory. Build it with
+> `xcodebuild -scheme EldrACPConfigurator -destination 'platform=macOS' build` (or
+> open `Apps/EldrACPConfigurator/EldrACPConfigurator.xcodeproj` and Run). It writes
+> the same `~/.config/eldr-acp/env` and `~/.local/bin/eldr-acp-xcode` documented
+> here, so the two approaches are interchangeable. See
+> [`Apps/EldrACPConfigurator/README.md`](../Apps/EldrACPConfigurator/README.md), and
+> [`docs/SIGNING-AND-DISTRIBUTION.md`](SIGNING-AND-DISTRIBUTION.md) for packaging it
+> as a DMG. The manual command-line setup follows.
+
 **1. Build + install the agent**
 ```bash
 swift build -c release --package-path Packages/PQRCACP
@@ -340,3 +354,127 @@ Click **Add**. The agent uses the working directory Xcode hands it per session
   then type an `initialize` line — it must reply immediately.
 - `run_shell` honors `DEVELOPER_DIR`, so `xcodebuild`/`xcrun simctl` target the
   Xcode 27 beta toolchain even though your default `xcode-select` may be stable.
+
+### Tuning for your model (context budget, tools, prompt) — A37
+
+The agent loops tool calls against *your* local model. The two things that break a
+self-hosted setup are **context flooding** (a big `read_file` or chatty
+`xcodebuild` dumps tens of thousands of tokens into the next prompt and the model
+loses the system instructions) and **tool confusion** (weaker models mis-call or
+over-call vague tools). These knobs cap and shape what the model sees. **All
+defaults are safe** — an un-tuned install just works; tune only if your model
+struggles. Set them in `~/.config/eldr-acp/env` (sourced by the launcher) or as env.
+
+| Env var | Default | Effect |
+|---|---|---|
+| `ELDR_ACP_MAX_TOOL_RESULT_BYTES` | `8192` | Max bytes of **one tool result** fed back to the model. Larger → head+tail truncated with a `… N bytes elided …` marker (so a 200 KB file read can't flood the window). `0` → unbounded. |
+| `ELDR_ACP_MAX_HISTORY_TURNS` | `12` | Most-recent user/assistant/tool **turns** kept each call. The system prompt + the original task are *always* kept; older turns drop. `0` → no turn cap. |
+| `ELDR_ACP_MAX_CONTEXT_CHARS` | `49152` | Soft ceiling on **total** characters sent. Over budget → oldest non-anchor message *content* is elided (oldest-first) until it fits. `0` → no cap. |
+| `ELDR_ACP_TOOLS` | *(all)* | Comma/space tool **allowlist**, e.g. `read_file,write_file,run_shell`. Only listed tools are advertised + accepted; trims the menu for models that get confused by choice. |
+| `ELDR_ACP_PROMPT_PREAMBLE` | *(none)* | Extra text **appended** to the system prompt — model-specific tool-calling rules you want to experiment with. Also a `prompt-preamble` file in `~/.config/eldr-acp/`. |
+| `ELDR_ACP_SYSTEM_PROMPT` | *(built-in)* | **Replaces** the system prompt entirely (`{cwd}` is substituted). Also a `system-prompt` file in the config dir. Use only if the built-in prompt fights your model. |
+
+Config-dir lookups honor `ELDR_ACP_CONFIG_DIR`, else `$XDG_CONFIG_HOME/eldr-acp`,
+else `~/.config/eldr-acp`. **Env always wins over a file.** On startup the agent logs
+the active budget to stderr (`context budget: …`) so you can confirm what's in force.
+
+- **Small / 7-8B / heavily-quantized model** (tight window, weaker tool use): shrink
+  the budgets and trim the toolset, e.g.
+  `ELDR_ACP_MAX_TOOL_RESULT_BYTES=4096 ELDR_ACP_MAX_HISTORY_TURNS=6 ELDR_ACP_MAX_CONTEXT_CHARS=16384 ELDR_ACP_TOOLS=read_file,write_file,run_shell`,
+  and add a terse `ELDR_ACP_PROMPT_PREAMBLE` like *"Call exactly one tool per step.
+  Keep replies short."*
+- **Large / long-context model** (e.g. 128k window): raise the ceilings to let it
+  hold more of the codebase, e.g.
+  `ELDR_ACP_MAX_TOOL_RESULT_BYTES=32768 ELDR_ACP_MAX_HISTORY_TURNS=40 ELDR_ACP_MAX_CONTEXT_CHARS=262144`
+  (leave tools at the default full set).
+
+### Skills (slash-commands) & other ACP clients — A38
+
+`eldr-acp` advertises three **skills** as ACP *available commands* (slash-commands):
+the client surfaces them in its command menu, and invoking one steers that turn's
+output without changing anything else. A skill is invoked the standard ACP way —
+the client sends `session/prompt` with the text `/<name> <your text>` (there is no
+separate invoke method), so you can also just type the slash-command yourself.
+
+| Command | Does | Example |
+|---|---|---|
+| `/spec <what>` | Produces a single, well-structured **Markdown specification** (title, Overview, Goals/Non-Goals, testable MUST/SHOULD requirements, edge cases). | `/spec a REST API for a todo list` |
+| `/snippet <what>` | Produces **one minimal, runnable, language-aware code snippet** in a fenced block (infers the language; defaults to Swift). | `/snippet a Swift function that debounces a closure` |
+| `/html <what>` | Produces a **self-contained, single-file HTML visualization** (inline CSS/JS, no CDNs, renders offline). On request it `write_file`s the `.html`. | `/html a bar chart of three fruit counts` |
+
+Skills are model-agnostic (they only swap in a focused system instruction) so they
+work against any OpenAI-compatible model behind `LLMClient`. The agent's normal
+tools stay available during a skill turn, so `/html … and save it to chart.html`
+will write the file. Discovery is advertised in **two** places: the `initialize`
+response (`agentCapabilities.availableCommands`) and, canonically, an
+`available_commands_update` `session/update` sent right after `session/new`.
+
+**Enable / disable / tune** (same env+config-file mechanism as the budget knobs):
+
+| Env var | Default | Effect |
+|---|---|---|
+| `ELDR_ACP_SKILLS` | *(all on)* | Overloaded toggle. A **boolean** turns all skills on/off: `off`/`0`/`false`/`none` advertises none and treats a `/cmd` prompt as ordinary text; `on`/`1`/`all` is the default. A **name list** narrows to a subset, e.g. `ELDR_ACP_SKILLS="spec html"`. Also a `skills` file in the config dir. |
+
+On startup the agent logs the active skills to stderr (`skills: /spec /snippet /html`,
+or `skills: none (disabled)`).
+
+#### Using other ACP clients (Zed, OpenClaw, Goose-style)
+
+Any ACP client launches an agent the same way Xcode does — by **command + args +
+env** — so `eldr-acp` (via the `eldr-acp-xcode` launcher that carries the LLM env)
+drops into all of them. Configure the launcher as the agent command:
+
+- **Zed-style** `agent_servers` (the format Zed, and tools that copy it, use):
+  ```json
+  { "agent_servers": { "eldr": { "command": "/Users/<you>/.local/bin/eldr-acp-xcode", "args": [] } } }
+  ```
+- **OpenClaw — one-click in the Configurator (A42).** The Eldr ACP Configurator now
+  registers OpenClaw first-class, like Xcode: it installs a dedicated
+  `~/.local/bin/eldr-acp-openclaw` launcher and the wizard's **"Register in OpenClaw"**
+  step merges the agent into OpenClaw's config (default `~/.config/openclaw/config.json`,
+  path overridable) **without clobbering** your existing settings. Manual fallback (its
+  `acpx` plugin registers external ACP harnesses by `command`/`args`):
+  ```json
+  { "plugins": { "entries": { "acpx": { "enabled": true,
+      "config": { "agents": { "eldr": {
+        "command": "/Users/<you>/.local/bin/eldr-acp-openclaw", "args": [] } } } } } } }
+  ```
+  `eldr-acp` requires **no authentication** (empty `authMethods`), so acpx's
+  credential plumbing is a no-op. It advertises `loadSession:false`, so a client
+  that tries `session/load`/`session/resume` on reconnect gets a clean JSON-RPC
+  error (not a crash) and simply opens a fresh session; optional methods the agent
+  doesn't implement (`session/set_mode`, `session/set_config_option`,
+  `session/list`, `authenticate`) return `-32601` without affecting the live session.
+- **Goose**: note that `goose acp` makes **Goose the ACP *agent***, not a client —
+  so Goose doesn't drive `eldr-acp`. To exercise `eldr-acp` headlessly (the way a
+  client would), drive it with a small stdio harness over
+  `initialize → session/new → session/prompt` (set `ELDR_ACP_FAKE_LLM=1` for a
+  network-free protocol check, or point `ELDR_LLM_*` at your local server for a real
+  run). The `swift test --package-path Packages/PQRCACP` suite is exactly this
+  conformance check, network-free, in-process.
+
+Compatibility was validated by driving the binary through a mock ACP client
+exercising the full handshake plus the three skills, against both the built-in echo
+LLM and a real local model.
+
+#### contextgraph (smart context assembly) — A43
+
+[`rdevaul/contextgraph`](https://github.com/rdevaul/contextgraph) is an optional
+graph-based context manager (DAG + tag retrieval; sticky/recency/topic layers) that
+runs as a local HTTP service on `:8302`. Eldr can leverage it at **two** layers:
+
+1. **Agent route (any ACP client).** Set `ELDR_ACP_CONTEXTGRAPH=1` (and optionally
+   `ELDR_ACP_CONTEXTGRAPH_URL`, default `http://localhost:8302`) and `eldr-acp`
+   assembles prior context via `POST /assemble` each turn and learns the turn via
+   `POST /ingest`. It health-checks once per session and **falls back to the built-in
+   recent-window budgeting** if the service is down — no turn ever fails because
+   contextgraph is offline. Toggle it (and install/start the service from a checkout)
+   in the Configurator's **Configuration ▸ ContextGraph** section.
+2. **OpenClaw-plugin route.** contextgraph ships its own OpenClaw plugin; enabling
+   contextgraph before the wizard's "Register in OpenClaw" step also writes its plugin
+   entry pointed at the same endpoint.
+
+Run the service yourself per its README (`pip install -r requirements.txt`,
+`python -m spacy download en_core_web_sm`, `./scripts/install-service.sh`), or let the
+Configurator run those steps for you — note this depends on your Python toolchain.
+Verify reachability with `curl http://localhost:8302/health`.

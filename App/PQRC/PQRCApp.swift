@@ -19,17 +19,99 @@ struct LocalMCPConnection: Equatable {
     }
 }
 
+/// Cross-cutting UI intents raised by the macOS menu-bar `.commands` (which live
+/// at Scene level) and consumed by `MainView` (which owns the sheets/selection).
+/// SwiftUI's command closures can't reach a View's `@State` directly, so this
+/// small observable is the seam: a command bumps a counter or flips a flag here,
+/// `MainView` observes it. Harmless on iPhone/iPad (no menu bar fires them).
+@MainActor
+@Observable
+final class AppCommands {
+    /// Bumped by ⌘N — MainView opens New Conversation.
+    var newConversationTick = 0
+    /// Bumped by ⇧⌘N — MainView opens New Group.
+    var newGroupTick = 0
+    /// Bumped by ⌥⌘N — MainView starts a new AI (self) chat.
+    var newAIChatTick = 0
+    /// Bumped by ⌘, — MainView opens Settings.
+    var openSettingsTick = 0
+    /// Bumped by ⌘F — MainView focuses the conversation search field.
+    var findTick = 0
+    /// Bumped by ⌃⌘S — MainView toggles the sidebar.
+    var toggleSidebarTick = 0
+
+    func newConversation() { newConversationTick += 1 }
+    func newGroup() { newGroupTick += 1 }
+    func newAIChat() { newAIChatTick += 1 }
+    func openSettings() { openSettingsTick += 1 }
+    func find() { findTick += 1 }
+    func toggleSidebar() { toggleSidebarTick += 1 }
+}
+
 @main
 struct PQRCApp: App {
     @State private var session = AppSession()
+    @State private var commands = AppCommands()
 
     var body: some Scene {
         WindowGroup {
+            // Mac ONLY: a sane window minimum so it can't be squeezed to a phone
+            // sliver. A `.frame(minWidth:)` is NOT inert on iOS — it would force a
+            // real iPhone to render 760pt wide and CLIP everything (the "UI cut off"
+            // bug). So gate it to "iOS app running on Mac" and pass nil (no
+            // constraint) on a real iPhone/iPad.
+            // "iOS app on Mac" (Designed for iPad) AND Mac Catalyst both want the
+            // desktop min/ideal frame so the window resizes freely instead of the
+            // fixed small-or-fullscreen iPad sizing. `isMacCatalystApp` covers the
+            // Catalyst runtime; `isiOSAppOnMac` the Designed-for-iPad one.
+            let onMac =
+                ProcessInfo.processInfo.isiOSAppOnMac
+                || ProcessInfo.processInfo.isMacCatalystApp
             RootView()
                 .environment(session)
+                .environment(commands)
+                .frame(
+                    minWidth: onMac ? 760 : nil, idealWidth: onMac ? 1100 : nil,
+                    minHeight: onMac ? 520 : nil, idealHeight: onMac ? 760 : nil)
                 .onOpenURL { url in
                     session.handleDeepLink(url)
                 }
+        }
+        // Window starts at a comfortable desktop size and is freely resizable to
+        // fit its content's min/ideal frame (above). iOS ignores both.
+        .defaultSize(width: 1100, height: 760)
+        .windowResizability(.contentMinSize)
+        .commands {
+            // Menu-bar commands — the single biggest "feels native on Mac" win.
+            // Each maps to a standard shortcut and routes through `AppCommands`.
+            // `replacing: .newItem` puts our New items in the File menu where Mac
+            // users expect ⌘N; CommandGroup is a no-op on iOS.
+            CommandGroup(replacing: .newItem) {
+                Button("New Conversation") { commands.newConversation() }
+                    .keyboardShortcut("n", modifiers: .command)
+                Button("New Group") { commands.newGroup() }
+                    .keyboardShortcut("n", modifiers: [.command, .shift])
+                Button("New AI Chat") { commands.newAIChat() }
+                    .keyboardShortcut("n", modifiers: [.command, .option])
+            }
+            // ⌘F Find lives in a standard place under the (empty) text-editing menu.
+            CommandGroup(after: .textEditing) {
+                Button("Find Conversation") { commands.find() }
+                    .keyboardShortcut("f", modifiers: .command)
+            }
+            // NOTE: no custom "Toggle Sidebar" command. SwiftUI already installs a
+            // system "Show Sidebar" item bound to ⌃⌘S for the `NavigationSplitView`
+            // in `MainView`, and registering our own ⌃⌘S in `.sidebar` duplicated
+            // that exact shortcut — UIKit rejects duplicate key commands with an
+            // uncaught `NSInvalidArgumentException` ("Replacement elements contain
+            // duplicates") the moment the main menu is built, which on Mac is at
+            // launch. So the app crashed on launch on Mac. The built-in ⌃⌘S already
+            // toggles the split view's sidebar, so we just rely on it.
+            // ⌘, Settings in the app menu, replacing the disabled default.
+            CommandGroup(replacing: .appSettings) {
+                Button("Settings…") { commands.openSettings() }
+                    .keyboardShortcut(",", modifiers: .command)
+            }
         }
     }
 }
@@ -54,23 +136,34 @@ final class AppSession {
     /// Surfaced on the lock screen when a passphrase doesn't unlock anything.
     var unlockError: String?
     /// The currently-unlocked silo (so reboots reuse the same key/store).
-    private var activeSilo: SiloKey.Derived?
+    /// An unlocked account's namespace + at-rest key, held only while unlocked.
+    /// Per AC31 the `kek` is the Secure-Enclave-wrapped RANDOM silo key recovered
+    /// via `AccountVault`, not a passphrase derivation.
+    struct UnlockedSilo: Sendable {
+        let siloID: String
+        let kek: SymmetricKey
+    }
+    private var activeSilo: UnlockedSilo?
+    /// The Nearby relay host's AUTH allowlist (C-5): the live set of paired peers'
+    /// Nostr pubkeys. The host captures this (empty at first ⇒ fail-closed); the
+    /// runtime republishes it after boot and on every verified-contact change.
+    private let pairedSnapshot = PairedPubkeySnapshot()
     /// Set when the user opens the demo from Settings or launch args.
     var demoRunning = false
     /// npub arriving via a `pqrc:add?npub=…` deep link (QR scan from the
     /// Camera app lands here instead of in a web browser).
     var pendingNpub: String?
-
-    /// A pre-silo account from an older build is present and must be migrated
-    /// (wrapped under a passphrase) before it can be unlocked.
-    var hasLegacyAccount: Bool {
-        KeychainStore(service: "chat.pqrc.keys").loadIfPresent(account: "identity-seed") != nil
-    }
+    /// Optional `&type=…` from the deep link — `coding_agent` when the Eldr ACP
+    /// Configurator generated it, so the new contact is tagged as the owner's coding
+    /// agent (enables the §13.5 watch-along draft path). nil for an ordinary add.
+    var pendingContactType: String?
 
     init() {
         let arguments = ProcessInfo.processInfo.arguments
         if arguments.contains("--reset") {
             KeychainStore(service: "chat.pqrc.keys").deleteAll()
+            KeychainStore(service: Self.siloService(Self.defaultSiloID)).deleteAll()
+            KeychainStore(service: Self.biometricService).deleteAll()
             UserDefaults.standard.removeObject(forKey: "displayName")
             Self.deleteAllStoreFiles()
         }
@@ -79,18 +172,16 @@ final class AppSession {
         }
         #if DEBUG
             if arguments.contains("--uitest-biometric") {
-                // Deterministic Face ID harness: wipe the test silo, create it
-                // fresh (which auto-enables Face ID when the device/Simulator has
-                // it enrolled), then lock — landing on the lock screen, which
+                // Deterministic Face ID harness: wipe the default account, create it
+                // fresh (which auto-enables Face ID when the device/Simulator has it
+                // enrolled), then lock — landing on the lock screen, which
                 // auto-prompts Face ID at launch. Lets a UI driver verify the
                 // glance-unlock path end to end.
-                let derived = SiloKey.derive(passphrase: "faceid-test-pass")
-                KeychainStore(service: Self.siloService(derived.siloID)).deleteAll()
+                KeychainStore(service: Self.siloService(Self.defaultSiloID)).deleteAll()
                 disableBiometricUnlock()
                 Self.deleteAllStoreFiles()
                 Task {
-                    await createAccount(
-                        passphrase: "faceid-test-pass", displayName: "FaceID Test")
+                    await createDefaultAccount(displayName: "FaceID Test", enableBiometric: true)
                     // Present the lock screen directly (a full lockSilo/shutdown
                     // races the still-in-flight startup in this harness); the
                     // running runtime just leaks for the duration of the test.
@@ -195,9 +286,11 @@ final class AppSession {
                 // path is verified on hardware, not the simulator.
                 let relay = LocalRelaySimulator(url: "nearby://host")
                 #if canImport(MultipeerConnectivity)
+                    pairedSnapshot.replace(with: [])  // fail closed until the runtime publishes
                     let host = NearbyRelayHost(
                         link: MultipeerNearbyLink(serviceType: "pqrc-relay"),
-                        relay: relay, aiAnswer: Self.onDeviceHubAI())
+                        relay: relay, aiAnswer: Self.onDeviceHubAI(),
+                        authorize: { [pairedSnapshot] pubkey in pairedSnapshot.contains(pubkey) })
                     try? await host.start()
                     relayHost = host
                 #endif
@@ -269,40 +362,14 @@ final class AppSession {
             // keys), then the legacy shared account for back-compat.
             read(config.apiKeyAccount) ?? read(apiKeyAccounts[provider])
         }
-        let model = config.model ?? ""
-        switch config.kind {
-        case "claude":
-            return key(for: "claude").map { AnthropicAPIProvider(apiKey: $0) } ?? DemoAgentProvider()
-        case "openai":
-            return key(for: "openai").map { OpenAIAPIProvider(apiKey: $0) } ?? DemoAgentProvider()
-        case "gemini":
-            return key(for: "gemini").map { GeminiAPIProvider(apiKey: $0) } ?? DemoAgentProvider()
-        case "openrouter":
-            return key(for: "openrouter").map {
-                model.isEmpty
-                    ? OpenRouterAPIProvider(apiKey: $0) : OpenRouterAPIProvider(apiKey: $0, model: model)
-            } ?? DemoAgentProvider()
-        case "groq":
-            return key(for: "groq").map {
-                model.isEmpty ? GroqAPIProvider(apiKey: $0) : GroqAPIProvider(apiKey: $0, model: model)
-            } ?? DemoAgentProvider()
-        case "custom":
-            // Self-hosted / any OpenAI-compatible server: needs a base URL; the
-            // key is OPTIONAL (a local Ollama/LM Studio usually has none). No URL
-            // yet → Demo stub so the AI still visibly responds.
-            let base = (config.baseURL ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
-            guard !base.isEmpty else { return DemoAgentProvider() }
-            return CustomOpenAIProvider(baseURL: base, apiKey: key(for: "custom") ?? "", model: model)
-        case "hub":
-            // Borrow a nearby host's AI over the Multipeer link. Needs an active
-            // `nearby` relay client; otherwise fall back to the Demo stub.
-            return hubClient.map { NearbyHubAIProvider(client: $0) } ?? DemoAgentProvider()
-        case "demo":
-            return DemoAgentProvider()
-        default:  // "ondevice"
-            return FoundationModelsAgentProvider.isAvailable
-                ? FoundationModelsAgentProvider() : DemoAgentProvider()
-        }
+        // Look up the backend in the registry and build its provider. An unknown
+        // kind (e.g. an older config naming a backend this build dropped) has no
+        // descriptor → fall through to the on-device default, exactly as the old
+        // `switch`'s `default:` arm did.
+        let descriptor =
+            BackendRegistry.descriptor(for: config.kind)
+            ?? BackendRegistry.descriptor(for: "ondevice")!
+        return descriptor.makeProvider(config, { key(for: $0) }, hubClient)
     }
 
     private static func configuredAIsKey(_ siloID: String) -> String { "configuredAIs.\(siloID)" }
@@ -347,6 +414,46 @@ final class AppSession {
         else { UserDefaults.standard.removeObject(forKey: key) }
     }
 
+    /// Per-conversation egress-firewall override (Settings → conversation details):
+    /// `true` = redact names + bound size before a REMOTE AI sees this chat,
+    /// `false` = send it raw, `nil` = inherit the account default (`firewallEnabled`).
+    /// This is what lets a private, paired chat with your OWN agents pass data raw
+    /// while every other chat stays scrubbed (per-chat firewall, owner-directed).
+    /// `nonisolated` so the (actor) PersonaRuntime can read it without an await.
+    nonisolated static func conversationFirewall(_ conversationID: String, siloID: String = "")
+        -> Bool?
+    {
+        UserDefaults.standard.object(
+            forKey: siloDefaultsKey("egressFirewall.\(conversationID)", siloID)) as? Bool
+    }
+    nonisolated static func setConversationFirewall(
+        _ value: Bool?, conversationID: String, siloID: String = ""
+    ) {
+        let key = siloDefaultsKey("egressFirewall.\(conversationID)", siloID)
+        if let value { UserDefaults.standard.set(value, forKey: key) }
+        else { UserDefaults.standard.removeObject(forKey: key) }
+    }
+
+    /// Per-node REMOTE DEV-CONTROL consent (ACPRouterplan Phase 3, C-3): whether the
+    /// owner has consented to drive a paired `coding_agent` node's real ACP agent over
+    /// the relay. OFF by default — privacy-first, the cardinal rule. The relay-carried
+    /// ACP path (frame routing AND the live `acp` provider) stays INERT for a node
+    /// until this is explicitly turned on; nothing about a paired Mac's agent is
+    /// reachable until the owner opts in. `nodeID` is the node contact's PQRC identity
+    /// hex (the ONLY ever ACP peer — C-3). Per-silo (deniability — A33), mirroring
+    /// `conversationFirewall`. `nonisolated` so the (actor) `PersonaRuntime` reads it
+    /// without an await.
+    nonisolated static func remoteDevControlConsent(nodeID: String, siloID: String = "") -> Bool {
+        UserDefaults.standard.bool(forKey: siloDefaultsKey("remoteDevControl.\(nodeID)", siloID))
+    }
+    nonisolated static func setRemoteDevControlConsent(
+        _ value: Bool, nodeID: String, siloID: String = ""
+    ) {
+        let key = siloDefaultsKey("remoteDevControl.\(nodeID)", siloID)
+        if value { UserDefaults.standard.set(true, forKey: key) }
+        else { UserDefaults.standard.removeObject(forKey: key) }
+    }
+
     /// Agent-skills asymmetry knob: a short label of THIS workstation's context
     /// domain (e.g. "iOS / Xcode"), injected into shared-thread prompts so each
     /// tether advertises what it has without dumping its full context.
@@ -372,13 +479,76 @@ final class AppSession {
         else { UserDefaults.standard.set(ids, forKey: key) }
     }
 
+    // MARK: - Custom agent skills (app-layer overlay, per-silo)
+
+    /// User-authored skills overlaid on the built-in `AgentSkills.catalog`. Stored
+    /// per-silo (deniability — A33) so accounts never share or accumulate each
+    /// other's custom skills at rest, exactly like every other silo-scoped
+    /// setting. The package catalog stays the source of truth for built-ins; these
+    /// are merged in only for DISPLAY (the Thread Skills picker) and for THREAD
+    /// INJECTION (their `fragment` is appended to the thread-turn prompt the same
+    /// way a built-in's is). Nothing here ever touches the wire — a skill is just
+    /// prompt text, recorded in the thread like any agent message.
+    nonisolated static func loadCustomSkills(siloID: String = "") -> [CustomSkill] {
+        guard let data = UserDefaults.standard.data(forKey: siloDefaultsKey("customSkills", siloID)),
+            let list = try? JSONDecoder().decode([CustomSkill].self, from: data)
+        else { return [] }
+        return list
+    }
+    nonisolated static func saveCustomSkills(_ list: [CustomSkill], siloID: String = "") {
+        let key = siloDefaultsKey("customSkills", siloID)
+        if list.isEmpty {
+            UserDefaults.standard.removeObject(forKey: key)
+        } else if let data = try? JSONEncoder().encode(list) {
+            UserDefaults.standard.set(data, forKey: key)
+        }
+    }
+    /// One custom skill, looked up by its (overlay) id — for thread injection.
+    nonisolated static func customSkill(_ id: String, siloID: String = "") -> CustomSkill? {
+        loadCustomSkills(siloID: siloID).first { $0.id == id }
+    }
+
+    /// Bounds the Settings stepper for the loop-guard threshold (DEVIATIONS D14):
+    /// a sensible floor so a human is reliably kept in the loop, up to a high cap.
+    /// `nonisolated` so the (actor) PersonaRuntime and the nonisolated setter can
+    /// read them without hopping to the main actor.
+    nonisolated static let agentLoopGuardMin = 2
+    nonisolated static let agentLoopGuardMax = 20
+
+    /// Per-silo loop-guard threshold (DEVIATIONS D14): pause a thread's agents
+    /// after this many consecutive agent messages with no human in between.
+    /// Returns the spec default (`PQRCConstants.agentLoopGuardLimit`) when unset,
+    /// or the user's per-account value — including `0`, which means the guard is
+    /// OFF (unbounded). Per-silo so a hidden account never shares/leaks the knob
+    /// (A33). `nonisolated` so the (actor) PersonaRuntime can read it without an
+    /// await before constructing its engine.
+    nonisolated static func agentLoopGuardLimit(siloID: String = "") -> Int {
+        let key = siloDefaultsKey("agentLoopGuardLimit", siloID)
+        // `object(forKey:)` distinguishes "never set" (use the default) from an
+        // explicit `0` (the user turned the guard OFF) — `integer(forKey:)` can't.
+        guard UserDefaults.standard.object(forKey: key) != nil else {
+            return PQRCConstants.agentLoopGuardLimit
+        }
+        return UserDefaults.standard.integer(forKey: key)
+    }
+
+    /// Persist the per-silo loop-guard threshold. `0` turns the guard OFF; any
+    /// positive value is clamped to `[agentLoopGuardMin, agentLoopGuardMax]`.
+    nonisolated static func setAgentLoopGuardLimit(_ limit: Int, siloID: String = "") {
+        let key = siloDefaultsKey("agentLoopGuardLimit", siloID)
+        let clamped = limit <= 0 ? 0 : min(max(limit, agentLoopGuardMin), agentLoopGuardMax)
+        UserDefaults.standard.set(clamped, forKey: key)
+    }
+
     /// The configured AIs bound to live providers — the runtime's tethered AIs.
     static func makeRuntimeAIs(siloID: String, hubClient: MultipeerRelayClient?) -> [TetheredAI] {
         loadConfiguredAIs(siloID: siloID).filter(\.isEnabled).map { config in
             TetheredAI(
                 id: config.id, name: config.name,
                 provider: makeProvider(config: config, siloID: siloID, hubClient: hubClient),
+                kind: config.kind,
                 isRemote: ConfiguredAI.isRemote(config.kind),
+                appliesEgressFirewall: ConfiguredAI.appliesEgressFirewall(config.kind),
                 instructions: config.instructions,
                 contextPolicy: config.effectivePolicy,
                 contextDepth: config.effectiveDepth,
@@ -409,10 +579,16 @@ final class AppSession {
     static func siloStoreURL(_ siloID: String) -> URL {
         URL.applicationSupportDirectory.appendingPathComponent("silo-\(siloID).store")
     }
-    /// A silo exists iff its wrapped master key is present under its service.
+    /// The fixed namespace of the single passphrase-less DEFAULT account (AC31).
+    /// Openly present (not deniable); hidden accounts use passphrase-derived ids.
+    static let defaultSiloID = "default"
+    /// A silo exists iff its Secure-Enclave-wrapped silo key is present under its
+    /// service (written first, at account creation — the source of truth).
     static func siloExists(_ siloID: String) -> Bool {
-        KeychainStore(service: siloService(siloID)).loadIfPresent(account: "wrapped-master-key") != nil
+        AccountVault(keychain: KeychainStore(service: siloService(siloID))).exists()
     }
+    /// Whether the single passphrase-less default account exists on this device.
+    var hasDefaultAccount: Bool { Self.siloExists(Self.defaultSiloID) }
     static func displayNameKey(_ siloID: String) -> String { "displayName.\(siloID)" }
 
     /// One-time migration of pre-silo (flat) UserDefaults into a silo namespace,
@@ -441,92 +617,81 @@ final class AppSession {
         }
     }
 
-    /// Unlock an existing silo by passphrase. Wrong passphrase / no such silo is
-    /// reported generically — a typo and a non-existent account are
-    /// indistinguishable (deniable).
+    /// Unlock a HIDDEN account by its passphrase. A wrong passphrase / no such silo
+    /// is reported generically — a typo and a non-existent account are
+    /// indistinguishable (deniable). The passphrase selects the namespace AND is the
+    /// nested factor that unwraps the Secure-Enclave-wrapped silo key (AC31).
     func unlock(passphrase: String) async {
         unlockError = nil
-        let derived = SiloKey.derive(passphrase: passphrase)
-        guard Self.siloExists(derived.siloID) else {
+        let siloID = SiloKey.siloID(for: passphrase)
+        let vault = AccountVault(keychain: KeychainStore(service: Self.siloService(siloID)))
+        do {
+            let siloKEK = try vault.open(unlock: .passphrase(passphrase))
+            await bootSilo(siloID: siloID, kek: siloKEK)
+        } catch {
             unlockError = "Couldn't unlock. Check your passphrase, or create a new account."
-            return
         }
-        await bootSilo(derived)
     }
 
-    /// Create a brand-new silo for a passphrase that has none yet.
+    /// Open the passphrase-less DEFAULT account (device-unlock path; the Face ID
+    /// button uses `biometricUnlock` instead). Generic error if there is none.
+    func unlockDefault() async {
+        unlockError = nil
+        let siloID = Self.defaultSiloID
+        let vault = AccountVault(keychain: KeychainStore(service: Self.siloService(siloID)))
+        do {
+            let siloKEK = try vault.open(unlock: .secureEnclave)
+            await bootSilo(siloID: siloID, kek: siloKEK)
+        } catch {
+            unlockError = "Couldn't open your account on this device."
+        }
+    }
+
+    /// Create a brand-new HIDDEN account, gated by a passphrase (deniable). Its
+    /// namespace is passphrase-derived; its at-rest key is a RANDOM Secure-Enclave-
+    /// wrapped KEK with the passphrase nested UNDER the SE wrap (AC31). No biometric
+    /// is enrolled — caching a hidden account's key behind Face ID would reveal it.
     func createAccount(passphrase: String, displayName: String) async {
         unlockError = nil
-        let derived = SiloKey.derive(passphrase: passphrase)
-        guard !Self.siloExists(derived.siloID) else {
+        let siloID = SiloKey.siloID(for: passphrase)
+        let vault = AccountVault(keychain: KeychainStore(service: Self.siloService(siloID)))
+        guard !vault.exists() else {
             unlockError = "An account already exists for that passphrase. Unlock it instead."
             return
         }
-        UserDefaults.standard.set(
-            displayName.isEmpty ? "Me" : displayName, forKey: Self.displayNameKey(derived.siloID))
-        await bootSilo(derived)
-        // Face ID is the default for the primary account: save its key behind
-        // Face ID / Touch ID so the next launch unlocks with a glance. Best-effort
-        // and silent — if the device has no biometric/passcode enrolled we just
-        // stay passphrase-only (turn it on later in Settings). Only the FIRST
-        // account is stored biometrically; hidden accounts stay passphrase-only
-        // and deniable.
-        enableBiometricByDefault()
+        do {
+            let siloKEK = try vault.create(unlock: .passphrase(passphrase))
+            UserDefaults.standard.set(
+                displayName.isEmpty ? "Me" : displayName, forKey: Self.displayNameKey(siloID))
+            await bootSilo(siloID: siloID, kek: siloKEK)
+        } catch {
+            unlockError = "Couldn't create the account on this device's secure hardware."
+        }
     }
 
-    /// Migrate a pre-silo (legacy, Secure-Enclave-wrapped) account into a
-    /// passphrase silo, then unlock it. Re-wraps the SAME store master key under
-    /// the passphrase (so the store isn't re-encrypted) and moves the store file
-    /// to the silo's deterministic name.
-    func migrateLegacyAccount(passphrase: String) async {
+    /// Create the single passphrase-less DEFAULT account: a RANDOM Secure-Enclave-
+    /// wrapped KEK at a fixed namespace, opening on Face ID / device unlock. This is
+    /// the personal account — openly present on the device (NOT deniable). At most
+    /// one exists; additional accounts must be passphrase-gated (hidden).
+    func createDefaultAccount(displayName: String, enableBiometric: Bool) async {
         unlockError = nil
-        let derived = SiloKey.derive(passphrase: passphrase)
-        let legacy = KeychainStore(service: "chat.pqrc.keys")
-        let silo = KeychainStore(service: Self.siloService(derived.siloID))
-        let kekData = derived.kek.withUnsafeBytes { Data($0) }
-        let nonce = SystemNonceSource()
-        // Identity + small secrets: raw → sealed under the silo key.
-        for account in [
-            "identity-seed", "nostr-key", "identity-dh", "prekey-state", "my-alias",
-            "open-inbox-until",
-        ] {
-            if let raw = legacy.loadIfPresent(account: account),
-                let sealed = try? SiloKey.seal(raw, kek: derived.kek)
-            {
-                try? silo.save(sealed, account: account)
-            }
+        let siloID = Self.defaultSiloID
+        let vault = AccountVault(keychain: KeychainStore(service: Self.siloService(siloID)))
+        guard !vault.exists() else {
+            unlockError = "A default account already exists. Unlock it, or create a passphrase account."
+            return
         }
-        // Store master key: unwrap from Secure Enclave, re-wrap under the kek.
-        let se = SecureEnclaveKeyWrapper(keychain: legacy)
-        if let wrapped = legacy.loadIfPresent(account: "wrapped-master-key"),
-            let master = try? se.unwrap(wrapped: wrapped),
-            let rewrapped = try? SoftwareKeyWrapper(keyEncryptionKey: kekData, nonceSource: nonce)
-                .wrap(masterKey: master)
-        {
-            try? silo.save(rewrapped, account: "wrapped-master-key")
+        do {
+            let siloKEK = try vault.create(unlock: .secureEnclave)
+            UserDefaults.standard.set(
+                displayName.isEmpty ? "Me" : displayName, forKey: Self.displayNameKey(siloID))
+            await bootSilo(siloID: siloID, kek: siloKEK)
+            // Opt-in Face ID convenience for the default account only (best-effort,
+            // silent if the device has no passcode/biometric enrolled).
+            if enableBiometric { enableBiometricByDefault() }
+        } catch {
+            unlockError = "Couldn't create the account on this device's secure hardware."
         }
-        // Carry AI API keys (raw, under the silo's service) and the configured-AI
-        // list across so the migrated account keeps its AI setup.
-        for account in Self.apiKeyAccounts.values {
-            if let raw = legacy.loadIfPresent(account: account) {
-                try? silo.save(raw, account: account)
-            }
-        }
-        if let aiData = UserDefaults.standard.data(forKey: "configuredAIs") {
-            UserDefaults.standard.set(aiData, forKey: Self.configuredAIsKey(derived.siloID))
-            UserDefaults.standard.removeObject(forKey: "configuredAIs")
-        }
-        // Move the store file (and SQLite sidecars) to the silo's name.
-        Self.moveStore(
-            from: URL.applicationSupportDirectory.appendingPathComponent("default.store"),
-            to: Self.siloStoreURL(derived.siloID))
-        // Carry the display name across, then erase the legacy footprint.
-        let name = UserDefaults.standard.string(forKey: "displayName") ?? "Me"
-        UserDefaults.standard.set(name, forKey: Self.displayNameKey(derived.siloID))
-        UserDefaults.standard.removeObject(forKey: "displayName")
-        legacy.deleteAll()
-        await bootSilo(derived)
-        enableBiometricByDefault()
     }
 
     /// Onboarding default: turn on Face ID unlock for the first account, silently.
@@ -539,30 +704,35 @@ final class AppSession {
         biometricError = nil
     }
 
-    private func bootSilo(_ derived: SiloKey.Derived) async {
-        activeSilo = derived
+    private func bootSilo(siloID: String, kek: SymmetricKey) async {
+        activeSilo = UnlockedSilo(siloID: siloID, kek: kek)
         // Pull any pre-silo (flat, device-global) UserDefaults into THIS silo's
         // namespace and delete the flat originals, so an older build's settings
         // don't linger readable at rest or bleed across accounts (A33).
-        Self.migrateFlatDefaults(into: derived.siloID)
-        let name = UserDefaults.standard.string(forKey: Self.displayNameKey(derived.siloID)) ?? "Me"
-        let transports = await makeRelayTransports(siloID: derived.siloID)
+        Self.migrateFlatDefaults(into: siloID)
+        let name = UserDefaults.standard.string(forKey: Self.displayNameKey(siloID)) ?? "Me"
+        let transports = await makeRelayTransports(siloID: siloID)
         let runtime = PersonaRuntime(
             displayName: name,
             transports: transports,
             blobStore: LocalBlossomSimulator(),
-            ais: Self.makeRuntimeAIs(siloID: derived.siloID, hubClient: relayClient),
-            keychainService: Self.siloService(derived.siloID),
-            siloKEK: derived.kek,
-            siloID: derived.siloID,
+            ais: Self.makeRuntimeAIs(siloID: siloID, hubClient: relayClient),
+            keychainService: Self.siloService(siloID),
+            siloKEK: kek,
+            siloID: siloID,
             enableLocalLink: Self.localLinkEnabled)
         await runtime.setFirewallEnabled(Self.firewallEnabled)
-        let model = AppModel(runtime: runtime, personaName: name, siloID: derived.siloID)
+        let model = AppModel(runtime: runtime, personaName: name, siloID: siloID)
         do {
             try await model.start(
-                inMemoryStore: false, storeURL: Self.siloStoreURL(derived.siloID),
-                relayURLs: Self.configuredRelayURLs(siloID: derived.siloID))
+                inMemoryStore: false, storeURL: Self.siloStoreURL(siloID),
+                relayURLs: Self.configuredRelayURLs(siloID: siloID))
             mode = .single(model)
+            // C-5: feed the live paired-contact set (verified peers' Nostr pubkeys)
+            // into the Nearby host's allowlist, now and on every change.
+            await runtime.setPairedPubkeysPublisher { [pairedSnapshot] set in
+                pairedSnapshot.replace(with: set)
+            }
         } catch {
             bootError = String(describing: error)
         }
@@ -639,21 +809,53 @@ final class AppSession {
         localMCPError = nil
     }
 
+    /// Keychain account (within the per-silo service) holding the MCP pairing
+    /// token. Per-silo so a hidden account never shares/leaks it (deniability).
+    private static let mcpPairingTokenAccount = "mcp-pairing-token"
+
     /// A random pairing token for this silo, persisted in its Keychain so it's
     /// stable across launches (and protected at rest), generated on first use.
     private static func pairingToken(siloID: String) -> String {
         let keychain = KeychainStore(service: siloService(siloID))
-        let account = "mcp-pairing-token"
-        if let existing = keychain.loadIfPresent(account: account),
+        if let existing = keychain.loadIfPresent(account: mcpPairingTokenAccount),
             let value = String(data: existing, encoding: .utf8), !value.isEmpty
         {
             return value
         }
+        return mintPairingToken(siloID: siloID)
+    }
+
+    /// Mint a fresh random pairing token and persist it, REPLACING any existing
+    /// one. Used both for first-use generation and explicit regeneration.
+    @discardableResult
+    private static func mintPairingToken(siloID: String) -> String {
         var bytes = [UInt8](repeating: 0, count: 32)
         _ = SecRandomCopyBytes(kSecRandomDefault, bytes.count, &bytes)
         let token = Data(bytes).base64EncodedString()
-        try? keychain.save(Data(token.utf8), account: account)
+        try? KeychainStore(service: siloService(siloID)).save(
+            Data(token.utf8), account: mcpPairingTokenAccount)
         return token
+    }
+
+    /// Regenerate the per-silo MCP pairing token: mint a fresh one (invalidating
+    /// the old one — any connected shim must re-pair with the new token), and if
+    /// the local MCP server is currently running, restart it so it serves the new
+    /// token and `localMCPConnection` republishes it for Settings to display.
+    /// No-op without an unlocked silo.
+    func regenerateMCPPairingToken() async {
+        guard let siloID = activeSilo?.siloID else {
+            localMCPError = "Unlock an account first."
+            return
+        }
+        Self.mintPairingToken(siloID: siloID)
+        // If the server is live, cycle it onto the new token. The published
+        // connection (and the socket path) updates so the displayed token matches
+        // what the server now enforces; the user must re-paste it into their MCP
+        // client. If it's not running, the fresh token simply waits in Keychain.
+        if isLocalMCPRunning {
+            await stopLocalMCP()
+            await startLocalMCP()
+        }
     }
 
     // MARK: - Biometric convenience unlock (one primary silo)
@@ -682,9 +884,11 @@ final class AppSession {
     /// false (and sets `biometricError`) if the system refuses to store it.
     @discardableResult
     func enableBiometricUnlock() -> Bool {
-        guard let derived = activeSilo else { return false }
+        // Biometric is the default (open) account's convenience ONLY — caching a
+        // hidden account's key behind Face ID would reveal it exists (deniability).
+        guard let silo = activeSilo, silo.siloID == Self.defaultSiloID else { return false }
         let record = BiometricSilo(
-            siloID: derived.siloID, kek: derived.kek.withUnsafeBytes { Data($0) })
+            siloID: silo.siloID, kek: silo.kek.withUnsafeBytes { Data($0) })
         guard let blob = try? JSONEncoder().encode(record) else { return false }
         do {
             try KeychainStore(service: Self.biometricService)
@@ -726,8 +930,7 @@ final class AppSession {
                 }
                 return
             }
-            await bootSilo(
-                SiloKey.Derived(siloID: record.siloID, kek: SymmetricKey(data: record.kek)))
+            await bootSilo(siloID: record.siloID, kek: SymmetricKey(data: record.kek))
         case .cancelled, .missing:
             // Quiet: the user cancelled, or nothing is enrolled — fall back to
             // the passphrase field that's always on screen.
@@ -765,7 +968,7 @@ final class AppSession {
     /// Tears the current silo down and boots it again — the apply path for
     /// relay-list and Nearby changes from Settings (reuses the unlocked key).
     func rebootSingle() async {
-        guard let derived = activeSilo else { return }
+        guard let silo = activeSilo else { return }
         // Stop the MCP server: its bridge points at the model we're about to
         // replace, so it must not outlive the reboot (the user re-enables it).
         await stopLocalMCP()
@@ -773,7 +976,7 @@ final class AppSession {
             await model.runtime.shutdown()
         }
         mode = .locked
-        await bootSilo(derived)
+        await bootSilo(siloID: silo.siloID, kek: silo.kek)
     }
 
     /// The unlocked silo's id, for per-account AI settings (nil while locked).
@@ -787,6 +990,34 @@ final class AppSession {
         await model.runtime.setFirewallEnabled(Self.firewallEnabled)
     }
 
+    /// Test ONE configured AI on demand (Settings ▸ AI per-row "Test"). Builds the
+    /// provider exactly as the runtime would — this silo's Keychain key, base URL,
+    /// model, PCC reasoning, etc. — runs a one-line sample, and returns the reply
+    /// or a readable failure reason. Works for ANY row (enabled or not) and
+    /// reflects the row's CURRENT settings, so it doesn't depend on the runtime
+    /// having refreshed. Drafts only (never posts), so no window/consent is needed.
+    func testProvider(for config: ConfiguredAI) async -> String {
+        let siloID = activeSilo?.siloID ?? ""
+        let provider = Self.makeProvider(config: config, siloID: siloID, hubClient: relayClient)
+        let name = UserDefaults.standard.string(forKey: Self.displayNameKey(siloID)) ?? "Me"
+        let sample = AgentContext(
+            myIdentityHex: "test", myDisplayName: name,
+            transcript: [
+                TranscriptEntry(
+                    senderIdentityHex: "sample", senderDisplayName: "Test",
+                    participantType: .human,
+                    text: "Hi! Are you working? Reply in one short sentence.")
+            ],
+            instructions: config.instructions)
+        do {
+            let text = try await provider.draftReply(context: sample).text
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            return text.isEmpty ? "⚠️ Connected, but the model returned an empty reply." : text
+        } catch {
+            return "⚠️ " + AppModel.describeAgentError(error)
+        }
+    }
+
     /// `pqrc:add?npub=npub1…` — from a scanned QR. Opens New Conversation
     /// with the npub prefilled (handled by MainView).
     func handleDeepLink(_ url: URL) {
@@ -796,6 +1027,9 @@ final class AppSession {
             npub.hasPrefix("npub1")
         {
             pendingNpub = npub
+            // The Configurator marks its pairing link `&type=coding_agent` so the phone
+            // tags the agent contact (lets the watch-along draft path recognize it).
+            pendingContactType = components?.queryItems?.first(where: { $0.name == "type" })?.value
         }
     }
 
@@ -832,8 +1066,32 @@ final class AppSession {
 
 struct RootView: View {
     @Environment(AppSession.self) private var session
+    /// The "venturing on unknown seas" first-run tour. Lives here (RootView) so it
+    /// overlays the whole app without touching MainView/ConversationView, and is
+    /// shared into the environment so Settings ▸ About can relaunch it.
+    @State private var tour = TourCoordinator()
 
     var body: some View {
+        content
+            .environment(tour)
+            .onboardingTour(tour, activeSiloID: session.activeSiloID)
+            // First entry into a real account → present the welcome tour once.
+            // (`.onChange` covers unlock/create; `.task` covers a same-launch boot.)
+            .onChange(of: isSingleMode) { _, single in
+                if single { tour.presentIfFirstRun(siloID: session.activeSiloID) }
+            }
+            .task {
+                if isSingleMode { tour.presentIfFirstRun(siloID: session.activeSiloID) }
+            }
+    }
+
+    /// True only for a real unlocked account (not the lock screen or demo).
+    private var isSingleMode: Bool {
+        if case .single = session.mode { return true }
+        return false
+    }
+
+    @ViewBuilder private var content: some View {
         switch session.mode {
         case .locked, .onboarding:
             AccountGateView()

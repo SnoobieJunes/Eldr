@@ -21,7 +21,7 @@ and affects interop; `[app-only]` — client behavior, no wire impact;
 | D11 | No published kind-0 profiles; local-only nicknames (encrypted at rest) | app-only |
 | D12 | Message-requests inbox gates unknown-sender handshakes | app-only |
 | D13 | Safety-code verification screen: 60 digits in 12 groups from SHA-256 over both identity pubkeys (sorted), QR compare, local "verified" flag | app-only |
-| D14 | Thread agent loop guard: 6 consecutive agent messages → pause until a human message | app-only |
+| D14 | Thread agent loop guard: pause after N consecutive agent messages until a human speaks. ~~Default 6 (fixed)~~ → now a **per-silo setting** (2–20, or OFF/unbounded), per A39. | app-only |
 | S1 | ~~BLE/Multipeer local link: seam only~~ → **Implemented** (2026-06-12): `MultipeerLinkTransport` over MultipeerConnectivity, seal-frame wire format, automatic relay fallback. See N17–N20, A9. | upstream-NIP |
 | S2 | ~~Localhost WebSocket relay frontend: not shipped~~ → **Implemented** (2026-06-12): `pqrc-relay` executable (NWListener WS over `LocalRelaySimulator`) + `NostrWebSocketTransport` client. See A10, T9–T10. | app-only |
 
@@ -410,17 +410,23 @@ and affects interop; `[app-only]` — client behavior, no wire impact;
   Effective relay retention is 5–7 days (the fuzz is up to 2 days into the past).
   `PQRCConstants.expirationWindowSeconds`; the frozen `giftwrap.json` vector was
   regenerated for the new tag.
-- **A23 — Deniable multi-account silos** (2026-06-14): one device holds N
-  passphrase-isolated accounts. `passphrase → PBKDF2 (fixed app salt) → siloID +
+- **A23 — Deniable multi-account silos** (2026-06-14; **key-custody mechanism superseded by AC31, 2026-06-19**): one device holds N
+  passphrase-isolated accounts. ~~`passphrase → PBKDF2 (fixed app salt) → siloID +
   KEK` (`SiloKey.swift`); each silo's Keychain secrets are AES-GCM-sealed under
   the KEK and its store master key is wrapped under it, so a silo is unreadable —
-  and its existence unprovable — without the passphrase. The app always launches
+  and its existence unprovable — without the passphrase.~~ **→ REVERTED by AC31:** the
+  passphrase-derived-KEK model was offline-brute-forceable from a disk image (invariant-10
+  violation). The silo key is now a **random Secure-Enclave-wrapped key**; the passphrase
+  derives only the deniable namespace `siloID` (plus an optional layer nested *under* the
+  SE wrap). See "At-rest key storage (AC31)" below. The deniable-account *concept* below
+  still ships unchanged: the app always launches
   to a bare passphrase screen and never auto-boots (auto-booting would reveal an
   account exists). A wrong passphrase derives a different, non-existent silo,
   indistinguishable from "no account". Isolation is CRYPTOGRAPHIC, not
   OS-enforced — iOS gives one app a single sandbox (no Android secure island).
 - **A24 — Biometric convenience tier (Face ID first, ON by default)** (2026-06-15,
-  revised twice): the primary account stores its {siloID, KEK} behind a
+  revised twice; **key-material superseded by AC31, 2026-06-19**): the primary (now "default")
+  account stores its ~~{siloID, KEK}~~ **Secure-Enclave-wrapped silo key (AC31)** behind a
   `.userPresence` Keychain item (Face ID / Touch ID / device passcode) and that is
   the **default** unlock — the lock screen shows Face ID first and auto-prompts it
   at launch (`AccountGateView.task`); the passphrase is the labelled-secondary
@@ -536,7 +542,7 @@ and affects interop; `[app-only]` — client behavior, no wire impact;
   and reveal that passphrase under coercion. A *destructive* duress (wipe on a
   trigger passphrase) is intentionally NOT shipped — accidental-wipe risk
   outweighs the benefit when a plausible decoy already exists.
-- **A26 — Known limit: silo COUNT is not yet hidden** `[tech-debt]` (2026-06-14):
+- **A26 — ~~Known limit: silo COUNT is not yet hidden~~ → Accepted limit, count-hiding is do-not-build (AC31)** `[tech-debt]` (2026-06-14; **resolved 2026-06-19**):
   v1 hides each silo's contents, keys, and (via the unprovable-passphrase
   property) whether a *given* passphrase maps to data. But a full forensic image
   can still infer the NUMBER of accounts from the count of `silo-*.store` files /
@@ -544,7 +550,11 @@ and affects interop; `[app-only]` — client behavior, no wire impact;
   per-silo records (the only approach that doesn't leak count); naive decoy files
   are distinguishable (a real store has a valid SQLite header, random padding
   doesn't), so they are deliberately NOT shipped — false deniability is worse
-  than a documented limit. Tracked for Phase 2. **Same residual surface, after
+  than a documented limit. ~~Tracked for Phase 2.~~ **→ AC31 (2026-06-19) resolved this as
+  DO-NOT-BUILD:** per-account Secure-Enclave wrapping makes a per-account on-disk trace
+  unavoidable, and count-hiding buys ≈zero benefit against a coercer holding the device
+  (deniability protects each account's *contents* + the passphrase→data mapping, not the
+  count). This is now an accepted, documented property — not pending work. **Same residual surface, after
   A33:** per-account settings now carry a `.<siloID>` suffix in the (unencrypted)
   UserDefaults plist, so the *set of distinct siloID suffixes* there is one more
   place a forensic image can count accounts — the same count leak as the store
@@ -552,8 +562,9 @@ and affects interop; `[app-only]` — client behavior, no wire impact;
   count is *certain*, not probabilistic: `configuredAIs.<siloID>` is written on
   every boot and `displayName.<siloID>` at creation, so each account always leaves
   at least one suffixed key — this matches the existing per-silo store-file count
-  leak exactly and adds nothing beyond it. The Phase-2 pooled-store design
-  subsumes it (opaque records, no siloID in the clear).
+  leak exactly and adds nothing beyond it. ~~The Phase-2 pooled-store design
+  subsumes it (opaque records, no siloID in the clear).~~ **→ Not building the pooled
+  store (AC31, see above); this suffix-count leak is part of the accepted limit.**
 - **A33 — Per-silo UserDefaults namespacing (deniable-account isolation)**
   `[app-only]` (2026-06-15): the deniable-silo work (A23–A26) sealed each
   account's *secrets* and *store* per-silo, but several app preferences were
@@ -656,8 +667,50 @@ and affects interop; `[app-only]` — client behavior, no wire impact;
     (`XCLocalSwiftPackageReference` + `XCSwiftPackageProductDependency` +
     Frameworks build-file), mirroring how PQRCCore/Nostr/Agent are referenced.
   Privacy: read-only, redacted, loopback-only, token-gated, off by default, stops on
-  lock — the cardinal rule resolved at every tie. **Still open (Phase 3, opt-in):**
-  window-gated action tools.
+  lock — the cardinal rule resolved at every tie. **Phase 3 (below) adds the
+  window-gated write tools.**
+
+- **A35-Phase3 — Local MCP server is now read/WRITE (invariant-preserving)**
+  `[app-only]` (2026-06-15): the point of an agent harness is to *act*; the product
+  owner accepts that responsibility, so the MCP server gains three action tools — but
+  each reuses an EXISTING send/draft/mark path (no new wire format, no crypto change)
+  and is built to respect the hard invariants:
+  • `draft_reply(conversationID, text)` → `PersonaRuntime.mcpDraftReply` → the
+    existing `draftReply` path. Produces a DRAFT for the human to review; **never
+    sends.** Always safe. (Prefers a real AI-drafted reply; falls back to staging the
+    caller's proposed text. Result byte-bounded to the 64 KB egress cap.)
+  • `mark_ai_context(conversationID, messageIDs, value)` →
+    `PersonaRuntime.mcpMarkAIContext` → the existing `markAsAIContext` path (mirrors
+    my own marks to the peer, author-guarded). Local marker change only — posts no
+    message content. Safe.
+  • `send_as_my_ai(conversationID, text)` → `PersonaRuntime.mcpSendAsMyAI` → the
+    existing `sendAsMyAI` → `sendMessage(participantType: .agent)` path, so the
+    message is **agent-labeled and renders as AI-authored (invariant 8)**. It posts
+    **ONLY when an ai_window is active for that conversation**, using the SAME engine
+    check the AI's own participation uses (`engine.activeWindow(for: identityHex) !=
+    nil && myWindowConversationID == conversationID`). With NO active window it
+    **FAILS CLOSED** — sends nothing, returns a refusal telling the caller to have the
+    human open an AI window first. So an MCP client can never make EldrChat speak to
+    others outside a visible, human-opened window (**invariant 9 / SPEC §13**). There
+    is no tool that posts as the human.
+  Mechanics: `MCPWriteResult` (`.ok`/`.failedClosed`) is added to the `SecureChatBridge`
+  protocol; a `failedClosed` outcome is surfaced as a `tools/call` `isError: true`
+  result (never a silent drop). `MCPServer.initialize` instructions + `tools/list`
+  now describe the write tools AND the window gate; `DemoSecureChatBridge` models the
+  gate faithfully (`send_as_my_ai` succeeds only for an `activeWindowConversationID`)
+  so the executable and tests exercise both the allowed and fail-closed paths.
+  `RuntimeSecureChatBridge`'s writes also fail closed when the silo is locked (model
+  gone). The Settings toggle is now gated behind a LOUD consent alert (same pattern as
+  the off-device-AI consent) disclosing that enabling it shares decrypted
+  (codename-redacted) chat with a local agent that can read and — where allowed —
+  draft/mark/send-as-your-AI in active windows, and warning to be careful which agent
+  harness is granted access. Settings also clarifies MCP-vs-ACP (the MCP server
+  exposes CHAT here; the separate `eldr-acp` coding agent is configured in Xcode —
+  SETUP-GUIDE §9). Tests: `swift test --package-path Packages/PQRCMCP` covers the
+  write tools incl. **`send_as_my_ai` fails closed with no active window** and
+  succeeds only in the windowed conversation. Reads stay codename-redacted +
+  64 KB-bounded. The cardinal rule is preserved: convenience (acting) never beats the
+  no-autonomous-send and honest-label invariants.
 
 - **A36 — ACP AGENT (EldrChat's self-hosted LLM pilots Xcode)** `[app-only]`
   (2026-06-15): the dual of A35. Where the MCP server exposes secure chat *to* a
@@ -672,15 +725,17 @@ and affects interop; `[app-only]` — client behavior, no wire impact;
   • **No `authenticate`** — we advertise `authMethods: []` (a locally-spawned
     subprocess is already trusted; auth would add friction with no security gain).
   • **`loadSession: false`, no `session/load`** — sessions are in-memory per run.
-  • **Permission model:** mutating tools (`write_file`, `run_shell`) call
-    `session/request_permission` first; read tools don't. If the client doesn't
-    answer (transport failure), we DEFAULT TO ALLOW — the client deliberately
-    spawned us to act, and a hung prompt shouldn't wedge the turn. (Privacy note:
-    this agent runs entirely on the developer's own machine against their own
-    files/Xcode and a local model; no secure-chat content or Nostr wire is
-    involved, so the §13 autonomous-send invariant is not in scope here — there is
-    no relay path. The permission default trades a hard fail-closed for usability
-    *within that local-dev blast radius only*.)
+  • **Permission model** (**default REVERSED by C-1 / AC27, 2026-06-19**): mutating tools
+    (`write_file`, `run_shell`) call `session/request_permission` first; read tools don't.
+    ~~If the client doesn't answer (transport failure), we DEFAULT TO ALLOW — the client
+    deliberately spawned us to act, and a hung prompt shouldn't wedge the turn.~~
+    **→ Now FAIL-CLOSED: deny on timeout / error / unimplemented** (`ClientConnection.request(timeout:)`,
+    default 120 s; never allow-on-error). The opt-in `ELDR_ACP_ALLOW_UNGATED_TOOLS` exists for
+    a trusted local-dev loop, but the node never sets it. (Privacy note: this agent runs
+    entirely on the developer's own machine against their own files/Xcode and a local model;
+    no secure-chat content or Nostr wire is involved, so the §13 autonomous-send invariant is
+    not in scope here. Once the agent rides the relay/Multipeer mesh as a router backend
+    (AC33–AC35), C-3 owner-gating becomes the intake authorizer — see those entries.)
   • **`run_shell` honors `DEVELOPER_DIR`** from env (and `ELDR_WORKDIR` for cwd) so
     `xcodebuild`/`xcrun simctl` target Xcode 27 beta; commands run via
     `/bin/zsh -lc`. Prefers the client's `terminal/*` (so commands show in Xcode),
@@ -701,11 +756,230 @@ and affects interop; `[app-only]` — client behavior, no wire impact;
   `read_file` tool round-trip to `tool_call_update: completed`, cancel, the
   bidirectional outbound-request correlation) + a piped stdio smoke test.
 
+- **A37 — ACP agent context budgeting + tool/prompt tuning** `[app-only]`
+  (2026-06-15): follow-up to A36. The E2E test of A36 confirmed the loop works but
+  flagged two real risks for self-hosted models: large tool results (file reads,
+  shell logs) FLOOD the context window, and smaller/varied models get CONFUSED by an
+  unbounded, noisy tool loop. Resolved by making the agent's context, tools, and
+  prompt **configurable**, with defaults that preserve or improve prior behavior (no
+  turn that used to succeed now fails; only never-needed bytes are trimmed). New
+  `AgentConfig` (env-first, optional `~/.config/eldr-acp/` files) + a pure,
+  deterministic `ContextBudget` (no I/O/clock → trivially testable). Decisions:
+  • **Per-tool-result cap** `ELDR_ACP_MAX_TOOL_RESULT_BYTES` (default 8 KB): every
+    result fed back is head+tail truncated past the cap with a `… N bytes elided …`
+    marker that names the env knob. Head gets ~60% (declarations / the command),
+    tail ~40% (errors / exit code). Cuts on CHARACTER boundaries so output is always
+    valid UTF-8 even mid-emoji; counts UTF-8 BYTES (what the window is measured in).
+    This is the FIRST cap on `read_file`/`list_dir` (previously unbounded); shell's
+    existing 64 KB capture cap is retained as the outer memory/deadlock guard and
+    this smaller cap then bounds what reaches the model.
+  • **History trimming** `ELDR_ACP_MAX_HISTORY_TURNS` (12) + `ELDR_ACP_MAX_CONTEXT_CHARS`
+    (48 KB): before each LLM call the running list is trimmed — the leading system
+    message(s) and the first user message (the task) are ALWAYS anchored; the most-
+    recent N turns are kept; if still over the char ceiling, the oldest non-anchor
+    message *content* is elided oldest-first. Eliding content (not removing messages)
+    keeps the OpenAI `assistant` tool-call ↔ `tool` result pairing valid. `0` on
+    either knob disables that cap.
+  • **Tool allowlist** `ELDR_ACP_TOOLS` (default = all four): only listed tools are
+    advertised + accepted, preserving canonical order; unknown names ignored.
+    Tightened the four tool DESCRIPTIONS to terse imperative one-liners each with a
+    concrete `tool(arg: …)` example, and pinned schemas with `additionalProperties:
+    false` + exact `required` — small models pick the right tool far more reliably
+    from a crisp schema than from prose.
+  • **Prompt tuning** `ELDR_ACP_PROMPT_PREAMBLE` (appended) and `ELDR_ACP_SYSTEM_PROMPT`
+    (full replace, `{cwd}` substituted), each also readable from a config-dir file
+    (`prompt-preamble` / `system-prompt`); env wins over file. Lets a user nudge a
+    finicky model's tool-calling without forking the binary. Built-in prompt also now
+    says "call ONE tool at a time" and warns results may be truncated. The A34/A36
+    reasoning-trace stripper is unchanged (still strips `<think>`/Harmony channels).
+  • **Config-dir resolution**: `ELDR_ACP_CONFIG_DIR` → `$XDG_CONFIG_HOME/eldr-acp` →
+    `~/.config/eldr-acp`. `fromEnvironment` takes the dir as an INJECTED parameter so
+    tests run home-directory-free (cardinal-rule-adjacent hygiene: no ambient FS read
+    under test). Active budget is logged to stderr on startup.
+  Backward-compatible: `ToolExecutor`'s new `maxResultBytes` defaults to `Int.max`
+  (uncapped) — only the agent layer opts into the 8 KB budget — so a direct
+  `ToolExecutor(…)` constructed without it behaves exactly as before. Verified: 67
+  headless tests total (was 35; +32 covering truncation incl. multibyte/UTF-8
+  safety, history trim + anchor preservation, allowlist filtering, schema shape,
+  env+config-file parsing with env-wins precedence, prompt preamble/override, and
+  two agent-level integration tests proving a 40 KB read is truncated before
+  feedback and a long loop's history is turn-bounded) + the piped stdio smoke test.
+
+- **A38 — ACP skills (slash-commands) + cross-client compatibility** `[app-only]`
+  (2026-06-15): follow-up to A36/A37. Adds three advertised, executable **skills**
+  and closes the one ACP conformance gap found when driving `eldr-acp` from a mock
+  client harness over the full `initialize → session/new → session/prompt` handshake.
+  • **Skills as ACP available-commands.** ACP advertises slash-commands via an
+    `available_commands_update` `session/update` (`availableCommands: [{name,
+    description, input:{hint}}]`) and a client invokes one by sending `session/prompt`
+    with `/<name> <text>` — there is NO dedicated invoke method (per
+    agentclientprotocol.com /protocol/v1/slash-commands + /schema). So "commands" —
+    not custom tools — are the right primitive; implemented exactly that way. New
+    `Skills.swift`: `AgentSkill` (name/description/hint + a focused system
+    instruction) and `AgentSkillSet` (catalog + enable/disable policy + `/name`
+    invocation parser). The three built-ins: `/spec` (well-structured Markdown
+    spec), `/snippet` (minimal, language-aware, runnable code in one fenced block),
+    `/html` (self-contained, offline, single-file HTML visualization; may `write_file`
+    the page). Each is model-agnostic — it only prepends a skill-specific system
+    instruction to that turn (appended AFTER the base prompt and any user override,
+    so it wins on output-shape conflicts while the base facts — cwd, tools, "report
+    real results" — still apply) — so it works against any OpenAI-compatible model.
+  • **Advertisement in two places.** Canonically the post-`session/new`
+    `available_commands_update`; additionally `agentCapabilities.availableCommands`
+    in the `initialize` result (an upward-compatible hint for a client that reads
+    commands at init or shows its menu before opening a session).
+  • **Enable/disable/tune** via one overloaded env var (matching the A37 pattern):
+    `ELDR_ACP_SKILLS` — a boolean (`off`/`0`/`false`/`none` → advertise none, treat
+    `/cmd` as plain text; `on`/`1`/`all` → all) OR a name list (`"spec html"` → that
+    subset). Also a `skills` file in the config dir; env wins. Backward-compatible:
+    default is all three on, and a plain prompt (or an unknown `/command`, or a
+    leading-slash path) is unchanged.
+  • **Conformance fix.** The mock-client harness confirmed the prior transport was
+    already correct (initialize/version echo, session/new, prompt turn with valid
+    `stopReason`, streamed `agent_message_chunk`, graceful `session/load` error under
+    `loadSession:false`, survival of optional methods) — the ONLY gap was that no
+    commands were advertised. That is now fixed; `session/new` became `async` to emit
+    the advertisement notification. No other client-required shape was missing.
+  • **Client compatibility notes.** Any ACP client launches an agent by
+    command/args/env, so the existing `eldr-acp-xcode` launcher drops into Zed-style
+    `agent_servers` and OpenClaw's `acpx` agent registry unchanged (SETUP-GUIDE §9).
+    `eldr-acp` needs no auth (empty `authMethods`), so acpx's credential plumbing is a
+    no-op. Goose's `goose acp` makes Goose an *agent*, not a client, so it can't drive
+    `eldr-acp`; the `swift test` suite IS the network-free client-side conformance
+    check. Verified: 85 headless tests (was 67; +18 covering catalog/allowlist policy,
+    `ELDR_ACP_SKILLS` boolean+list parsing, `/name` invocation parsing, advertisement
+    in both initialize and the session/update, skill-instruction injection + prefix
+    stripping for `/spec` and `/html`, and plain-prompt unchanged) + a real-LLM E2E
+    that produced a Markdown spec, a Swift snippet, and a standalone HTML chart.
+
+- **A39 — Loop guard is now a per-silo SETTING; MCP token gets a mask/reveal-once/
+  regenerate UX** `[app-only]` (2026-06-15): two usability hardening changes that touch
+  no wire/crypto.
+  • **Configurable loop guard (supersedes the fixed D14).** The thread loop guard was
+    hardcoded at `PQRCConstants.agentLoopGuardLimit = 6`. It is now an instance value on
+    `AgentEngine` (`loopGuardLimit`, init-injected, default = the constant, plus a live
+    `setLoopGuardLimit(_:)`); `authorizeAutonomousSend`/`loopGuardActive` read it, and a
+    value `<= 0` means the guard is **OFF** (unbounded — AIs may ping-pong). The app stores
+    the threshold **per silo** via `AppSession.agentLoopGuardLimit(siloID:)` /
+    `setAgentLoopGuardLimit` (UserDefaults key `agentLoopGuardLimit`, namespaced by silo per
+    A33 — a hidden account never shares/leaks the knob). `object(forKey:)` distinguishes
+    "never set" (→ default 6) from an explicit `0` (OFF), which `integer(forKey:)` can't.
+    `PersonaRuntime` reads it when constructing its engine and `AppModel.setLoopGuardLimit`
+    pushes live changes through `PersonaRuntime.setLoopGuardLimit` so a change applies without
+    re-booting the silo. SettingsView ▸ "AI loop guard" Section: a master Toggle (on restores
+    the default 6, off stores 0) + a Stepper bounded to `[2, 20]`
+    (`AppSession.agentLoopGuard{Min,Max}`) with an HONEST footer that turns orange when OFF
+    ("two AIs left talking can loop indefinitely … keep this on"). Cardinal-rule note: the
+    DEFAULT still keeps a human in the loop at 6; turning it off is an explicit, clearly-warned
+    user choice, never silent. The two pre-existing D14 tests still pass unchanged (they use the
+    default), plus two new tests cover a custom limit (3) and OFF.
+  • **MCP pairing-token UX (around the existing A35-Phase2 token display).** The token was
+    shown in plaintext inside the paste-able config block. It is now treated as the secret it
+    is: **masked by default** (8 `•`), a **Reveal** that shows it once then re-masks (re-masked
+    on every connection/token change, on toggle off→on, and after regenerate), a **Copy token**
+    button, a **Copy configuration** button (always the real token — it's bound for the user's
+    own MCP client config, not the screen), and a **Regenerate** button (confirm alert) wired to
+    a new `AppSession.regenerateMCPPairingToken()` that mints a fresh 32-byte token (reusing the
+    existing generator), persists it to the same per-silo Keychain account, and — if the server
+    is live — restarts it so it enforces the new token and republishes the connection. Copy is
+    the platform-standard egress (no app-level clipboard policy exists here); the footer warns
+    the token is a local-machine secret and that regenerating invalidates any paired shim, which
+    must be re-pasted. The MCP toggle, consent alert, and MCP-vs-ACP note are untouched. No
+    crypto/wire change beyond minting a new random token.
+
+- **A40 — Apple Private Cloud Compute as its own off-device AI tier** `[app-only]`
+  (2026-06-18): added `pcc` as a tethered-AI backend
+  (`PCCFoundationModelsProvider`, mirroring the on-device `FoundationModelsAgentProvider`)
+  that runs Apple's WWDC26 server foundation model. Per-AI **reasoning depth**
+  (`light`/`moderate`/`deep`, default moderate) is surfaced in Settings ▸ AI and
+  passed via `ContextOptions(reasoningLevel:)`; `GenerationOptions` carries optional
+  temperature / max tokens. **Cardinal-rule resolution:** PCC sends decrypted context
+  off-device, so it requires the off-device **consent** alert and shows the
+  "leaves device" indicator (`isRemote("pcc") == true`), BUT it is **exempt from the
+  name-redaction egress firewall** (`appliesEgressFirewall("pcc") == false`) — Apple
+  PCC is attested and retains no prompts, so we send full names/context for quality
+  while third-party vendors stay firewalled. This required splitting the old
+  `isRemote`-drives-everything coupling: `ConfiguredAI.appliesEgressFirewall` is a new
+  classifier, `TetheredAI` carries it, and `PersonaRuntime`'s two firewall predicates
+  (name redaction + `redactedForRemote`) now key off it instead of `isRemote`.
+  Eligibility (App Store Small Business Program, < 2M lifetime downloads, PCC
+  entitlement) and rate-limits surface as actionable `availabilityReason` strings →
+  Demo fallback, never a silent confidentiality downgrade.
+- **A40-tech-debt — PCC APIs are build-gated behind `ELDR_PCC_SDK`** `[tech-debt]`
+  (2026-06-18): the WWDC26 PCC symbols (`PrivateCloudComputeLanguageModel`,
+  `ContextOptions`, the `respond(to:options:contextOptions:)` overload) are absent from
+  the 2025 on-device-only SDK currently installed, so the provider's PCC path compiles
+  only when the target defines `ELDR_PCC_SDK` (set
+  `SWIFT_ACTIVE_COMPILATION_CONDITIONS` once building with the Xcode-26 SDK + PCC
+  entitlement). Without the flag the file still compiles and reports "not built with the
+  PCC SDK" → Demo. The structured-output / tool-calling / vision / adapter seams from the
+  "everything" scope are deferred to that same flagged path; **adapters are
+  specifically NOT pursued** (the training toolkit is EOL at v26.0.0, incompatible with
+  OS 27+) — prompt engineering is the supported path. Exact symbol spellings must be
+  verified in Xcode Quick Help when flipping the flag on. **Update (2026-06-18):**
+  confirmed the symbols are STILL absent even with the **Xcode 27.0** SDK installed
+  (`SDKROOT=iphoneos27.0`) — `PrivateCloudComputeLanguageModel` / `ContextOptions` /
+  reasoning appear in zero FoundationModels `.swiftinterface` files (iPhoneOS,
+  Simulator, macOS, Catalyst all checked); Apple's online docs are ahead of this seed.
+  Defining `ELDR_PCC_SDK` therefore breaks the build, so the gate stays OFF until a
+  later seed ships the symbols. Two prep changes landed meanwhile: (1) the
+  `com.apple.developer.private-cloud-compute` **managed** entitlement is wired
+  (`App/EldrChat.entitlements` + `CODE_SIGN_ENTITLEMENTS`; Apple must still grant it via
+  the PCC access request before device signing succeeds); (2) the gated PCC code paths
+  now carry `@available(iOS 27, macOS 27, *)` guards (the package deploys to 26, the PCC
+  symbols are 27-only) and `availabilityReason` reports the OS-version gap. The flag
+  belongs in `Package.swift` (`swiftSettings: [.define("ELDR_PCC_SDK")]`), not the app's
+  `SWIFT_ACTIVE_COMPILATION_CONDITIONS` — the provider lives in the PQRCAgent package.
+- **A41 — Mac Catalyst for a freely-resizable desktop window** `[app-only]`
+  (2026-06-18): EldrChat on Mac ran as "Designed for iPad" (`TARGETED_DEVICE_FAMILY
+  = "1,2"`), which forces small-or-fullscreen and ignores `.windowResizability`. Switched
+  the Mac runtime to **Mac Catalyst** (`SUPPORTS_MACCATALYST = YES`,
+  `SUPPORTS_MAC_DESIGNED_FOR_IPHONE_IPAD = NO`, device family `1,2,6`, macOS
+  deployment 26.0) so the window is a real, freely-resizable AppKit window. The
+  existing `.windowResizability(.contentMinSize)` / `.defaultSize` are now honored; the
+  `onMac` frame gate broadened to `isiOSAppOnMac || isMacCatalystApp`. `MainView`'s
+  `NavigationSplitView` already gives the responsive list/detail layout. Signing for
+  run/distribution is a manual Catalyst capability step (CI compiles with
+  `CODE_SIGNING_ALLOWED=NO`). The **Eldr ACP Configurator** (native macOS) got the same
+  desktop-window polish: its scene only set a 760×560 *minimum* (so it opened cramped at
+  the min), now `.defaultSize(1000×760)` + an ideal/`maxWidth:.infinity` content frame so
+  it opens comfortably and resizes freely.
+- **A42 — OpenClaw is a first-class ACP client in the Configurator** `[app-only]`
+  (2026-06-18): the `eldr-acp` agent is client-agnostic, so OpenClaw plugs in like Xcode.
+  `InstallerService` now writes a dedicated `~/.local/bin/eldr-acp-openclaw` launcher
+  (identical body to the Xcode one), and `OpenClawRegistration` auto-merges the agent into
+  OpenClaw's `acpx` plugin config (`plugins.entries.acpx.config.agents.eldr`) via a
+  read-modify-write that **preserves existing keys** (no clobber). The config path is
+  user-overridable in the wizard (default `~/.config/openclaw/config.json`). A new wizard
+  step (detect/register/status) mirrors the Xcode step. The `acpx` shape is taken from
+  SETUP-GUIDE; verify against the installed OpenClaw if rejected.
+- **A43 — contextgraph as an optional context backend (both hook points)** `[app-only]`
+  (2026-06-18): integrated `rdevaul/contextgraph` (graph/tag context manager, HTTP on
+  `:8302`) at the two layers requested. **(1) Agent route:** `ContextGraphClient`
+  (behind a `ContextGraphAssembling` seam) lets `eldr-acp` route context assembly through
+  `/assemble` + `/ingest` each turn (gated by `ELDR_ACP_CONTEXTGRAPH`, default OFF). It
+  is health-checked once per session and **falls back to the existing
+  `ContextBudget.trim` window on any failure** — no turn ever fails because contextgraph
+  is down (consistent with AgentConfig's "nothing makes a turn fail that used to
+  succeed"). Benefits every ACP client, not just OpenClaw. **(2) OpenClaw-plugin route:**
+  `OpenClawRegistration` also enables contextgraph's bundled plugin entry when the user
+  opts in. The Configurator (`ContextGraphService`) can install/start the Python service
+  from a user-supplied checkout (pip + spaCy model + `install-service.sh` + `launchctl`)
+  and shows a live `/health` dot. **Tech-debt:** the install/start path depends on the
+  user's Python toolchain and may need the app sandbox relaxed; the fallback is
+  "point at an already-running endpoint." The contextgraph OpenClaw-plugin config shape is
+  best-effort — verify against the shipped plugin.
+
 ### Tech debt `[tech-debt]`
 
 - **T1 — Secure Enclave fallback.** Where `SecureEnclave.isAvailable == false`
-  (some simulators), the master key wraps under a Keychain-held software KEK
-  (still device-only/unlocked-only). Hardware builds always use the SE path.
+  (some simulators / hardware with no secure element), the master key wraps under
+  a Keychain-held software KEK (still device-only/unlocked-only). On secure-element
+  hardware the SE path is mandatory. *(Corrected 2026-06-19: between `439a8f0` and
+  the AC31 rework, the deniable-silo feature made the **passphrase**-derived software
+  KEK the production default on ALL hardware — so "hardware builds always use the SE
+  path" was FALSE in that window and the code violated invariant 10. AC31 restores
+  SE-wrap as the default; the passphrase is now an optional layer under it.)*
 - **T2 — ~~Prekey private state is not persisted across launches~~ →
   Resolved** (2026-06-12): `PrekeyState` snapshot/restore on `PrekeyManager`,
   persisted in the Keychain, replenished to 16 at boot, consumed hashes kept
@@ -757,3 +1031,115 @@ and affects interop; `[app-only]` — client behavior, no wire impact;
   marked context is consumed only when BOTH humans have a live grant in scope,
   rather than a single author-side grant exposing one party's content
   unilaterally. The looser single-side mode is not shipped.
+
+## Eldr ACP Configurator (macOS GUI app + DMG)
+
+A SwiftUI macOS app (`Apps/EldrACPConfigurator/`) that wraps the `eldr-acp` CLI in
+a setup wizard, live config, log viewer, in-app test chat, self-learning project
+memory, and an EldrChat bridge, then ships as a DMG. Judgment calls made:
+
+| ID | Decision | Tag |
+|---|---|---|
+| AC1 | New thin macOS app target wrapping the existing PQRCACP engine; the CLI itself is unchanged in behavior and still runs headless. | app-only |
+| AC2 | App deployment target = **macOS 26.0**, not the plan's macOS 14. Forced: Phase 4 links `PQRCNostr`/`PQRCCore`, which declare `.macOS(.v26)`. Also matches the rest of the repo (iOS/macOS 26). | app-only |
+| AC3 | PQRCACP gains `ELDR_ACP_EVENTS_FILE` (a JSONL turn-event log) and `ELDR_ACP_CONTEXT_FILE` + auto-discovery of `<configDir>/projects/<sha256(cwd)>/eldr.md`. Both default OFF/`nil` — existing installs are byte-for-byte unaffected. Project identity = SHA-256 of the absolute cwd (one-way; the real path is not exposed in the shared `projects/` namespace; a sidecar `cwd` marker, written locally, lets the GUI show a friendly name). | app-only |
+| AC4 | `promptCapabilities.embeddedContext` flipped to `true`; `extractPromptText` now folds Xcode-27 `code` blocks (fenced) and `compilation_error`/`diagnostic` blocks (labeled) into the prompt. Unknown/image/audio blocks still ignored (forward-compatible). | app-only |
+| AC5 | `ConfigurationStore` round-trips config through the binary's OWN parsers (`LLMConfig.fromEnvironment` / `AgentConfig.fromEnvironment`) — no duplicated parsing. It writes `export KEY='value'` lines to `<configDir>/env` (sourced by the launcher) for scalars, and the individual `tools`/`skills`/`prompt-preamble`/`system-prompt` files AgentConfig reads directly. | app-only |
+| AC6 | The Configurator ships **unsandboxed**. It installs the CLI to `~/.local/bin`, writes `~/.config/eldr-acp`, spawns the local LLM client + shell tools, and pairs over the local network — all of which the App Sandbox forbids. Developer ID + notarization + hardened runtime is the Gatekeeper story instead (`entitlements` sets `com.apple.security.app-sandbox = false`). | app-only |
+| AC7 | Menu-bar presence uses a SwiftUI **`MenuBarExtra` scene**, not a hand-managed `NSStatusItem`. Same UX (status dot + quick actions) with no `AppDelegate` and clean `@StateObject` sharing. | app-only |
+| AC8 | `ContextLearner`'s "user edited a file the agent wrote → correction" rule is a heuristic: a `DispatchSource` vnode watch on the written path for a 15-min window. Any post-write modification yields a soft "prefer your version" note. Best-effort; not a precise diff. | tech-debt |
+| AC9 | **Bridge runtime boundary.** Standing up a full PQRC node in the Configurator (identity + prekeys published to a relay, then a live PQXDH pairing handshake with EldrChat over Multipeer) needs a second peer and the app's identity/session stack, so it is not headlessly verifiable. Implemented + tested: `NostrKeypair` generation and Keychain storage (SPEC §3.1 flags: `…WhenUnlockedThisDeviceOnly`, `synchronizable=false`), the QR pairing payload codec, `MultipeerNearbyLink` advertising, ACP-activity formatting, and the send path that emits `participant_type: .agent` (invariant 8) — all behind a `BridgeMessaging` seam. Production wires a `PQRCMessenger`-backed implementation into that seam; until paired, sends throw. | tech-debt |
+| AC10 | The ACP bridge service type is now a single source of truth — `MultipeerNearbyLink.bridgeServiceType = "eldr-acp"` — referenced by the Configurator advertiser (replacing a bare `"eldr-acp"` literal) so the two sides can't drift. It is **deliberately distinct** from `pqrc-local`: the bridge performs no `pqrc-local-hello` proof, so it must NOT join the paired-peer message mesh (an earlier framing called this a "mismatch to reconcile" — it is intentional separation). Both `_eldr-acp._tcp`/`_udp` are now declared in **both** Info.plists (the app's was previously missing it). **Working pairing path:** the QR / "Copy pairing link" / "Open in EldrChat" deep link (`pqrc:add?npub=…`), which transfers the agent npub and opens New Conversation. **Still pending (AC9 runtime wiring):** a live app-side `eldr-acp` browser + over-channel payload transfer for zero-touch auto-discovery — the Configurator currently advertises with `discoveryInfo: nil` and carries the pubkey only in the deep link, so auto-discovery needs both the browser and a payload exchange built. | app-only / tech-debt |
+| AC11 | iOS/macOS EldrChat changes are minimal + purely local (never broadcast, SPEC §0): `ContactRecord.contactType` (`"coding_agent"`), `ConversationVM.isCodingAgent`, a `wrench.and.screwdriver.fill` badge in `ConversationRow`, and `PersonaRuntime.contactType`/`setContactType`. Agent-message rendering (invariant 8) was already handled by `MessageBubble`, so no message-path change. The in-conversation header info-chip ("Coding session shared from <host>") was deferred to keep the change surgical. | app-only / tech-debt |
+| AC12 | `build-dmg.sh` (archive → export → notarytool → staple → hdiutil → codesign) requires a paid Apple Developer account (Developer ID cert + notarization creds via `APPLE_ID`/`APP_PASSWORD`/`TEAM_ID`). It is intentionally NOT part of CI and was not executed here; the script header documents the prerequisites. | tech-debt |
+| AC13 | The `--version` executable test spawns the **pre-built** binary; it must not run `swift build`/`swift run` from inside `swift test` (that deadlocks on the SwiftPM `.build/.lock` the outer run holds). Documented flow is `swift build` then `swift test`; a clean `swift test` skips that one spawn (a sibling test pins the version constant). | tech-debt |
+
+**Cardinal-rule resolutions (bridge):** the bridge shares **nothing** until the user
+pairs, picks a conversation, AND enables a per-message-type toggle (all OFF by
+default). The coding agent never self-activates — it is the user's own tool reporting
+their work, so no `ai_window` gate applies to its outbound messages (SPEC §13); the
+agent-authored `participant_type: .agent` label and the existing PQXDH/ratchet/gift-
+wrap stack are preserved unchanged (invariants 6, 8 intact).
+
+### Usable agent (Path 1) + PQRC watch-along bridge (Path 2)
+
+| # | Decision | Tag |
+|---|---|---|
+| AC14 | **`ACPClientDriver` — the reusable client half of ACP** added to `PQRCACP`. It spawns `eldr-acp` (or attaches to a provided handle pair for tests/the bridge), correlates positive-id requests, services the agent's outbound `session/request_permission` + `fs/*` requests via a `ACPClientHandler` (a struct of `@Sendable` closures, all permissively defaulted), and renders `session/update`s. The pipe reader uses `FileHandle.readabilityHandler` + a `@unchecked Sendable` line splitter (touched only by Foundation's single serial readability queue — justified, per CLAUDE.md). `start()` sets `signal(SIGPIPE, SIG_IGN)` (also added to `eldr-acp` main) so a peer that goes away mid-write surfaces a catchable error instead of killing the process. | app-only |
+| AC15 | **`eldr-acp-run` terminal client + `run-agent.sh`.** A new `.executable` product drives the agent by hand against real LM Studio + real files (REPL, streamed answer, tool/permission rendering, `--dir`, `--yes`, Ctrl-C cancels the in-flight turn). It does NOT advertise fs/terminal client capabilities, so the agent does its own Foundation/`Process` I/O directly (what a real-files runner wants); it still services `session/request_permission`, which the agent always issues. | app-only |
+| AC16 | **No-hang: per-request timeout + mid-turn cancel race.** `LLMConfig.requestTimeoutSeconds` (`ELDR_LLM_TIMEOUT_SECONDS`, default 120) sets the `URLSession`/`URLRequest` timeouts; `runTurn` additionally races each model call against that wall-clock backstop AND against `cancelledSessions` flipping (50 ms poll), so a wedged model → `.refusal` and an in-flight `session/cancel` → `.cancelled`, neither blocking on `complete`. | app-only |
+| AC17 | **Streaming final answer** (`ELDR_ACP_STREAM`, default on; off for echo/tests). `LLMClient.stream(…onDelta:)` has a default extension (one-shot `complete`, emit once) so mocks/tests need no change; `OpenAICompatibleLLMClient` implements SSE and the `StreamAssembler` buffers `delta.content` through `strippingReasoningTrace` so a `<think>` block never streams, and drops any `delta.reasoning_content` channel outright. Tool-call turns are never streamed. The bridge runs with streaming **off** on purpose (AC20). | app-only |
+| AC18 | **Two new tools — `edit_file` + `search`** — registered everywhere the tool surface is enumerated. `edit_file(path, old_string, new_string)` is exact-substring, permission-gated, and fails on absent/non-unique matches (range-based replace so a `new_string` containing `old_string` can't double-apply). `search(query, path?)` is a read-only, capped (`searchMatchCap = 200`) literal grep that prefers ripgrep and falls back to a Foundation recursive walk (skipping `.git`/`.build`/…); both emit `path:line:text` and a truncation note. **`read_file` backpressure:** `maxReadFileBytes` (`ELDR_ACP_MAX_READ_FILE_BYTES`, default 1 MB) stats first and streams a bounded prefix off disk for over-cap files instead of loading the whole thing into memory before trimming. | app-only |
+| AC19 | **`CredentialRedactor`** (in `PQRCACP`, where the bridge already depends for the driver). Pure/synchronous secret scrubber: OpenAI/Anthropic `sk-…`, AWS `AKIA…`, GitHub/Slack/Google tokens, `Bearer …`, `key=value` secret assignments, and high-entropy base64/hex runs → `‹redacted:api-key›`/`‹redacted:token›`. Conservative toward leaking (false positives only over-redact the **non-owner** copy, the privacy-maximizing failure, SPEC §0); the entropy rule requires a letter+digit mix so long words/paths aren't mangled. | app-only |
+| AC20 | **PQRC watch-along bridge — owner authority.** The plan's "authority = the owner's phone" + "owner sees raw, everyone else redacted." `AgentEngine` gains `isAuthorizedForOwner(_:threadID:)` (mirrors `authorizeAutonomousSend`/`activeWindow`, keyed on a pinned owner). The Configurator pins `ownerIdentityHex` (persisted plaintext at `<configDir>/owner`; authorization-relevant, not secret) via a new "Owner device" panel, routes inbound owner-signed windows/grants into an injected `AgentEngine` (rejecting any non-owner sender — never "first peer wins"), and fans an agent answer out per recipient: RAW to the owner's session, `CredentialRedactor.scrub(…)` to every other member. Each pairwise link is already separately encrypted, so divergent bodies are natural and only the owner's session carries the secret. Fail-closed: no owner pinned / no engine / no live owner window ⇒ no send. Streaming is deliberately **off** for the bridge — redaction must scrub a *complete* message (a secret split across deltas could evade the scrubber). | app-only |
+| AC21 | **Owner-binding hardening deferred (§13.5 endpoint model).** The Mac signs its watch-along messages with its **own** device-bound agent key and labels them `participant_type: .agent` (invariants 8/§13.5 satisfied — no key exported); its autonomy is gated by the pinned owner's live window. Making the message cryptographically *the owner's* agent (inference on the Mac → draft returned to the owner's phone → signed there → fanned out from iOS) is strictly additive and out of scope. | app-only |
+| AC22 | **Production wiring of the runner + owner-authority engine (narrows AC21).** `ACPBridgeService.configureProduction()` (called from `enable()`, idempotent, test-double-preserving) stands these up in the live app: the `BridgeAgentRunner` is an `ACPDriverAgentRunner` over the resolved executable (installed launcher → installed binary → app-bundled, `resolveAgentExecutable`, unit-tested), and the owner-authority `AgentEngine` is built with a fresh `PQRCIdentity`. A throwaway identity is correct **and needs no Keychain persistence** because the owner-gate path (`receiveWindow`/`isAuthorizedForOwner`) keys on the *owner's* identity and never reads the engine's own — verified by `configureProductionWiresWorkingOwnerEngine` (no engine injected; a genuine owner-signed window opens the gate and the fan-out diverges owner-vs-others). Redaction is robust to streaming: the runner accumulates ALL `agent_message_chunk`s and scrubs the COMPLETE answer, so a secret can't slip through split deltas even if the launcher's env re-enabled streaming (it still sets `ELDR_ACP_STREAM=0` to avoid the overhead). | app-only |
+| AC23 | **Remaining bridge runtime boundary (was AC9/AC21).** Narrowed to two pieces that genuinely need a second peer + the app's session stack, so they aren't headlessly verifiable: (1) a live `BridgeMessaging` (a `PQRCMessenger`-backed implementation — identity + prekeys published, a PQXDH pairing handshake, the ratchet) injected via `setMessaging`; and (2) the inbound receive path — `handle(linkEvent:)`'s `.data` case decoding a PQRC payload and dispatching it to `receiveOwnerWindow`/`receiveOwnerContextGrant` (ai_window/grant) or `handleInboundPrompt` (a human message). Everything those would call is implemented and unit-tested against spies/stubs; only the decode-and-dispatch glue and the messenger remain. | tech-debt |
+| AC24 | **§13.5 endpoint hardening — agent message is cryptographically the OWNER's agent.** Design: `docs/WATCH-ALONG-ENDPOINT-PLAN.md`. The Mac drafts privately to the owner's phone; the phone redacts + voices to the group signed with the owner's agent key, so the raw secret never transits a non-owner link and the message binds to the owner (§3.3), not the Mac. The owner's identity key never leaves the phone (invariant 10) — signing happens phone-side, which is *why* this is an endpoint round-trip. Built + headless-tested across layers: **wire** `MessageBody.agentDraft: AgentDraft{agentName,voiceInto,threadID}` (PQRCCore, Codable round-trip + unknown-field tolerance); **redactor moved** PQRCACP→PQRCCore (shared by Mac + engine + iOS; PQRCACP stays dependency-free; CLI never used it); **engine** `AgentEngine.voiceAgentDraft` + `AgentMessageSink.postAgentDraft` (owner-window-gated, scrub-in-engine so the wire copy can't be unscrubbed, raw handed to the sink only for the owner's local view); **Mac** `WatchAlongMode {.direct,.endpoint}` (default `.direct` — it works in 1:1 AND group and is what the first live demo exercises; `.endpoint` is the hardened path and only makes sense in a GROUP, since a 1:1 has no group to voice into) — endpoint sends the full answer to the owner only with the draft marker, no Mac-side redaction/fan-out; **iOS** `PersonaRuntime.handleReceived` detects a draft from a `coding_agent` contact → `voiceCodingAgentDraft` → `engine.voiceAgentDraft` → `RuntimeSink.postAgentDraft` → `sendMessage(localTextOverride: raw)` (wire redacted, owner's local echo raw); window-off ⇒ fail closed + a local-only "turn on your AI window" note. Pairing tags the contact: the Configurator deep link gains `&type=coding_agent`, parsed by `handleDeepLink`→`NewChatView`→`setContactType` (only `coding_agent`-tagged contacts are voice-trusted — closes the inject-as-owner hole). `.direct` mode (AC20) stays intact as the verified fallback. **Live two-device behavior is gated on AC25** (the Mac→phone messaging seam, now built). | app-only |
+| AC25 | **Mac PQRC node — the live messaging seam (closes AC23).** The Configurator now stands up a real `PQRCMessenger` so "Pair with EldrChat" actually resolves the agent's keys. `ACPBridgeService.startMessagingNode` (from `enable()`) mirrors `PersonaRuntime.bootstrap`: load/persist a `PQRCIdentity` + `identity-dh` + `PrekeyManager` in the Keychain (under the SAME Nostr key the QR advertises, so `fetchVerifiedPeer(npub)` resolves us), build a `NostrWebSocketTransport(wss://relay.lerants.com)` (NIP-42 AUTH handled inside `messenger.start()`), `announce()` the 10420/10421, and inject a `PQRCMessengerMessaging` as the live `BridgeMessaging`. The event pump auto-accepts message-requests (the user initiated pairing from their phone), routes owner-signed windows/grants into the engine, and turns inbound human messages into watch-along prompts (`handleInboundPrompt`). The owner-authority `AgentEngine` now uses this device-bound identity. v1 keeps sessions in-memory (a Mac restart ⇒ re-pair); identity/prekeys persist. **`ELDR_PCC_SDK` scoped to iOS** in PQRCAgent's `Package.swift` (`.when(platforms: [.iOS])`): Apple PCC is iOS-only and the macOS Configurator uses local LLMs, so the Mac build no longer needs (or compiles) the PCC symbols — fixing a hard build break on the Xcode 27.0 macOS seed and decoupling the Configurator from PCC-SDK churn (~~iOS keeps full PCC; build the iOS app with Xcode-beta as before~~ **→ superseded by AC36, 2026-06-20: the iOS `ELDR_PCC_SDK` define broke the iOS app build because the PCC symbols are absent from the installed iOS 26.5 AND 27.0 SDKs; the define was removed and PCC is OFF by default per A40**). **Pairing moved to Settings** (a "Mac coding agent" section), per user feedback that a persistent device relationship doesn't belong in New Chat. Verified: Configurator builds on Xcode.app AND Xcode-beta; iOS builds on Xcode-beta; all package suites green. The real-relay two-device pair is the manual test. | app-only / tech-debt |
+| AC26 | **Security audit + Phase-0 hardening (C-3, confused-deputy RCE — fixed).** A 4-agent audit of the ACP-router plan + code preceded this. **C-3 (Critical):** `ACPBridgeService.handleMessengerEvent` turned ANY inbound human message into an agent prompt; the only gate (`ownerAuthorized`) checked that the owner's `ai_window` was open, NOT that the *sender* was the owner — so in a group with the owner's window live, a different member's message ran `run_shell`/`xcodebuild` on the node (confused-deputy → RCE). Fixed by threading `senderIdentityHex` into `handleInboundPrompt` and failing closed unless `sender == ownerIdentityHex` (both watch-along modes; the `.endpoint` path was previously ungated entirely). Regression test `nonOwnerPromptIsRejected`; watch-along suite green (xcodebuild). | app-only |
+| AC27 | **C-1 (Critical) — ACP permission gate now fails closed.** `ACPAgent.requestPermission` returned ALLOW on any transport error and defaulted to allow when a client couldn't prompt, and `ClientConnection.request` had no timeout (a non-responding client hung the turn). A network-exposed `run_shell`/`write_file` gate that fails open is RCE. Now: `ClientConnection.request(timeout:)` resumes the awaiter with `.timedOut` (continuation cleaned up, no leak); `requestPermission` is time-bounded (`AgentConfig.permissionTimeoutSeconds`, default 120s) and any non-grant — deny, timeout, transport error, unimplemented — is a DENIAL. `ELDR_ACP_ALLOW_UNGATED_TOOLS` restores allow-by-default for a trusted local client that genuinely can't prompt (explicit operator risk acceptance). `authMethods: []` (no ACP-transport auth) left as-is — the real transport auth is the PQRC identity at the node (Phase 1). Tests: silent client → write_file denied; opt-in → allowed. | app-only |
+| AC28 | **C-2 (High) — file tools jailed to the working directory.** `ToolExecutor`'s `read_file`/`write_file`/`edit_file`/`list_dir`/`search` resolved any absolute or `../` path verbatim (read `~/.ssh`, overwrite `~/.zshrc`/launchd). New `ToolExecutor.jailedPath` canonicalizes (resolve symlinks, then `..`) and returns nil for anything outside the session workdir; each tool returns a tool error on escape. `run_shell` stays the deliberate, permission-gated (C-1) escape hatch and is NOT jailed. Tests: absolute-escape, `../` traversal, symlink-out rejected; relative/absolute in-jail allowed. PQRCACP green (141 tests). | app-only |
+| AC29 | **C-8 (High) — LLM token moved to the Keychain (user decision over `chmod 0600`).** `ELDR_LLM_TOKEN` was written cleartext to `~/.config/eldr-acp/env` at the umask (commonly 0644, world-readable on a multi-user Mac). Now `ConfigurationStore` stores/loads it in the Keychain (`WhenUnlockedThisDeviceOnly`; injectable service for test isolation) and never writes it to the env file; `writeFile` chmods all config files 0600; `ACPBridgeService.llmTokenEnvironment()` injects it from the Keychain into the agent's environment when the Configurator spawns the launcher; the launcher reads it via the `security` CLI for external clients (Xcode/OpenClaw — may prompt once; integration-only, NOT unit-verified). Legacy env-file tokens migrate to the Keychain on next save. Tests: token absent from env file, env 0600, Keychain round-trip + reload; watch-along suite still green. | app-only |
+| AC30 | **Deferred audit items (C-5, C-6) — tracked, not done.** **C-5 (High, nearby-relay AUTH allowlist):** `NearbyRelayHost` AUTHs any validly-signed key (a stranger in radio range can self-AUTH, publish to the store, or spend the host's AI). The library gate (an `authorize` predicate + an `.event` publish gate) is simple, but the real benefit needs the host's silo verified-contacts list, which isn't available at `PQRCApp.makeRelayTransports`; it belongs with the Phase-1 node/contact wiring (mesh content stays E2E-encrypted regardless). **C-6 (High, redact agent stdout / events-log / logfile at rest):** the events JSONL records `run_shell` commands + result prefixes in `ACPAgent`/PQRCACP, which is deliberately dependency-free (no PQRCCore/`CredentialRedactor`, per AC24); scrubbing it needs a vendor-vs-dep decision — the same shared-scrubber question as the MCP-redaction port (P-7/G5). Events log is opt-in (`ELDR_ACP_EVENTS_FILE`) and on the user's own Mac. Both deferred to Phase 1. | tech-debt |
+| AC31 | **At-rest key storage returns to SPEC §3.4 (Secure-Enclave hardware wrap) — supersedes the passphrase-silo deviation.** Full tradeoff analysis in the **"At-rest key storage (AC31)"** section below. One-line: `439a8f0`'s deniable-silo feature replaced §3.4's SE-wrap with a passphrase-derived KEK (PBKDF2, **fixed** salt) that is offline-brute-forceable from a stolen-phone disk image — a regression from the SPEC and invariant 10. Reverted to per-account **secure-element** wrapping (Secure Enclave on Apple; platform-equivalent elsewhere) with **optional** user passphrase + biometric chosen at setup. Proven crypto only (§2 forbids invented primitives, so the un-traceable "device-SE-mixed-KDF" idea was rejected). Accepted cost: hardware-binding leaves a per-account on-disk trace ⇒ forensic count/coercion-deniability is **reduced** (duress/decoy covers a live coercer, not a forensic imager). Needs the SPEC §15.4 security review before shipping to high-sensitivity users. | app-only |
+| AC33 | **Relay-carried ACP path (Phase 3) — drive the Mac node's FULL ACP agent from anywhere over the relay.** Beyond local Multipeer (`ACPNodeHost`) and watch-along drafts (AC24/AC25), the phone now drives a remote node's complete ACP protocol over the Nostr relay. `RelayACPTransport` (PQRCNostr) carries each ACP line as a framed, chunked body over the existing gift-wrapped + Double-Ratcheted mesh — the relay sees only the SAME E2EE ciphertext a chat carries (SPEC §2, no new crypto). Envelope `ACP1\|<lineId>\|<seq>\|<total>\|<b64url>`; reassembles multi-chunk lines AND restores **inter-line order** from a monotonic per-send index (a relay delivers each line as a separate unordered event, but ACP is a stream — a content `session/update` must precede its `end_turn` or the turn finalizes empty; this was a real wire-ordering bug found+fixed here, not a test artifact, with two deterministic tests + a 3× under-contention proof). **C-3 is the only intake authorizer, fail-closed**: a frame drives the agent ONLY when `isACPFrame(body) && sender == ownerIdentityHex` (node `ACPRelayHost.routeInbound`; phone `PersonaRuntime.isConsentedCodingAgentNode`) — a non-owner's byte-perfect, decrypting frame is dropped. The node never sets `allowUngatedTools` (C-1 stays the tool authorizer; the C-2 cwd jail stands). Remote dev-control is **OFF by default**, per-node, per-silo (`AppSession.remoteDevControlConsent`); the path is fully inert until the owner opts in (privacy #1). Proven headlessly E2E over `LocalRelaySimulator` between two real messengers (prompt round-trip, jailed write, C-3 drop of a verified non-owner, P-8 no-key-bytes canary) + a phone runtime suite. **Live two-device + real-relay (relay.lerants.com) remain the manual test.** | app-only |
+| AC34 | **Intelligent task routing — `CapabilityRoutingPolicy` (Phase 3: "task-type → engine is a policy swap").** The Phase-2 `AISelectionPolicy` seam gains a concrete task router: route the draft engine (primary) + the autonomous participant set to an AI whose declared `routingCapabilities` cover a scope's REQUIREMENT — e.g. a coding conversation uses the `acp` Mac node, ordinary chat stays on-device. **Privacy (SPEC §0): routes ONLY on explicit signals** — per-AI capabilities + a host-supplied scope→requirement classifier (`byConversation:` map / closure) — and NEVER reads message CONTENT to infer a task (that would mean inspecting plaintext to make a routing call). Deterministic; fail-safe (no matching engine ⇒ default first / all-autonomous, never a stranded request or a zero-participant turn). `primary` gains conversation scope; `DefaultAISelectionPolicy` ignores it (exact old behavior). **NOT auto-enabled** — the runtime default stays `DefaultAISelectionPolicy`; a host opts in via `setAISelectionPolicy(CapabilityRoutingPolicy(...))`, because silently changing which engine handles a user's drafts/turns is a behavior change the user should choose. PQRCAgent tests green (5 routing cases). | app-only |
+| AC35 | **Standalone `eldr-node` (Phase 4) — run the host on another machine.** A new self-contained SPM package `Packages/EldrNode` (macOS-only — `runACPAgent`/`ToolExecutor` spawn `Foundation.Process`): the headless, no-SwiftUI/no-`@MainActor` equivalent of the Configurator's `ACPRelayHost`+`ACPBridgeService`. `EldrNodeCore.serve(messenger:ownerIdentityHex:…)` (reusable, dependency-injected behind a `NodeMessenger` seam) builds a `RelayACPTransport`, runs `runACPAgent` in a child task, and is the SOLE consumer of the messenger's event stream — applying the **same C-3 gate** as the relay path (`routeInbound`: admit a body to the agent ONLY when `isACPFrame(body) && sender == ownerIdentityHex`; `config` passed through, `allowUngatedTools` never set; C-2 jail = `toolEnvironment.workdir`). The `eldr-node` daemon loads/creates its PQRC identity from the macOS Keychain (`WhenUnlockedThisDeviceOnly`, bytes never logged), dials `NostrWebSocketTransport`, announces, serves, and parks (clean SIGINT); `--owner` is REQUIRED (fail-closed exit 2 — no owner ⇒ no one may drive the agent); model via the same `ELDR_LLM_*` env the launcher uses; status output is hex-PREFIXES only (no secrets/payloads). No new dependencies (path deps on PQRCCore/PQRCNostr/PQRCACP only). Verified GREEN on my run: `swift build` clean + `swift test` 3/3 — a full owner ACP turn + a `write_file` that stays in the C-2 jail (an out-of-jail escape target asserted absent); **C-3 non-vacuous** (Mallory, a verified contact whose handshake the node provably DECRYPTS — polled via `hasSession` — sends a byte-perfect `session/prompt` ⇒ 0 agent turns + no write; the owner's identical prompt DOES run, proving the gate filters by identity, not by refusing all traffic); + the gate predicate in isolation. **Follow-ups (documented, not built):** a Linux/Pi host has no macOS Keychain (a hardened file-keystore is a separate deliverable); and the node identity uses plain `WhenUnlockedThisDeviceOnly` like the Configurator today, NOT yet the Secure-Enclave envelope wrap AC31 brought to iOS (an invariant-10 parity item for the Mac-node path — not a regression, matches the shipped Configurator). | app-only |
+| AC36 | **iOS app build was broken by two package-manifest defects (found + fixed in the 2026-06-20 end-to-end audit; see `statusreport.md`).** The package unit suites stayed green (379 tests) because `swift test` builds for **macOS**, hiding that `xcodebuild` for the iOS simulator FAILED. Two stacked, config-only defects (not app code): **(1)** `Packages/PQRCACP/Package.swift` declared no iOS platform floor (`platforms: [.macOS(.v14)]` only, tools-version 6.0), so SwiftPM linked it into the iOS app at a pre-iOS-13 baseline → `AsyncStream`/`Task`/`CheckedContinuation` "only available in iOS 13.0 or newer" (commit `0604448` guarded the node-side `Process` code but never set the deployment target). **Fix:** `// swift-tools-version:6.2` + `platforms: [.iOS(.v26), .macOS(.v14)]` (matches every sibling). **(2)** `Packages/PQRCAgent/Package.swift` force-defined `ELDR_PCC_SDK` for all iOS builds (`.define(…, .when(platforms: [.iOS]))`, the AC25 macOS-fix overreaching), referencing `PrivateCloudComputeLanguageModel`/`ContextOptions` — types absent from BOTH the installed iOS 26.5 and 27.0 SDKs (verified: both builds fail identically), contradicting A40's "OFF by default, symbols absent even in the 27.0 seed." **Fix:** removed the auto-define (PCC OFF, opt-in only). **Result:** `xcodebuild build -scheme EldrChat -destination 'iOS Simulator,iPhone 17,OS=26.5'` → BUILD SUCCEEDED, 0 errors; PQRCACP 160/160 + PQRCAgent 53/53 still green. **Action item:** add the iOS app build to CI (`swift test` alone will keep hiding this). Related open finding (not fixed here): the ACP cancel-vs-permission ordering is an intermittent fail-open (1/5 runs) — see `statusreport.md` §2.2. | tech-debt |
+
+---
+
+## At-rest key storage (AC31) — return to SPEC §3.4
+
+**Decision (2026-06-19, owner-directed).** Revert the deniable-silo at-rest key model (`439a8f0`) back to SPEC §3.4 — **hardware-wrap every account's key material with the device's secure element** — because the silo model traded away §3.4's hardware root for a passphrase-derived KEK that is **offline-brute-forceable from a stolen device**. This re-aligns the code with both the SPEC and invariant 10.
+
+### Why (grounded in the SPEC the owner re-read)
+- **§2 forbids invented crypto:** *"No custom cryptographic primitives are defined or permitted. PQRC composes vetted building blocks; it does not invent them."* → the clever "single device-wide SE secret mixed into every account's KDF" design (which *would* hardware-bind hidden accounts with no per-account trace) is a **novel composition** and was **rejected** on these grounds.
+- **§2 + §3.4 mandate the Secure Enclave at rest:** §2's primitive table lists *"Key wrapping (at rest) | Secure Enclave P-256"*; §3.4: *"All long-term secret material … is encrypted at rest using a P-256 wrapping key generated in and bound to the Secure Enclave … non-exportable hardware-bound."* The silo change deviated from this; the code had been **violating invariant 10** ever since (the SE path was dead in production — `PersonaRuntime.masterKeyWrapper()` returned the passphrase `SoftwareKeyWrapper`).
+- **The concrete vulnerability:** `SiloKey.derive` used PBKDF2-HMAC-SHA256, 600k iters, a **fixed app salt**. An attacker with a disk image / forensic extraction can mount a fully offline, GPU/ASIC dictionary attack on the passphrase — no device, no rate limit. A weak/memorable passphrase falls in seconds–days. `WhenUnlockedThisDeviceOnly` does **not** prevent this once the raw blob is extracted.
+
+### The new model
+- **Hardware root, always:** each account's key material is wrapped by the device's secure element — **Secure Enclave** on Apple platforms (iOS *and* modern/Apple-silicon + T2 Macs), the **platform-equivalent hardware keystore** (Android StrongBox, Windows TPM) on future ports, and a **hardened-passphrase KEK only** where no secure element exists (security-conscious users choose hardware-backed devices — surfaced honestly).
+- **Optional, user-chosen at account setup:** a **passphrase** (layered *under* the hardware wrap, so even an unlocked stolen device needs it for that account) and/or **biometric** (Face ID / Touch ID) unlock. SE-only(+biometric) = max convenience; SE+passphrase(no biometric) = max security (must type it).
+- **Two account shapes (implemented 2026-06-19 in `AccountVault` + `AppSession`/`SiloKey`):** at setup the user chooses one of —
+  - a **passphrase-less DEFAULT account** (at most one per device): a random SE-wrapped key opened on Face ID / device unlock, at the fixed namespace `"default"`. The convenient *personal* account; **openly present** on the device (not deniable — it's the one you're not hiding). Created via `createDefaultAccount(displayName:enableBiometric:)`.
+  - any number of **passphrase-gated HIDDEN accounts**: the passphrase derives *only* the opaque namespace (`SiloKey.siloID(for:)`, deniable — a wrong passphrase ≡ a non-existent account) while the random SE-wrapped key is nested *under* the passphrase (`AccountVault.create(unlock:.passphrase)`). The Fort-Knox work account is one of these: SE + passphrase = two factors, un-brute-forceable, hidden.
+  - **Biometric is restricted to the DEFAULT account** — caching a hidden account's key behind Face ID would reveal it exists, so `enableBiometricUnlock()` refuses any non-default silo (deniability). Confidentiality no longer rests on passphrase entropy (the SE wrap does), so the passphrase-derived namespace is only a deniable *selector*, not a brute-force surface.
+- **Separation (the owner's "Grand Canyon"):** each account is its own silo — separate random key, separate SE wrap, separate encrypted store, **zero shared key material**; cross-contamination is cryptographically impossible.
+- **Quantum:** unchanged and uncompromised — the at-rest wrap (SE P-256 / hardware keystore) is a **local** operation with no harvest-now-decrypt-later exposure; the **wire** stays ML-KEM-768 / X-Wing / PQXDH per §4–6. The passphrase layer (when present) sits *under* the SE wrap, so a standard PBKDF2 KDF suffices (brute-forcing it requires the non-exportable SE anyway) — **no new crypto dependency** (Argon2 not needed; CryptoKit "no other crypto deps" pin honored).
+
+### Threat model — old vs new
+| Adversary | OLD (passphrase-KEK, fixed salt — `439a8f0`) | NEW (§3.4 secure-element wrap) |
+|---|---|---|
+| **Coercion** (forced to unlock) | strong (deniable silos: wrong passphrase ≡ no account) | **partial** — duress/decoy passphrase covers a *live* coercer; accounts are traceable to a *forensic* imager |
+| **Thief, LOCKED phone** | passcode-dependent, then offline-brute-forceable | **strong** — SE key non-exportable, gated by device unlock |
+| **Thief, UNLOCKED phone** | game over | game over (a passphrase-protected account still needs its passphrase unless biometric is caching it) |
+| **Disk image / backup** (no live SE) | **WEAK — fully offline brute-forceable** | **STRONG — non-exportable SE key absent ⇒ cannot unwrap off-device, even with the correct passphrase** |
+| **Malware running as the app** | no protection | no protection (app-level auto-lock/re-auth is the lever — separate, currently thin) |
+
+### What we gain / give up
+- **Gain:** Fort-Knox against theft / break-in / brute-force / disk-image extraction (the owner's #1, the medical-data/enterprise use-case); re-adherence to §3.4 + invariant 10; cross-platform proven crypto.
+- **Give up:** the silo's **forensic** count/coercion-deniability — hardware-binding leaves a per-account on-disk artifact, so a forensic imager can see *that* accounts exist (and how many). The owner **explicitly accepted** this ("not at the sacrifice of actual encrypted security"; "if you have the app installed you have ≥1 account"). The proven ceiling for *forensic* coercion-resistance is a **separate physical device** for the high-sensitivity account — no software gives cryptographic unprovability **and** hardware-binding at once (that was the rejected, SPEC-forbidden, design).
+- **Coercion-resistance** is retained as a **UX layer**: the duress/decoy passphrase (A25) lets a coerced user reveal a plausible account while keeping another's passphrase secret — effective against a coercer who makes you unlock, **not** against forensic imaging.
+
+### Relationship to A23–A26 (the deniable silos)
+The **silo separation** (A23) is KEPT — it's how the work/personal accounts stay cryptographically isolated. What changes is the **basis of each silo's key**: random + SE-wrapped (+ optional passphrase/biometric) instead of passphrase-derived. The silo's **forensic count-deniability (A26)** is reduced (see threat table) — accepted, security-first. The **duress/decoy (A25)** is kept as the coercion-resistance layer. The **biometric tier (A24)** is generalized into the per-account setup choice.
+
+### Migration
+**None — pre-launch wipe (owner-directed, 2026-06-19).** There are no real users yet, so the passphrase-silo `migrateLegacyAccount` path and the legacy `chat.pqrc.keys` account are **removed**, not migrated. A fresh install creates accounts directly under the new model; `--reset` wipes the default silo service, the biometric service, and all stores. (If a pre-launch tester has an old install, they re-create their account.)
+
+### Open items (do NOT mark "done" until these close)
+1. **SPEC §15.4 security review** — this is the at-rest crypto guarding medical-grade data; the full silo-KEK restructure + migration MUST get the SPEC's security-review pass before shipping to real high-sensitivity users. I implement and test it; I do not declare it production-safe unreviewed.
+2. **Count-obfuscation / hidden-volume — RESOLVED: do NOT build (owner's "boondoggle" lean confirmed by analysis).** Against **coercion** (the dominant threat) hiding *N* gives ≈zero benefit — the deniability paradox / iteration attack means a coercer demands "all accounts" regardless of the count, and the duress/decoy passphrase (A25) already lets a user reveal one plausible account while withholding another; a bespoke count-hider is itself a suspicious capability that can *invite* "how many more?" coercion. Against **forensics** it's defeated by our own direction: a per-account Secure-Enclave-wrapped key is an **enumerable Keychain row** (records persist in a forensic image even when undecryptable), so the per-account SE model we're adopting *itself* reveals the count — a file-level hidden volume would be pointless, and a multi-snapshot imager defeats even a max-N-padded pool (write-only ORAM over Keychain writes is infeasible on iOS). You cannot have both per-account SE-wrap and count-hiding. **Decision:** keep the per-account SE model, accept the count trace, **drop the Phase-2 pooled store (A26) from the roadmap**, and document the limit honestly in `THREAT_MODEL.md` — *"the app's presence proves ≥1 account; the account count is recoverable from a full forensic image; deniability protects each account's contents and the passphrase→data mapping, not the count."*
+3. **Unlocked-stolen-device + in-process-malware** — defended by **no** wrap design; the lever is app-level (auto-lock on background, re-auth on foreground), currently thin. Tracked separately.
+4. **Cross-platform secure elements** (StrongBox/TPM) are design targets; only Apple Secure Enclave is built today (iOS + Mac).
+
+## Per-chat egress firewall override (AC32)
+
+**Decision (2026-06-20, owner-directed).** The egress firewall — which redacts real names (and bounds size) before a conversation's context reaches a REMOTE cloud AI — is now overridable **per conversation**, not just per account.
+
+- **Why.** The product's core use-case is a private, paired chat between the user's OWN devices/agents (iPhone ↔ Mac ↔ their robots) passing data — including keys — back and forth. Blanket-redacting that path would cripple it. But the firewall must stay ON for a chat where a third party you've enabled can reach your AI (so they can't turn it against you to harvest secrets). The system must not guess which case a chat is — the **user sets the trust boundary per chat.**
+- **Model.** `AppSession.conversationFirewall(convID)` → `nil` (inherit the account default `firewallEnabled`, which defaults ON) | `true` (redact) | `false` (raw). Resolved at the single egress site (`PersonaRuntime.contextFor`). Default stays ON (privacy-first); an override only ever *relaxes* a chat the user explicitly trusts. Only affects a REMOTE AI (`appliesEgressFirewall`); on-device AI never egresses.
+- **Distinct from C-6 (AC28, ACP at-rest log redaction).** Two separate controls, never conflated: C-6 always scrubs secrets from the Mac node's on-disk diagnostic logs and NEVER touches the data channel; the egress firewall is the per-chat-togglable control on what a remote AI *sees*. Both scope to the user-set trust boundary; neither blanket-redacts the owner / private-paired delivery path.
+- **Surfaced a silently-red test.** The firewall unit tests set `isRemote:true` but not `appliesEgressFirewall:true`; since the PCC split of those fields the redaction guard short-circuited, so `firewall_redactsRealNamesForRemoteAI` had been **silently failing** — undetected because CI pointed at the renamed project and never ran the app suite. Fixed (set the flag); the CI repoint closes the detection gap.

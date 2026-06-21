@@ -173,4 +173,51 @@ struct SecuritySuiteTests {
         #expect(wrapped != master)
         #expect(try wrapper.unwrap(wrapped: wrapped) == master)
     }
+
+    /// G3 (HIGH), invariant 10 / DEVIATIONS AC31: proves the at-rest master key
+    /// is genuinely Secure-Enclave-bound, not silently software-wrapped, when an
+    /// SE is present. DEVICE-ONLY: `SecureEnclave.isAvailable` is always false on
+    /// the Simulator/CI, so this no-ops to green there; the real assertions run
+    /// only on hardware with a Secure Enclave.
+    @Test func seWrappedBlob_isNotSoftwareUnwrappable_whenSEPresent() throws {
+        guard SecureEnclave.isAvailable else { return }  // no-op on the Simulator
+
+        let keychain = KeychainStore(service: "chat.pqrc.test-se")
+        defer { keychain.deleteAll() }
+        keychain.deleteAll()  // start from a clean slate (no stale SE/software keys)
+
+        let wrapper = SecureEnclaveKeyWrapper(keychain: keychain)
+        let master = SystemRandomSource().bytes(32)
+        let wrapped = try wrapper.wrap(masterKey: master)
+
+        // (a) The SE blob does NOT decrypt under a freshly-derived software KEK.
+        // A software wrapper holds an unrelated 32-byte key; opening an SE/ECIES
+        // blob with it must fail (wrong key AND the 65-byte X9.63 prefix makes
+        // the combined-box parse land on the wrong ciphertext/tag).
+        let freshSoftwareKEK = SystemRandomSource().bytes(32)
+        let software = SoftwareKeyWrapper(
+            keyEncryptionKey: freshSoftwareKEK, nonceSource: SystemNonceSource())
+        #expect(throws: PQRCError.keyWrapFailure) {
+            _ = try software.unwrap(wrapped: wrapped)
+        }
+
+        // (b) No software-KEK fallback item was written during an SE-path wrap.
+        // (Account string mirrors `SecureEnclaveKeyWrapper.softwareKEKAccount`.)
+        #expect(
+            !keychain.contains(account: "software-kek-fallback"),
+            "SE-path wrap must not create a software KEK (invariant 10)")
+
+        // (c) The blob has the SE/ECIES shape: a 65-byte X9.63 uncompressed
+        // ephemeral public key prefix (leading 0x04), then the AES-GCM box —
+        // strictly larger than a bare software AES-GCM blob of the same payload.
+        #expect(wrapped.count > 65, "SE blob carries the X9.63 ephemeral key prefix")
+        #expect(wrapped.first == 0x04, "X9.63 uncompressed-point indicator")
+        let softwareBlob = try software.wrap(masterKey: master)
+        #expect(
+            wrapped.count > softwareBlob.count,
+            "SE blob is larger than the software blob by the 65-byte ephemeral key")
+
+        // The genuine SE path still round-trips.
+        #expect(try wrapper.unwrap(wrapped: wrapped) == master)
+    }
 }

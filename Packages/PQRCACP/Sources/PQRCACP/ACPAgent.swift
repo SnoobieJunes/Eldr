@@ -1,5 +1,13 @@
 import Foundation
 
+// NODE-SIDE (macOS only): the AGENT half of ACP. It runs the tool-calling loop and
+// executes file/shell tools via `ToolExecutor` (which spawns `Process`), so it only
+// runs on the Mac node. The iOS app drives a remote agent over an `ACPTransport` via
+// `ACPClient`/`ACPClientDriver` and never instantiates the agent itself, so this whole
+// type is guarded off the iOS-compiled `PQRCACP` library. The one wire constant the
+// client path needs (`protocolVersion`) lives on `ACPClientDriver` (iOS-available) and
+// is mirrored here so macOS keeps a single source of truth.
+#if os(macOS)
 /// EldrChat's ACP agent. An ACP CLIENT (Xcode 27) spawns it over stdio and drives
 /// it with JSON-RPC: `initialize` → `session/new` → `session/prompt`. On a prompt
 /// the agent runs a tool-calling loop against a local LLM, streaming `session/update`
@@ -13,13 +21,37 @@ import Foundation
 public actor ACPAgent {
     public static let agentName = "eldr-acp"
     public static let agentVersion = "0.1.0"
-    /// ACP MAJOR protocol version we speak (a single integer; see spec).
-    public static let protocolVersion = 1
+    /// ACP MAJOR protocol version we speak (a single integer; see spec). Defined on the
+    /// iOS-available client driver so the phone path can reference it without pulling in
+    /// this macOS-only agent; mirrored here to keep the agent's call sites unchanged.
+    public static let protocolVersion = ACPClientDriver.acpProtocolVersion
 
     private let connection: ClientConnection
     private let llm: any LLMClient
     private let toolEnvironment: ToolEnvironment
+    private let config: AgentConfig
+    /// Config dir used to auto-discover a project's `eldr.md` when no explicit
+    /// `ELDR_ACP_CONTEXT_FILE` is set. Injected (not hard-coded to ~/.config) so
+    /// unit tests stay home-directory-free — pass `nil` to disable auto-discovery.
+    private let configDir: String?
     private let maxIterations: Int
+    /// Stream the final answer to the client token-by-token (`agent_message_chunk`
+    /// per delta) instead of one message at end-of-turn. Tool-call turns are never
+    /// streamed (they produce no visible text). Off for echo/tests via `ELDR_ACP_STREAM`.
+    private let streamingEnabled: Bool
+    /// Wall-clock backstop for a single model call: `runTurn` races each completion
+    /// against this so a wedged model (or one that streams forever) ends the turn
+    /// instead of hanging. Mirrors `LLMConfig.requestTimeoutSeconds`.
+    private let requestTimeoutSeconds: Double
+    /// The advertised, executable skills (ACP slash-commands). Derived from config
+    /// once at init; empty when skills are disabled.
+    private let skills: AgentSkillSet
+    /// Optional external context manager (contextgraph). nil → local sliding-window
+    /// budgeting only. When present and healthy, it assembles prior context per
+    /// turn and learns each completed turn; any failure falls back to local.
+    private let contextGraph: (any ContextGraphAssembling)?
+    /// Cached `contextGraph.health()` result (checked once, before first use).
+    private var contextGraphHealthy: Bool?
 
     /// Negotiated at `initialize`. Defaults to "everything off" until then (so a
     /// stray prompt before initialize still works via Foundation fallbacks).
@@ -29,17 +61,40 @@ public actor ACPAgent {
     private var sessionCounter = 0
     /// Sessions the client asked to cancel; the turn loop checks this and bails.
     private var cancelledSessions: Set<String> = []
+    /// Per-session project context (eldr.md contents), resolved at session/new and
+    /// prepended to the system prompt on every turn of that session.
+    private var sessionContext: [String: String] = [:]
+    /// Per-session count of files written (for the session_end event's `files`).
+    private var sessionWriteCounts: [String: Int] = [:]
+    /// Per-session last observed build result ("green" | "red" | "unknown"), updated
+    /// whenever a run_shell command looks like a build/test (for `session_end.build`).
+    private var sessionBuildStatus: [String: String] = [:]
 
     public init(
         connection: ClientConnection,
         llm: any LLMClient,
         toolEnvironment: ToolEnvironment = .fromEnvironment(),
-        maxIterations: Int = 20
+        config: AgentConfig = .fromEnvironment(),
+        configDir: String? = AgentConfig.defaultConfigDir(ProcessInfo.processInfo.environment),
+        maxIterations: Int = 20,
+        streamingEnabled: Bool = true,
+        requestTimeoutSeconds: Double = 120,
+        contextGraph: (any ContextGraphAssembling)? = nil
     ) {
         self.connection = connection
         self.llm = llm
         self.toolEnvironment = toolEnvironment
+        self.config = config
+        self.configDir = configDir
         self.maxIterations = maxIterations
+        self.streamingEnabled = streamingEnabled
+        self.requestTimeoutSeconds = requestTimeoutSeconds > 0 ? requestTimeoutSeconds : 120
+        self.skills = AgentSkillSet.from(config: config)
+        // Build the real client from config when enabled and not injected (tests
+        // inject a stub so they stay network-free).
+        self.contextGraph =
+            contextGraph
+            ?? (config.contextGraphEnabled ? ContextGraphClient(baseURL: config.contextGraphURL) : nil)
     }
 
     struct RPCError: Error { let code: Int; let message: String }
@@ -86,7 +141,7 @@ public actor ACPAgent {
     private func dispatch(method: String, params: JSONValue) async throws -> JSONValue {
         switch method {
         case "initialize": return initializeResult(params: params)
-        case "session/new": return newSessionResult(params: params)
+        case "session/new": return await newSessionResult(params: params)
         case "session/prompt": return try await promptResult(params: params)
         // session/load and authenticate are intentionally not implemented — we
         // require no auth and advertise loadSession:false (see initialize).
@@ -110,18 +165,28 @@ public actor ACPAgent {
         // Echo the client's MAJOR version if we speak it; otherwise our own.
         let requested = params["protocolVersion"]?.intValue ?? Self.protocolVersion
         let version = requested == Self.protocolVersion ? requested : Self.protocolVersion
+        var agentCapabilities: [String: JSONValue] = [
+            // We don't persist sessions across runs.
+            "loadSession": .bool(false),
+            // Text + embedded context (Xcode 27 sends selected code / build errors
+            // as embedded blocks; `extractPromptText` folds them into the prompt).
+            // Still no image/audio.
+            "promptCapabilities": .object([
+                "image": .bool(false),
+                "audio": .bool(false),
+                "embeddedContext": .bool(true),
+            ]),
+        ]
+        // Advertise skills here too (in addition to the post-session/new
+        // available_commands_update), so a client that reads commands at initialize
+        // — or never opens a session before showing its menu — still sees them. The
+        // canonical place is the session/update; this is an upward-compatible hint.
+        if !skills.isEmpty {
+            agentCapabilities["availableCommands"] = .array(skills.availableCommandsJSON)
+        }
         return .object([
             "protocolVersion": .int(version),
-            "agentCapabilities": .object([
-                // We don't persist sessions across runs.
-                "loadSession": .bool(false),
-                // Text in, text out — no image/audio/embedded context yet.
-                "promptCapabilities": .object([
-                    "image": .bool(false),
-                    "audio": .bool(false),
-                    "embeddedContext": .bool(false),
-                ]),
-            ]),
+            "agentCapabilities": .object(agentCapabilities),
             "agentInfo": .object([
                 "name": .string(Self.agentName),
                 "version": .string(Self.agentVersion),
@@ -133,13 +198,35 @@ public actor ACPAgent {
 
     // MARK: - session/new
 
-    private func newSessionResult(params: JSONValue) -> JSONValue {
+    private func newSessionResult(params: JSONValue) async -> JSONValue {
         sessionCounter += 1
         let sessionId = "eldr-session-\(sessionCounter)"
         // Per-session cwd: the client's `cwd`, else the agent's configured workdir.
         let cwd = params["cwd"]?.stringValue ?? toolEnvironment.effectiveWorkdir
         sessions[sessionId] = cwd
+        // Resolve this project's persistent context (explicit ELDR_ACP_CONTEXT_FILE,
+        // else the auto-discovered per-project eldr.md). Stored once; prepended to
+        // the system prompt on every turn of this session.
+        if let context = ProjectContext.read(
+            explicitPath: config.contextFilePath, configDir: configDir, cwd: cwd)
+        {
+            sessionContext[sessionId] = context
+        }
+        // Advertise the agent's skills for this session. ACP's canonical channel for
+        // command discovery is an available_commands_update session/update; clients
+        // (Zed, OpenClaw) surface these as slash-commands in their menu.
+        await advertiseSkills(sessionId: sessionId)
         return .object(["sessionId": .string(sessionId)])
+    }
+
+    /// Emit an `available_commands_update` for `sessionId` listing the active skills.
+    /// No-op when skills are disabled (nothing to advertise).
+    private func advertiseSkills(sessionId: String) async {
+        guard !skills.isEmpty else { return }
+        await connection.notify(
+            method: "session/update",
+            params: ACPWire.availableCommandsUpdate(
+                sessionId: sessionId, commands: skills.availableCommandsJSON))
     }
 
     // MARK: - session/prompt (the turn)
@@ -151,50 +238,120 @@ public actor ACPAgent {
         // Fresh cancel state for this turn.
         cancelledSessions.remove(sessionId)
 
-        let userText = Self.extractPromptText(params["prompt"])
-        let stopReason = await runTurn(sessionId: sessionId, userText: userText)
+        let rawText = Self.extractPromptText(params["prompt"])
+        // A leading `/skill …` invokes a skill: the rest is the user's text and the
+        // skill contributes a focused system instruction for this turn only. Plain
+        // prompts (and unknown /commands) run with the default system prompt.
+        let invocation = skills.invocation(for: rawText)
+        let userText = invocation?.argument ?? rawText
+        let stopReason = await runTurn(
+            sessionId: sessionId, userText: userText, skill: invocation?.skill)
         return .object(["stopReason": .string(stopReason.rawValue)])
     }
 
-    /// Concatenate the text content blocks of a prompt into a single user string.
-    /// (We advertise no image/audio support, so non-text blocks are ignored.)
+    /// Flatten a prompt's content blocks into a single user string. Handles the
+    /// embedded-context blocks an ACP client (Xcode 27) sends when the user invokes
+    /// the agent on a selection or a build error: `code` blocks are fenced (with any
+    /// language/path hint) and `compilation_error`/`diagnostic` blocks are labeled so
+    /// the model treats them as something to fix. image/audio/unknown blocks are
+    /// ignored (forward-compatible).
     static func extractPromptText(_ prompt: JSONValue?) -> String {
         guard let blocks = prompt?.arrayValue else { return prompt?.stringValue ?? "" }
-        return
-            blocks
-            .compactMap { block -> String? in
-                guard block["type"]?.stringValue == "text" else { return nil }
-                return block["text"]?.stringValue
+        return blocks.compactMap(blockText(_:)).joined(separator: "\n")
+    }
+
+    /// Render one ACP content block as prompt text, or nil to drop it.
+    static func blockText(_ block: JSONValue) -> String? {
+        switch block["type"]?.stringValue {
+        case "text":
+            return block["text"]?.stringValue
+        case "code":
+            guard let code = block["text"]?.stringValue ?? block["code"]?.stringValue else {
+                return nil
             }
-            .joined(separator: "\n")
+            let language = block["language"]?.stringValue ?? ""
+            let location = block["path"]?.stringValue ?? block["uri"]?.stringValue
+            let header = location.map { "// \($0)\n" } ?? ""
+            return "\(header)```\(language)\n\(code)\n```"
+        case "compilation_error", "diagnostic":
+            guard let message = block["text"]?.stringValue ?? block["message"]?.stringValue else {
+                return nil
+            }
+            let at = (block["path"]?.stringValue).map { " at \($0)" } ?? ""
+            return "Compilation error\(at):\n\(message)"
+        default:
+            return nil
+        }
     }
 
     /// The tool-calling loop. Builds the message list, calls the LLM with tool defs;
     /// on tool_calls, streams + executes each (permission-gated for mutating tools),
     /// feeds results back, and loops (≤ maxIterations). On a final assistant message,
     /// streams it as agent_message_chunk and returns end_turn.
-    private func runTurn(sessionId: String, userText: String) async -> StopReason {
+    private func runTurn(
+        sessionId: String, userText: String, skill: AgentSkill? = nil
+    ) async -> StopReason {
         let cwd = sessions[sessionId] ?? toolEnvironment.effectiveWorkdir
         var perTurnEnvironment = toolEnvironment
         perTurnEnvironment.workdir = cwd
         let executor = ToolExecutor(
             capabilities: clientCapabilities, environment: perTurnEnvironment,
-            connection: connection, sessionId: sessionId)
-        let tools = ToolExecutor.toolDefinitions()
+            connection: connection, sessionId: sessionId,
+            maxResultBytes: config.maxToolResultBytes,
+            maxReadFileBytes: config.maxReadFileBytes)
+        let tools = ToolExecutor.toolDefinitions(allowlist: config.toolAllowlist)
 
-        var messages: [LLMMessage] = [
-            LLMMessage(role: .system, content: Self.systemPrompt(cwd: cwd)),
-            LLMMessage(role: .user, content: userText),
-        ]
+        // Leading system run: optional project-context block FIRST (so the model
+        // reads the project's accumulated facts/corrections before its operating
+        // instructions), then the operating system prompt, then the task. Both
+        // system messages are anchored by ContextBudget.trim's leading-system rule.
+        var messages: [LLMMessage] = []
+        if let context = sessionContext[sessionId] {
+            messages.append(
+                LLMMessage(role: .system, content: ProjectContext.systemBlock(context)))
+        }
+        messages.append(
+            LLMMessage(
+                role: .system,
+                content: Self.systemPrompt(cwd: cwd, config: config, skill: skill)))
+        // contextgraph (optional): assemble prior context via graph/tag retrieval
+        // ahead of the local sliding window. Part of the anchored leading-system
+        // run, so ContextBudget.trim never drops it. Unreachable → nil → fall back.
+        if let assembled = await assembledContext(for: userText), !assembled.isEmpty {
+            messages.append(LLMMessage(role: .system, content: assembled))
+        }
+        messages.append(LLMMessage(role: .user, content: userText))
 
         var toolCallSeq = 0
         for _ in 0..<maxIterations {
             if cancelledSessions.contains(sessionId) { return .cancelled }
 
+            // Context budgeting: bound the history sent to the model each turn so a
+            // long tool loop (and the large results it accumulates) can't outgrow
+            // the window. The system prompt + the task are always preserved.
+            let outgoing = ContextBudget.trim(
+                messages, maxTurns: config.maxHistoryTurns, maxChars: config.maxContextChars)
+
+            // One model call, raced against a timeout and against an in-flight
+            // session/cancel so a hung model or a mid-generation cancel aborts the
+            // turn rather than blocking on `complete`. When streaming is on, the final
+            // answer's deltas are forwarded to the client as they arrive.
             let response: LLMResponse
-            do {
-                response = try await llm.complete(messages: messages, tools: tools)
-            } catch {
+            let alreadyStreamed: String
+            switch await runModelCall(sessionId: sessionId, outgoing: outgoing, tools: tools) {
+            case .completed(let r, let streamed):
+                response = r
+                alreadyStreamed = streamed
+            case .cancelled:
+                return .cancelled
+            case .timedOut:
+                await emitMessage(
+                    sessionId: sessionId,
+                    text:
+                        "The local model did not respond within \(Int(requestTimeoutSeconds))s "
+                        + "(raise ELDR_LLM_TIMEOUT_SECONDS or check the model server).")
+                return .refusal
+            case .failed(let error):
                 // Surface the failure to the user as a message, then end the turn.
                 await emitMessage(
                     sessionId: sessionId,
@@ -205,9 +362,17 @@ public actor ACPAgent {
             if cancelledSessions.contains(sessionId) { return .cancelled }
 
             guard response.wantsTools else {
-                // Final answer.
-                let text = response.content.isEmpty ? "(no response)" : response.content
-                await emitMessage(sessionId: sessionId, text: text)
+                // Final answer. Streaming already forwarded `alreadyStreamed`; emit only
+                // the remainder (the whole text when nothing streamed, e.g. tests/echo).
+                let text = response.content.isEmpty
+                    ? "(The model returned no final answer — only private reasoning, which is "
+                        + "stripped from chat. If this is a reasoning/QAT model, switch to an "
+                        + "instruct model or disable its “thinking” mode for agentic tool use.)"
+                    : response.content
+                let remainder = Self.remainder(of: text, afterStreaming: alreadyStreamed)
+                if !remainder.isEmpty { await emitMessage(sessionId: sessionId, text: remainder) }
+                logSessionEnd(sessionId: sessionId, cwd: cwd, summary: text)
+                await ingestTurn(userText: userText, assistantText: text, cwd: cwd)
                 return .endTurn
             }
 
@@ -223,17 +388,46 @@ public actor ACPAgent {
                 let args = call.argumentsJSON
                 let result = await runOneTool(
                     sessionId: sessionId, toolCallId: toolCallId, executor: executor,
-                    name: call.name, args: args)
+                    name: call.name, args: args, cwd: cwd)
                 messages.append(
                     LLMMessage(role: .tool, content: result.text, toolCallId: call.id))
             }
         }
 
         // Hit the iteration cap without a final message.
-        await emitMessage(
-            sessionId: sessionId,
-            text: "Reached the tool-call limit (\(maxIterations) steps) without finishing.")
+        let capMessage = "Reached the tool-call limit (\(maxIterations) steps) without finishing."
+        await emitMessage(sessionId: sessionId, text: capMessage)
+        logSessionEnd(sessionId: sessionId, cwd: cwd, summary: capMessage)
         return .maxTurnRequests
+    }
+
+    /// Assembled prior context from contextgraph, or nil to use local budgeting.
+    /// Health is checked (and cached) before the first assemble; any failure → nil
+    /// so the turn falls back to `ContextBudget.trim` (no turn ever fails because
+    /// contextgraph is down).
+    private func assembledContext(for userText: String) async -> String? {
+        guard let cg = contextGraph else { return nil }
+        if contextGraphHealthy == nil { contextGraphHealthy = await cg.health() }
+        guard contextGraphHealthy == true else { return nil }
+        do {
+            // token_budget ≈ chars/4 (rough tokenizer ratio); never below 1.
+            let budget = max(1, config.maxContextChars / 4)
+            return try await cg.assemble(userText: userText, tokenBudget: budget)
+        } catch {
+            // C-6: stderr is an at-rest diagnostic sink (the launcher tees it to a
+            // logfile); scrub the error text in case it echoes a request body/header.
+            FileHandle.standardError.write(
+                Data(config.logRedactor("contextgraph assemble failed: \(Self.describe(error))\n").utf8))
+            return nil
+        }
+    }
+
+    /// Record a completed turn so contextgraph learns it. Only when the service is
+    /// known-healthy this turn; fire-and-forget (never fails the turn).
+    private func ingestTurn(userText: String, assistantText: String, cwd: String) async {
+        guard let cg = contextGraph, contextGraphHealthy == true else { return }
+        let label = config.contextGraphAgentName ?? (cwd as NSString).lastPathComponent
+        await cg.ingest(userText: userText, assistantText: assistantText, channelLabel: label)
     }
 
     /// Stream one tool call's lifecycle and run it. Mutating tools (write_file,
@@ -241,7 +435,7 @@ public actor ACPAgent {
     /// short-circuits to a failed tool_call_update and a "denied" tool result.
     private func runOneTool(
         sessionId: String, toolCallId: String, executor: ToolExecutor,
-        name: String, args: JSONValue
+        name: String, args: JSONValue, cwd: String
     ) async -> ToolResult {
         let kind = ToolExecutor.kind(for: name)
         let title = ToolExecutor.title(for: name, args: args)
@@ -266,6 +460,20 @@ public actor ACPAgent {
                 return ToolResult(
                     text: "The user denied permission to run \(name).", isError: true)
             }
+            // Fail closed on a cancel that RACED the permission round-trip: requesting
+            // permission is an `await`, so a session/cancel can land on the actor while
+            // it's in flight and resolve AFTER the grant. Re-check before the
+            // side-effecting `executor.run` so a cancelled turn never performs the write
+            // it was mid-asking-about — the loop-top check (runTurn) is too late, the
+            // mutation would already have happened.
+            if cancelledSessions.contains(sessionId) {
+                await connection.notify(
+                    method: "session/update",
+                    params: ACPWire.toolCallUpdate(
+                        sessionId: sessionId, toolCallId: toolCallId, status: "failed",
+                        contentText: "Cancelled before the tool ran.", isError: true))
+                return ToolResult(text: "Cancelled before \(name) ran.", isError: true)
+            }
         }
 
         // tool_call_update (in_progress)
@@ -283,26 +491,76 @@ public actor ACPAgent {
                 sessionId: sessionId, toolCallId: toolCallId,
                 status: result.isError ? "failed" : "completed",
                 contentText: result.text, isError: result.isError))
+
+        logToolEvent(name: name, args: args, result: result, sessionId: sessionId, cwd: cwd)
         return result
     }
 
-    /// Ask the client for permission. If the client can't prompt (no permission
-    /// support implied by terminal/fs caps), default to ALLOW — the client spawned
-    /// us as a trusted local subprocess, and the user expects the agent to act.
+    /// Append a JSONL event for a significant tool call (write_file / run_shell) and
+    /// update per-session counters that feed the session_end event. No-op unless
+    /// `ELDR_ACP_EVENTS_FILE` is set.
+    private func logToolEvent(
+        name: String, args: JSONValue, result: ToolResult, sessionId: String, cwd: String
+    ) {
+        switch name {
+        case "write_file" where !result.isError:
+            sessionWriteCounts[sessionId, default: 0] += 1
+            let path = Self.resolvePath(args["path"]?.stringValue ?? "", cwd: cwd)
+            // Path uses the PATH-AWARE default scrub (catches an embedded credential
+            // but preserves legitimate sha256/UUID path components ContextLearner
+            // reads), NOT the free-text `config.logRedactor`.
+            ACPEventLog.writeFile(
+                path: path, session: sessionId, cwd: cwd, to: config.eventsFilePath)
+        case "run_shell":
+            let cmd = args["command"]?.stringValue ?? ""
+            let exit = Self.parseShellExit(from: result.text)
+            // A build/test command's outcome is the session's build status.
+            if Self.isBuildCommand(cmd) {
+                sessionBuildStatus[sessionId] = exit == 0 ? "green" : "red"
+            }
+            ACPEventLog.shellResult(
+                cmd: cmd, exit: exit, summary: String(result.text.prefix(200)),
+                session: sessionId, cwd: cwd, to: config.eventsFilePath,
+                redact: config.logRedactor)
+        default:
+            break
+        }
+    }
+
+    /// Emit the session_end event with the final summary, files-written count, and
+    /// build status. No-op unless `ELDR_ACP_EVENTS_FILE` is set.
+    private func logSessionEnd(sessionId: String, cwd: String, summary: String) {
+        ACPEventLog.sessionEnd(
+            cwd: cwd, session: sessionId, summary: String(summary.prefix(200)),
+            files: sessionWriteCounts[sessionId] ?? 0,
+            build: sessionBuildStatus[sessionId] ?? "unknown",
+            to: config.eventsFilePath, redact: config.logRedactor)
+    }
+
+    /// Ask the client for permission for a mutating tool, and FAIL CLOSED. The request
+    /// is time-bounded (`config.permissionTimeoutSeconds`); any non-grant outcome — an
+    /// explicit deny, a timeout (the client never answered), a transport error, or a
+    /// client that doesn't implement `session/request_permission` — is a DENIAL.
+    /// (C-1: the previous fallback to ALLOW turned the gate into a no-op the moment a
+    /// remote driver could reach it, and a non-responding client hung the turn instead.)
+    /// The trusted-local case — a client the operator spawned that genuinely can't
+    /// prompt — can disable the gate entirely with `ELDR_ACP_ALLOW_UNGATED_TOOLS`.
     private func requestPermission(
         sessionId: String, toolCallId: String, title: String, kind: String
     ) async -> Bool {
-        // ACP doesn't expose a dedicated "can request permission" capability; the
-        // method is always available on a conformant client. We attempt it and, on
-        // any transport failure, fall back to allow.
+        // Operator explicitly disabled gating for a trusted local client that can't
+        // prompt — restore allow-by-default (no wait, no prompt).
+        if config.allowUngatedTools { return true }
         do {
             let result = try await connection.request(
                 method: "session/request_permission",
                 params: ACPWire.requestPermission(
-                    sessionId: sessionId, toolCallId: toolCallId, title: title, kind: kind))
+                    sessionId: sessionId, toolCallId: toolCallId, title: title, kind: kind),
+                timeout: config.permissionTimeoutSeconds)
             return ACPWire.permissionGranted(result)
         } catch {
-            return true
+            // Timeout / transport failure / unimplemented ⇒ DENY (fail closed).
+            return false
         }
     }
 
@@ -312,32 +570,170 @@ public actor ACPAgent {
             params: ACPWire.agentMessageChunk(sessionId: sessionId, text: text))
     }
 
+    // MARK: - Model call (timeout + cancel race + streaming)
+
+    /// The outcome of one raced model call.
+    private enum ModelCallOutcome {
+        /// The model returned; `streamed` is the visible text already sent as
+        /// `agent_message_chunk`s during streaming (empty when not streaming).
+        case completed(LLMResponse, streamed: String)
+        case timedOut
+        case cancelled
+        case failed(Error)
+    }
+
+    /// True iff the client asked to cancel this session (actor-isolated read so the
+    /// racing cancel-poll can observe a session/cancel that arrives mid-generation).
+    private func isCancelled(_ sessionId: String) -> Bool {
+        cancelledSessions.contains(sessionId)
+    }
+
+    /// Run one model completion, racing it against (a) a wall-clock timeout and (b) an
+    /// in-flight session/cancel, whichever resolves first. When streaming is enabled
+    /// the final answer's deltas are forwarded to the client as `agent_message_chunk`s
+    /// as they arrive; a tool-call turn produces no deltas. The non-winning racers are
+    /// cancelled (which cancels the underlying URLSession request too).
+    private func runModelCall(
+        sessionId: String, outgoing: [LLMMessage], tools: [LLMTool]
+    ) async -> ModelCallOutcome {
+        let llm = self.llm
+        let connection = self.connection
+        let streaming = self.streamingEnabled
+        let timeoutNanos = UInt64(requestTimeoutSeconds * 1_000_000_000)
+
+        return await withTaskGroup(of: ModelCallOutcome.self) { group in
+            // 1. The model call.
+            group.addTask {
+                let streamed = StreamedTextBox()
+                do {
+                    let response: LLMResponse
+                    if streaming {
+                        response = try await llm.stream(messages: outgoing, tools: tools) { delta in
+                            await streamed.append(delta)
+                            await connection.notify(
+                                method: "session/update",
+                                params: ACPWire.agentMessageChunk(sessionId: sessionId, text: delta))
+                        }
+                    } else {
+                        response = try await llm.complete(messages: outgoing, tools: tools)
+                    }
+                    return .completed(response, streamed: await streamed.value)
+                } catch {
+                    return .failed(error)
+                }
+            }
+            // 2. Timeout backstop.
+            group.addTask {
+                try? await Task.sleep(nanoseconds: timeoutNanos)
+                return .timedOut
+            }
+            // 3. Cancel poll (session/cancel can land on the actor while we await).
+            group.addTask { [weak self] in
+                while !Task.isCancelled {
+                    if await self?.isCancelled(sessionId) == true { return .cancelled }
+                    do { try await Task.sleep(nanoseconds: 50_000_000) } catch { break }
+                }
+                return .cancelled
+            }
+
+            let first = await group.next() ?? .failed(LLMError.badResponse("no model outcome"))
+            group.cancelAll()
+            return first
+        }
+    }
+
+    /// The slice of `text` not yet streamed: when `streamed` is a prefix of `text`,
+    /// the unsent tail; when nothing was streamed, the whole text; otherwise (the
+    /// streamed text diverged — shouldn't happen, both are reasoning-stripped) the
+    /// whole text, so the client never loses the answer.
+    static func remainder(of text: String, afterStreaming streamed: String) -> String {
+        guard !streamed.isEmpty else { return text }
+        if text == streamed { return "" }
+        if text.hasPrefix(streamed) { return String(text.dropFirst(streamed.count)) }
+        return text
+    }
+
     // MARK: - System prompt
 
-    static func systemPrompt(cwd: String) -> String {
-        """
-        You are EldrChat's coding agent, embedded in an iOS/macOS developer's editor \
-        (an Agent Client Protocol client such as Xcode). You help write Swift code, \
-        edit files, build projects, and run tests on the iOS Simulator.
+    /// The turn's system prompt. A user override (`ELDR_ACP_SYSTEM_PROMPT` / config
+    /// file) replaces the BASE wholesale ({cwd} substituted); otherwise the built-in
+    /// prompt is used and any preamble (`ELDR_ACP_PROMPT_PREAMBLE`) is appended so a
+    /// user can nudge a finicky model's tool-calling without forking the binary.
+    ///
+    /// When a `skill` is active (a `/spec`, `/snippet`, `/html` invocation), its
+    /// focused instruction is appended LAST so it steers this turn's output format
+    /// while the base prompt's facts (cwd, the tool list, "report real results")
+    /// still apply. The skill text wins on any output-shape conflict because it
+    /// comes last.
+    static func systemPrompt(
+        cwd: String, config: AgentConfig = .default, skill: AgentSkill? = nil
+    ) -> String {
+        func withSkill(_ base: String) -> String {
+            guard let skill else { return base }
+            let instruction = skill.systemInstruction.replacingOccurrences(of: "{cwd}", with: cwd)
+            return base + "\n\n--- Skill: /\(skill.name) ---\n" + instruction
+        }
+        if let override = config.systemPromptOverride {
+            return withSkill(override.replacingOccurrences(of: "{cwd}", with: cwd))
+        }
+        var prompt = """
+            You are EldrChat's coding agent, embedded in an iOS/macOS developer's editor \
+            (an Agent Client Protocol client such as Xcode). You help write Swift code, \
+            edit files, build projects, and run tests on the iOS Simulator.
 
-        You have these tools — call them rather than guessing:
-          • read_file(path): read a text file.
-          • write_file(path, content): create/overwrite a text file with full new contents.
-          • list_dir(path): list a directory.
-          • run_shell(command): run a shell command (e.g. `xcodebuild …`, `xcrun simctl …`, \
-        `swift build`). DEVELOPER_DIR is preconfigured so xcodebuild/xcrun target the \
-        intended Xcode.
+            You have these tools — call them rather than guessing:
+              • read_file(path): read a text file.
+              • write_file(path, content): create/overwrite a text file with full new contents.
+              • edit_file(path, old_string, new_string): replace one exact, unique substring \
+            in a file (prefer this for small edits — you don't resend the whole file).
+              • list_dir(path): list a directory.
+              • search(query, path): find a literal string in files (path:line:text); use it to \
+            locate code before reading whole files.
+              • run_shell(command): run a shell command (e.g. `xcodebuild …`, `xcrun simctl …`, \
+            `swift build`). DEVELOPER_DIR is preconfigured so xcodebuild/xcrun target the \
+            intended Xcode.
 
-        Guidelines:
-          • The working directory is: \(cwd). Prefer paths relative to it; absolute paths also work.
-          • Make minimal, correct edits. Read a file before rewriting it.
-          • When you build or test, run the command and report the real result; do not fabricate output.
-          • When the task is done, reply with a short plain-text summary of what you did. \
-        Do not include chain-of-thought.
-        """
+            Guidelines:
+              • The working directory is: \(cwd). Prefer paths relative to it; absolute paths also work.
+              • Make minimal, correct edits. Read a file before rewriting it.
+              • Call ONE tool at a time and wait for its result before the next step.
+              • Tool results may be truncated (a `… N bytes elided …` marker): read a \
+            specific file or grep for the part you need rather than re-reading huge output.
+              • When you build or test, run the command and report the real result; do not fabricate output.
+              • When the task is done, reply with a short plain-text summary of what you did. \
+            Do not include chain-of-thought.
+            """
+        if let preamble = config.promptPreamble, !preamble.isEmpty {
+            prompt += "\n\n" + preamble
+        }
+        return withSkill(prompt)
     }
 
     // MARK: - Helpers
+
+    /// Resolve a (possibly relative) tool path against the session cwd, matching
+    /// `ToolExecutor.absolutePath` so an events.jsonl `path` equals where the file
+    /// actually landed (ContextLearner watches that path).
+    static func resolvePath(_ path: String, cwd: String) -> String {
+        if path.isEmpty || path.hasPrefix("/") { return path }
+        return (cwd as NSString).appendingPathComponent(path)
+    }
+
+    /// Pull the exit code out of a run_shell result (`formatShellResult` appends
+    /// `[exit code: N]`). Returns -1 when absent/unknown.
+    static func parseShellExit(from text: String) -> Int {
+        guard let marker = text.range(of: "[exit code: ", options: .backwards) else { return -1 }
+        let tail = text[marker.upperBound...]
+        let digits = tail.prefix { $0 == "-" || $0.isNumber }
+        return Int(digits) ?? -1
+    }
+
+    /// True when a shell command is a build/test invocation whose exit status should
+    /// become the session's build result.
+    static func isBuildCommand(_ command: String) -> Bool {
+        let c = command.lowercased()
+        return c.contains("xcodebuild") || c.contains("swift build") || c.contains("swift test")
+    }
 
     static func describe(_ error: Error) -> String {
         switch error {
@@ -365,3 +761,12 @@ public actor ACPAgent {
         ]).serialized()
     }
 }
+
+/// A tiny actor that accumulates streamed deltas inside the model-call child task,
+/// so the `@Sendable` onDelta closure has a Sendable place to write without sharing
+/// mutable state across the task boundary.
+private actor StreamedTextBox {
+    private(set) var value = ""
+    func append(_ s: String) { value += s }
+}
+#endif  // os(macOS) — ACPAgent (node-side: tool-calling loop + ToolExecutor/Process)

@@ -82,13 +82,32 @@ actor PersonaRuntime {
     private let enableLocalLink: Bool
     private var localLink: MultipeerLinkTransport?
 
+    /// Relay-carried ACP transports (ACPRouterplan Phase 3), one per paired
+    /// `coding_agent` node, keyed by the node's PQRC identity hex. Each carries the
+    /// ACP line protocol to that node over the SAME gift-wrapped + Double-Ratcheted
+    /// message mesh a normal chat uses (`RelayACPTransport`): the relay only ever
+    /// sees the same E2EE ciphertext, never the ACP frames. The transport's `send`
+    /// closure publishes a framed chunk via `messenger.send(_, to: nodeHex)`; inbound
+    /// ACP frames received FROM that node are fed to `deliverInbound` in
+    /// `handleReceived` (and NEVER stored/rendered as chat). Created lazily by
+    /// `ensureRelayACPTransport(nodeHex:)` only when the node is consented (C-3 /
+    /// `AppSession.remoteDevControlConsent`); torn down on `shutdown()`.
+    private var relayACPTransports: [String: RelayACPTransport] = [:]
+    /// The relay's per-message byte budget for an ACP frame chunk. Sized well under
+    /// the strict-relay event ceiling so a framed chunk fits one gift-wrapped event
+    /// even after the wrap overhead; `RelayACPTransport` chunks longer ACP lines to
+    /// fit. Conservative on purpose (correctness over throughput).
+    private let relayACPMaxFrameBytes = 16 * 1024
+
     private var store: SwiftDataMessageStore!
     private var crypter: EncryptedStore!
 
     /// Verified contacts by identity hex. The parallel `contactRecords` map
     /// carries nicknames/aliases/flags and is persisted encrypted — both are
     /// restored at bootstrap so contacts survive relaunch.
-    private(set) var verifiedContacts: [String: VerifiedContact] = [:]
+    private(set) var verifiedContacts: [String: VerifiedContact] = [:] {
+        didSet { publishPairedPubkeys() }
+    }
     private(set) var contactRecords: [String: ContactRecord] = [:]
     /// Nearby peers discovered + binding-verified over the local link (SPEC §10),
     /// identity hex -> display name. Not yet contacts — the user starts the
@@ -106,6 +125,11 @@ actor PersonaRuntime {
     private var threadTitles: [String: String] = [:]
     /// Conversation my active ai_window was started in (window replies route here).
     private var myWindowConversationID: String?
+    /// The conversation a watch-along draft is currently being voiced into (§13.5).
+    /// Stashed across the `engine.voiceAgentDraft` → `RuntimeSink.postAgentDraft` hop so
+    /// the sink resolves the target the Mac's draft named (`voiceInto`). Set/cleared
+    /// synchronously around a single voicing on this actor, so no concurrent draft races.
+    private var pendingDraftTarget: String?
     /// conversationID / threadID -> when MY AI was turned on here. The AI only
     /// ingests messages from this point forward — NEVER prior chat history — plus
     /// any message the human manually marked "Add to AI Context" (b7: stream
@@ -154,8 +178,10 @@ actor PersonaRuntime {
         keychainService: String,
         siloKEK: SymmetricKey? = nil,
         siloID: String = "",
-        enableLocalLink: Bool = false
+        enableLocalLink: Bool = false,
+        aiSelection: (any AISelectionPolicy<TetheredAI>)? = nil
     ) {
+        if let aiSelection { self.aiSelection = aiSelection }
         self.siloKEK = siloKEK
         self.siloID = siloID
         self.displayName = displayName
@@ -175,9 +201,24 @@ actor PersonaRuntime {
     var identityHex: String { identity.publicKeyData.hexString }
     var npub: String { nostrKeypair.npub }
 
-    /// The primary AI used for private drafts and the Settings probe.
-    private var primaryAI: TetheredAI { ais[0] }
-    private var primaryProvider: any AgentProvider { ais[0].provider }
+    /// Router policy (Phase 2): decides the PRIMARY AI (private drafts / Settings
+    /// probe) and the PARTICIPATION set (solo/window/thread autonomous turns).
+    /// Injectable; the default reproduces today's behavior EXACTLY (`ais.first` +
+    /// the `participatesAutonomously` filter). A future policy can route by task —
+    /// e.g. code/dev requests to the paired Mac ("acp") backend.
+    private var aiSelection: any AISelectionPolicy<TetheredAI> = DefaultAISelectionPolicy<TetheredAI>()
+
+    /// The primary AI for a private draft or the Settings probe, routed via the
+    /// policy for the given scope (`conversationID`/`threadID` — empty/nil for the
+    /// probe). Falls back to the first AI so it is NEVER nil (the runtime guarantees
+    /// `ais` is non-empty, matching the old `ais[0]`). The default policy ignores
+    /// the scope; `CapabilityRoutingPolicy` uses it to route the engine by task.
+    private func primaryAI(conversationID: String, threadID: String?) -> TetheredAI {
+        aiSelection.primary(from: ais, conversationID: conversationID, threadID: threadID) ?? ais[0]
+    }
+    private func primaryProvider(conversationID: String, threadID: String?) -> any AgentProvider {
+        primaryAI(conversationID: conversationID, threadID: threadID).provider
+    }
     /// Egress firewall: when on, context handed to a REMOTE AI is name-redacted
     /// (real names → local codenames) and byte-bounded before it leaves the
     /// device. On-device AIs always bypass it.
@@ -187,10 +228,83 @@ actor PersonaRuntime {
         ais = newAIs.isEmpty
             ? [TetheredAI(id: "demo", name: "demo-otter-naps-000", provider: DemoAgentProvider())]
             : newAIs
+        rebindRelayACPProviders()
+    }
+
+    /// Make any enabled "acp" backend LIVE over the relay (ACPRouterplan Phase 3).
+    /// The static `makeProvider` cannot reach the messenger or the node identity, so
+    /// it hands back a Demo stub for "acp"; here, where both are available, we swap in
+    /// a relay-backed `ACPAgentProvider` driving the owner's CONSENTED `coding_agent`
+    /// node over its `RelayACPTransport`. Until a node is paired AND consented (C-3),
+    /// the Demo stub stays — the `acp` tier is selectable and visibly responds, but
+    /// nothing reaches a node. Idempotent: re-binds in place; called after bootstrap
+    /// and on every `setAIs` (Settings refresh), so toggling consent / pairing a node
+    /// flips the backend live without a reboot.
+    private func rebindRelayACPProviders() {
+        guard ais.contains(where: { $0.kind == "acp" }) else { return }
+        guard let nodeHex = consentedCodingAgentNode(),
+            let transport = ensureRelayACPTransport(nodeHex: nodeHex)
+        else { return }  // no consented node yet — leave the Demo stub in place
+        // Permission for a mutating tool call is governed by the per-node remote
+        // dev-control consent the owner already gave (the gate that admitted this
+        // path at all): driving the agent IS authorizing its tool work on the node.
+        // The node still enforces its own C-2 cwd jail.
+        let provider = ACPAgentProvider(
+            transport: transport,
+            permissionHandler: { _, _ in true })
+        ais = ais.map { ai in
+            guard ai.kind == "acp" else { return ai }
+            var live = ai
+            live.provider = provider
+            return live
+        }
+    }
+
+    /// The owner's paired `coding_agent` node to drive over the relay, if one is
+    /// consented (C-3). Deterministic pick (lowest identity hex) when more than one
+    /// is consented, so the choice is stable across refreshes.
+    private func consentedCodingAgentNode() -> String? {
+        verifiedContacts.keys
+            .filter { isConsentedCodingAgentNode($0) }
+            .sorted()
+            .first
     }
 
     func setFirewallEnabled(_ enabled: Bool) {
         firewallEnabled = enabled
+    }
+
+    /// Inject a routing policy at runtime (Phase 2). Defaults to
+    /// `DefaultAISelectionPolicy` (today's behavior) until set.
+    func setAISelectionPolicy(_ policy: any AISelectionPolicy<TetheredAI>) {
+        aiSelection = policy
+    }
+
+    // MARK: - Nearby AUTH allowlist (C-5)
+
+    /// The PAIRED peers' NOSTR pubkeys (hex) — the key space a kind-22242 AUTH is
+    /// signed by (NOT the PQRC identity hex). This is the `NearbyRelayHost`
+    /// allowlist: only a peer you've bidirectionally bound (kind-10420) may AUTH.
+    func pairedNostrPubkeys() -> Set<String> {
+        Set(verifiedContacts.values.map(\.nostrPubkeyHex))
+    }
+    private var pairedPubkeysPublisher: (@Sendable (Set<String>) -> Void)?
+    /// Wire the live allowlist snapshot: republishes the paired Nostr pubkeys now
+    /// and on every subsequent change to `verifiedContacts` (via its didSet).
+    func setPairedPubkeysPublisher(_ publisher: @escaping @Sendable (Set<String>) -> Void) {
+        pairedPubkeysPublisher = publisher
+        publishPairedPubkeys()
+    }
+    private func publishPairedPubkeys() {
+        pairedPubkeysPublisher?(pairedNostrPubkeys())
+    }
+
+    /// Apply a changed per-silo loop-guard threshold (DEVIATIONS D14) to the live
+    /// engine so it takes effect without re-booting the silo. `0` turns the guard
+    /// off (unbounded). Persistence is the caller's (Settings) responsibility;
+    /// this only pushes the value into the running engine.
+    func setLoopGuardLimit(_ limit: Int) async {
+        await engine?.setLoopGuardLimit(limit)
     }
 
     /// Builds the context for one AI: the normal (byte-bounded) context for an
@@ -226,33 +340,46 @@ actor PersonaRuntime {
         // local autoName) instead of real display names — otherwise the skills
         // prompt would leak the very social graph the firewall withholds from the
         // redacted transcript (DEVIATIONS A19/A20).
-        let redactNames = ai.isRemote && firewallEnabled
+        // Per-conversation override (Settings → conversation details) wins over the
+        // account default — a private, paired chat with your own agents can pass raw.
+        let firewallOn = AppSession.conversationFirewall(conversationID, siloID: siloID) ?? firewallEnabled
+        let redactNames = ai.appliesEgressFirewall && firewallOn
         let promptDisplayName = redactNames ? "you" : displayName
         let promptPeerName =
             redactNames
             ? (contactRecords[conversationID]?.autoName ?? "a contact")
             : (groupRosters[conversationID]?.name ?? contactName(conversationID))
         let override: String? = threadID.map { tid in
-            AgentSkills.threadSystemPrompt(
+            let base = AgentSkills.threadSystemPrompt(
                 displayName: promptDisplayName,
                 contextDomain: AppSession.aiContextDomain(siloID: siloID),
                 peerName: promptPeerName,
                 threadID: tid,
                 activeSkillIDs: AppSession.threadSkills(tid, siloID: siloID),
                 instructions: ai.instructions)
+            // App-layer overlay: append any pinned CUSTOM skills' instruction text
+            // the same way the package appends a built-in's fragment. The package
+            // catalog stays the built-in source of truth; these are merged in only
+            // for the prompt. Still just message text — no wire/privacy exception.
+            let custom = customSkillFragments(threadID: tid)
+            return custom.isEmpty ? base : base + "\n\n" + custom
         }
         let ctx = await agentContext(
             conversationID: conversationID, threadID: threadID, depth: ai.contextDepth,
             strict: policy == "strict", instructions: ai.instructions, summarize: ai.summarizes,
             systemPromptOverride: override)
-        guard ai.isRemote, firewallEnabled else { return ctx }
+        guard ai.appliesEgressFirewall, firewallOn else { return ctx }
         return redactedForRemote(ctx)
     }
 
     /// Replaces real display names with each identity's LOCAL codename (and self
     /// with "you"), so a remote vendor never receives a labeled social graph
-    /// (DEVIATIONS A19/A20: names are device-local). Text/flags are unchanged;
-    /// the byte bound was already applied in `agentContext`.
+    /// (DEVIATIONS A19/A20: names are device-local). ALSO scrubs credential-shaped
+    /// secrets from the message text via `CredentialRedactor` (G4/P-6) — an API
+    /// key / token pasted into a chat must not reach a third-party cloud AI. The
+    /// byte bound was already applied in `agentContext`. (When the per-chat
+    /// firewall is OFF this path is skipped — the user chose to send that chat raw
+    /// to their own trusted agents.)
     private func redactedForRemote(_ context: AgentContext) -> AgentContext {
         let entries = context.transcript.map { entry -> TranscriptEntry in
             let codename =
@@ -263,7 +390,7 @@ actor PersonaRuntime {
                 senderIdentityHex: entry.senderIdentityHex,
                 senderDisplayName: codename,
                 participantType: entry.participantType,
-                text: entry.text,
+                text: CredentialRedactor.scrub(entry.text),
                 isContext: entry.isContext,
                 isSharedContext: entry.isSharedContext)
         }
@@ -272,6 +399,20 @@ actor PersonaRuntime {
             transcript: entries, threadID: context.threadID, threadTitle: context.threadTitle,
             instructions: context.instructions, summarize: context.summarize,
             systemPromptOverride: context.systemPromptOverride)
+    }
+
+    /// The pinned CUSTOM skills' instruction text for a thread, formatted exactly
+    /// like the built-in `ACTIVE SKILLS` block so the model treats them the same.
+    /// Resolves the per-silo overlay (`AppSession.loadCustomSkills`); built-in ids
+    /// are handled by the package and skipped here. Empty when none are pinned.
+    private func customSkillFragments(threadID: String) -> String {
+        let pinned = AppSession.threadSkills(threadID, siloID: siloID)
+        guard !pinned.isEmpty else { return "" }
+        let custom = AppSession.loadCustomSkills(siloID: siloID)
+        let active = pinned.compactMap { id in custom.first { $0.id == id } }
+        guard !active.isEmpty else { return "" }
+        return "CUSTOM SKILLS — use the one whose trigger fits; reply in the same envelope:\n"
+            + active.map { "## \($0.id)\n\($0.instruction)" }.joined(separator: "\n\n")
     }
 
     // MARK: - Bootstrap
@@ -369,7 +510,9 @@ actor PersonaRuntime {
             identity: identity, nostrKeypair: nostrKeypair, prekeyManager: prekeyManager,
             identityDH: identityDH, transports: transports, clock: clock,
             randomSource: randomSource, nonceSource: nonceSource)
-        engine = AgentEngine(myIdentity: identity, clock: clock, sink: RuntimeSink(runtime: self))
+        engine = AgentEngine(
+            myIdentity: identity, clock: clock, sink: RuntimeSink(runtime: self),
+            loopGuardLimit: AppSession.agentLoopGuardLimit(siloID: siloID))
 
         // Restore persisted state: contacts (bindings re-verified — invariant 7
         // survives persistence), ratchet sessions, group rosters, threads, and
@@ -447,6 +590,9 @@ actor PersonaRuntime {
         // Dispatched AFTER the continuation is wired so the publish-status event
         // is never yielded into a nil continuation and lost.
         Task { [weak self] in await self?.publishKeys(relayURLs: publishURLs) }
+        // Now that contacts (incl. any consented `coding_agent` node) and the
+        // messenger are up, make any enabled "acp" backend live over the relay.
+        rebindRelayACPProviders()
         return stream
     }
 
@@ -460,6 +606,10 @@ actor PersonaRuntime {
             await persistPrekeyState()
         }
         pumpTask?.cancel()
+        // Close every relay-ACP transport so its inbound stream finishes and any
+        // ACP client/consumer awaiting it unwinds (no orphaned reassembly state).
+        for transport in relayACPTransports.values { transport.close() }
+        relayACPTransports.removeAll()
         await localLink?.stop()
         await messenger?.stop()
         eventContinuation?.finish()
@@ -640,6 +790,71 @@ actor PersonaRuntime {
         eventContinuation?.yield(.conversationChanged(identityHex))
     }
 
+    /// Phase 4: this contact's local type tag (`"coding_agent"` for a paired Eldr
+    /// ACP Configurator). PURELY LOCAL — never broadcast (SPEC §0).
+    func contactType(_ identityHex: String) -> String? {
+        contactRecords[identityHex]?.contactType
+    }
+
+    /// Tag (or clear) a contact as a coding agent — set when pairing the Configurator
+    /// so its conversation renders with the wrench icon. Local-only; persisted.
+    func setContactType(_ identityHex: String, type: String?) async {
+        contactRecords[identityHex]?.contactType = (type?.isEmpty ?? true) ? nil : type
+        persistContact(identityHex)
+        eventContinuation?.yield(.conversationChanged(identityHex))
+    }
+
+    // MARK: - Relay-carried ACP (ACPRouterplan Phase 3 — drive a paired Mac node)
+
+    /// C-3 gate: an identity may be an ACP peer ONLY when it is the owner's paired
+    /// `coding_agent` node AND remote dev-control is consented for it. This is the
+    /// SINGLE predicate every relay-ACP path (inbound routing, transport binding, the
+    /// live provider) checks, so the path stays inert (privacy-first) until the owner
+    /// opts in. A node that is un-tagged, or consent revoked, fails closed.
+    private func isConsentedCodingAgentNode(_ identityHex: String) -> Bool {
+        contactType(identityHex) == "coding_agent"
+            && AppSession.remoteDevControlConsent(nodeID: identityHex, siloID: siloID)
+    }
+
+    /// The live relay-ACP transport bound to a consented `coding_agent` node, creating
+    /// it on first use. Returns nil (fails closed) when the node is not a consented
+    /// coding agent (C-3) — so no transport is ever wired to a non-owner-node peer.
+    /// The transport's `send` closure publishes each framed chunk to the node over the
+    /// relay as an ordinary ratcheted message; inbound frames are delivered by
+    /// `handleReceived`. Idempotent: the same transport is reused across turns so the
+    /// node's reassembly ids stay coherent.
+    func ensureRelayACPTransport(nodeHex: String) -> RelayACPTransport? {
+        guard isConsentedCodingAgentNode(nodeHex) else { return nil }
+        if let existing = relayACPTransports[nodeHex] { return existing }
+        let transport = RelayACPTransport(maxFrameBytes: relayACPMaxFrameBytes) {
+            [weak self] framedBody in
+            guard let self else { return }
+            // Publish the framed chunk as a normal message to the node. Best-effort:
+            // a relay hiccup surfaces to the ACP client as a timed-out turn, not a
+            // crash. `sentAt` is the live clock so each chunk is a distinct ratchet
+            // message number.
+            try? await self.sendRelayACPFrame(framedBody, to: nodeHex)
+        }
+        relayACPTransports[nodeHex] = transport
+        return transport
+    }
+
+    /// Publish ONE framed ACP chunk to the node over the relay as an ordinary
+    /// (agent-typed) ratcheted message. Hops onto the actor so `messenger.send` is
+    /// serialized with every other send; persists the advanced ratchet afterwards.
+    private func sendRelayACPFrame(_ framedBody: String, to nodeHex: String) async throws {
+        let body = MessageBody(text: framedBody, sentAt: clock.now())
+        try await messenger.send(body, to: nodeHex, participantType: .agent)
+        await persistSession(nodeHex)
+    }
+
+    /// Tear down a node's relay-ACP transport (and drop it), e.g. when consent is
+    /// revoked or the node is unpaired. Safe when none exists.
+    func teardownRelayACPTransport(nodeHex: String) async {
+        guard let transport = relayACPTransports.removeValue(forKey: nodeHex) else { return }
+        transport.close()
+    }
+
     /// Sets my alias and broadcasts it to every connected contact over the
     /// existing encrypted sessions (an empty-text control message — never a
     /// public profile; only established contacts learn the name).
@@ -784,7 +999,8 @@ actor PersonaRuntime {
         aiWindow: AIWindowAnnouncement? = nil, aiInvite: AIInvite? = nil,
         aiContextGrant: AIContextGrant? = nil,
         threadCreate: ThreadCreate? = nil, groupCreate: GroupCreate? = nil,
-        asSystemRow: Bool = false, agentName: String? = nil
+        asSystemRow: Bool = false, agentName: String? = nil,
+        localTextOverride: String? = nil
     ) async throws {
         let recipients = recipientsFor(conversationID: conversationID)
         // A group I'm a member of with no other humans (the "solo AI chat") is a
@@ -828,10 +1044,13 @@ actor PersonaRuntime {
         // leave you staring at an empty chat: the bubble is local and shouldn't
         // depend on the relay round-trip succeeding. Status is local-only and
         // never claims "delivered" (D5).
+        // `localTextOverride` lets the locally-stored copy differ from the wire body —
+        // the §13.5 watch-along path stores the OWNER's RAW answer locally while the
+        // wire carries the redacted text (only the owner ever sees the secret).
         let message = StoredMessage(
             id: messageID, conversationID: conversationID,
             senderIdentity: identityHex, participantType: participantType,
-            text: body.text, sentAt: body.sentAt, threadID: threadID,
+            text: localTextOverride ?? body.text, sentAt: body.sentAt, threadID: threadID,
             isContext: isContext, aiContext: aiContext,
             localStatus: asSystemRow ? "system" : "sent", agentName: agentName)
         try await store.save(message)
@@ -920,7 +1139,9 @@ actor PersonaRuntime {
         guard !aiSuppressed(in: conversationID) else { return }
         var posted = 0
         var lastError: String?
-        for ai in ais where ai.participatesAutonomously {
+        for ai in aiSelection.participants(
+            from: ais, conversationID: conversationID, threadID: nil)
+        {
             let context = await contextFor(ai, conversationID: conversationID, threadID: nil)
             do {
                 // Race generation against a timeout so a wedged/slow on-device
@@ -993,6 +1214,110 @@ actor PersonaRuntime {
         }
     }
 
+    // MARK: - Context inspector (read-only, per-AI; backs AIContextInspectorView)
+
+    /// One assembled context window for one tethered AI — EXACTLY what it would
+    /// receive for a conversation/thread right now: the system prompt (its honest,
+    /// resolved text), the gather policy + depth, and every transcript entry. For
+    /// a REMOTE AI with the egress firewall on, names are already codename-redacted
+    /// (the same boundary `contextFor` crosses), so the inspector never shows a
+    /// remote vendor something the model wouldn't see. Read-only.
+    struct AIContextInspection: Sendable, Identifiable {
+        let id: String  // the tethered AI's id
+        let aiName: String
+        let isRemote: Bool
+        let firewallOn: Bool
+        /// Engine policy actually in effect ("active" | "strict" | "off"), after
+        /// the per-conversation override is applied.
+        let effectivePolicy: String
+        let depth: Int
+        /// The system/instructions text the model receives this turn (draft prompt
+        /// for a conversation, the composed guardrails+skills override for a thread).
+        let systemPrompt: String
+        let entries: [Entry]
+
+        struct Entry: Sendable, Identifiable {
+            let id: String  // the stored message id — drives the include/exclude toggle
+            let role: String
+            let text: String
+            let isAgent: Bool
+            let isMine: Bool
+            /// Whether this message is currently marked "Add to AI Context".
+            let marked: Bool
+            /// Whether it's a peer's message a sharing grant authorized.
+            let shared: Bool
+            /// True when it's included by the live policy (window/solo) rather than
+            /// by an explicit mark — so the UI can explain why excluding it needs
+            /// the gather mode changed, not just an un-mark.
+            let includedByPolicy: Bool
+        }
+    }
+
+    /// Assemble the inspector view for every tethered AI for one conversation/
+    /// thread. Mirrors `contextFor` precisely (same policy resolution, same depth,
+    /// same redaction) so what the user inspects is what the AI gets.
+    func contextInspections(conversationID: String, threadID: String? = nil) async
+        -> [AIContextInspection]
+    {
+        var out: [AIContextInspection] = []
+        // Per-conversation firewall override wins over the account default (same
+        // resolution as contextFor), so the inspector shows the EFFECTIVE state.
+        let firewallOn = AppSession.conversationFirewall(conversationID, siloID: siloID) ?? firewallEnabled
+        for ai in ais {
+            // Resolve the effective gather policy exactly as contextFor does: the
+            // per-conversation override (Settings ▸ conversation details) wins.
+            var policy = ai.contextPolicy
+            switch AppSession.conversationContextMode(conversationID, siloID: siloID) {
+            case "off": policy = "off"
+            case "marked": policy = "strict"
+            case "full": policy = "active"
+            default: break
+            }
+            // The honest system-prompt text + redaction state this AI receives.
+            let ctx = await contextFor(ai, conversationID: conversationID, threadID: threadID)
+            let systemPrompt = threadID == nil ? ctx.draftSystemPrompt() : ctx.turnSystemPrompt()
+            let redact = ai.isRemote && firewallOn
+
+            var entries: [AIContextInspection.Entry] = []
+            if policy != "off" {
+                let visible = await visibleContextMessages(
+                    conversationID: conversationID, threadID: threadID,
+                    depth: ai.contextDepth, strict: policy == "strict")
+                entries = visible.map { item in
+                    let message = item.message
+                    let isMine = message.senderIdentity == identityHex
+                    let isAgent = message.participantType == .agent
+                    // Same codename rule as redactedForRemote, but keep the id.
+                    let display: String
+                    if redact {
+                        display =
+                            isMine ? "you" : (contactRecords[message.senderIdentity]?.autoName ?? "a contact")
+                    } else {
+                        display =
+                            isMine ? displayName : (contactRecords[message.senderIdentity]?.displayName ?? "Contact")
+                    }
+                    return AIContextInspection.Entry(
+                        id: message.id,
+                        role: isAgent ? "\(display)'s AI" : display,
+                        text: message.text,
+                        isAgent: isAgent,
+                        isMine: isMine,
+                        marked: message.aiContext,
+                        shared: item.shared,
+                        // Included by live policy when it's NOT a marked message
+                        // (a marked message would be included even when off/strict).
+                        includedByPolicy: policy == "active" && !message.aiContext)
+                }
+            }
+            out.append(
+                AIContextInspection(
+                    id: ai.id, aiName: ai.name, isRemote: ai.isRemote,
+                    firewallOn: firewallOn, effectivePolicy: policy,
+                    depth: ai.contextDepth, systemPrompt: systemPrompt, entries: entries))
+        }
+        return out
+    }
+
     // MARK: - Egress-firewall-redacted accessors for the local MCP server (A35 Phase 2)
 
     /// The SAME egress firewall the remote-AI path uses (`redactedForRemote`),
@@ -1005,6 +1330,16 @@ actor PersonaRuntime {
         senderIdentityHex == identityHex
             ? "you"
             : (contactRecords[senderIdentityHex]?.autoName ?? "a contact")
+    }
+
+    /// A redacted conversation TITLE for the MCP bridge — a group's name or the
+    /// contact's local codename, NEVER an identity-hex fallback. The UI's
+    /// `displayName` can degrade to "Contact <hex>", and the bridge's "never
+    /// identity hex" guarantee must be absolute (security audit, 2026-06-15). Uses
+    /// the same source as `mcpCodename` for consistency with sender redaction.
+    func mcpConversationTitle(_ conversationID: String) -> String {
+        if let group = groupRosters[conversationID]?.name, !group.isEmpty { return group }
+        return contactRecords[conversationID]?.autoName ?? "a contact"
     }
 
     /// At most 64 KB of UTF-8 (invariant 4 bound), truncated on a code-point
@@ -1083,6 +1418,86 @@ actor PersonaRuntime {
                 text: entry.text,  // agentContext already applied the 64 KB bound
                 sentAt: 0)
         }
+    }
+
+    // MARK: - MCP write actions (A35 Phase 3 — reuse existing paths, invariants 8+9)
+
+    /// Whether the human currently has an ai_window OPEN for this conversation —
+    /// the SAME source of truth `agentContext` uses to decide the AI may participate
+    /// (engine-validated, human-signed, time-bounded). This is the gate for
+    /// `mcpSendAsMyAI`: an MCP client may only make my AI speak here while this is
+    /// true (CLAUDE.md invariant 9 / SPEC §13).
+    private func aiWindowActive(conversationID: String) async -> Bool {
+        await engine.activeWindow(for: identityHex) != nil
+            && myWindowConversationID == conversationID
+    }
+
+    /// Stage a DRAFT reply for the human via the existing `draftReply` path. NEVER
+    /// sends — it only returns text the UI/agent can present for the human to send
+    /// or discard. The returned body is byte-bounded to the same 64 KB egress cap so
+    /// a draft can't smuggle an unbounded payload back to the MCP client.
+    func mcpDraftReply(conversationID: String, text proposed: String) async -> MCPDraftOutcome {
+        // Prefer a model-drafted reply (the real "draft my reply" feature). If the
+        // provider is unavailable, fall back to staging the caller's proposed text —
+        // either way nothing is sent.
+        if let drafted = try? await draftReply(conversationID: conversationID).text,
+            !drafted.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        {
+            return .drafted(mcpBounded(drafted))
+        }
+        let fallback = mcpBounded(proposed)
+        guard !fallback.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            return .failed("Could not produce a draft (no AI reply and no proposed text).")
+        }
+        return .staged(fallback)
+    }
+
+    /// Outcome of an MCP draft request. The draft is NEVER sent; this only stages it.
+    enum MCPDraftOutcome: Sendable {
+        /// The AI produced a reply for the human to review.
+        case drafted(String)
+        /// No AI reply was available; the caller's proposed text was staged as-is.
+        case staged(String)
+        case failed(String)
+    }
+
+    /// Mark/unmark messages as AI context via the existing `markAsAIContext` path
+    /// (mirrors my own marks to the peer, author-guarded). Local marker change only.
+    func mcpMarkAIContext(conversationID: String, messageIDs: [String], value: Bool) async -> Int {
+        guard !messageIDs.isEmpty else { return 0 }
+        await markAsAIContext(messageIDs: messageIDs, value: value, conversationID: conversationID)
+        return messageIDs.count
+    }
+
+    /// Post an AGENT-LABELED message via the existing `sendAsMyAI` path
+    /// (`participant_type == .agent`, so it renders as AI-authored — invariant 8),
+    /// but ONLY while an ai_window is active for this conversation. With no active
+    /// window it FAILS CLOSED: it sends nothing and returns the refusal reason, so
+    /// an MCP client can never make EldrChat speak to others outside a visible,
+    /// human-opened window (invariant 9 / SPEC §13).
+    func mcpSendAsMyAI(conversationID: String, text: String) async -> MCPSendOutcome {
+        guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            return .failedClosed("Refused: empty message.")
+        }
+        guard await aiWindowActive(conversationID: conversationID) else {
+            return .failedClosed(
+                "No active AI window for this conversation — EldrChat will not send autonomously. "
+                    + "Ask the human to open an AI window for this conversation first, then retry.")
+        }
+        do {
+            // Reuses sendMessage(.agent): same wire format, same crypto, honest label.
+            try await sendAsMyAI(text, conversationID: conversationID)
+            return .sent
+        } catch {
+            return .failedClosed("Send failed: \(error.localizedDescription)")
+        }
+    }
+
+    /// Outcome of an MCP `send_as_my_ai`. `failedClosed` is the window-gate refusal
+    /// (or a delivery error) — surfaced to the client, never a silent drop.
+    enum MCPSendOutcome: Sendable {
+        case sent
+        case failedClosed(String)
     }
 
     /// Removes a stored message (tap-to-retry drops the failed copy first).
@@ -1182,9 +1597,10 @@ actor PersonaRuntime {
     }
 
     func draftReply(conversationID: String, threadID: String? = nil) async throws -> Draft {
-        try await engine.draft(
-            provider: primaryProvider,
-            context: await contextFor(primaryAI, conversationID: conversationID, threadID: threadID))
+        let primary = primaryAI(conversationID: conversationID, threadID: threadID)
+        return try await engine.draft(
+            provider: primary.provider,
+            context: await contextFor(primary, conversationID: conversationID, threadID: threadID))
     }
 
     /// Diagnostic for Settings "Test AI now": run the active provider against a
@@ -1198,7 +1614,8 @@ actor PersonaRuntime {
                     senderIdentityHex: "sample", senderDisplayName: "Test",
                     participantType: .human, text: "Hi! Are you working? Reply in one short sentence.")
             ])
-        return try await engine.draft(provider: primaryProvider, context: sample).text
+        return try await engine.draft(
+            provider: primaryProvider(conversationID: "", threadID: nil), context: sample).text
     }
 
     func startAIWindow(conversationID: String, durationSeconds: Int64) async throws {
@@ -1240,11 +1657,14 @@ actor PersonaRuntime {
         try await sendMessage(text, conversationID: conversationID, participantType: .agent)
     }
 
-    private func agentContext(
-        conversationID: String, threadID: String?, depth: Int = ConfiguredAI.defaultDepth,
-        strict: Bool = false, instructions: String? = nil, summarize: Bool = false,
-        systemPromptOverride: String? = nil
-    ) async -> AgentContext {
+    /// The EXACT messages the AI would see for this scope, with the per-message
+    /// `shared` flag — the single source of truth for both `agentContext` (what's
+    /// actually sent) and the read-only context inspector (what the user is
+    /// shown). Pure read: store + grants + settings, no engine mutation.
+    /// `strict` forces marked-context-only even while the AI is active.
+    private func visibleContextMessages(
+        conversationID: String, threadID: String?, depth: Int, strict: Bool
+    ) async -> [(message: StoredMessage, shared: Bool)] {
         let stored: [StoredMessage]
         if let threadID {
             stored = (try? await store.messages(threadID: threadID)) ?? []
@@ -1299,14 +1719,27 @@ actor PersonaRuntime {
             budget -= cost
         }
         let visible = Array(bounded.reversed())
-
-        let transcript = visible.map { message -> TranscriptEntry in
+        return visible.map { message in
             let isMine = message.senderIdentity == identityHex
             // A message flagged "Add to AI Context" is elevated to shared
             // context the agent treats specially: my own marked messages always
             // (my AI, my content); a peer's only when BOTH humans granted in
             // this scope — default-deny otherwise (invariant 9, privacy).
             let shared = message.aiContext && (isMine || sharingAuthorized)
+            return (message, shared)
+        }
+    }
+
+    private func agentContext(
+        conversationID: String, threadID: String?, depth: Int = ConfiguredAI.defaultDepth,
+        strict: Bool = false, instructions: String? = nil, summarize: Bool = false,
+        systemPromptOverride: String? = nil
+    ) async -> AgentContext {
+        let visible = await visibleContextMessages(
+            conversationID: conversationID, threadID: threadID, depth: depth, strict: strict)
+        let transcript = visible.map { entry -> TranscriptEntry in
+            let message = entry.message
+            let isMine = message.senderIdentity == identityHex
             return TranscriptEntry(
                 senderIdentityHex: message.senderIdentity,
                 senderDisplayName: isMine
@@ -1314,7 +1747,7 @@ actor PersonaRuntime {
                 participantType: message.participantType,
                 text: message.text,
                 isContext: message.isContext,
-                isSharedContext: shared)
+                isSharedContext: entry.shared)
         }
         return AgentContext(
             myIdentityHex: identityHex, myDisplayName: displayName,
@@ -1331,7 +1764,9 @@ actor PersonaRuntime {
     func takeAgentThreadTurn(threadID: String) async {
         let conversationID = threadConversations[threadID] ?? ""
         guard !conversationID.isEmpty, !aiSuppressed(in: conversationID) else { return }
-        for ai in ais where ai.participatesAutonomously {
+        for ai in aiSelection.participants(
+            from: ais, conversationID: conversationID, threadID: threadID)
+        {
             _ = await engine.runThreadTurn(
                 provider: ai.provider,
                 context: await contextFor(ai, conversationID: conversationID, threadID: threadID),
@@ -1541,9 +1976,15 @@ actor PersonaRuntime {
         // would stall message delivery (relay AND Nearby both funnel through
         // handleReceived) whenever the relay is slow. Detached, fire-and-forget.
         Task { [weak self] in await self?.republishIfPrekeysLow() }
+        // Persist the dedup id SYNCHRONOUSLY (was fire-and-forget): if the app is
+        // killed right after rendering #0, a detached write could be lost, so on
+        // relaunch the relay replays the handshake — which, before the
+        // processHandshake guard (13d2f86), silently desynced the session. This is
+        // a cheap LOCAL write (no relay round-trip, unlike the prekey republish
+        // above), so awaiting it doesn't stall delivery. (Security-audit
+        // defense-in-depth for the replay-desync fix.)
         let dedupeStore = store
-        let wrapEventID = received.wrapEventID
-        Task { try? await dedupeStore?.markProcessed(eventID: wrapEventID) }
+        try? await dedupeStore?.markProcessed(eventID: received.wrapEventID)
 
         // Chunked large message: each part advanced the ratchet (handled above);
         // buffer until every part is present, then continue with the whole text.
@@ -1551,6 +1992,35 @@ actor PersonaRuntime {
         if body.chunk != nil {
             guard let whole = accumulateChunk(body, from: senderHex) else { return }
             body = whole
+        }
+
+        // Relay-carried ACP frame (ACPRouterplan Phase 3): an ACP line from the
+        // owner's consented `coding_agent` node, riding the message mesh. Route it to
+        // that node's transport and RETURN — it is the ACP control channel, NEVER a
+        // chat message, so it is neither stored nor rendered. The C-3 gate
+        // (`isConsentedCodingAgentNode`) is what makes this safe: only the paired,
+        // consented node's frames are admitted; anyone else's "ACP1|…" text falls
+        // through to the normal chat path (and renders as the literal text it is).
+        // `ensureRelayACPTransport` returns nil for a non-consented sender, so an
+        // un-consented node's frame is NOT swallowed here — it stays visible as chat,
+        // never silently routed.
+        if RelayACPTransport.isACPFrame(body.text),
+            let transport = ensureRelayACPTransport(nodeHex: senderHex)
+        {
+            await transport.deliverInbound(body.text)
+            return
+        }
+
+        // Watch-along DRAFT (SPEC §13.5 endpoint model): the owner's Mac coding agent
+        // produced an answer for THIS phone to voice to the group. Recognize it
+        // (agent-signed, from a pinned coding_agent contact, carrying the draft marker),
+        // voice it REDACTED as the owner's signed agent, and return — the raw draft is
+        // never stored as a 1:1 message; only the owner's local group echo holds the raw.
+        if let draft = body.agentDraft, received.participantType == .agent,
+            contactType(senderHex) == "coding_agent"
+        {
+            await voiceCodingAgentDraft(rawText: body.text, draft: draft)
+            return
         }
 
         // Peer self-chosen alias (D11-preserving: arrived over the encrypted
@@ -1680,7 +2150,9 @@ actor PersonaRuntime {
             // Conversation scope: only during MY active ai_window. Each tethered
             // AI that participates replies in turn (the engine gate fails closed
             // when no window; draft-only/off AIs never auto-post).
-            for ai in ais where ai.participatesAutonomously {
+            for ai in aiSelection.participants(
+                from: ais, conversationID: conversationID, threadID: nil)
+            {
                 _ = await engine.runWindowReply(
                     provider: ai.provider,
                     context: await contextFor(ai, conversationID: conversationID, threadID: nil),
@@ -1779,11 +2251,63 @@ private struct RuntimeSink: AgentMessageSink {
         try await runtime.sendMessage(
             body.text, conversationID: conversationID, participantType: .agent, agentName: agentName)
     }
+
+    /// §13.5 voicing: `body` (redacted) goes on the wire to the group; `rawText` is the
+    /// owner's local-only view. Thread scope routes via the thread's conversation;
+    /// conversation scope routes via the draft's target (`voiceInto`, stashed on the
+    /// runtime). Signs as the owner's agent (sendMessage `.agent` → owner's agent key).
+    func postAgentDraft(
+        _ body: MessageBody, rawText: String, threadID: String?, agentName: String?
+    ) async throws {
+        let conversationID: String
+        if let threadID, let info = await runtime.threadInfo(threadID: threadID) {
+            conversationID = info.conversationID
+        } else if let target = await runtime.draftTargetConversation() {
+            conversationID = target
+        } else {
+            throw PQRCError.sessionNotEstablished
+        }
+        try await runtime.sendMessage(
+            body.text, conversationID: conversationID, participantType: .agent,
+            threadID: threadID, agentName: agentName, localTextOverride: rawText)
+    }
 }
 
 extension PersonaRuntime {
     func windowConversation() -> String? {
         myWindowConversationID
+    }
+
+    /// The conversation a watch-along draft is currently being voiced into — read by
+    /// `RuntimeSink.postAgentDraft` to route a conversation-scope voicing (§13.5).
+    func draftTargetConversation() -> String? {
+        pendingDraftTarget
+    }
+
+    /// Voice a watch-along DRAFT from the owner's Mac coding agent (§13.5 endpoint
+    /// model). Stashes the Mac-named target conversation so the sink can route it, then
+    /// runs the raw answer through the engine — which gates on MY (the owner's) active
+    /// window/invite and REDACTS the wire copy while preserving the raw for my local
+    /// view (the owner sees the real answer; the group sees `‹redacted:…›`, signed with
+    /// MY agent key). Fail closed + visible: if my window is off, drop a LOCAL-ONLY note
+    /// (never published) so I know to enable it.
+    func voiceCodingAgentDraft(rawText: String, draft: AgentDraft) async {
+        guard let target = draft.voiceInto, !target.isEmpty else { return }
+        pendingDraftTarget = target
+        defer { pendingDraftTarget = nil }
+
+        let posted = await engine.voiceAgentDraft(
+            rawText: rawText, threadID: draft.threadID, agentName: draft.agentName)
+        guard !posted else { return }
+
+        let note = StoredMessage(
+            id: UUID().uuidString, conversationID: target, senderIdentity: identityHex,
+            participantType: .human,
+            text: "Your coding agent replied, but your AI window is off — turn it on to share its answer.",
+            sentAt: clock.now(), threadID: draft.threadID, isContext: false, aiContext: false,
+            localStatus: "system", agentName: nil)
+        try? await store.save(note)
+        eventContinuation?.yield(.messageAdded(note))
     }
 }
 

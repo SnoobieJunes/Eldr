@@ -4,8 +4,19 @@ import Foundation
 /// connect and exercise the protocol) BEFORE the real `PersonaRuntime`-backed
 /// bridge is wired into the app. All names are already codenames, mirroring what
 /// the real (firewall-redacted) bridge will return.
+///
+/// The write tools are modeled faithfully: `draft_reply`/`mark_ai_context` always
+/// succeed (they never send), and `send_as_my_ai` succeeds ONLY for a conversation
+/// passed as `activeWindowConversationID` — every other conversation fails closed,
+/// mirroring the real "no AI window open → no autonomous send" gate (invariant 9).
 public struct DemoSecureChatBridge: SecureChatBridge {
-    public init() {}
+    /// The conversation (if any) for which a human-opened AI window is currently
+    /// active, so `send_as_my_ai` is allowed there. nil → no window anywhere.
+    private let activeWindowConversationID: String?
+
+    public init(activeWindowConversationID: String? = nil) {
+        self.activeWindowConversationID = activeWindowConversationID
+    }
 
     private static let corpus: [MCPMessage] = [
         MCPMessage(
@@ -45,5 +56,32 @@ public struct DemoSecureChatBridge: SecureChatBridge {
 
     public func contextPreview(conversationID: String) async -> [MCPMessage] {
         await messages(conversationID: conversationID, limit: 20)
+    }
+
+    // MARK: Write (mirrors the real bridge's invariant posture)
+
+    public func draftReply(conversationID: String, text: String) async -> MCPWriteResult {
+        // Never sends — just stages a draft for the human.
+        .ok(detail: "Draft saved for \(conversationID) (the user can review and send it):\n\(text)")
+    }
+
+    public func markAIContext(conversationID: String, messageIDs: [String], value: Bool) async
+        -> MCPWriteResult
+    {
+        .ok(
+            detail:
+                "\(value ? "Marked" : "Unmarked") \(messageIDs.count) message(s) as AI context in \(conversationID)."
+        )
+    }
+
+    public func sendAsMyAI(conversationID: String, text: String) async -> MCPWriteResult {
+        // Window gate: speak only when the human has an AI window open here.
+        guard conversationID == activeWindowConversationID else {
+            return .failedClosed(
+                reason:
+                    "No active AI window for \(conversationID). EldrChat will not send autonomously — ask the user to open an AI window for this conversation first, then retry."
+            )
+        }
+        return .ok(detail: "Sent as your AI (in the active AI window) to \(conversationID): \(text)")
     }
 }

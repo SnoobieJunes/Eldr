@@ -9,6 +9,8 @@ struct SettingsView: View {
     @Bindable var model: AppModel
     @Environment(\.dismiss) private var dismiss
     @Environment(AppSession.self) private var session
+    /// Relaunch the first-run "explore a new planet" tour (provided by RootView).
+    @Environment(TourCoordinator.self) private var tour
     @State private var wipeConfirmStage = 0
     @AppStorage("ephemeralReceivingKeys") private var ephemeralKeys = false
     @AppStorage("localLinkEnabled") private var localLinkEnabled = AppSession.localLinkEnabled
@@ -26,7 +28,27 @@ struct SettingsView: View {
     /// Local agent access (in-process MCP server) toggle state. Mirrors the live
     /// server, OFF by default; flipping it starts/stops the loopback server.
     @State private var localMCPOn = false
+    /// Set when the user flips Local agent access ON: gates the actual start behind
+    /// a LOUD consent alert (same pattern as the off-device-AI consent), because
+    /// enabling it shares decrypted (codename-redacted) chat with a local agent that
+    /// can read and — with writes — draft, mark, and send-as-your-AI in active windows.
+    @State private var showLocalMCPConsent = false
+    /// Per-silo loop-guard threshold (DEVIATIONS D14): pause a thread's AIs after
+    /// this many consecutive agent messages with no human. `0` = guard OFF
+    /// (unbounded). Loaded in `.onAppear`, written through `model.setLoopGuardLimit`.
+    @State private var loopGuardLimit = PQRCConstants.agentLoopGuardLimit
+    /// Pairing-token reveal state: masked by default, shown once on "Reveal",
+    /// then re-masked (the platform-standard view-once pattern). Reset whenever
+    /// the connection (and thus the token) changes.
+    @State private var revealMCPToken = false
+    /// Gates the "Regenerate" action behind a confirm alert (it breaks any paired
+    /// shim, which must re-pair with the new token).
+    @State private var showRegenerateTokenConfirm = false
     @State private var now = Int64(Date().timeIntervalSince1970)
+    /// Presents the "connect your Mac coding agent" pairing sheet (the agent contact
+    /// is a persistent device relationship, so it lives here in Settings rather than
+    /// in New Chat). Tagged `coding_agent` on pair so its watch-along drafts are voiced.
+    @State private var showConnectAgent = false
 
     private let ticker = Timer.publish(every: 1, on: .main, in: .common).autoconnect()
 
@@ -39,6 +61,8 @@ struct SettingsView: View {
                 nearbySection
                 reachabilitySection
                 aiSection
+                aiLoopGuardSection
+                codingAgentSection
                 prekeysSection
                 privacySection
                 localAgentSection
@@ -66,6 +90,7 @@ struct SettingsView: View {
                     UserDefaults.standard.string(forKey: AppSession.displayNameKey(model.siloID)) ?? ""
                 biometricOn = session.hasBiometricUnlock
                 localMCPOn = session.isLocalMCPRunning
+                loopGuardLimit = AppSession.agentLoopGuardLimit(siloID: model.siloID)
                 Task {
                     openInboxUntil = await model.runtime.openInboxActiveUntil()
                     // Refresh the live prekey count so the Prekeys section isn't
@@ -363,6 +388,82 @@ struct SettingsView: View {
         }
     }
 
+    // MARK: AI loop guard (DEVIATIONS D14)
+
+    /// The loop guard pauses a shared thread's AIs once they've sent N messages in
+    /// a row with no human, keeping a person in the loop. Per-silo (deniability),
+    /// applied live to the running engine. `0` = OFF (unbounded — AIs may loop).
+    private var aiLoopGuardSection: some View {
+        Section {
+            Toggle("Pause AIs after a run of messages", isOn: Binding(
+                get: { loopGuardLimit > 0 },
+                set: { on in
+                    // Turning it back on restores the spec default; OFF stores 0.
+                    setLoopGuard(on ? PQRCConstants.agentLoopGuardLimit : 0)
+                }))
+                .accessibilityIdentifier("loop-guard-toggle")
+            if loopGuardLimit > 0 {
+                Stepper(value: Binding(
+                    get: { loopGuardLimit },
+                    set: { setLoopGuard($0) }
+                ), in: AppSession.agentLoopGuardMin...AppSession.agentLoopGuardMax) {
+                    LabeledContent("Pause after") {
+                        Text("\(loopGuardLimit) messages")
+                            .monospacedDigit()
+                            .accessibilityIdentifier("loop-guard-value")
+                    }
+                }
+                .accessibilityIdentifier("loop-guard-stepper")
+                .accessibilityValue("\(loopGuardLimit) consecutive AI messages")
+            }
+        } header: {
+            Text("AI loop guard")
+        } footer: {
+            if loopGuardLimit > 0 {
+                Text("In a shared AI thread, your assistants pause automatically after \(loopGuardLimit) message\(loopGuardLimit == 1 ? "" : "s") in a row with no human, so a person always stays in the loop. Anyone typing in the thread resumes them. Lower keeps you more in control; higher lets the AIs go further on their own.")
+            } else {
+                Text("OFF — your assistants will NOT auto-pause in a shared AI thread. Two AIs left talking to each other can loop indefinitely (and, with a remote provider, keep spending tokens) until you step in. Recommended: keep this on.")
+                    .foregroundStyle(.orange)
+            }
+        }
+    }
+
+    /// Persist + apply the loop-guard threshold and reflect it in the UI. `0` =
+    /// OFF; positive values are clamped to the supported range by AppSession.
+    private func setLoopGuard(_ value: Int) {
+        let clamped = value <= 0 ? 0
+            : min(max(value, AppSession.agentLoopGuardMin), AppSession.agentLoopGuardMax)
+        loopGuardLimit = clamped
+        Task { await model.setLoopGuardLimit(clamped) }
+    }
+
+    // MARK: Mac coding agent (watch-along pairing, §13.5)
+
+    /// Pair the Mac-hosted coding agent (the Eldr ACP Configurator) as a persistent
+    /// device — a long-lived relationship that belongs in Settings, not New Chat. The
+    /// contact is tagged `coding_agent`, which is what lets the phone recognize its
+    /// watch-along drafts and voice them as your signed agent under your AI window.
+    private var codingAgentSection: some View {
+        Section {
+            Button {
+                showConnectAgent = true
+            } label: {
+                Label("Connect your Mac coding agent", systemImage: "desktopcomputer")
+            }
+            .accessibilityIdentifier("connect-mac-agent")
+        } header: {
+            Text("Mac coding agent")
+        } footer: {
+            Text("Pair the Eldr ACP Configurator running on your Mac so its coding agent can join a conversation — controlled by you, under your AI window. On the Mac: open the Bridge tab, then scan its QR here (or use “Open in EldrChat” / paste its address). Paired this way, the agent is recognized as yours and its answers are shown to you in full while secrets are redacted for everyone else.")
+        }
+        .sheet(isPresented: $showConnectAgent) {
+            // Reuse the verified-pairing flow, pre-tagged as a coding agent so its
+            // drafts are voice-trusted. The user scans the Configurator's QR or pastes
+            // its npub.
+            NewChatView(model: model, prefilledContactType: "coding_agent")
+        }
+    }
+
     // MARK: Prekeys / privacy / data / about
 
     private var prekeysSection: some View {
@@ -415,11 +516,18 @@ struct SettingsView: View {
             Toggle("Local agent access (MCP)", isOn: Binding(
                 get: { localMCPOn },
                 set: { on in
-                    localMCPOn = on
-                    Task {
-                        if on { await session.startLocalMCP() } else { await session.stopLocalMCP() }
-                        // Snap back if the server refused to bind.
-                        localMCPOn = session.isLocalMCPRunning
+                    if on {
+                        // Gate turning it ON behind the LOUD consent alert — this
+                        // shares decrypted chat with a local agent. Keep the toggle
+                        // visually off until the user confirms.
+                        showLocalMCPConsent = true
+                    } else {
+                        localMCPOn = false
+                        revealMCPToken = false  // never carry a reveal across off→on
+                        Task {
+                            await session.stopLocalMCP()
+                            localMCPOn = session.isLocalMCPRunning
+                        }
                     }
                 }))
                 .accessibilityIdentifier("local-mcp-toggle")
@@ -432,43 +540,154 @@ struct SettingsView: View {
             if localMCPOn, let connection = session.localMCPConnection {
                 localMCPInstructions(connection)
             }
+            mcpVsACPInfo
         } header: {
             Text("Local agent access")
         } footer: {
-            Text("OFF by default. When ON, a local AI agent on THIS machine (Goose, Xcode, Claude, …) can READ your conversations through a loopback-only connection — sender names are local codenames, message text is firewall-redacted and size-capped, and there is NO way for it to send or post anything. Nothing is ever exposed off this device, and the connection needs the one-time pairing token below. Turning this off, or locking, stops it immediately. Only enable it if you want a local agent to see your redacted chat.")
+            Text("OFF by default. When ON, a local AI agent on THIS machine (Goose, Xcode, Claude, …) can interact with your conversations over a loopback-only, token-gated connection. It can READ them (sender names are local codenames; message text is firewall-redacted and size-capped) and, where allowed, DRAFT a reply for you to review, MARK messages as AI context, and SEND a message labeled as YOUR AI — but only while you have an AI window open for that conversation; with no window open it cannot send anything. It can never post as you. Be careful which agent harness you grant access to: whatever you point at this can see your redacted chat. Nothing is ever exposed off this device. Turning this off, or locking, stops it immediately.")
+        }
+        .alert("Share your chat with a local agent?", isPresented: $showLocalMCPConsent) {
+            Button("Enable local agent access", role: .destructive) {
+                localMCPOn = true
+                revealMCPToken = false  // a freshly published token starts masked
+                Task {
+                    await session.startLocalMCP()
+                    // Snap back if the server refused to bind.
+                    localMCPOn = session.isLocalMCPRunning
+                }
+            }
+            Button("Cancel", role: .cancel) {
+                // Never started — the toggle stays off.
+                localMCPOn = false
+            }
+        } message: {
+            Text("Turning this on SHARES your decrypted conversations (with contact names replaced by your private codenames) with a local AI agent running on THIS machine. That agent can READ your chat and — where you've allowed it — DRAFT replies, MARK messages as AI context, and SEND messages labeled as your AI, but only while you have an AI window open. It can never post as you, and nothing leaves this device. Only enable this for an agent harness you trust; whatever you point at it will see your redacted chat. You can turn it off (or just lock) at any time to stop it instantly.")
         }
     }
 
-    /// The exact shim command + token + env a user pastes into their MCP client.
+    /// Clarify the TWO distinct local-agent integrations so the user isn't confused
+    /// that "ACP" has no Settings toggle: this MCP server exposes your CHAT to a
+    /// local agent here; the separate ACP coding agent is configured in Xcode.
+    private var mcpVsACPInfo: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Label {
+                Text("Two different integrations").font(.caption.weight(.semibold))
+            } icon: {
+                Image(systemName: "info.circle")
+            }
+            Text("**Local agent access (MCP)** — this toggle — exposes your CHAT to a local agent on this machine.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            Text("The separate **ACP coding agent** (`eldr-acp`) lets your self-hosted LLM pilot Xcode (write code, build, run tests). It touches no chat content and is configured **in Xcode**, not here — see SETUP-GUIDE §9.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        }
+        .accessibilityIdentifier("mcp-vs-acp-info")
+    }
+
+    /// 8 dots — what the pairing token shows as while masked.
+    private let maskedToken = String(repeating: "•", count: 8)
+
+    /// The shim command + socket + token a user pastes into their MCP client.
+    /// The token is a SECRET: masked by default, shown once on "Reveal" (then
+    /// re-masked), copyable, and regenerable. The copied configuration always
+    /// carries the REAL token regardless of mask state.
     @ViewBuilder
     private func localMCPInstructions(_ connection: LocalMCPConnection) -> some View {
-        let block = """
+        // The full block the user pastes — always the real token (it's headed to
+        // their own MCP client config, not the screen).
+        let configBlock = """
             command: pqrc-mcp-bridge
             env:
               PQRC_MCP_SOCKET=\(connection.socketPath)
               PQRC_MCP_TOKEN=\(connection.token)
             """
-        VStack(alignment: .leading, spacing: 6) {
-            Text("Point your MCP client at the bridge shim with this env:")
+        VStack(alignment: .leading, spacing: 10) {
+            Text("Point your MCP client at the bridge shim with this socket and pairing token:")
                 .font(.caption)
                 .foregroundStyle(.secondary)
-            Text(block)
-                .font(.caption.monospaced())
-                .textSelection(.enabled)
-                .padding(8)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .background(.quaternary, in: RoundedRectangle(cornerRadius: 8))
-                .accessibilityIdentifier("local-mcp-config")
+
+            // Socket path (not secret) — selectable.
+            VStack(alignment: .leading, spacing: 2) {
+                Text("Socket").font(.caption2).foregroundStyle(.secondary)
+                Text(connection.socketPath)
+                    .font(.caption.monospaced())
+                    .textSelection(.enabled)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .accessibilityIdentifier("local-mcp-socket")
+            }
+
+            // Pairing token — masked by default, revealed once on tap.
+            VStack(alignment: .leading, spacing: 4) {
+                Text("Pairing token").font(.caption2).foregroundStyle(.secondary)
+                Text(revealMCPToken ? connection.token : maskedToken)
+                    .font(.caption.monospaced())
+                    // Selectable only when revealed (selecting dots is pointless);
+                    // the Copy button is the masked-state path to the real value.
+                    .textSelection(.enabled)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(8)
+                    .background(.quaternary, in: RoundedRectangle(cornerRadius: 8))
+                    .accessibilityIdentifier("local-mcp-token")
+                    .accessibilityLabel(revealMCPToken ? "Pairing token revealed" : "Pairing token hidden")
+                    .accessibilityValue(revealMCPToken ? connection.token : "hidden")
+                HStack(spacing: 16) {
+                    Button {
+                        revealMCPToken.toggle()
+                    } label: {
+                        Label(
+                            revealMCPToken ? "Hide" : "Reveal",
+                            systemImage: revealMCPToken ? "eye.slash" : "eye")
+                    }
+                    .accessibilityIdentifier("local-mcp-reveal-token")
+                    Button {
+                        UIPasteboard.general.string = connection.token
+                    } label: {
+                        Label("Copy token", systemImage: "doc.on.doc")
+                    }
+                    .accessibilityIdentifier("local-mcp-copy-token")
+                }
+                .font(.caption)
+                .buttonStyle(.borderless)
+            }
+
+            // Copy the whole config block (real token) for the MCP client.
             Button {
-                UIPasteboard.general.string = block
+                UIPasteboard.general.string = configBlock
             } label: {
-                Label("Copy configuration", systemImage: "doc.on.doc")
+                Label("Copy configuration", systemImage: "doc.on.clipboard")
             }
             .font(.caption)
             .accessibilityIdentifier("local-mcp-copy")
-            Text("`pqrc-mcp-bridge` is built from Packages/PQRCMCP (`swift build`). The socket lives in this app's container and changes each time you turn this on.")
+
+            // Regenerate — mints a fresh token and breaks any paired shim.
+            Button(role: .destructive) {
+                showRegenerateTokenConfirm = true
+            } label: {
+                Label("Regenerate token", systemImage: "arrow.triangle.2.circlepath")
+            }
+            .font(.caption)
+            .accessibilityIdentifier("local-mcp-regenerate-token")
+
+            Text("Keep the pairing token secret — anyone who has it (and is on this machine) can reach your redacted chat. Reveal shows it once, then re-hides it. Regenerate mints a new token and invalidates the old one, so any agent you'd paired must be updated with the new token. `pqrc-mcp-bridge` is built from Packages/PQRCMCP (`swift build`); the socket lives in this app's container and changes each time you turn this on.")
                 .font(.caption2)
                 .foregroundStyle(.secondary)
+        }
+        // Whenever the published token changes (turn on, regenerate), re-mask so a
+        // fresh secret never appears already-revealed.
+        .onChange(of: connection.token) { _, _ in revealMCPToken = false }
+        .alert("Regenerate pairing token?", isPresented: $showRegenerateTokenConfirm) {
+            Button("Regenerate", role: .destructive) {
+                Task {
+                    await session.regenerateMCPPairingToken()
+                    // The new token must never show up pre-revealed.
+                    revealMCPToken = false
+                    localMCPOn = session.isLocalMCPRunning
+                }
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("This mints a brand-new pairing token and invalidates the current one. Any MCP client you'd already paired will stop connecting until you paste the new token into its configuration.")
         }
     }
 
@@ -523,6 +742,17 @@ struct SettingsView: View {
 
     private var aboutSection: some View {
         Section("About") {
+            Button {
+                // Dismiss Settings first; `relaunch()` defers the full-screen tour
+                // until this sheet has finished dismissing, so the cover doesn't
+                // collide with the sheet's dismissal (which silently dropped it).
+                dismiss()
+                tour.relaunch()
+            } label: {
+                Label("Take the tour", systemImage: "sparkles")
+            }
+            .accessibilityIdentifier("take-the-tour")
+            .accessibilityHint("Replays the guided tour of EldrChat's features and privacy.")
             LabeledContent("Protocol", value: "pqrc-v1")
             LabeledContent("License", value: "AGPL-3.0")
             Text("Honest limits: relays can see your IP address and that someone messaged you. They cannot see who sent it or what it says. Messages are not deniable, and this identity lives only on this device.")

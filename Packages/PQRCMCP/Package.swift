@@ -2,9 +2,11 @@
 import PackageDescription
 
 // PQRCMCP — EldrChat's local Model Context Protocol (MCP) server. Exposes the
-// user's secure chat (read-only, firewall-redacted) to a LOCAL MCP client
-// (Goose, Xcode, Claude, OpenClaw, …) over stdio JSON-RPC. The server is
-// client-agnostic: any spec-compliant MCP client can use it.
+// user's secure chat (firewall-redacted reads + window-gated write tools) to a
+// LOCAL MCP client (Goose, Xcode, Claude, OpenClaw, …) over stdio JSON-RPC. The
+// server is client-agnostic: any spec-compliant MCP client can use it. The write
+// tools reuse the app's existing send/draft/mark paths and preserve the hard
+// invariants (agent-labeled + ai_window-gated send; see SecureChatBridge).
 //
 // The library has NO app/crypto dependencies — it speaks MCP against a
 // `SecureChatBridge` the app implements (firewall-redacted) and a demo bridge

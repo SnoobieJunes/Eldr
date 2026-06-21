@@ -1,3 +1,9 @@
+> **RETIRED / SUPERSEDED — do not edit or cite.** This is an early, divergent copy
+> of the threat model that was accidentally tracked under `TestVectors/` (which is
+> for frozen JSON vectors, not prose). The single canonical, maintained threat
+> model is **`docs/THREAT_MODEL.md`**. Kept only for history; renamed with a
+> `-old` suffix. (This was flagged as finding II·H2 in `docs/SPEC_COMPLIANCE_REVIEW.md`.)
+
 # PQRC Threat Model v1
 
 **PQRC — Post-Quantum Ratcheted Conversations** (codename **Ratchet & Clank**)

@@ -35,6 +35,22 @@ struct JSONValueTests {
         #expect(JSONValue.parse("") == nil)
         #expect(JSONValue.parse("   ") == nil)
     }
+
+    /// Regression: `intValue` on a non-finite or out-of-range double must return nil,
+    /// not TRAP. A malformed wire field like `1e400` parses (via JSONSerialization) to
+    /// `+inf`, and `Int(.infinity)` is a fatal runtime error — a remote crash the
+    /// instant any `id`/`n`/`exit` field is read as Int.
+    @Test func intValueOnExtremeDoubleDoesNotTrap() {
+        // These all parse to ±inf or an out-of-Int64-range double.
+        #expect(JSONValue.parse(#"{"id":1e400}"#)?["id"]?.intValue == nil)
+        #expect(JSONValue.parse(#"{"id":-1e400}"#)?["id"]?.intValue == nil)
+        #expect(JSONValue.parse(#"{"id":1e309}"#)?["id"]?.intValue == nil)
+        // In-range values still coerce fine (regression guard, not over-rejecting).
+        #expect(JSONValue.parse(#"{"id":42.9}"#)?["id"]?.intValue == 42)
+        #expect(JSONValue.parse(#"{"id":-7}"#)?["id"]?.intValue == -7)
+        #expect(JSONValue.double(.nan).intValue == nil)
+        #expect(JSONValue.double(.infinity).intValue == nil)
+    }
 }
 
 @Suite("OpenAI codec")
@@ -197,16 +213,23 @@ struct ToolExecutorTests {
         #expect(result.text.contains("/Applications/Xcode-beta.app/Contents/Developer"))
     }
 
-    @Test func toolDefinitionsCoverAllFour() {
+    @Test func toolDefinitionsCoverAllTools() {
         let names = Set(ToolExecutor.toolDefinitions().map(\.name))
-        #expect(names == ["read_file", "write_file", "list_dir", "run_shell"])
+        #expect(
+            names == [
+                "read_file", "write_file", "edit_file", "list_dir", "search", "run_shell",
+            ])
+        // The advertised set must match the declared source of truth.
+        #expect(names == Set(ToolExecutor.allToolNames))
     }
 
     @Test func permissionRequiredOnlyForMutating() {
         #expect(ToolExecutor.needsPermission("write_file"))
+        #expect(ToolExecutor.needsPermission("edit_file"))
         #expect(ToolExecutor.needsPermission("run_shell"))
         #expect(!ToolExecutor.needsPermission("read_file"))
         #expect(!ToolExecutor.needsPermission("list_dir"))
+        #expect(!ToolExecutor.needsPermission("search"))
     }
 }
 
@@ -277,6 +300,178 @@ struct ClientConnectionTests {
         let sent = try #require(JSONValue.parse(await sink.last() ?? ""))
         #expect(sent["method"]?.stringValue == "session/update")
         #expect(sent["id"] == nil)
+    }
+}
+
+// MARK: - Phase 1 helpers
+
+@Suite("AgentConfig events/context")
+struct AgentConfigEventsContextTests {
+    @Test func parsesEventsAndContextPaths() {
+        let c = AgentConfig.fromEnvironment(
+            ["ELDR_ACP_EVENTS_FILE": "/tmp/ev.jsonl", "ELDR_ACP_CONTEXT_FILE": "/tmp/ctx.md"],
+            configDir: nil)
+        #expect(c.eventsFilePath == "/tmp/ev.jsonl")
+        #expect(c.contextFilePath == "/tmp/ctx.md")
+    }
+
+    @Test func defaultsNilAndBackwardCompatible() {
+        let c = AgentConfig.fromEnvironment([:], configDir: nil)
+        #expect(c.eventsFilePath == nil)
+        #expect(c.contextFilePath == nil)
+        // The new fields don't disturb the existing defaults.
+        #expect(c.maxToolResultBytes == AgentConfig.default.maxToolResultBytes)
+    }
+}
+
+@Suite("Prompt content blocks (embedded context)")
+struct PromptContentBlockTests {
+    @Test func handlesCodeAndCompilationErrorBlocks() {
+        let prompt: JSONValue = .array([
+            .object(["type": "text", "text": "Fix this:"]),
+            .object([
+                "type": "code", "language": "swift", "path": "A.swift", "text": "let x = 1",
+            ]),
+            .object(["type": "compilation_error", "path": "A.swift", "text": "cannot find 'y'"]),
+            .object(["type": "image", "data": "BASE64IMAGEPAYLOAD"]),  // ignored
+        ])
+        let text = ACPAgent.extractPromptText(prompt)
+        #expect(text.contains("Fix this:"))
+        #expect(text.contains("```swift"))
+        #expect(text.contains("let x = 1"))
+        #expect(text.contains("// A.swift"))
+        #expect(text.contains("Compilation error at A.swift"))
+        #expect(text.contains("cannot find 'y'"))
+        // The image block is dropped entirely.
+        #expect(!text.contains("BASE64IMAGEPAYLOAD"))
+    }
+
+    @Test func plainTextBlocksStillWork() {
+        let prompt: JSONValue = .array([
+            .object(["type": "text", "text": "one"]),
+            .object(["type": "text", "text": "two"]),
+        ])
+        #expect(ACPAgent.extractPromptText(prompt) == "one\ntwo")
+    }
+}
+
+@Suite("ACPAgent shell helpers")
+struct ACPAgentShellHelperTests {
+    @Test func parseShellExit_readsTrailingMarker() {
+        #expect(ACPAgent.parseShellExit(from: "out\n[exit code: 0]") == 0)
+        #expect(ACPAgent.parseShellExit(from: "boom\n[exit code: 3]") == 3)
+        #expect(ACPAgent.parseShellExit(from: "x\n[exit code: unknown]") == -1)
+        #expect(ACPAgent.parseShellExit(from: "no marker here") == -1)
+    }
+
+    @Test func isBuildCommand_detectsBuildsAndTests() {
+        #expect(ACPAgent.isBuildCommand("xcodebuild -scheme X build"))
+        #expect(ACPAgent.isBuildCommand("swift build -c release"))
+        #expect(ACPAgent.isBuildCommand("SWIFT BUILD"))  // case-insensitive
+        #expect(ACPAgent.isBuildCommand("swift test"))
+        #expect(!ACPAgent.isBuildCommand("echo hi"))
+        #expect(!ACPAgent.isBuildCommand("ls -la"))
+    }
+
+    @Test func resolvePath_matchesExecutorResolution() {
+        #expect(ACPAgent.resolvePath("/abs/path.swift", cwd: "/work") == "/abs/path.swift")
+        #expect(ACPAgent.resolvePath("rel/path.swift", cwd: "/work") == "/work/rel/path.swift")
+    }
+}
+
+@Suite("ProjectContext")
+struct ProjectContextTests {
+    @Test func identityIsStableAndDependsOnCwd() {
+        let a = ProjectContext.identity(forCwd: "/Users/x/proj")
+        let b = ProjectContext.identity(forCwd: "/Users/x/proj")
+        let c = ProjectContext.identity(forCwd: "/Users/x/other")
+        #expect(a == b)  // stable across calls
+        #expect(a != c)  // distinct projects → distinct ids
+        #expect(a.count == 64)  // SHA-256 hex
+        #expect(a.allSatisfy { $0.isHexDigit })
+    }
+
+    @Test func memoryPathPlacesEldrMdUnderProjectsHash() {
+        let path = ProjectContext.memoryPath(configDir: "/cfg", cwd: "/Users/x/proj")
+        let id = ProjectContext.identity(forCwd: "/Users/x/proj")
+        #expect(path == "/cfg/projects/\(id)/eldr.md")
+    }
+
+    @Test func readPrefersExplicitThenAutoElseNil() throws {
+        let base = (NSTemporaryDirectory() as NSString).appendingPathComponent(
+            "eldr-pc-\(UUID().uuidString)")
+        let cfg = (base as NSString).appendingPathComponent("cfg")
+        let cwd = (base as NSString).appendingPathComponent("proj")
+        let explicit = (base as NSString).appendingPathComponent("explicit.md")
+        try FileManager.default.createDirectory(atPath: base, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(atPath: base) }
+
+        // Nothing yet → nil.
+        #expect(ProjectContext.read(explicitPath: explicit, configDir: cfg, cwd: cwd) == nil)
+
+        // Auto path present → found.
+        let auto = ProjectContext.memoryPath(configDir: cfg, cwd: cwd)
+        try FileManager.default.createDirectory(
+            atPath: (auto as NSString).deletingLastPathComponent, withIntermediateDirectories: true)
+        try "AUTO".data(using: .utf8)!.write(to: URL(fileURLWithPath: auto))
+        #expect(ProjectContext.read(explicitPath: nil, configDir: cfg, cwd: cwd) == "AUTO")
+
+        // Explicit present → wins over auto.
+        try "EXPLICIT".data(using: .utf8)!.write(to: URL(fileURLWithPath: explicit))
+        #expect(ProjectContext.read(explicitPath: explicit, configDir: cfg, cwd: cwd) == "EXPLICIT")
+    }
+}
+
+@Suite("eldr-acp executable")
+struct ExecutableVersionTests {
+    /// Package root derived from this source file: <pkg>/Tests/PQRCACPTests/<file>.
+    static var packageRoot: String {
+        ((((#filePath as NSString).deletingLastPathComponent) as NSString).deletingLastPathComponent
+            as NSString).deletingLastPathComponent
+    }
+
+    /// The first existing pre-built `eldr-acp` (debug or release). We do NOT build it
+    /// here: spawning `swift build`/`swift run` from inside `swift test` deadlocks on
+    /// the SwiftPM `.build/.lock` the outer run still holds. The documented flow is
+    /// `swift build` then `swift test`, so the binary is present when this runs.
+    static var prebuiltBinary: String? {
+        let pkg = packageRoot
+        for config in ["debug", "release"] {
+            let path = (pkg as NSString).appendingPathComponent(".build/\(config)/eldr-acp")
+            if FileManager.default.isExecutableFile(atPath: path) { return path }
+        }
+        return nil
+    }
+
+    @Test func versionFlagPrintsNameAndVersion() throws {
+        guard let binary = Self.prebuiltBinary else {
+            // Not built yet (clean `swift test` without a prior `swift build`).
+            // Verified end-to-end via Bash in the build flow instead; skip here.
+            return
+        }
+        let output = try capture(binary, ["--version"])
+        #expect(
+            output.trimmingCharacters(in: .whitespacesAndNewlines)
+                == "eldr-acp/\(ACPAgent.agentVersion)")
+        #expect(output.contains("eldr-acp/0.1.0"))
+    }
+
+    @Test func versionConstantIsSourceOfTruth() {
+        // The flag prints exactly this; pin it so a bump is deliberate.
+        #expect(ACPAgent.agentVersion == "0.1.0")
+    }
+
+    private func capture(_ launch: String, _ args: [String]) throws -> String {
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: launch)
+        p.arguments = args
+        let out = Pipe()
+        p.standardOutput = out
+        p.standardError = FileHandle.nullDevice
+        try p.run()
+        let data = out.fileHandleForReading.readDataToEndOfFile()
+        p.waitUntilExit()
+        return String(data: data, encoding: .utf8) ?? ""
     }
 }
 
