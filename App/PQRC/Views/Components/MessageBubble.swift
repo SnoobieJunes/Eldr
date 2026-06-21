@@ -28,6 +28,22 @@ struct MessageBubble: View {
     var onFullScreen: ((String) -> Void)? = nil
     /// Re-sends a message that failed to publish ("Not sent"). nil hides retry.
     var onRetry: (() -> Void)? = nil
+    /// Whether to show the RAW AgentSkills `⟡⟡ … ⟡⟡ end` protocol envelope in
+    /// agent bubbles (per-silo "Show agent protocol envelope" toggle). Default
+    /// `false` strips the header/footer at DISPLAY time and shows only the inner
+    /// body — the stored record keeps every raw byte (§23). Read from
+    /// `AppSession.showAgentEnvelope(siloID:)` at the call site so this stays a
+    /// plain value type (no `@Environment` in the bubble). Only ever affects what
+    /// is rendered; the stored `message.text` is never mutated.
+    var showEnvelope: Bool = false
+
+    /// The text to RENDER for this message. For an agent message with the toggle
+    /// off, that's the envelope-stripped inner body; otherwise the raw text
+    /// verbatim. Display-only — `message.text` (the stored record) is untouched.
+    private var displayText: String {
+        guard message.participantType == .agent, !showEnvelope else { return message.text }
+        return Self.strippedEnvelopeBody(message.text)
+    }
 
     /// Whether this message has document structure worth opening full screen.
     private var isRich: Bool { MessageContent.isRich(message.text) }
@@ -87,7 +103,10 @@ struct MessageBubble: View {
     @ViewBuilder private var expandButton: some View {
         if isRich, !isLargeContent, let onFullScreen {
             Button {
-                onFullScreen(message.text)
+                // `displayText` == `message.text` for human bubbles; for an agent
+                // bubble it's the envelope-stripped body, so the reader matches
+                // what the bubble shows.
+                onFullScreen(displayText)
             } label: {
                 Image(systemName: "arrow.up.left.and.arrow.down.right")
                     .font(.caption2)
@@ -107,6 +126,85 @@ struct MessageBubble: View {
     static func accessibleText(_ text: String, limit: Int = 240) -> String {
         guard text.count > limit else { return text }
         return text.prefix(limit) + "… (long message)"
+    }
+
+    /// The sentinel that frames an AgentSkills envelope (AgentSkills.envelope):
+    /// the opening header line, the standalone separator, and the `⟡⟡ end …`
+    /// footer all begin with this glyph pair.
+    nonisolated static let envelopeMarker = "⟡⟡"
+
+    /// DISPLAY-TIME envelope stripper. Agent thread messages are wrapped in the
+    /// shared AgentSkills envelope (PQRCAgent `AgentSkills.envelope`):
+    ///
+    ///     ⟡⟡ <skill-name> · v<version>
+    ///     from: <you>'s AI · <domain>
+    ///     re:   <subject>
+    ///     scope: thread:<thread-id>
+    ///     ⟡⟡
+    ///     <body — what the human actually wants to read>
+    ///     ⟡⟡ end <skill-name>
+    ///
+    /// When `text` matches that shape we return ONLY the inner body (everything
+    /// between the standalone `⟡⟡` separator line and the `⟡⟡ end …` footer).
+    ///
+    /// Parses DEFENSIVELY — the goal is to never hide a real message and never
+    /// crash on a partial/streamed envelope:
+    ///  - first non-empty line must be a header `⟡⟡ …` that is NOT itself the
+    ///    standalone separator and NOT the `⟡⟡ end` footer;
+    ///  - there must be a later line that is exactly `⟡⟡` (the separator);
+    ///  - the body is taken from after that separator. A closing `⟡⟡ end …` is
+    ///    honored when present but NOT required (a truncated/streaming envelope
+    ///    still yields its body so far rather than the raw header noise);
+    ///  - anything that doesn't match (plain text, a lone fragment, an envelope
+    ///    missing its separator) is returned UNCHANGED.
+    ///
+    /// `nonisolated` + `static` (pure over its input) so it's callable off the
+    /// main actor and unit-testable without building a view.
+    nonisolated static func strippedEnvelopeBody(_ text: String) -> String {
+        // Cheap reject: no marker at all ⇒ definitely not an envelope. (Avoids
+        // splitting/scanning ordinary messages, which is the common case.)
+        guard text.contains(envelopeMarker) else { return text }
+
+        // Keep blank lines (the body may contain them); we index by line.
+        let lines = text.components(separatedBy: "\n")
+
+        // Find the first NON-EMPTY line — that's where a real header must be.
+        guard let headerIdx = lines.firstIndex(where: {
+            !$0.trimmingCharacters(in: .whitespaces).isEmpty
+        }) else { return text }
+
+        // It must be an opening header: starts with "⟡⟡ " (marker + content),
+        // and is neither the bare separator "⟡⟡" nor an "⟡⟡ end …" footer.
+        let header = lines[headerIdx].trimmingCharacters(in: .whitespaces)
+        guard header.hasPrefix(envelopeMarker + " "),
+            !isSeparatorLine(header),
+            !isEndLine(header)
+        else { return text }
+
+        // Find the standalone separator line (exactly "⟡⟡") AFTER the header.
+        guard let sepIdx = lines[(headerIdx + 1)...].firstIndex(where: { isSeparatorLine($0) })
+        else { return text }  // header but no separator ⇒ not (yet) a full envelope
+
+        // Body = lines after the separator, up to the "⟡⟡ end …" footer if there
+        // is one (else to the end — handles a truncated/streaming envelope).
+        let afterSep = lines[(sepIdx + 1)...]
+        let endIdx = afterSep.firstIndex(where: { isEndLine($0) })
+        let bodyLines = afterSep[afterSep.startIndex..<(endIdx ?? afterSep.endIndex)]
+        // Trim only leading/trailing blank lines introduced by the envelope frame
+        // (the separator's newline and the line before the footer); inner blank
+        // lines of the body are preserved.
+        return bodyLines.joined(separator: "\n")
+            .trimmingCharacters(in: .newlines)
+    }
+
+    /// A line that is exactly the bare separator `⟡⟡` (ignoring surrounding space).
+    nonisolated private static func isSeparatorLine(_ line: String) -> Bool {
+        line.trimmingCharacters(in: .whitespaces) == envelopeMarker
+    }
+
+    /// A line that opens the closing footer `⟡⟡ end …` (ignoring surrounding space).
+    nonisolated private static func isEndLine(_ line: String) -> Bool {
+        line.trimmingCharacters(in: .whitespaces).hasPrefix(envelopeMarker + " end")
     }
 
     /// Long-press menu entry for marking a message as AI context.
@@ -224,8 +322,16 @@ struct MessageBubble: View {
     }
 
     /// What the agent bubble's header reads: the AI's own friendly codename when
-    /// known, otherwise "<sender>'s AI".
-    private var agentLabel: String { agentName ?? "\(senderName)'s AI" }
+    /// known (a tethered AI's local codename always wins), otherwise "My AI" for
+    /// the LOCAL user's own agent and "<sender>'s AI" for everyone else. The
+    /// possessive is keyed off the real self signal (`isMine`, i.e.
+    /// `senderIdentity == myIdentityHex` at the call site), NOT the displayed
+    /// `senderName` — that's the configurable alias/persona ("Me" by default, but
+    /// editable), so "<senderName>'s AI" rendered "Me's AI" for the owner.
+    private var agentLabel: String {
+        if let agentName { return agentName }
+        return isMine ? "My AI" : "\(senderName)'s AI"
+    }
 
     private var agentBubble: some View {
         HStack {
@@ -246,7 +352,12 @@ struct MessageBubble: View {
                             .foregroundStyle(agentLabelColor)
                             .accessibilityLabel("Context contribution")
                     }
-                    CollapsibleMessageContent(text: message.text, onFullScreen: onFullScreen)
+                    // Render the DISPLAY text (envelope stripped unless the
+                    // "Show agent protocol envelope" toggle is on). The full-
+                    // screen reader gets the same stripped body so it never shows
+                    // the header/footer the bubble hid. Stored `message.text` is
+                    // untouched — this is display-only.
+                    CollapsibleMessageContent(text: displayText, onFullScreen: onFullScreen)
                         .textSelection(.enabled)
                     aiContextBadge
                 }
@@ -271,7 +382,7 @@ struct MessageBubble: View {
         .id(message.id)
         .privacySensitive()
         .accessibilityElement(children: .combine)
-        .accessibilityLabel("AI message from \(agentLabel): \(Self.accessibleText(message.text))")
+        .accessibilityLabel("AI message from \(agentLabel): \(Self.accessibleText(displayText))")
         .accessibilityIdentifier("agent-bubble")
     }
 

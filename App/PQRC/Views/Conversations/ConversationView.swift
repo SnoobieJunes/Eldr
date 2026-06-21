@@ -300,7 +300,11 @@ struct ConversationView: View {
                     }
                 },
             onFullScreen: selecting ? nil : { fullScreenContent = FullScreenContent(text: $0) },
-            onRetry: selecting ? nil : { Task { await model.retry(message) } })
+            onRetry: selecting ? nil : { Task { await model.retry(message) } },
+            // Strip the AgentSkills ⟡⟡ envelope from agent bubbles unless the
+            // per-silo "Show agent protocol envelope" toggle is on (default off).
+            // Display-only — the stored record keeps the raw bytes (§23).
+            showEnvelope: AppSession.showAgentEnvelope(siloID: model.siloID))
         if selecting {
             HStack(spacing: 8) {
                 Image(systemName: selection.contains(message.id) ? "checkmark.circle.fill" : "circle")

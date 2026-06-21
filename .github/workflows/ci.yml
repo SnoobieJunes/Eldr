@@ -31,10 +31,33 @@ jobs:
       - name: Test
         run: swift test --package-path Packages/${{ matrix.package }}
 
+  app-build:
+    name: xcodebuild build (iOS + Mac Catalyst — fast gate)
+    runs-on: macos-26
+    steps:
+      - uses: actions/checkout@v4
+      - name: Select Xcode 26
+        run: sudo xcode-select -s /Applications/Xcode.app
+      # `swift test` only builds the PACKAGES for macOS, which has TWICE hidden an
+      # iOS-only break that compiled on macOS but not the app (DEVIATIONS AC36, AC41).
+      # This builds the actual EldrChat target for BOTH iOS and Mac Catalyst, fast
+      # (no tests, no signing), so an iOS/Catalyst-only regression fails in ~1 min
+      # with a clear message instead of deep inside the test job.
+      - name: Build EldrChat (iOS Simulator)
+        run: |
+          xcodebuild build -project App/EldrChat.xcodeproj -scheme EldrChat \
+            -destination 'platform=iOS Simulator,name=iPhone 17 Pro,OS=26.5' \
+            -skipPackagePluginValidation CODE_SIGNING_ALLOWED=NO
+      - name: Build EldrChat (Mac Catalyst)
+        run: |
+          xcodebuild build -project App/EldrChat.xcodeproj -scheme EldrChat \
+            -destination 'platform=macOS,variant=Mac Catalyst' \
+            -skipPackagePluginValidation CODE_SIGNING_ALLOWED=NO
+
   app:
     name: xcodebuild test (app + UI + accessibility)
     runs-on: macos-26
-    needs: packages
+    needs: [packages, app-build]
     steps:
       - uses: actions/checkout@v4
       - name: Select Xcode 26

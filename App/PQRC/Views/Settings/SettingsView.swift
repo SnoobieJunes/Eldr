@@ -12,6 +12,13 @@ struct SettingsView: View {
     /// Relaunch the first-run "explore a new planet" tour (provided by RootView).
     @Environment(TourCoordinator.self) private var tour
     @State private var wipeConfirmStage = 0
+    /// Mirrors the per-silo "Show agent protocol envelope" pref (a per-silo
+    /// UserDefaults read, which `@AppStorage` can't namespace and `@Observable`
+    /// can't track) so the toggle re-renders when flipped. Loaded in `.onAppear`,
+    /// written through `AppSession.setShowAgentEnvelope`. Default OFF = the raw
+    /// ⟡⟡ envelope is stripped from agent bubbles (only the body shows); the
+    /// stored record always keeps every raw byte (§23) — this is display-only.
+    @State private var showAgentEnvelope = false
     @AppStorage("ephemeralReceivingKeys") private var ephemeralKeys = false
     @AppStorage("localLinkEnabled") private var localLinkEnabled = AppSession.localLinkEnabled
     @State private var relayURLs: [String] = []
@@ -91,6 +98,7 @@ struct SettingsView: View {
                 biometricOn = session.hasBiometricUnlock
                 localMCPOn = session.isLocalMCPRunning
                 loopGuardLimit = AppSession.agentLoopGuardLimit(siloID: model.siloID)
+                showAgentEnvelope = AppSession.showAgentEnvelope(siloID: model.siloID)
                 Task {
                     openInboxUntil = await model.runtime.openInboxActiveUntil()
                     // Refresh the live prekey count so the Prekeys section isn't
@@ -504,6 +512,16 @@ struct SettingsView: View {
             Toggle("Ephemeral receiving keys", isOn: $ephemeralKeys)
                 .disabled(true)
             Text("Experimental — hides your address from relay observers per conversation. Off in this build; see THREAT_MODEL.md.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            Toggle("Show agent protocol envelope", isOn: Binding(
+                get: { showAgentEnvelope },
+                set: { on in
+                    showAgentEnvelope = on
+                    AppSession.setShowAgentEnvelope(on, siloID: model.siloID)
+                }))
+                .accessibilityIdentifier("show-agent-envelope-toggle")
+            Text("When your AIs talk in a shared thread, each message is wrapped in a small machine-readable header (⟡⟡ skill · from · re · scope). OFF (default) hides that frame and shows only the message body; ON shows the raw envelope. Either way the full envelope is always recorded — this only changes what's displayed.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
         }
