@@ -106,8 +106,18 @@ struct ACPDriverAgentRunner: BridgeAgentRunner {
 
     func run(prompt: String, workdir: String?) async throws -> String {
         let collected = AgentAnswerCollector()
+        // CR-1: this watch-along / Mac-responder runner has no interactive client to
+        // approve a mutating tool, so the default `requestPermission` ({ _,_ in true })
+        // AUTO-APPROVED run_shell / write_file / edit_file UNATTENDED — an owner-window-open
+        // + prompt-injected task could run arbitrary shell on the Mac. This path is a
+        // chat-participant / drafting role that needs only file READS for context, and
+        // reads never request permission, so DENY every permission request (which denies
+        // exactly the mutating tools). Real mutating work goes through the phone-driven
+        // relay-ACP path (ACPRelayHost), which routes each request to the owner's phone
+        // for an explicit Allow / Deny.
         let handler = ACPClientHandler(
-            onAgentMessageChunk: { await collected.append($0) })
+            onAgentMessageChunk: { await collected.append($0) },
+            requestPermission: { _, _ in false })
         var env = environmentOverrides
         env["ELDR_ACP_STREAM"] = "0"  // need the complete message to scrub it (§10)
         let driver = ACPClientDriver(
@@ -909,8 +919,14 @@ final class ACPBridgeService: ObservableObject {
 
     /// Send a formatted report to every enabled conversation as an agent message.
     private func broadcast(_ text: String) async {
-        let body = MessageBody(text: text, sentAt: clock.now())
+        // Owner sees the raw report; every other recipient gets the credential-scrubbed
+        // copy — tool args / build output / session summaries routinely carry tokens and
+        // paths, and these reports fan out to every enabled conversation incl. non-owner
+        // peers (H-4). Mirrors the DIRECT-mode agent-message per-recipient fan-out.
+        let redacted = CredentialRedactor.scrub(text)
         for conversation in activeConversations where conversation.enabled {
+            let visible = conversation.id == ownerIdentityHex ? text : redacted
+            let body = MessageBody(text: visible, sentAt: clock.now())
             do {
                 try await messaging.send(body, to: conversation.id, participantType: .agent)
             } catch {

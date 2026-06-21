@@ -25,3 +25,6 @@ logs/
 
 # Claude Code background-agent worktrees
 .claude/worktrees/
+
+# Xcode distribution / export logs (build artifacts)
+*.xcdistributionlogs/

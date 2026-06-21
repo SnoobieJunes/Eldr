@@ -127,11 +127,11 @@ struct ConversationDetailsView: View {
                 }  // end 1:1-only (Name + Verify) sections — a group has no peer key
                 Section {
                     // Unified vocabulary (matches the per-AI "Gathers" picker and
-                    // the in-chat "AI here" chip): Use default · Off · Marked only
-                    // · Live. Tags stay the engine's "default"/"off"/"marked"/
-                    // "full" — only the labels are unified.
+                    // the in-chat "AI here" chip): Follow each AI's own setting · Off ·
+                    // Marked only · Live. Tags stay the engine's "default"/"off"/
+                    // "marked"/"full" — only the labels are unified.
                     Picker("AI context here", selection: $aiContextMode) {
-                        Text("Use default").tag("default")
+                        Text("Follow each AI's own setting").tag("default")
                         Text("Off in this conversation").tag("off")
                         Text("Marked only — messages I add to context").tag("marked")
                         Text("Live — full conversation while active").tag("full")

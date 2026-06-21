@@ -1,8 +1,8 @@
 # Eldr — Enterprise Pitch & Positioning
 
 > The single source of truth for the funder/enterprise narrative. The in-app
-> **"Why Eldr for teams"** tour (EldrChat ▸ Settings ▸ About) is the distilled,
-> on-device version of this document — keep the two in sync.
+> **"Why Eldr for teams"** tour (Huginn ▸ Configuration ▸ "Why Eldr for teams")
+> is the distilled, on-device version of this document — keep the two in sync.
 >
 > **Honesty rule (same as the rest of this repo):** capabilities marked *Shipped*
 > run in the app today. Capabilities marked *Rolling out* are in active development
@@ -150,9 +150,11 @@ company we're building.
 
 ## Appendix — how this maps to the in-app tour
 
-The **"Why Eldr for teams"** tour (`TourScript.enterpriseSteps`) is this doc in seven
-cards: (0) *AI without the leak* — the framing; (1) *Collaboration without risk* —
-Layer 1; (2) *Nothing happens in the dark* — auditability; (3) *Your AI, your
-infrastructure* — Layer 2; (4) *Reach your agent from anywhere* — the host bridge;
-(5) *Built for the hardest networks* — Layer 3; (6) *Own the network your AI runs on* —
-the close. Edit the cards and this document together.
+The **"Why Eldr for teams"** tour (`EnterpriseTourStep`, in
+`Apps/Huginn/Sources/Views/EnterpriseTourView.swift`, launched from Huginn's
+**Configuration ▸ "Why Eldr for teams"** row) is this doc in **11 cards** with
+raven/sailing titles: it opens on (0) *Huginn — the raven of thought* (the framing)
+and (1) *Delivered, never rewritten* (tool-agnostic routing), then walks sovereignty,
+secret-scrubbing, change-approval, on-the-wire labeling, decentralization, the
+phone-pairing bridge, post-quantum encryption, and the close. Edit the cards and this
+document together.

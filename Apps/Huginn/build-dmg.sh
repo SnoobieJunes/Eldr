@@ -40,6 +40,15 @@ DEVELOPER_ID="${DEVELOPER_ID:-Developer ID Application}"
 : "${APP_PASSWORD:?set APP_PASSWORD (app-specific password from appleid.apple.com)}"
 : "${TEAM_ID:?set TEAM_ID (your 10-char Apple Developer Team ID)}"
 
+# Build with Xcode 27: the PCC symbols ELDR_PCC_SDK compiles
+# (PrivateCloudComputeLanguageModel, ContextOptions) are ABSENT from the Xcode 26.x SDK,
+# so archiving under the default toolchain fails with "cannot find type … in scope".
+# Default DEVELOPER_DIR to the beta if it's installed and the caller didn't set one.
+if [ -z "${DEVELOPER_DIR:-}" ] && [ -d "/Applications/Xcode-beta.app" ]; then
+  export DEVELOPER_DIR="/Applications/Xcode-beta.app/Contents/Developer"
+fi
+echo "==> Toolchain: $(xcodebuild -version 2>/dev/null | head -1) (DEVELOPER_DIR=${DEVELOPER_DIR:-default})"
+
 echo "==> Reading version"
 VERSION="$(xcodebuild -project "$PROJECT" -scheme "$SCHEME" -showBuildSettings 2>/dev/null \
   | awk -F' = ' '/ MARKETING_VERSION / {print $2; exit}')"
@@ -120,8 +129,21 @@ echo "==> [6/7] Converting to a compressed DMG"
 FINAL_DMG="$DIST_DIR/Huginn-$VERSION.dmg"
 hdiutil convert "$RW_DMG" -format UDZO -imagekey zlib-level=9 -ov -o "$FINAL_DMG"
 
-echo "==> [7/7] Signing the DMG"
+echo "==> [7/9] Signing the DMG"
 codesign --sign "$DEVELOPER_ID" --timestamp "$FINAL_DMG"
 
+echo "==> [8/9] Notarizing the DMG (submit + wait)"
+# The .app inside is already notarized + stapled, but Gatekeeper also checks the DMG
+# itself — an un-notarized DMG is REJECTED ("Unnotarized Developer ID") on a recipient's
+# Mac. Notarize + staple the DMG so it opens cleanly, even offline (B3).
+xcrun notarytool submit "$FINAL_DMG" \
+  --apple-id "$APPLE_ID" --password "$APP_PASSWORD" --team-id "$TEAM_ID" \
+  --wait
+
+echo "==> [9/9] Stapling + verifying the DMG"
+xcrun stapler staple "$FINAL_DMG"
+xcrun stapler validate "$FINAL_DMG"
+spctl -a -t open --context context:primary-signature "$FINAL_DMG"
+
 echo ""
-echo "Done: $FINAL_DMG"
+echo "Done (notarized + stapled): $FINAL_DMG"

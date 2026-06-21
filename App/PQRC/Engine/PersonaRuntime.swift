@@ -1597,6 +1597,13 @@ actor PersonaRuntime {
                 }
                 let text = draft.text.trimmingCharacters(in: .whitespacesAndNewlines)
                 guard !text.isEmpty else { continue }
+                // TOCTOU guard (H-2): the "solo chat" decision was made BEFORE this 30 s
+                // await, during which a human may have been added to the conversation
+                // (addMembers → reviseRoster mutates groupRosters, read live by
+                // isSoloConversation). An autonomous agent send to a peer with no
+                // human-opened ai_window MUST fail closed (invariant #9) — so if this is
+                // no longer a solo chat, drop the in-flight reply rather than publish it.
+                guard isSoloConversation(conversationID) else { break }
                 try await sendMessage(
                     text, conversationID: conversationID, participantType: .agent, agentName: ai.name)
                 posted += 1
