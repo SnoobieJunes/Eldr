@@ -170,9 +170,12 @@ public actor ACPAgent {
             "loadSession": .bool(false),
             // Text + embedded context (Xcode 27 sends selected code / build errors
             // as embedded blocks; `extractPromptText` folds them into the prompt).
-            // Still no image/audio.
+            // D2: `image` tracks `config.visionEnabled` — advertised true ONLY when the
+            // operator has confirmed the configured model can read images (env
+            // `ELDR_LLM_VISION`). Default OFF, so a text-only model is never offered —
+            // and so never sent — images it can't read. Audio stays unsupported.
             "promptCapabilities": .object([
-                "image": .bool(false),
+                "image": .bool(config.visionEnabled),
                 "audio": .bool(false),
                 "embeddedContext": .bool(true),
             ]),
@@ -239,13 +242,20 @@ public actor ACPAgent {
         cancelledSessions.remove(sessionId)
 
         let rawText = Self.extractPromptText(params["prompt"])
+        // D2 (node-side image input): parse any `image` content blocks ONLY when vision
+        // is enabled. With vision off (the default) we never even look at them, so an
+        // image block is dropped exactly as before — and we never feed a text-only model
+        // input it can't read. (We also advertise image:false in that case, so a
+        // well-behaved client won't send one; this is belt-and-suspenders.)
+        let imageParts = config.visionEnabled ? Self.extractImageParts(params["prompt"]) : []
         // A leading `/skill …` invokes a skill: the rest is the user's text and the
         // skill contributes a focused system instruction for this turn only. Plain
         // prompts (and unknown /commands) run with the default system prompt.
         let invocation = skills.invocation(for: rawText)
         let userText = invocation?.argument ?? rawText
         let stopReason = await runTurn(
-            sessionId: sessionId, userText: userText, skill: invocation?.skill)
+            sessionId: sessionId, userText: userText, skill: invocation?.skill,
+            imageParts: imageParts)
         return .object(["stopReason": .string(stopReason.rawValue)])
     }
 
@@ -284,12 +294,31 @@ public actor ACPAgent {
         }
     }
 
+    /// D2 (node-side image input): pull the `image` content blocks out of a prompt as
+    /// `LLMImagePart`s. An ACP image block is `{type:"image", data:<base64>,
+    /// mimeType:<mime>}` (agentclientprotocol.com /protocol/content); a block missing
+    /// either field is skipped (forward-compatible, never fatal). Returns [] when the
+    /// prompt is plain text — the overwhelmingly-common case — so the caller can keep
+    /// today's text-only path. The CALLER (runTurn) decides whether to use these: with
+    /// vision disabled they are ignored and the image is dropped exactly as before.
+    static func extractImageParts(_ prompt: JSONValue?) -> [LLMImagePart] {
+        guard let blocks = prompt?.arrayValue else { return [] }
+        return blocks.compactMap { block in
+            guard block["type"]?.stringValue == "image",
+                let data = block["data"]?.stringValue, !data.isEmpty,
+                let mimeType = block["mimeType"]?.stringValue, !mimeType.isEmpty
+            else { return nil }
+            return LLMImagePart(mimeType: mimeType, base64Data: data)
+        }
+    }
+
     /// The tool-calling loop. Builds the message list, calls the LLM with tool defs;
     /// on tool_calls, streams + executes each (permission-gated for mutating tools),
     /// feeds results back, and loops (≤ maxIterations). On a final assistant message,
     /// streams it as agent_message_chunk and returns end_turn.
     private func runTurn(
-        sessionId: String, userText: String, skill: AgentSkill? = nil
+        sessionId: String, userText: String, skill: AgentSkill? = nil,
+        imageParts: [LLMImagePart] = []
     ) async -> StopReason {
         let cwd = sessions[sessionId] ?? toolEnvironment.effectiveWorkdir
         var perTurnEnvironment = toolEnvironment
@@ -320,7 +349,12 @@ public actor ACPAgent {
         if let assembled = await assembledContext(for: userText), !assembled.isEmpty {
             messages.append(LLMMessage(role: .system, content: assembled))
         }
-        messages.append(LLMMessage(role: .user, content: userText))
+        // D2: attach any node-side images to the user turn (empty unless vision is on).
+        // The OpenAI client emits the multimodal content-array shape iff `imageParts`
+        // is non-empty; with none it's the plain text turn, unchanged. This user
+        // message is the anchored "first task" in ContextBudget.trim, so it's never
+        // elided — the image survives every loop iteration.
+        messages.append(LLMMessage(role: .user, content: userText, imageParts: imageParts))
 
         var toolCallSeq = 0
         // Plan/TODO visibility (Phase D1): a heuristic checklist the client surfaces

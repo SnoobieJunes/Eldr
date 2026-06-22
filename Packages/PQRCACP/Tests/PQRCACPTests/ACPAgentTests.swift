@@ -79,6 +79,76 @@ struct ACPAgentTests {
         #expect(result["agentCapabilities"]?["loadSession"]?.boolValue == false)
     }
 
+    // MARK: D2 — vision capability gate + image forwarding
+
+    /// Pull the user message that reached the model on the FIRST completion call.
+    private func firstUserMessage(_ llm: MockLLMClient) async -> LLMMessage? {
+        await llm.calls().first?.first { $0.role == .user }
+    }
+
+    @Test func visionOff_advertisesImageFalse_andDropsImageBlock() async throws {
+        // DEFAULT config: vision disabled. (a) image capability is false, AND an image
+        // block in the prompt is dropped — never reaches the model. Today's behavior.
+        let llm = MockLLMClient([LLMResponse(content: "ok")])
+        let (agent, _) = makeAgent(llm: llm, config: .default)  // visionEnabled == false
+
+        let initResult = try parse(
+            await agent.handle(
+                line: #"{"jsonrpc":"2.0","id":0,"method":"initialize","params":{}}"#))
+        #expect(
+            initResult["result"]?["agentCapabilities"]?["promptCapabilities"]?["image"]?
+                .boolValue == false)
+
+        let sid = try #require(
+            try parse(
+                await agent.handle(
+                    line: #"{"jsonrpc":"2.0","id":1,"method":"session/new","params":{}}"#))[
+                "result"]?["sessionId"]?.stringValue)
+
+        // Prompt = text + an image block.
+        _ = await agent.handle(
+            line:
+                "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"session/prompt\",\"params\":{\"sessionId\":\"\(sid)\",\"prompt\":[{\"type\":\"text\",\"text\":\"look\"},{\"type\":\"image\",\"mimeType\":\"image/png\",\"data\":\"PNGBYTES1234\"}]}}"
+        )
+
+        // The model saw the TEXT but NO image part (dropped).
+        let user = try #require(await firstUserMessage(llm))
+        #expect(user.content == "look")
+        #expect(user.imageParts.isEmpty)
+    }
+
+    @Test func visionOn_advertisesImageTrue_andForwardsImageAsMultimodal() async throws {
+        // Vision ENABLED: (b) image capability is true, AND an image block becomes an
+        // `LLMImagePart` on the multimodal user message handed to the model.
+        let llm = MockLLMClient([LLMResponse(content: "I see a build error.")])
+        let cfg = AgentConfig(visionEnabled: true)
+        let (agent, _) = makeAgent(llm: llm, config: cfg)
+
+        let initResult = try parse(
+            await agent.handle(
+                line: #"{"jsonrpc":"2.0","id":0,"method":"initialize","params":{}}"#))
+        #expect(
+            initResult["result"]?["agentCapabilities"]?["promptCapabilities"]?["image"]?
+                .boolValue == true)
+
+        let sid = try #require(
+            try parse(
+                await agent.handle(
+                    line: #"{"jsonrpc":"2.0","id":1,"method":"session/new","params":{}}"#))[
+                "result"]?["sessionId"]?.stringValue)
+
+        _ = await agent.handle(
+            line:
+                "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"session/prompt\",\"params\":{\"sessionId\":\"\(sid)\",\"prompt\":[{\"type\":\"text\",\"text\":\"debug this\"},{\"type\":\"image\",\"mimeType\":\"image/png\",\"data\":\"PNGBYTES1234\"}]}}"
+        )
+
+        let user = try #require(await firstUserMessage(llm))
+        #expect(user.content == "debug this")
+        #expect(user.imageParts.count == 1)
+        #expect(user.imageParts.first?.mimeType == "image/png")
+        #expect(user.imageParts.first?.base64Data == "PNGBYTES1234")
+    }
+
     // MARK: session/new
 
     @Test func sessionNew_returnsSessionId() async throws {

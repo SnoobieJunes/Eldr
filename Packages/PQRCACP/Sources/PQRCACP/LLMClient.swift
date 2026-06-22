@@ -8,6 +8,24 @@ import Foundation
 
 // MARK: - Message & tool model (provider-agnostic, OpenAI-shaped)
 
+/// D2 (node-side image input): one image attached to a multimodal `user` message.
+/// Carries the raw base64 bytes + the MIME type from a node-side ACP `image` content
+/// block, encoded into the OpenAI vision `image_url` data-URI at request time. NOT
+/// free text and NEVER credential-scrubbed (a base64 image is high-entropy and the
+/// entropy redactor would mangle it — and an image isn't a credential). Node-side
+/// only: the phone product is text-only (CLAUDE.md) and never produces these.
+public struct LLMImagePart: Sendable, Equatable {
+    /// The image MIME type (e.g. `image/png`, `image/jpeg`) — the `mimeType` of the
+    /// ACP image content block.
+    public var mimeType: String
+    /// The image bytes, base64-encoded — the `data` of the ACP image content block.
+    public var base64Data: String
+    public init(mimeType: String, base64Data: String) {
+        self.mimeType = mimeType
+        self.base64Data = base64Data
+    }
+}
+
 /// One chat message in the running conversation the agent maintains across a turn.
 public struct LLMMessage: Sendable, Equatable {
     public enum Role: String, Sendable { case system, user, assistant, tool }
@@ -20,14 +38,20 @@ public struct LLMMessage: Sendable, Equatable {
     public var toolCalls: [LLMToolCall]
     /// Present only on `tool` messages — which call this result answers.
     public var toolCallId: String?
+    /// D2: images attached to a `user` turn (node-side vision). Default empty, so the
+    /// common text-only path is byte-for-byte unchanged; when non-empty the OpenAI
+    /// client emits the multimodal `content` ARRAY shape instead of the plain string.
+    public var imageParts: [LLMImagePart]
 
     public init(
-        role: Role, content: String, toolCalls: [LLMToolCall] = [], toolCallId: String? = nil
+        role: Role, content: String, toolCalls: [LLMToolCall] = [], toolCallId: String? = nil,
+        imageParts: [LLMImagePart] = []
     ) {
         self.role = role
         self.content = content
         self.toolCalls = toolCalls
         self.toolCallId = toolCallId
+        self.imageParts = imageParts
     }
 }
 
@@ -366,15 +390,23 @@ public struct OpenAICompatibleLLMClient: LLMClient {
                     arguments: ACPLogRedactor.scrub(call.arguments))
         }
         let scrubbedContent = m.content.isEmpty ? m.content : ACPLogRedactor.scrub(m.content)
+        // D2: imageParts pass through VERBATIM. A base64 image is a long high-entropy
+        // run the entropy redactor would shred — and an image is not a credential — so
+        // the scrub MUST skip it. Only `content` text and tool `arguments` are scrubbed.
         return LLMMessage(
             role: m.role, content: scrubbedContent,
-            toolCalls: scrubbedCalls, toolCallId: m.toolCallId)
+            toolCalls: scrubbedCalls, toolCallId: m.toolCallId, imageParts: m.imageParts)
     }
 
     static func encode(message m: LLMMessage) -> JSONValue {
         var obj: [String: JSONValue] = [
             "role": .string(m.role.rawValue),
-            "content": .string(m.content),
+            // D2: a message carrying image parts uses the OpenAI multimodal `content`
+            // ARRAY (text part + one image_url data-URI per image); a message with no
+            // images keeps the plain STRING content — byte-for-byte the prior shape, so
+            // the overwhelmingly-common text path is completely unchanged.
+            "content": m.imageParts.isEmpty
+                ? .string(m.content) : encodeMultimodalContent(m),
         ]
         if !m.toolCalls.isEmpty {
             obj["tool_calls"] = .array(
@@ -391,6 +423,29 @@ public struct OpenAICompatibleLLMClient: LLMClient {
         }
         if let id = m.toolCallId { obj["tool_call_id"] = .string(id) }
         return .object(obj)
+    }
+
+    /// D2: the OpenAI vision `content` ARRAY for a message that has image parts — a
+    /// leading `{type:"text"}` part (omitted only when the text is empty, so an
+    /// image-only turn still produces a valid non-empty array) followed by one
+    /// `{type:"image_url", image_url:{url:"data:<mime>;base64,<data>"}}` per image.
+    /// This is the shape OpenAI/LM Studio/vLLM accept for vision; the base64 bytes go
+    /// out exactly as received (never scrubbed — see `scrubbed`).
+    static func encodeMultimodalContent(_ m: LLMMessage) -> JSONValue {
+        var parts: [JSONValue] = []
+        if !m.content.isEmpty {
+            parts.append(.object(["type": .string("text"), "text": .string(m.content)]))
+        }
+        for image in m.imageParts {
+            parts.append(
+                .object([
+                    "type": .string("image_url"),
+                    "image_url": .object([
+                        "url": .string("data:\(image.mimeType);base64,\(image.base64Data)")
+                    ]),
+                ]))
+        }
+        return .array(parts)
     }
 
     static func encode(tool t: LLMTool) -> JSONValue {

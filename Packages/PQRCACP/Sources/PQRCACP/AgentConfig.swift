@@ -95,6 +95,16 @@ public struct AgentConfig: Sendable, Equatable {
     /// acceptance; default false (fail closed: a mutating tool runs only on an explicit
     /// grant; a timeout/error is a denial). Env: `ELDR_ACP_ALLOW_UNGATED_TOOLS`.
     public var allowUngatedTools: Bool
+    /// D2 (node-side image input): whether the configured LLM can read images. When
+    /// true, the agent advertises `promptCapabilities.image=true` at `initialize` and
+    /// forwards a node-side ACP `image` content block to the model as a multimodal
+    /// user message; when false (the DEFAULT), `image` is advertised false and any
+    /// image block is dropped (today's behavior). Default OFF because most self-hosted
+    /// models are text-only and would choke on — or silently ignore — image input, so
+    /// vision is opt-in: only a model the operator knows is vision-capable should get
+    /// images. NODE-SIDE ONLY; the phone product is text-only and never sends images
+    /// (CLAUDE.md). Env: `ELDR_LLM_VISION` (boolean).
+    public var visionEnabled: Bool
     /// C-6: redaction seam applied to the FREE-TEXT strings written to the AT-REST log
     /// sinks (a `run_shell` cmd + its captured output → `events.jsonl`; the agent's
     /// stderr diagnostics). Defaults to the built-in `ACPLogRedactor.scrub` so the
@@ -127,7 +137,8 @@ public struct AgentConfig: Sendable, Equatable {
         contextGraphURL: "http://localhost:8302",
         contextGraphAgentName: nil,
         permissionTimeoutSeconds: 120,
-        allowUngatedTools: false)
+        allowUngatedTools: false,
+        visionEnabled: false)
 
     public init(
         maxToolResultBytes: Int = 8 * 1024,
@@ -146,6 +157,7 @@ public struct AgentConfig: Sendable, Equatable {
         contextGraphAgentName: String? = nil,
         permissionTimeoutSeconds: Double = 120,
         allowUngatedTools: Bool = false,
+        visionEnabled: Bool = false,
         logRedactor: @escaping ACPLogScrubber = ACPLogRedactor.scrub
     ) {
         // Clamp to sane floors: a non-positive byte cap would truncate everything to
@@ -167,6 +179,7 @@ public struct AgentConfig: Sendable, Equatable {
         // ≤0 ⇒ no wait (deny immediately on no answer); otherwise the given seconds.
         self.permissionTimeoutSeconds = max(0, permissionTimeoutSeconds)
         self.allowUngatedTools = allowUngatedTools
+        self.visionEnabled = visionEnabled
         self.logRedactor = logRedactor
     }
 
@@ -189,6 +202,7 @@ public struct AgentConfig: Sendable, Equatable {
             && lhs.contextGraphAgentName == rhs.contextGraphAgentName
             && lhs.permissionTimeoutSeconds == rhs.permissionTimeoutSeconds
             && lhs.allowUngatedTools == rhs.allowUngatedTools
+            && lhs.visionEnabled == rhs.visionEnabled
     }
 
     /// Build from the process environment, falling back to an optional config
@@ -262,7 +276,8 @@ public struct AgentConfig: Sendable, Equatable {
             contextGraphURL: stringEnv("ELDR_ACP_CONTEXTGRAPH_URL") ?? d.contextGraphURL,
             contextGraphAgentName: stringEnv("ELDR_ACP_CONTEXTGRAPH_AGENT"),
             permissionTimeoutSeconds: doubleEnv("ELDR_ACP_PERMISSION_TIMEOUT", default: d.permissionTimeoutSeconds),
-            allowUngatedTools: boolEnv("ELDR_ACP_ALLOW_UNGATED_TOOLS", default: d.allowUngatedTools))
+            allowUngatedTools: boolEnv("ELDR_ACP_ALLOW_UNGATED_TOOLS", default: d.allowUngatedTools),
+            visionEnabled: boolEnv("ELDR_LLM_VISION", default: d.visionEnabled))
     }
 
     /// Interpret the overloaded `ELDR_ACP_SKILLS` value.
