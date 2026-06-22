@@ -1,6 +1,6 @@
-# SIGNING-AND-DISTRIBUTION.md — shipping the Eldr ACP Configurator
+# SIGNING-AND-DISTRIBUTION.md — shipping the Huginn
 
-How to sign, notarize, and package the **Eldr ACP Configurator** macOS app
+How to sign, notarize, and package the **Huginn** macOS app
 (`Apps/Huginn/`) as a DMG others can run.
 
 This is the **distribution** story only. The app builds and runs from Xcode with no
@@ -34,7 +34,7 @@ macOS code-signing certificates come in different flavors. For a Mac app distrib
   `Apps/Huginn/build-dmg.sh` automates.
 
 > The Mac App Store path (a *Mac App Store* distribution certificate + App Store
-> Connect submission) is **not** used here: the Configurator ships unsandboxed
+> Connect submission) is **not** used here: Huginn ships unsandboxed
 > (DEVIATIONS AC6), and an unsandboxed app cannot go through the Mac App Store.
 > Developer ID + notarization is the correct and only fit.
 
@@ -124,7 +124,7 @@ export TEAM_ID="TEAMID1234"                # the 10-char Team ID from Step 3
 ./build-dmg.sh
 ```
 
-Output: **`dist/EldrACP-<version>.dmg`** (signed, notarized, stapled). The version is
+Output: **`dist/Huginn-<version>.dmg`** (signed, notarized, stapled). The version is
 read from the project's `MARKETING_VERSION` (currently `0.1.0`).
 
 Notes:
@@ -139,10 +139,10 @@ Notes:
 
 ---
 
-## The current DMG: signed, not notarized
+## The current DMG: stale + signed-only
 
-`Apps/Huginn/dist/EldrACP-0.1.0.dmg` exists today but is **signed only,
-not notarized** — so it opens on the machine that built it and **Gatekeeper will
-block it on any other Mac**. To produce a distributable build, run `build-dmg.sh`
-with the credentials above. The `dist/` directory is git-ignored; DMGs are build
-artifacts and are not committed.
+Any leftover `Apps/Huginn/dist/EldrACP-0.1.0.dmg` predates the Huginn rename and is
+**signed only, not notarized** — it opens on the machine that built it and **Gatekeeper
+blocks it on any other Mac**. Delete it and run `build-dmg.sh` with the credentials
+above to produce the distributable **`dist/Huginn-<version>.dmg`**. The `dist/`
+directory is git-ignored; DMGs are build artifacts and are not committed.

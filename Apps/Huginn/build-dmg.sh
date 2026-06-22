@@ -11,7 +11,7 @@
 #   • DEVELOPER_ID  — optional; the signing identity name. Defaults to
 #                     "Developer ID Application" (matched against your keychain).
 #
-# Output: dist/EldrACP-<version>.dmg  (signed, notarized, stapled)
+# Output: dist/Huginn-<version>.dmg  (signed, notarized, stapled)
 #
 # This step is intentionally separate from the normal build: the app itself builds
 # and runs from Xcode with no certificates. Only distribution needs the above.
@@ -93,7 +93,7 @@ hdiutil create -srcfolder "$STAGE" -volname "$APP_NAME" -fs HFS+ \
   -format UDRW -ov "$RW_DMG"
 
 echo "==> [6/7] Converting to a compressed DMG"
-FINAL_DMG="$DIST_DIR/EldrACP-$VERSION.dmg"
+FINAL_DMG="$DIST_DIR/Huginn-$VERSION.dmg"
 hdiutil convert "$RW_DMG" -format UDZO -imagekey zlib-level=9 -ov -o "$FINAL_DMG"
 
 echo "==> [7/7] Signing the DMG"
