@@ -134,6 +134,23 @@ struct MainView: View {
         .onChange(of: commands.toggleSidebarTick) { _, _ in
             withAnimation { columnVisibility = columnVisibility == .all ? .detailOnly : .all }
         }
+        // Phase 3 item 3 — interactive per-tool approval. When a paired Mac coding agent
+        // wants a mutating action (write/edit/run) and autonomous-changes consent is OFF,
+        // it surfaces here for an explicit Allow once / Always / Deny. Global so it appears
+        // over any screen; the node's own 120s C-1 timeout denies if this is ignored
+        // (fail-closed — the prompt is the affordance, not the brake).
+        .alert(
+            "Allow this action?",
+            isPresented: Binding(
+                get: { model.acpPermissions.pending.first != nil }, set: { _ in }),
+            presenting: model.acpPermissions.pending.first
+        ) { request in
+            Button("Allow once") { model.acpPermissions.resolve(id: request.id, .allowOnce) }
+            Button("Always allow") { model.acpPermissions.resolve(id: request.id, .allowAlways) }
+            Button("Deny", role: .cancel) { model.acpPermissions.resolve(id: request.id, .deny) }
+        } message: { request in
+            Text("\(model.contactNames[request.nodeHex] ?? "Your Mac agent") wants to:\n\(request.title)")
+        }
     }
 
     /// Conversation list — the sidebar on wide screens, the root on iPhone.

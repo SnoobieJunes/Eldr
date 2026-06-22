@@ -229,6 +229,7 @@ actor PersonaRuntime {
             ? [TetheredAI(id: "demo", name: "demo-otter-naps-000", provider: DemoAgentProvider())]
             : newAIs
         rebindRelayACPProviders()
+        refreshRoutingPolicy()
     }
 
     /// Make any enabled "acp" backend LIVE over the relay (ACPRouterplan Phase 3).
@@ -244,7 +245,18 @@ actor PersonaRuntime {
         guard ais.contains(where: { $0.kind == "acp" }) else { return }
         guard let nodeHex = consentedCodingAgentNode(),
             let transport = ensureRelayACPTransport(nodeHex: nodeHex)
-        else { return }  // no consented node yet — leave the Demo stub in place
+        else {
+            // No consented node (e.g. remote dev-control revoked): revert any live `acp`
+            // provider to the inert stub so the relay path goes fully inert again
+            // (privacy-first — revoking consent must actually disconnect, not linger).
+            ais = ais.map { ai in
+                guard ai.kind == "acp" else { return ai }
+                var inert = ai
+                inert.provider = DemoAgentProvider()
+                return inert
+            }
+            return
+        }
         // Phone-side permission decision (statusreport §2.3, P0). The `kind` is the
         // ACP ToolKind the node attaches to its `session/request_permission`
         // (`ToolExecutor.kind(for:)`): `read` (read_file/list_dir/search) is the only
@@ -262,9 +274,11 @@ actor PersonaRuntime {
         let silo = siloID
         let provider = ACPAgentProvider(
             transport: transport,
-            permissionHandler: { _, kind in
+            permissionHandler: { [weak self] title, kind in
                 guard Self.isMutatingACPToolKind(kind) else { return true }
-                return AppSession.autonomousChangesConsent(nodeID: nodeHex, siloID: silo)
+                guard let self else { return false }  // runtime gone → fail closed
+                return await self.decidePermission(
+                    nodeHex: nodeHex, silo: silo, title: title, kind: kind)
             })
         ais = ais.map { ai in
             guard ai.kind == "acp" else { return ai }
@@ -272,6 +286,47 @@ actor PersonaRuntime {
             live.provider = provider
             return live
         }
+    }
+
+    /// Decide one mutating ACP tool call (Phase 3 item 3 — "ask each time"). Allowlist
+    /// ladder (cardinal rule): blanket per-node autonomous-changes consent → allow without
+    /// prompting; else ASK the human (allow once / always / deny); if no asker is wired
+    /// (headless / tests) → FAIL CLOSED. "Allow always" flips the autonomous-changes
+    /// consent (the SAME store the Settings toggle writes) so the node stops prompting.
+    /// Read-only kinds never reach here (the handler short-circuits them). The node also
+    /// independently denies on its own C-1 timeout, so an unanswered prompt never runs.
+    private func decidePermission(
+        nodeHex: String, silo: String, title: String, kind: String
+    ) async -> Bool {
+        if AppSession.autonomousChangesConsent(nodeID: nodeHex, siloID: silo) { return true }
+        guard let asker = permissionAsker else { return false }  // no UI → fail closed
+        let decision = await asker.request(
+            PermissionRequest(id: UUID().uuidString, nodeHex: nodeHex, title: title, kind: kind))
+        if decision == .allowAlways {
+            AppSession.setAutonomousChangesConsent(true, nodeID: nodeHex, siloID: silo)
+        }
+        return decision != .deny
+    }
+
+    /// (Phase 3 — intelligent task routing.) Keep the AI-selection policy in sync with the
+    /// consented coding nodes: ≥1 remote-dev-control-consented `coding_agent` node AND an
+    /// `acp` AI tethered → route that node's conversation's drafts/turns to the
+    /// code-capable engine (`CapabilityRoutingPolicy`); otherwise the default policy.
+    /// Auto-managed (no toggle) — drafting in your Mac-agent chat uses the Mac, every other
+    /// chat unchanged. Called from setAIs, bootstrap, and setContactType.
+    private func refreshRoutingPolicy() {
+        let codingNodes = verifiedContacts.keys.filter { isConsentedCodingAgentNode($0) }
+        guard !codingNodes.isEmpty, ais.contains(where: { $0.kind == "acp" }) else {
+            // No consented coding node: if WE installed a capability policy, revert to the
+            // default; never clobber a policy someone else set (a test / future feature
+            // via setAISelectionPolicy).
+            if aiSelection is CapabilityRoutingPolicy<TetheredAI> {
+                aiSelection = DefaultAISelectionPolicy<TetheredAI>()
+            }
+            return
+        }
+        let map = Dictionary(uniqueKeysWithValues: codingNodes.map { ($0, Set(["code"])) })
+        aiSelection = CapabilityRoutingPolicy<TetheredAI>(byConversation: map)
     }
 
     /// Whether an ACP ToolKind needs autonomous-changes consent before the phone
@@ -314,6 +369,25 @@ actor PersonaRuntime {
     /// `DefaultAISelectionPolicy` (today's behavior) until set.
     func setAISelectionPolicy(_ policy: any AISelectionPolicy<TetheredAI>) {
         aiSelection = policy
+    }
+
+    /// The phone-side interactive permission asker (Phase 3 item 3 — "ask each time").
+    /// Wired at app bootstrap to the `@MainActor ACPPermissionCoordinator`; nil in
+    /// headless/tests, where `decidePermission` then fails closed on any mutating tool the
+    /// owner hasn't pre-consented to.
+    private var permissionAsker: (any ACPPermissionAsking)?
+
+    func setPermissionAsker(_ asker: any ACPPermissionAsking) {
+        permissionAsker = asker
+    }
+
+    /// Re-bind the relay-ACP provider + refresh routing for the CURRENT AI set, without
+    /// rebuilding every AI. Call after a per-node consent flip (remote dev-control on/off)
+    /// so the `acp` backend binds live (ON) or reverts to the inert stub (OFF) with no
+    /// reboot. Idempotent.
+    func refreshACPBindings() {
+        rebindRelayACPProviders()
+        refreshRoutingPolicy()
     }
 
     // MARK: - Nearby AUTH allowlist (C-5)
@@ -629,6 +703,7 @@ actor PersonaRuntime {
         // Now that contacts (incl. any consented `coding_agent` node) and the
         // messenger are up, make any enabled "acp" backend live over the relay.
         rebindRelayACPProviders()
+        refreshRoutingPolicy()
         return stream
     }
 
@@ -844,6 +919,7 @@ actor PersonaRuntime {
         contactRecords[identityHex]?.contactType = (type?.isEmpty ?? true) ? nil : type
         persistContact(identityHex)
         eventContinuation?.yield(.conversationChanged(identityHex))
+        refreshRoutingPolicy()
     }
 
     // MARK: - Relay-carried ACP (ACPRouterplan Phase 3 — drive a paired Mac node)
@@ -893,6 +969,9 @@ actor PersonaRuntime {
     /// Tear down a node's relay-ACP transport (and drop it), e.g. when consent is
     /// revoked or the node is unpaired. Safe when none exists.
     func teardownRelayACPTransport(nodeHex: String) async {
+        // Resolve any prompts awaiting the human for this node with .deny — never strand a
+        // continuation when the path goes away (item 3 fail-closed hygiene).
+        await permissionAsker?.cancelAll(nodeHex: nodeHex)
         guard let transport = relayACPTransports.removeValue(forKey: nodeHex) else { return }
         transport.close()
     }

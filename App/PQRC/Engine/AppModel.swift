@@ -40,6 +40,12 @@ final class AppModel {
     let runtime: PersonaRuntime
     let personaName: String
 
+    /// The interactive ACP tool-permission queue (Phase 3 item 3 — "ask each time"). A
+    /// SwiftUI alert drives off `acpPermissions.pending.first`; the runtime's permission
+    /// handler awaits it. Owned here so it lives for the whole app session and is reachable
+    /// from any view via the model.
+    let acpPermissions = ACPPermissionCoordinator()
+
     var onboarded = false
     var myNpub = ""
     var myIdentityHex = ""
@@ -93,6 +99,9 @@ final class AppModel {
         inMemoryStore: Bool, storeURL: URL? = nil,
         relayURLs: [String] = ["local://relay"]
     ) async throws {
+        // Wire the interactive permission asker BEFORE bootstrap, so the first relay-ACP
+        // rebind (inside bootstrap) builds a handler that can prompt the human.
+        await runtime.setPermissionAsker(acpPermissions)
         let events = try await runtime.bootstrap(
             inMemoryStore: inMemoryStore, storeURL: storeURL, relayURLs: relayURLs)
         myNpub = await runtime.npub

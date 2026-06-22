@@ -31,6 +31,10 @@ struct ConversationDetailsView: View {
     /// agent create/modify files and run shell commands without asking each time.
     /// OFF by default — when off, the phone fails closed on every mutating tool.
     @State private var autonomousChanges = false
+    /// Per-node REMOTE DEV-CONTROL consent (ACPRouterplan Phase 3): whether the phone may
+    /// drive this paired Mac node's ACP agent over the relay at all. OFF by default — the
+    /// relay path is inert until this is on.
+    @State private var remoteDevControl = false
 
     var body: some View {
         NavigationStack {
@@ -119,27 +123,52 @@ struct ConversationDetailsView: View {
                 }
                 if isCodingAgent {
                     Section {
+                        Toggle("Drive this agent from here", isOn: $remoteDevControl)
+                            .accessibilityIdentifier("acp-remote-dev-control")
+                            .onChange(of: remoteDevControl) { _, newValue in
+                                AppSession.setRemoteDevControlConsent(
+                                    newValue, nodeID: conversationID, siloID: model.siloID)
+                                // Bind the live relay-ACP provider (ON) / revert to the inert
+                                // stub (OFF) with no reboot.
+                                let nodeHex = conversationID
+                                Task { await model.runtime.refreshACPBindings() }
+                                if !newValue {
+                                    // Revoking dev-control also drops the transport + denies
+                                    // any pending prompts for this node (fail-closed).
+                                    Task { await model.runtime.teardownRelayACPTransport(nodeHex: nodeHex) }
+                                }
+                            }
+                        Label(
+                            remoteDevControl
+                                ? "ON — your phone can drive this Mac's coding agent over the relay. Read-only by default; mutating actions are governed below."
+                                : "OFF — this paired Mac agent is fully inert; nothing here can drive it.",
+                            systemImage: remoteDevControl
+                                ? "antenna.radiowaves.left.and.right" : "antenna.radiowaves.left.and.right.slash")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .accessibilityIdentifier("acp-remote-dev-control-status")
+
                         Toggle("Allow autonomous file & shell changes", isOn: $autonomousChanges)
                             .accessibilityIdentifier("acp-autonomous-changes")
+                            .disabled(!remoteDevControl)
                             .onChange(of: autonomousChanges) { _, newValue in
-                                // Per-node, per-silo — same store as remote dev-control
-                                // consent; the conversationID IS the node's identity hex.
+                                // Per-node, per-silo — the conversationID IS the node's hex.
                                 AppSession.setAutonomousChangesConsent(
                                     newValue, nodeID: conversationID, siloID: model.siloID)
                             }
                         Label(
                             autonomousChanges
                                 ? "ON — the paired Mac agent can create/modify files and run shell commands on its node without asking each time."
-                                : "OFF — each request to create/modify a file or run a shell command is denied automatically (fails safe). Read-only inspection still works.",
+                                : "OFF — each create/modify/run request prompts you here (Allow once / Allow always / Deny). Read-only inspection still works.",
                             systemImage: autonomousChanges ? "lock.open.trianglebadge.exclamationmark" : "lock.shield")
                             .font(.caption)
                             .foregroundStyle(autonomousChanges ? AnyShapeStyle(.orange) : AnyShapeStyle(.secondary))
                             .accessibilityIdentifier("acp-autonomous-changes-status")
                     } header: {
                         Text("Mac coding agent")
-                            .helpInfo("Separate from letting the agent join your conversation. With this OFF, your phone refuses any request from the paired Mac agent to write files or run shell commands — the last brake before a destructive change. Turn it ON only if you trust this node to act on its own; it can then create, modify, and delete files and run commands on that Mac without prompting you.")
+                            .helpInfo("Two switches, both off by default. The first lets your phone drive this paired Mac's coding agent over the relay at all. The second lets it create/modify files and run shell commands WITHOUT prompting — with it off, every mutating action asks you here, and your phone is the last brake before a destructive change runs on that Mac.")
                     } footer: {
-                        Text("Lets the paired Mac agent create/modify files and run shell commands without asking each time. Keep this off unless you trust it to act autonomously — your phone is the last brake before a destructive change runs on that Mac.")
+                        Text("Off by default (privacy-first). Turn the first on to drive the agent; leave the second off to be asked before each file/shell change.")
                     }
                 }
                 Section("Safety") {
@@ -174,6 +203,8 @@ struct ConversationDetailsView: View {
                 summary = model.primaryAIContextSummary(conversationID)
                 isCodingAgent = await model.runtime.contactType(conversationID) == "coding_agent"
                 autonomousChanges = AppSession.autonomousChangesConsent(
+                    nodeID: conversationID, siloID: model.siloID)
+                remoteDevControl = AppSession.remoteDevControlConsent(
                     nodeID: conversationID, siloID: model.siloID)
             }
             .toolbar {
