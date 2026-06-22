@@ -228,9 +228,12 @@ final class ACPBridgeService: ObservableObject {
     /// True while an agent run is in flight — a guard so queued messages don't each
     /// spawn a fresh agent (which stacked up and looked "dead").
     private var agentRunInFlight = false
-    /// Overall wall-clock cap for one agent run. A weak tool-calling model can loop to
-    /// the iteration limit; without this the run (and the watch-along) hangs silently.
-    private let agentRunTimeout: Double = 90
+    /// Wall-clock cap for one watch-along agent run. **0 (default) = no cap** — a
+    /// self-hosted model doing real work legitimately runs long, so the whole turn
+    /// isn't bounded here; it's still bounded by the agent's own iteration limit and
+    /// the per-LLM-request timeout. Set a positive value to re-enable a hard ceiling
+    /// (e.g. to fail fast on a known-weak looping model).
+    @Published var agentRunTimeout: Double = 0
     /// File holding the pinned owner hex (`<configDir>/owner`).
     private let ownerFilePath: String?
     /// File holding the agent's project working directory (`<configDir>/workdir`).
@@ -922,7 +925,9 @@ final class ACPBridgeService: ObservableObject {
     nonisolated static func runWithTimeout<T: Sendable>(
         seconds: Double, _ operation: @escaping @Sendable () async throws -> T
     ) async throws -> T {
-        try await withThrowingTaskGroup(of: T.self) { group in
+        // seconds <= 0 disables the cap: run the operation directly, unbounded.
+        guard seconds > 0 else { return try await operation() }
+        return try await withThrowingTaskGroup(of: T.self) { group in
             group.addTask { try await operation() }
             group.addTask {
                 try await Task.sleep(nanoseconds: UInt64(seconds * 1_000_000_000))
