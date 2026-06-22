@@ -120,5 +120,12 @@ public func runACPAgent(
             }
         }
     }
+    // Phase D4 — FAIL-CLOSED TEARDOWN at the node: the inbound stream finished (the
+    // transport closed — a relay drop, the phone backgrounding/locking, or an explicit
+    // teardown). KILL every live interactive terminal so no orphaned PTY shell is left
+    // running on the Mac. This is the node-side counterpart to the phone-side teardown
+    // (`PersonaRuntime.teardownRelayACPTransport`/`shutdown`, which closes the transport
+    // and so triggers exactly this).
+    await agent.terminateAllTerminals()
 }
 #endif  // os(macOS) — runACPAgent + TransportOutputSink (node-side: hosts ACPAgent)

@@ -97,6 +97,21 @@ public actor ACPAgentProvider: AgentProvider {
         live.consumer.cancel()
     }
 
+    // MARK: Phase D4 — interactive terminal control (phone → node)
+
+    /// Write stdin to a live interactive terminal on the node (the user typing into the
+    /// PTY view). No-op if the session isn't started.
+    public func sendTerminalInput(terminalId: String, data: String) async {
+        await live?.client.terminalInput(terminalId: terminalId, data: data)
+    }
+
+    /// KILL a live interactive terminal (the phone's Stop control). Always available —
+    /// the node terminates the PTY's child process group and closes its fds. No-op if the
+    /// session isn't started (then there's nothing live to kill).
+    public func killTerminal(terminalId: String) async {
+        await live?.client.terminalKill(terminalId: terminalId)
+    }
+
     // MARK: AgentProvider
 
     public func draftReply(context: AgentContext) async throws -> Draft {
@@ -268,6 +283,11 @@ actor TurnAccumulator {
         case .plan:
             // Live UI signal (forwarded to the observer), not turn-fold output — the
             // plan is shown as its own checklist, never inlined into the reply text.
+            break
+        case .terminalOpened, .terminalOutput, .terminalClosed:
+            // Phase D4 — live INTERACTIVE-terminal signals. Forwarded to the observer (the
+            // app renders a terminal view + Stop control); NEVER folded into the turn's
+            // reply text — the live PTY stream is its own surface, not a chat message.
             break
         }
     }

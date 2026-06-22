@@ -123,7 +123,15 @@ public struct ToolExecutor: Sendable {
     /// "what tools exist" (used to validate an allowlist).
     public static let allToolNames = [
         "read_file", "write_file", "edit_file", "list_dir", "search", "run_shell",
+        "open_terminal",
     ]
+
+    /// Phase D4 — the interactive-PTY tool name. A PERSISTENT streaming terminal (REPLs,
+    /// debuggers, long-running processes), as opposed to one-shot `run_shell`. NOT run by
+    /// `ToolExecutor` (a value type can't own a long-lived process); `ACPAgent` intercepts
+    /// it and manages the `PTYProcess` lifecycle. Defined here so it shares the tool
+    /// allowlist + the `execute` ToolKind (and therefore the phone's mutating-tool gate).
+    public static let openTerminalTool = "open_terminal"
 
     /// The OpenAI tool/function definitions the agent advertises to its LLM,
     /// optionally filtered to an allowlist (empty → all). Descriptions are written
@@ -216,6 +224,14 @@ public struct ToolExecutor: Sendable {
                     "Run one shell command with /bin/zsh -lc in the working directory; returns combined stdout+stderr and the exit code. Use for builds and tests, e.g. run_shell(command: \"xcodebuild -scheme App test\") or xcrun simctl / swift build. DEVELOPER_DIR is preset to the configured Xcode. Long output is truncated.",
                 parameters: stringArgSchema(
                     name: "command", desc: "the single shell command line to run", required: true)),
+            LLMTool(
+                name: "open_terminal",
+                description:
+                    "Open a PERSISTENT interactive terminal (a live shell on a pseudo-terminal) for REPLs, debuggers, or long-running processes that need streamed input/output over time — NOT for one-off commands (use run_shell for those). Returns a terminalId; output streams live to the user's device and you cannot read it back, so only use this when the USER needs an interactive session. An optional command runs immediately in the shell. Example: open_terminal(command: \"python3\").",
+                parameters: stringArgSchema(
+                    name: "command",
+                    desc: "an optional command to run immediately in the new shell (may be empty)",
+                    required: false)),
         ]
         guard !allowlist.isEmpty else { return all }
         let wanted = Set(allowlist)
@@ -243,7 +259,14 @@ public struct ToolExecutor: Sendable {
         switch tool {
         case "read_file", "list_dir", "search": return "read"
         case "write_file", "edit_file": return "edit"
-        case "run_shell": return "execute"
+        // run_shell and open_terminal both EXECUTE on the node → the `execute` ToolKind,
+        // which the phone's allowlist (`PersonaRuntime.isMutatingACPToolKind`) treats as
+        // mutating. open_terminal carries the stronger phone-side gate (the standing
+        // autonomous-changes consent, no allow-once) because an open-ended interactive
+        // shell can't be meaningfully approved per-keystroke — that distinction is made
+        // phone-side off the tool TITLE (`isInteractiveTerminalTitle`), since the ACP
+        // ToolKind vocabulary has no finer-grained value.
+        case "run_shell", "open_terminal": return "execute"
         default: return "other"
         }
     }
@@ -252,6 +275,7 @@ public struct ToolExecutor: Sendable {
     /// prompt (when the client supports it) before they run.
     static func needsPermission(_ tool: String) -> Bool {
         tool == "write_file" || tool == "edit_file" || tool == "run_shell"
+            || tool == "open_terminal"
     }
 
     /// A short human title for a tool call (shown in the editor's tool UI).
@@ -263,9 +287,22 @@ public struct ToolExecutor: Sendable {
         case "list_dir": return "List \(args["path"]?.stringValue ?? ".")"
         case "search": return "Search \"\(args["query"]?.stringValue ?? "")\""
         case "run_shell": return "Run: \(args["command"]?.stringValue ?? "")"
+        case "open_terminal":
+            // The phone keys its STRONGER gate (standing autonomous-changes consent, no
+            // allow-once) off this exact prefix — `ACPTerminal.interactiveTerminalTitlePrefix`
+            // (iOS-available, the single source of truth) / `PersonaRuntime.isInteractiveTerminalTitle`.
+            let cmd = args["command"]?.stringValue ?? ""
+            return cmd.isEmpty
+                ? interactiveTerminalTitlePrefix
+                : "\(interactiveTerminalTitlePrefix): \(cmd)"
         default: return tool
         }
     }
+
+    /// Phase D4 — the stable title prefix every `open_terminal` permission request
+    /// carries. Re-exported from the iOS-available `ACPTerminal` (the single source of
+    /// truth shared with the phone's gate) so node-side call sites stay terse.
+    public static let interactiveTerminalTitlePrefix = ACPTerminal.interactiveTerminalTitlePrefix
 
     // MARK: Dispatch
 

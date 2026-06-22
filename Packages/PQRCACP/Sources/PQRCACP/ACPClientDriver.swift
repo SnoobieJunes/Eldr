@@ -34,6 +34,12 @@ public struct ACPClientHandler: Sendable {
     /// The agent reported its plan for the turn (a checklist; re-sent in full on
     /// each change).
     public var onPlan: @Sendable (_ entries: [ACPPlanEntry]) async -> Void
+    /// Phase D4 — a live interactive terminal (PTY) was opened on the node.
+    public var onTerminalOpened: @Sendable (_ terminalId: String, _ title: String) async -> Void
+    /// Phase D4 — a streamed chunk of an interactive terminal's output (incremental).
+    public var onTerminalOutput: @Sendable (_ terminalId: String, _ chunk: String) async -> Void
+    /// Phase D4 — an interactive terminal ended (child exited or it was killed).
+    public var onTerminalClosed: @Sendable (_ terminalId: String, _ exitCode: Int?) async -> Void
     /// Decide a mutating tool's permission request. Default: allow.
     public var requestPermission: @Sendable (_ title: String, _ kind: String) async -> Bool
     /// Serve a client-side file read (only reached if fs caps are advertised); nil →
@@ -53,6 +59,9 @@ public struct ACPClientHandler: Sendable {
         },
         onAvailableCommands: @escaping @Sendable ([String]) async -> Void = { _ in },
         onPlan: @escaping @Sendable ([ACPPlanEntry]) async -> Void = { _ in },
+        onTerminalOpened: @escaping @Sendable (String, String) async -> Void = { _, _ in },
+        onTerminalOutput: @escaping @Sendable (String, String) async -> Void = { _, _ in },
+        onTerminalClosed: @escaping @Sendable (String, Int?) async -> Void = { _, _ in },
         requestPermission: @escaping @Sendable (String, String) async -> Bool = { _, _ in true },
         readTextFile: @escaping @Sendable (String) async -> String? = { _ in nil },
         writeTextFile: @escaping @Sendable (String, String) async -> Bool = { _, _ in false }
@@ -62,6 +71,9 @@ public struct ACPClientHandler: Sendable {
         self.onToolCallUpdate = onToolCallUpdate
         self.onAvailableCommands = onAvailableCommands
         self.onPlan = onPlan
+        self.onTerminalOpened = onTerminalOpened
+        self.onTerminalOutput = onTerminalOutput
+        self.onTerminalClosed = onTerminalClosed
         self.requestPermission = requestPermission
         self.readTextFile = readTextFile
         self.writeTextFile = writeTextFile
@@ -278,6 +290,30 @@ public actor ACPClientDriver {
             method: "session/cancel", params: .object(["sessionId": .string(sessionId)]))
     }
 
+    /// Phase D4 — write stdin to a LIVE interactive terminal (PTY) on the node. A
+    /// fire-and-forget notification: the phone (or the user, via the terminal view) types
+    /// into the running shell. No-op if there is no session.
+    public func terminalInput(terminalId: String, data: String) async {
+        guard let sessionId else { return }
+        await notify(
+            method: "terminal/input",
+            params: ACPWire.terminalInput(
+                sessionId: sessionId, terminalId: terminalId, data: data))
+    }
+
+    /// Phase D4 — KILL a live interactive terminal (the Stop control). Fire-and-forget:
+    /// the node terminates the PTY's child process group and closes its fds, then emits a
+    /// `terminal_closed`. This is the always-killable guarantee's wire edge — it can be
+    /// sent at any time. No-op if there is no session.
+    public func terminalKill(terminalId: String) async {
+        guard let sessionId else { return }
+        await notify(
+            method: "terminal/release",
+            params: .object([
+                "sessionId": .string(sessionId), "terminalId": .string(terminalId),
+            ]))
+    }
+
     /// Tear down: stop reading, close our write end, terminate a spawned process, and
     /// fail any outstanding requests.
     public func shutdown() async {
@@ -366,6 +402,22 @@ public actor ACPClientDriver {
                 Self.commandNames(update["availableCommands"]))
         case "plan":
             await handler.onPlan(Self.planEntries(update["entries"]))
+        // Phase D4 — the live INTERACTIVE-terminal stream (an Eldr extension carried on
+        // the session/update channel, alongside the unchanged request-based `terminal/*`
+        // that `run_shell` uses). The node emits these as the PTY produces output, so the
+        // phone renders it incrementally and can Stop it.
+        case "terminal_opened":
+            await handler.onTerminalOpened(
+                update["terminalId"]?.stringValue ?? "",
+                update["title"]?.stringValue ?? "Terminal")
+        case "terminal_output":
+            await handler.onTerminalOutput(
+                update["terminalId"]?.stringValue ?? "",
+                update["chunk"]?.stringValue ?? "")
+        case "terminal_closed":
+            await handler.onTerminalClosed(
+                update["terminalId"]?.stringValue ?? "",
+                update["exitCode"]?.intValue)
         default:
             break  // unknown updates ignored (forward-compat)
         }

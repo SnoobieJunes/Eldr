@@ -1149,3 +1149,66 @@ The **silo separation** (A23) is KEPT — it's how the work/personal accounts st
 - **Model.** `AppSession.conversationFirewall(convID)` → `nil` (inherit the account default `firewallEnabled`, which defaults ON) | `true` (redact) | `false` (raw). Resolved at the single egress site (`PersonaRuntime.contextFor`). Default stays ON (privacy-first); an override only ever *relaxes* a chat the user explicitly trusts. Only affects a REMOTE AI (`appliesEgressFirewall`); on-device AI never egresses.
 - **Distinct from C-6 (AC28, ACP at-rest log redaction).** Two separate controls, never conflated: C-6 always scrubs secrets from the Mac node's on-disk diagnostic logs and NEVER touches the data channel; the egress firewall is the per-chat-togglable control on what a remote AI *sees*. Both scope to the user-set trust boundary; neither blanket-redacts the owner / private-paired delivery path.
 - **Surfaced a silently-red test.** The firewall unit tests set `isRemote:true` but not `appliesEgressFirewall:true`; since the PCC split of those fields the redaction guard short-circuited, so `firewall_redactsRealNamesForRemoteAI` had been **silently failing** — undetected because CI pointed at the renamed project and never ran the app suite. Fixed (set the flag); the CI repoint closes the detection gap.
+
+## Interactive PTY terminal (AC40, Phase D4) — `[app-only]`
+
+**Decision (2026-06-22).** Beyond one-shot `run_shell`, the ACP agent can open a
+**persistent interactive terminal** — a real shell on a pseudo-terminal (`PTYProcess`,
+macOS-only, `posix_spawn` + `openpty`) for REPLs / debuggers / long-running processes —
+streaming stdin in and stdout/stderr out incrementally, killable at any time. This is the
+project's **highest-risk surface** (an open-ended interactive shell on the user's Mac,
+driven from the phone), so the safeguards are the deliverable, not the feature.
+
+- **Gate = the STANDING autonomous-changes consent, NO allow-once.** An open-ended shell
+  can't be meaningfully approved per-keystroke, so PTY creation requires the same per-node
+  `autonomousChangesConsent` the user explicitly opted into — it is NOT a per-action
+  prompt. Enforced phone-side in `PersonaRuntime` (`decideInteractivePTY` →
+  `AppSession.autonomousChangesConsent`, reached from the relay-ACP `permissionHandler`
+  when the request's title matches `ACPTerminal.interactiveTerminalTitlePrefix`). With the
+  consent OFF it **FAILS CLOSED** — no terminal, and the per-action permission UI is never
+  even consulted (proven by `interactiveTerminal_deniedWithoutStandingConsent_evenWithUI`).
+  The node independently re-checks its own C-1 (deny-on-timeout) and keeps its C-2 cwd jail;
+  the PTY adds no capability `run_shell` didn't already have (the same C-1-gated, C-2-jail-
+  EXEMPT escape hatch) — it just keeps the shell alive for streaming. The `open_terminal`
+  tool carries the ACP `execute` ToolKind, so the existing mutating-tool allowlist
+  (`isMutatingACPToolKind`) already treats it as mutating; the title prefix is the finer
+  signal that routes it to the stronger gate (the ToolKind vocabulary is too coarse).
+- **Always-killable.** The phone's prominent Stop control → `terminal/release` →
+  `PTYProcess.terminate()`, which SIGTERM+SIGKILLs the child's whole process group and
+  closes the master fd, idempotently, synchronously, from any task. **Job control is
+  disabled in the spawned shell (`zsh +m`)** so a backgrounded `cmd &` stays in the killable
+  group — otherwise it would get its own process group and survive the kill (an orphaned
+  shell, the #1 risk). Proven by `terminate_killsLongRunningChild_noOrphan` (a backgrounded
+  `sleep 600` is reliably reaped) and the ACP-level `terminateAllTerminals_killsLiveShell_noOrphan`.
+- **Fail-closed teardown.** A relay drop / app background→shutdown / silo lock (`lockSilo`
+  → `PersonaRuntime.shutdown`) / `teardownRelayACPTransport` shuts the node's ACP provider
+  down, which closes the transport, which ends the node's `runACPAgent` inbound loop →
+  `ACPAgent.terminateAllTerminals()` kills every live PTY. A `session/cancel` also kills
+  that session's terminals. No interactive shell ever outlives the session that authorized
+  it. (Node-side `terminateAllTerminals` was added to `runACPAgent`'s post-loop;
+  phone-side teardown additionally shuts the provider in `shutdown`/`teardownRelayACPTransport`.)
+- **C-6 (CLAUDE.md inv. 12).** The LIVE PTY stream is NEVER written to the node's at-rest
+  logs — it goes only to the owner's paired device (the data channel, raw, like
+  `run_shell`'s output). The only at-rest write for an interactive terminal is the close
+  EVENT, which records solely the exit code (no output). Proven by
+  `interactiveTerminalOutput_isNeverWrittenAtRest` (a secret-shaped marker in the PTY output
+  reaches the device but never the events log — not even as a redaction marker, because
+  nothing about the stream is logged). The on-screen scrollback is bounded
+  (`LiveACPTerminal.maxOutputBytes`, head-trimmed) and never persisted.
+- **`@unchecked Sendable` justification.** `PTYProcess` is a final class (not an actor) so
+  `terminate()` is synchronous and callable from a fail-closed teardown without an actor
+  hop that cancellation could skip (the orphan risk). Its only mutable state (`state`) is
+  guarded by an `NSLock`; the fds/pid are immutable post-spawn. Written justification is in
+  the source (precedent: `LineSplitter`).
+- **Wire.** An Eldr extension on the ACP `session/update` channel (`terminal_opened` /
+  `terminal_output` / `terminal_closed`) plus a `terminal/input` notification, ALONGSIDE the
+  unchanged request-based `terminal/*` that one-shot `run_shell` still uses. A persistent
+  terminal needs a push channel the request/response shape can't give. Queued for the NIP if
+  ACP terminal-streaming is ever standardized.
+- **App-test-host link caveat (pre-existing, NOT introduced here).** `xcodebuild
+  build-for-testing`/`test` for `EldrChatTests` fails to link the host app against the
+  PQRCACP package framework (`Undefined symbol … ACPPlanEntry`, an existing type) — confirmed
+  by reproducing it on clean HEAD with all D4 changes stashed. The package suites
+  (`swift test`) and the plain app `xcodebuild build` are green; the App-side gate suite
+  (`ACPInteractiveTerminalGateTests`) compiles but can't be RUN until that environmental
+  test-host link issue is resolved separately. `[tech-debt]`

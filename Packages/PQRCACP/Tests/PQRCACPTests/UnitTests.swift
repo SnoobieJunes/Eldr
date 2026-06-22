@@ -291,6 +291,7 @@ struct ToolExecutorTests {
         #expect(
             names == [
                 "read_file", "write_file", "edit_file", "list_dir", "search", "run_shell",
+                "open_terminal",
             ])
         // The advertised set must match the declared source of truth.
         #expect(names == Set(ToolExecutor.allToolNames))
@@ -300,6 +301,10 @@ struct ToolExecutorTests {
         #expect(ToolExecutor.needsPermission("write_file"))
         #expect(ToolExecutor.needsPermission("edit_file"))
         #expect(ToolExecutor.needsPermission("run_shell"))
+        // Phase D4: opening an interactive PTY is mutating/executing — gated like run_shell
+        // (and, phone-side, behind the stronger standing autonomous-changes consent).
+        #expect(ToolExecutor.needsPermission("open_terminal"))
+        #expect(ToolExecutor.kind(for: "open_terminal") == "execute")
         #expect(!ToolExecutor.needsPermission("read_file"))
         #expect(!ToolExecutor.needsPermission("list_dir"))
         #expect(!ToolExecutor.needsPermission("search"))

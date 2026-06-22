@@ -7,6 +7,19 @@ import Foundation
 // NO fs/terminal capabilities, so the agent does its own file/shell I/O on the Mac node —
 // the phone is the remote control, not the worker.
 
+/// Phase D4 — iOS-available constants for the interactive PTY terminal. Lives here (not
+/// on the macOS-only `ToolExecutor`) because the PHONE — which compiles PQRCACP for iOS
+/// and never hosts the agent — must recognize an interactive-terminal permission request
+/// to apply its stronger gate. The node's `ToolExecutor` reuses the same prefix so the two
+/// sides agree by construction.
+public enum ACPTerminal {
+    /// The stable title prefix every `open_terminal` permission request carries. The ACP
+    /// ToolKind (`execute`) is too coarse to distinguish an open-ended interactive shell
+    /// from a one-shot `run_shell`, so the phone keys its stronger gate (standing
+    /// autonomous-changes consent, no allow-once) off this title prefix.
+    public static let interactiveTerminalTitlePrefix = "Open interactive terminal"
+}
+
 /// One step of the agent's plan (an ACP `PlanEntry`), as the phone consumes it.
 /// Display-only: `content` is agent output and gets the same hygiene as an agent
 /// bubble (no special trust). `priority` is dropped — the phone's checklist keys
@@ -33,6 +46,17 @@ public enum ACPUIEvent: Sendable, Equatable {
     /// The agent reported its plan for the turn (a checklist). Re-sent in full on
     /// each change, so the latest `.plan` is the current state of every step.
     case plan([ACPPlanEntry])
+    /// Phase D4 — a live INTERACTIVE terminal was opened on the node (a persistent PTY,
+    /// distinct from one-shot `run_shell`). The phone surfaces a terminal view + a Stop
+    /// control keyed off `terminalId`. `title` is a short human label (e.g. the shell).
+    case terminalOpened(terminalId: String, title: String)
+    /// Phase D4 — a streamed chunk of an interactive terminal's combined stdout+stderr,
+    /// delivered incrementally as the child produces it (NOT buffered to EOF). Display
+    /// text only — agent output, trusted no further than an agent bubble.
+    case terminalOutput(terminalId: String, chunk: String)
+    /// Phase D4 — an interactive terminal ended (the child exited, or it was killed via
+    /// the phone's Stop / a fail-closed teardown). The phone removes its terminal view.
+    case terminalClosed(terminalId: String, exitCode: Int?)
 }
 
 public actor ACPClient {
@@ -74,6 +98,15 @@ public actor ACPClient {
             },
             onAvailableCommands: { names in emit.yield(.availableCommands(names)) },
             onPlan: { entries in emit.yield(.plan(entries)) },
+            onTerminalOpened: { id, title in
+                emit.yield(.terminalOpened(terminalId: id, title: title))
+            },
+            onTerminalOutput: { id, chunk in
+                emit.yield(.terminalOutput(terminalId: id, chunk: chunk))
+            },
+            onTerminalClosed: { id, code in
+                emit.yield(.terminalClosed(terminalId: id, exitCode: code))
+            },
             requestPermission: permissionHandler)
         // The phone advertises no fs/terminal caps → the agent uses its own I/O on the Mac.
         self.driver = ACPClientDriver(
@@ -96,6 +129,16 @@ public actor ACPClient {
 
     /// Cancel the in-flight turn (fire-and-forget).
     public func cancel() async { await driver.cancel() }
+
+    /// Phase D4 — write stdin to a live interactive terminal (PTY) on the node.
+    public func terminalInput(terminalId: String, data: String) async {
+        await driver.terminalInput(terminalId: terminalId, data: data)
+    }
+
+    /// Phase D4 — KILL a live interactive terminal (the Stop control). Always available.
+    public func terminalKill(terminalId: String) async {
+        await driver.terminalKill(terminalId: terminalId)
+    }
 
     /// Tear down the transport + reader and finish the event stream.
     public func shutdown() async {

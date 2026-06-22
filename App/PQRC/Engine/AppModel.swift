@@ -34,6 +34,25 @@ struct NearbyVM: Identifiable, Hashable {
     let name: String
 }
 
+/// Phase D4 — the live INTERACTIVE terminal (PTY) a paired coding-agent node is running.
+/// Append-only `output` (the streamed combined stdout+stderr), display-only — agent text,
+/// trusted no further than a bubble, and NEVER persisted (the live stream isn't written
+/// at rest, CLAUDE.md inv. 12). The view renders `output` monospace and offers a Stop
+/// control wired to `terminalID`.
+struct LiveACPTerminal: Identifiable, Equatable {
+    var id: String { terminalID }
+    let terminalID: String
+    let title: String
+    var output: String = ""
+    /// Set once the node reports the terminal closed (child exited / killed). The view
+    /// shows it as ended; the row is cleared shortly after.
+    var closed: Bool = false
+    var exitCode: Int?
+    /// Cap on retained output so a chatty process can't grow the string unbounded in the
+    /// view (the live stream is unbounded; the on-screen scrollback is not). Head-trimmed.
+    static let maxOutputBytes = 256 * 1024
+}
+
 /// Main-actor view state for one persona, fed by its `PersonaRuntime`.
 @MainActor
 @Observable
@@ -80,6 +99,13 @@ final class AppModel {
     /// reported for the turn it's running (Phase D1). Display-only; the node re-sends
     /// the whole plan on each change, so this is replaced wholesale, never merged.
     var acpPlansByConversation: [String: [ACPPlanEntry]] = [:]
+    /// conversationID -> the live INTERACTIVE terminal (PTY) a paired coding-agent node is
+    /// running for this conversation (Phase D4), or nil when none is live. The UI shows a
+    /// monospace output view + a prominent Stop control while present. At most one live
+    /// terminal per conversation is surfaced (a coding chat drives one node). The output
+    /// is display-only agent text and is NEVER persisted (CLAUDE.md inv. 12 — the live
+    /// stream is not written at rest).
+    var acpTerminalByConversation: [String: LiveACPTerminal] = [:]
     /// Nearby peers discovered over the local link (SPEC §10) — startable with
     /// no relay. Populated only when the Nearby setting is on.
     var nearbyContacts: [NearbyVM] = []
@@ -230,6 +256,30 @@ final class AppModel {
             } else {
                 acpPlansByConversation[conversationID] = entries
             }
+        case .acpTerminalOpened(let conversationID, let terminalID, let title):
+            // A live interactive terminal opened — show its view + Stop control.
+            acpTerminalByConversation[conversationID] = LiveACPTerminal(
+                terminalID: terminalID, title: title)
+        case .acpTerminalOutput(let conversationID, let terminalID, let chunk):
+            // Append streamed output to the matching live terminal (display-only; never
+            // persisted). Ignore a chunk for a terminal we aren't showing (a stale id).
+            guard var term = acpTerminalByConversation[conversationID],
+                term.terminalID == terminalID
+            else { break }
+            term.output += chunk
+            // Bound the on-screen scrollback (head-trim) so a chatty process can't grow
+            // the retained string without limit.
+            if term.output.utf8.count > LiveACPTerminal.maxOutputBytes {
+                term.output = String(term.output.suffix(LiveACPTerminal.maxOutputBytes / 2))
+            }
+            acpTerminalByConversation[conversationID] = term
+        case .acpTerminalClosed(let conversationID, let terminalID, let exitCode):
+            guard var term = acpTerminalByConversation[conversationID],
+                term.terminalID == terminalID
+            else { break }
+            term.closed = true
+            term.exitCode = exitCode
+            acpTerminalByConversation[conversationID] = term
         }
     }
 
@@ -372,6 +422,32 @@ final class AppModel {
 
     func withdrawAI(threadID: String) async {
         await runtime.withdrawMyAI(threadID: threadID)
+    }
+
+    // MARK: - Interactive terminal (Phase D4)
+
+    /// Send a line of stdin to the live interactive terminal in `conversationID` (the user
+    /// typed into the PTY view). Appends a newline. No-op if no terminal is live.
+    func sendACPTerminalInput(_ text: String, conversationID: String) async {
+        guard let term = acpTerminalByConversation[conversationID], !term.closed else { return }
+        await runtime.sendACPTerminalInput(
+            nodeHex: conversationID, terminalID: term.terminalID, data: text + "\n")
+    }
+
+    /// STOP/KILL the live interactive terminal in `conversationID` (the prominent Stop
+    /// control). Tells the node to terminate the PTY's child process group + close its
+    /// fds. Always available while a terminal is live.
+    func stopACPTerminal(conversationID: String) async {
+        guard let term = acpTerminalByConversation[conversationID] else { return }
+        await runtime.killACPTerminal(nodeHex: conversationID, terminalID: term.terminalID)
+    }
+
+    /// Dismiss a CLOSED terminal's view (clears the row). Only meaningful once closed —
+    /// while live, the Stop control is the way out.
+    func dismissACPTerminal(conversationID: String) {
+        if acpTerminalByConversation[conversationID]?.closed == true {
+            acpTerminalByConversation[conversationID] = nil
+        }
     }
 
     // MARK: - AI context (Features 3–4)

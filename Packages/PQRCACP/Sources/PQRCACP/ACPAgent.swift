@@ -83,6 +83,20 @@ public actor ACPAgent {
     /// context, so this gate keeps the MCP-passthrough path inert otherwise (and
     /// inert entirely when `extraTools` is nil).
     private var sessionsWithMCP: Set<String> = []
+    /// Phase D4 — live INTERACTIVE terminals (PTYs), by `terminalId`. The persistent
+    /// interactive shell `open_terminal` spawns lives HERE (on the actor), not in the
+    /// per-turn `ToolExecutor` value. Each entry carries the process and the task
+    /// streaming its output as `terminal_output` session/updates. Terminating a PTY
+    /// (the phone's Stop, a session/cancel, or full teardown) kills the child + closes
+    /// fds and removes it here — the always-killable / no-orphan / fail-closed guarantee.
+    private var terminals: [String: LiveTerminal] = [:]
+    private var terminalCounter = 0
+
+    private struct LiveTerminal {
+        let sessionId: String
+        let process: PTYProcess
+        let pump: Task<Void, Never>
+    }
 
     public init(
         connection: ClientConnection,
@@ -168,7 +182,26 @@ public actor ACPAgent {
     private func handleNotification(method: String, params: JSONValue) async {
         switch method {
         case "session/cancel":
-            if let sid = params["sessionId"]?.stringValue { cancelledSessions.insert(sid) }
+            if let sid = params["sessionId"]?.stringValue {
+                cancelledSessions.insert(sid)
+                // Fail-closed: a cancel also KILLS every interactive terminal owned by
+                // this session — an open-ended shell must never outlive the turn that was
+                // cancelled (no orphaned interactive shell on the Mac).
+                terminateTerminals(forSession: sid)
+            }
+        case "terminal/input":
+            // Phase D4 — write stdin to a live PTY. Best-effort; a write to a terminal
+            // that already closed is a silent no-op.
+            guard let terminalId = params["terminalId"]?.stringValue,
+                let data = params["data"]?.stringValue
+            else { return }
+            terminals[terminalId]?.process.write(data)
+        case "terminal/release":
+            // Phase D4 — the phone's Stop control. Kill the PTY at the caller's request,
+            // from ANY state. Always available (the always-killable guarantee).
+            if let terminalId = params["terminalId"]?.stringValue {
+                await killTerminal(terminalId, exitCode: nil)
+            }
         default:
             break  // unknown notifications are ignored (forward-compat)
         }
@@ -579,15 +612,24 @@ public actor ACPAgent {
             params: ACPWire.toolCallUpdate(
                 sessionId: sessionId, toolCallId: toolCallId, status: "in_progress"))
 
-        // Phase D3: a tool the `extraTools` provider owns (the phone's MCP chat tools,
-        // `mcp_`-prefixed) is run by the PROVIDER — a round-trip to the phone over the
-        // relay — not by the local file/shell `ToolExecutor`. Redaction + the
-        // ai_window write-gate are enforced PHONE-SIDE inside its `MCPServer`; this
-        // path only carries the request and the already-redacted result. Routed only
-        // for an opted-in session with a provider wired; otherwise it falls through to
-        // the built-in executor (which reports "unknown tool" for an mcp_ name).
+        // Phase D4: `open_terminal` is NOT run by the per-turn `ToolExecutor` (a value
+        // type can't own a long-lived process). The agent intercepts it and spawns a
+        // persistent `PTYProcess` whose output streams to the phone as `terminal_output`
+        // session/updates. The phone has ALREADY gated this through its standing
+        // autonomous-changes consent (the `open_terminal` tool_call carried the `execute`
+        // kind + the interactive-terminal title, and `requestPermission` above returned
+        // true only if the owner consented). The node STILL re-checked C-1 there, so by
+        // the time we reach this line the open-ended shell was explicitly authorized.
         let result: ToolResult
-        if let extraTools, Self.isExtraTool(name), sessionsWithMCP.contains(sessionId) {
+        if name == ToolExecutor.openTerminalTool {
+            result = await openInteractiveTerminal(
+                sessionId: sessionId, args: args, cwd: cwd)
+        } else if let extraTools, Self.isExtraTool(name), sessionsWithMCP.contains(sessionId) {
+            // Phase D3: a tool the `extraTools` provider owns (the phone's MCP chat tools,
+            // `mcp_`-prefixed) is run by the PROVIDER — a round-trip to the phone over the
+            // relay — not by the local file/shell `ToolExecutor`. Redaction + the
+            // ai_window write-gate are enforced PHONE-SIDE inside its `MCPServer`; this
+            // path only carries the request and the already-redacted result.
             result = await extraTools.call(name: name, arguments: args)
         } else {
             result = await executor.run(tool: name, args: args)
@@ -604,6 +646,138 @@ public actor ACPAgent {
         logToolEvent(name: name, args: args, result: result, sessionId: sessionId, cwd: cwd)
         return result
     }
+
+    // MARK: - Phase D4: interactive PTY terminal
+
+    /// Spawn a persistent interactive `/bin/zsh` on a PTY and stream its output to the
+    /// phone as `terminal_output` session/updates. Returns a tool result naming the
+    /// `terminalId` (the model can't read the live stream — it goes to the user's device
+    /// — so the result just tells the model the terminal is open). The PTY is registered
+    /// in `terminals` and lives until the child exits, the phone kills it (Stop), the
+    /// session is cancelled, or the agent tears down — all of which terminate the child.
+    ///
+    /// GATING NOTE (the whole point): by the time this runs, the phone has approved the
+    /// open-ended shell via its STANDING autonomous-changes consent (the permission
+    /// round-trip in `runOneTool` denied it otherwise, and a non-responding/timed-out
+    /// phone fails closed in `requestPermission`). The node owns its environment; this is
+    /// the C-1/escape-hatch surface and adds no NEW capability beyond what `run_shell`
+    /// already had — it just keeps the shell alive for streaming.
+    private func openInteractiveTerminal(
+        sessionId: String, args: JSONValue, cwd: String
+    ) async -> ToolResult {
+        let initialCommand = args["command"]?.stringValue ?? ""
+        terminalCounter += 1
+        let terminalId = "\(sessionId)-pty-\(terminalCounter)"
+
+        var env = toolEnvironment.shellEnvironment
+        let process: PTYProcess
+        do {
+            process = try PTYProcess(executable: "/bin/zsh", cwd: cwd, environment: env)
+        } catch {
+            return ToolResult(
+                text: "open_terminal: failed to spawn a PTY: \(Self.describe(error))",
+                isError: true)
+        }
+        // Don't keep a reference to the mutated env beyond the spawn.
+        env.removeAll()
+
+        // Announce the terminal so the phone shows a view + Stop control.
+        await connection.notify(
+            method: "session/update",
+            params: ACPWire.terminalOpened(
+                sessionId: sessionId, terminalId: terminalId,
+                title: ToolExecutor.interactiveTerminalTitlePrefix))
+
+        // Stream the PTY's output to the phone, chunk by chunk, until EOF (child exit /
+        // kill). The connection is the SAME push channel agent_message_chunk uses.
+        //
+        // C-6 (CLAUDE.md invariant 12): the LIVE stream is NEVER written to an at-rest
+        // log — it goes only to the owner's paired device (the data channel, which by
+        // policy carries raw bytes, like run_shell's output). The ONLY at-rest write here
+        // is the terminal_closed EVENT, and that records solely the exit code (no
+        // output). So there is no PTY output to scrub at rest. (If a future change logged
+        // any output byte, it MUST go through `config.logRedactor` first — see the
+        // session_end/shellResult sites — but today nothing does.)
+        let connection = self.connection
+        let pump = Task { [weak self] in
+            for await chunk in process.output {
+                let text = String(decoding: chunk, as: UTF8.self)
+                await connection.notify(
+                    method: "session/update",
+                    params: ACPWire.terminalOutput(
+                        sessionId: sessionId, terminalId: terminalId, chunk: text))
+            }
+            // The stream finished → the child exited (or was killed). Clean up + announce
+            // closure exactly once (guarded inside the actor).
+            await self?.terminalDidEnd(terminalId)
+        }
+
+        terminals[terminalId] = LiveTerminal(
+            sessionId: sessionId, process: process, pump: pump)
+
+        // Optionally run a starting command in the new shell.
+        if !initialCommand.isEmpty {
+            process.write(initialCommand + "\n")
+        }
+
+        return ToolResult(
+            text:
+                "Opened interactive terminal \(terminalId). Its output is streaming live to "
+                + "the user's device; you cannot read it back. The user can type into it and "
+                + "stop it at any time.")
+    }
+
+    /// The output stream ended on its own (child exited). Announce closure + drop it.
+    /// Distinct from `killTerminal` (which we initiate); both converge on `finalize`.
+    private func terminalDidEnd(_ terminalId: String) async {
+        await finalizeTerminal(terminalId, exitCode: nil)
+    }
+
+    /// KILL a live terminal at our request (phone Stop, cancel, teardown). Terminates the
+    /// child + closes fds (idempotent), then finalizes. Safe to call when it's already
+    /// gone.
+    private func killTerminal(_ terminalId: String, exitCode: Int?) async {
+        terminals[terminalId]?.process.terminate()
+        await finalizeTerminal(terminalId, exitCode: exitCode)
+    }
+
+    /// Remove the terminal, cancel its pump, and emit `terminal_closed` exactly once
+    /// (keyed on still being present in `terminals`). The actor serializes this, so a
+    /// child-exit and a concurrent Stop can't double-announce.
+    private func finalizeTerminal(_ terminalId: String, exitCode: Int?) async {
+        guard let live = terminals.removeValue(forKey: terminalId) else { return }
+        live.process.terminate()  // idempotent; ensures fds closed even on the EOF path
+        live.pump.cancel()
+        await connection.notify(
+            method: "session/update",
+            params: ACPWire.terminalClosed(
+                sessionId: live.sessionId, terminalId: terminalId, exitCode: exitCode))
+    }
+
+    /// Fail-closed: kill every interactive terminal owned by `sessionId` (a session/cancel
+    /// landed). No PTY may outlive a cancelled turn.
+    private func terminateTerminals(forSession sessionId: String) {
+        for (id, live) in terminals where live.sessionId == sessionId {
+            live.process.terminate()
+            live.pump.cancel()
+            terminals.removeValue(forKey: id)
+        }
+    }
+
+    /// Fail-closed teardown: terminate EVERY live interactive terminal (the agent is
+    /// shutting down / the transport dropped). Public so the node host can call it when
+    /// the owner-verified stream closes — an interactive shell must never survive the
+    /// session that authorized it. Idempotent.
+    public func terminateAllTerminals() {
+        for (_, live) in terminals {
+            live.process.terminate()
+            live.pump.cancel()
+        }
+        terminals.removeAll()
+    }
+
+    /// Test-only: how many interactive terminals are currently live.
+    func liveTerminalCount() -> Int { terminals.count }
 
     /// Append a JSONL event for a significant tool call (write_file / run_shell) and
     /// update per-session counters that feed the session_end event. No-op unless

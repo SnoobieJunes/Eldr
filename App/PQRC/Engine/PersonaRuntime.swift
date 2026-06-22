@@ -37,6 +37,15 @@ enum RuntimeEvent: Sendable {
     /// a checklist in that node's conversation; never trusted beyond a bubble. The
     /// node re-sends the whole plan on each change, so this carries the full state.
     case acpPlan(conversationID: String, entries: [ACPPlanEntry])
+    /// Phase D4 — a live INTERACTIVE terminal (PTY) opened on the node for this
+    /// conversation. The UI shows a terminal view + a prominent Stop control.
+    case acpTerminalOpened(conversationID: String, terminalID: String, title: String)
+    /// Phase D4 — a streamed chunk of an interactive terminal's output (incremental).
+    /// Display-only agent output (like an agent bubble). NEVER logged at rest.
+    case acpTerminalOutput(conversationID: String, terminalID: String, chunk: String)
+    /// Phase D4 — an interactive terminal ended (child exited or killed via Stop /
+    /// fail-closed teardown). The UI removes the terminal view.
+    case acpTerminalClosed(conversationID: String, terminalID: String, exitCode: Int?)
 }
 
 /// One configured relay's URL paired with its current connection health.
@@ -279,6 +288,16 @@ actor PersonaRuntime {
                 inert.provider = DemoAgentProvider()
                 return inert
             }
+            // Phase D4 — fail-closed: shut down any now-detached ACP providers (fire-and-
+            // forget; this method is sync). Shutting a provider closes its transport →
+            // the node terminates any live PTY. The Settings revoke path also calls
+            // `teardownRelayACPTransport` (which awaits this), so this is a backstop for
+            // any other route into the revert branch.
+            let detached = relayACPProviders
+            relayACPProviders.removeAll()
+            for (_, provider) in detached {
+                Task { await provider.shutdown() }
+            }
             return
         }
         // Phone-side permission decision (statusreport §2.3, P0). The `kind` is the
@@ -307,28 +326,92 @@ actor PersonaRuntime {
         // up lazily on the first inbound MCP frame). Off ⇒ no `mcpServers` advertised,
         // so the node never even discovers the chat tools exist.
         let shareChat = AppSession.shareChatContextConsent(nodeID: nodeHex, siloID: silo)
+        // Idempotent: if this node already has a live provider, REUSE it rather than
+        // rebuilding — rebuilding would orphan a provider that may be streaming a live
+        // interactive terminal (Phase D4), detaching the PTY from its Stop control. A
+        // benign refresh (setAIs/refreshACPBindings) just re-installs the existing
+        // provider into `ais`. A genuine consent change goes through
+        // `teardownRelayACPTransport` first, which drops the entry, so this won't mask one.
+        if let existing = relayACPProviders[nodeHex] {
+            ais = ais.map { ai in
+                guard ai.kind == "acp" else { return ai }
+                var live = ai
+                live.provider = existing
+                return live
+            }
+            return
+        }
         let provider = ACPAgentProvider(
             transport: transport,
             permissionHandler: { [weak self] title, kind in
                 guard Self.isMutatingACPToolKind(kind) else { return true }
                 guard let self else { return false }  // runtime gone → fail closed
+                // Phase D4 — an INTERACTIVE PTY (open_terminal) is a SPECIAL, higher gate:
+                // an open-ended shell can't be meaningfully approved per-keystroke, so it
+                // requires the STANDING autonomous-changes consent and FAILS CLOSED
+                // otherwise — NO per-action allow-once prompt. Recognized purely from the
+                // tool title (the ACP `execute` kind is too coarse to tell it from
+                // run_shell). Cardinal rule: the dangerous escape hatch needs the explicit,
+                // standing opt-in, never a one-tap allow.
+                if Self.isInteractiveTerminalTitle(title) {
+                    return Self.decideInteractivePTY(nodeHex: nodeHex, silo: silo)
+                }
                 return await self.decidePermission(
                     nodeHex: nodeHex, silo: silo, title: title, kind: kind)
             },
             eventObserver: { event in
-                // Phase D1: surface ONLY the plan checklist to the UI. Other live
-                // events (assistant text, tool lifecycle) already arrive as the
-                // folded reply message, so re-forwarding them here would double them.
-                guard case .plan(let entries) = event else { return }
-                plansContinuation?.yield(.acpPlan(conversationID: nodeHex, entries: entries))
+                switch event {
+                case .plan(let entries):
+                    // Phase D1: surface the plan checklist. Other folded events
+                    // (assistant text, tool lifecycle) already arrive as the reply
+                    // message, so re-forwarding them would double them.
+                    plansContinuation?.yield(.acpPlan(conversationID: nodeHex, entries: entries))
+                // Phase D4 — the live INTERACTIVE-terminal stream. These are NOT folded
+                // into the reply (the PTY is its own surface), so the observer is the only
+                // path the UI gets them by. The output chunk is display-only and never
+                // logged at rest (CLAUDE.md inv. 12).
+                case .terminalOpened(let terminalId, let title):
+                    plansContinuation?.yield(
+                        .acpTerminalOpened(
+                            conversationID: nodeHex, terminalID: terminalId, title: title))
+                case .terminalOutput(let terminalId, let chunk):
+                    plansContinuation?.yield(
+                        .acpTerminalOutput(
+                            conversationID: nodeHex, terminalID: terminalId, chunk: chunk))
+                case .terminalClosed(let terminalId, let exitCode):
+                    plansContinuation?.yield(
+                        .acpTerminalClosed(
+                            conversationID: nodeHex, terminalID: terminalId, exitCode: exitCode))
+                case .assistantText, .toolCall, .toolCallUpdate, .availableCommands:
+                    break  // folded into the reply message; not a live UI signal here
+                }
             },
             advertiseChatTools: shareChat)
+        relayACPProviders[nodeHex] = provider
         ais = ais.map { ai in
             guard ai.kind == "acp" else { return ai }
             var live = ai
             live.provider = provider
             return live
         }
+    }
+
+    /// Phase D4 — the live `ACPAgentProvider` per consented node, so the UI can drive an
+    /// interactive terminal's stdin/Stop back to the node. Reset alongside the relay-ACP
+    /// transport. Kept separate from `ais[].provider` (typed as `any AgentProvider`) so
+    /// the terminal-control methods are reachable without a downcast.
+    private var relayACPProviders: [String: ACPAgentProvider] = [:]
+
+    /// Write stdin to a live interactive terminal on `nodeHex` (the user typing into the
+    /// PTY view). No-op if the node has no live ACP provider.
+    func sendACPTerminalInput(nodeHex: String, terminalID: String, data: String) async {
+        await relayACPProviders[nodeHex]?.sendTerminalInput(terminalId: terminalID, data: data)
+    }
+
+    /// KILL a live interactive terminal on `nodeHex` (the phone's Stop control). The node
+    /// terminates the PTY's child process group + closes its fds. Always available.
+    func killACPTerminal(nodeHex: String, terminalID: String) async {
+        await relayACPProviders[nodeHex]?.killTerminal(terminalId: terminalID)
     }
 
     /// Decide one mutating ACP tool call (Phase 3 item 3 — "ask each time"). Allowlist
@@ -349,6 +432,30 @@ actor PersonaRuntime {
             AppSession.setAutonomousChangesConsent(true, nodeID: nodeHex, siloID: silo)
         }
         return decision != .deny
+    }
+
+    /// Phase D4 — the GATE for opening an interactive PTY terminal on the node (the
+    /// project's highest-risk surface: a persistent interactive shell on the user's Mac,
+    /// driven from the phone). Unlike `decidePermission` for one-shot mutating tools,
+    /// there is NO per-action allow-once path: an open-ended shell can't be meaningfully
+    /// approved one keystroke at a time, so it requires the SAME standing
+    /// `autonomousChangesConsent` the user explicitly opted into (Settings ▸ the node's
+    /// "autonomous changes" toggle). With that consent OFF, PTY creation FAILS CLOSED — no
+    /// terminal is ever opened. `nonisolated static` + pure so the `@Sendable` permission
+    /// handler can call it without hopping the actor (matching `isMutatingACPToolKind`).
+    /// The node independently re-checks C-1 (deny-on-timeout) and keeps its own cwd jail,
+    /// so this is the phone-owned last brake on the escape hatch, not the only one.
+    nonisolated static func decideInteractivePTY(nodeHex: String, silo: String) -> Bool {
+        AppSession.autonomousChangesConsent(nodeID: nodeHex, siloID: silo)
+    }
+
+    /// Whether an ACP permission request's `title` is an interactive-PTY (`open_terminal`)
+    /// request — matched against `ACPTerminal.interactiveTerminalTitlePrefix` (iOS-available,
+    /// the same prefix the node attaches to every such request). The ACP ToolKind
+    /// (`execute`) can't distinguish it from `run_shell`, so the title is the signal that
+    /// routes it to the stronger `decideInteractivePTY` gate. `nonisolated static` + pure.
+    nonisolated static func isInteractiveTerminalTitle(_ title: String) -> Bool {
+        title.hasPrefix(ACPTerminal.interactiveTerminalTitlePrefix)
     }
 
     /// (Phase 3 — intelligent task routing.) Keep the AI-selection policy in sync with the
@@ -760,6 +867,13 @@ actor PersonaRuntime {
             await persistPrekeyState()
         }
         pumpTask?.cancel()
+        // Phase D4 — FAIL-CLOSED teardown: shut every live ACP provider down FIRST. Each
+        // provider's shutdown finishes its client, which closes the transport, which ends
+        // the node's runACPAgent inbound loop → the node terminates every live interactive
+        // PTY. So locking the silo / backgrounding-into-shutdown kills any shell the node
+        // is running — nothing interactive outlives the session (the #1 safeguard).
+        for provider in relayACPProviders.values { await provider.shutdown() }
+        relayACPProviders.removeAll()
         // Close every relay-ACP transport so its inbound stream finishes and any
         // ACP client/consumer awaiting it unwinds (no orphaned reassembly state).
         for transport in relayACPTransports.values { transport.close() }
@@ -1020,6 +1134,13 @@ actor PersonaRuntime {
         // Resolve any prompts awaiting the human for this node with .deny — never strand a
         // continuation when the path goes away (item 3 fail-closed hygiene).
         await permissionAsker?.cancelAll(nodeHex: nodeHex)
+        // Phase D4 — FAIL-CLOSED: shut the node's ACP provider down (finishes its client
+        // → closes the transport → the node's runACPAgent terminates every live PTY). This
+        // is the phone-side trigger for "no orphaned interactive shell on the Mac" on
+        // consent-revoke / unpair. Belt-and-suspenders with the transport.close() below.
+        if let provider = relayACPProviders.removeValue(forKey: nodeHex) {
+            await provider.shutdown()
+        }
         guard let transport = relayACPTransports.removeValue(forKey: nodeHex) else { return }
         transport.close()
     }

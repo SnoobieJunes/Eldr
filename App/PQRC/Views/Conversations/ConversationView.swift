@@ -71,6 +71,16 @@ struct ConversationView: View {
                     .padding(.top, 6)
                     .frame(maxWidth: 760)
             }
+            // Phase D4 — a live INTERACTIVE terminal (PTY) the node is running, with its
+            // prominent Stop/Kill control. Shown only for a coding-agent conversation while
+            // a terminal is live; same reading-width cap so it doesn't sprawl on iPad/Mac.
+            if isCodingAgent, let terminal = model.acpTerminalByConversation[conversationID] {
+                ACPTerminalView(
+                    model: model, conversationID: conversationID, terminal: terminal)
+                    .padding(.horizontal)
+                    .padding(.top, 6)
+                    .frame(maxWidth: 760)
+            }
             threadChips
             messageList
             if selecting { selectionBar } else { composer }
