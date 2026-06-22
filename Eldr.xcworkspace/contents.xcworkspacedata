@@ -5,6 +5,6 @@
       location = "group:App/EldrChat.xcodeproj">
    </FileRef>
    <FileRef
-      location = "group:Apps/EldrACPConfigurator/EldrACPConfigurator.xcodeproj">
+      location = "group:Apps/Huginn/Huginn.xcodeproj">
    </FileRef>
 </Workspace>
