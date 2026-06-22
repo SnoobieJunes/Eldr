@@ -84,6 +84,20 @@ xcodebuild -exportArchive \
 APP="$EXPORT_DIR/$APP_NAME.app"
 [ -d "$APP" ] || { echo "error: exported app not found at $APP" >&2; exit 1; }
 
+echo "==> [2.5/7] Signing the bundled eldr-acp CLI + re-sealing the app"
+# The "Build and bundle eldr-acp" Xcode phase copies the CLI in ad-hoc/linker-signed
+# (Signature=adhoc, no team, no hardened runtime). Notarization rejects ANY nested
+# Mach-O that isn't Developer-ID + hardened-runtime signed, so sign it, then re-seal
+# the app around it (inside-out) preserving the unsandboxed entitlement. The verify
+# fails the build loudly here rather than wasting a notarization round-trip.
+ELDR_ACP_BIN="$APP/Contents/Resources/eldr-acp"
+if [ -f "$ELDR_ACP_BIN" ]; then
+  codesign --force --options runtime --timestamp --sign "$DEVELOPER_ID" "$ELDR_ACP_BIN"
+  codesign --force --options runtime --timestamp --sign "$DEVELOPER_ID" \
+    --entitlements "Huginn.entitlements" "$APP"
+  codesign --verify --deep --strict --verbose=2 "$APP"
+fi
+
 echo "==> [3/7] Notarizing (submit + wait)"
 NOTARY_ZIP="$BUILD_DIR/$APP_NAME.zip"
 ditto -c -k --keepParent "$APP" "$NOTARY_ZIP"
