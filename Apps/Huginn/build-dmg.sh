@@ -32,6 +32,14 @@ STAGE="$BUILD_DIR/stage"
 
 DEVELOPER_ID="${DEVELOPER_ID:-Developer ID Application}"
 
+# Signing + notarization inputs, validated up front. TEAM_ID is needed as early as the
+# archive step: with manual Developer ID signing, the Swift package dependencies
+# (swift-crypto, swift-secp256k1) must resolve a development team, or the archive fails
+# with: 'Signing for "swift-crypto_Crypto" requires a development team.'
+: "${APPLE_ID:?set APPLE_ID (your Apple ID email)}"
+: "${APP_PASSWORD:?set APP_PASSWORD (app-specific password from appleid.apple.com)}"
+: "${TEAM_ID:?set TEAM_ID (your 10-char Apple Developer Team ID)}"
+
 echo "==> Reading version"
 VERSION="$(xcodebuild -project "$PROJECT" -scheme "$SCHEME" -showBuildSettings 2>/dev/null \
   | awk -F' = ' '/ MARKETING_VERSION / {print $2; exit}')"
@@ -50,6 +58,7 @@ xcodebuild archive \
   -destination 'generic/platform=macOS' \
   CODE_SIGN_STYLE=Manual \
   CODE_SIGN_IDENTITY="$DEVELOPER_ID" \
+  DEVELOPMENT_TEAM="$TEAM_ID" \
   -allowProvisioningUpdates
 
 echo "==> [2/7] Exporting the .app"
@@ -62,6 +71,8 @@ cat > "$BUILD_DIR/ExportOptions.plist" <<PLIST
     <string>developer-id</string>
     <key>signingStyle</key>
     <string>manual</string>
+    <key>teamID</key>
+    <string>$TEAM_ID</string>
 </dict>
 </plist>
 PLIST
@@ -74,7 +85,6 @@ APP="$EXPORT_DIR/$APP_NAME.app"
 [ -d "$APP" ] || { echo "error: exported app not found at $APP" >&2; exit 1; }
 
 echo "==> [3/7] Notarizing (submit + wait)"
-: "${APPLE_ID:?set APPLE_ID}"; : "${APP_PASSWORD:?set APP_PASSWORD}"; : "${TEAM_ID:?set TEAM_ID}"
 NOTARY_ZIP="$BUILD_DIR/$APP_NAME.zip"
 ditto -c -k --keepParent "$APP" "$NOTARY_ZIP"
 xcrun notarytool submit "$NOTARY_ZIP" \
