@@ -1,5 +1,6 @@
 import Foundation
 import Observation
+import PQRCACP
 import PQRCAgent
 import PQRCCore
 import PQRCNostr
@@ -75,6 +76,10 @@ final class AppModel {
     /// used to label their assistant's bubbles. My own AIs label via the
     /// message's stored `agentName`.
     var aiNames: [String: String] = [:]
+    /// conversationID -> the latest plan/TODO checklist a paired coding-agent node
+    /// reported for the turn it's running (Phase D1). Display-only; the node re-sends
+    /// the whole plan on each change, so this is replaced wholesale, never merged.
+    var acpPlansByConversation: [String: [ACPPlanEntry]] = [:]
     /// Nearby peers discovered over the local link (SPEC §10) — startable with
     /// no relay. Populated only when the Nearby setting is on.
     var nearbyContacts: [NearbyVM] = []
@@ -217,6 +222,14 @@ final class AppModel {
             }
         case .keyPublishChanged(let status):
             keyPublish = status
+        case .acpPlan(let conversationID, let entries):
+            // Full snapshot from the node — replace, don't merge. An empty plan
+            // (turn produced no steps) clears the checklist.
+            if entries.isEmpty {
+                acpPlansByConversation[conversationID] = nil
+            } else {
+                acpPlansByConversation[conversationID] = entries
+            }
         }
     }
 

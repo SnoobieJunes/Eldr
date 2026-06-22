@@ -323,6 +323,16 @@ public actor ACPAgent {
         messages.append(LLMMessage(role: .user, content: userText))
 
         var toolCallSeq = 0
+        // Plan/TODO visibility (Phase D1): a heuristic checklist the client surfaces
+        // so the user sees the agent's approach, not just raw tool calls. We can't
+        // ask the model for an explicit plan without a model-protocol dependency, so
+        // we DERIVE it from the tool calls the model actually makes: each tool call
+        // in a turn becomes one plan entry, accumulating across iterations, and an
+        // entry flips pending → in_progress → completed as that step runs. The whole
+        // plan is re-emitted on each change (ACP models a plan as a full snapshot).
+        // This rides alongside the existing tool_call/tool_call_update flow without
+        // altering it — purely additive session/updates.
+        var plan = TurnPlan()
         for _ in 0..<maxIterations {
             if cancelledSessions.contains(sessionId) { return .cancelled }
 
@@ -380,15 +390,35 @@ public actor ACPAgent {
             messages.append(
                 LLMMessage(role: .assistant, content: response.content, toolCalls: response.toolCalls))
 
-            // Execute each requested tool, streaming ACP tool_call lifecycle.
-            for call in response.toolCalls {
+            // Extend the plan with this batch's steps (one entry per tool call,
+            // titled like the editor's tool UI) and emit the updated snapshot before
+            // running them, so the user sees the upcoming steps as `pending`.
+            let newIndices = plan.addSteps(
+                response.toolCalls.map { call in
+                    ToolExecutor.title(for: call.name, args: call.argumentsJSON)
+                })
+            await emitPlan(sessionId: sessionId, plan: plan)
+
+            // Execute each requested tool, streaming ACP tool_call lifecycle, and
+            // advance the matching plan entry (in_progress while it runs, then
+            // completed/failed) so the checklist tracks real progress.
+            for (offset, call) in response.toolCalls.enumerated() {
                 if cancelledSessions.contains(sessionId) { return .cancelled }
                 toolCallSeq += 1
                 let toolCallId = "\(sessionId)-tc-\(toolCallSeq)"
                 let args = call.argumentsJSON
+                let planIndex = newIndices[offset]
+                plan.setStatus(planIndex, to: "in_progress")
+                await emitPlan(sessionId: sessionId, plan: plan)
                 let result = await runOneTool(
                     sessionId: sessionId, toolCallId: toolCallId, executor: executor,
                     name: call.name, args: args, cwd: cwd)
+                // A step is "completed" either way — the tool_call_update already
+                // carries the failed/error detail; ACP's PlanEntry status has no
+                // "failed" value, so the checklist marks the step done and the user
+                // reads the failure in the tool result.
+                plan.setStatus(planIndex, to: "completed")
+                await emitPlan(sessionId: sessionId, plan: plan)
                 messages.append(
                     LLMMessage(role: .tool, content: result.text, toolCallId: call.id))
             }
@@ -568,6 +598,15 @@ public actor ACPAgent {
         await connection.notify(
             method: "session/update",
             params: ACPWire.agentMessageChunk(sessionId: sessionId, text: text))
+    }
+
+    /// Send the current plan snapshot as a `plan` session/update. No-op for an
+    /// empty plan (a turn with no tool calls never has steps, so it never emits one).
+    private func emitPlan(sessionId: String, plan: TurnPlan) async {
+        guard !plan.isEmpty else { return }
+        await connection.notify(
+            method: "session/update",
+            params: ACPWire.plan(sessionId: sessionId, entries: plan.entries))
     }
 
     // MARK: - Model call (timeout + cancel race + streaming)
@@ -768,5 +807,33 @@ public actor ACPAgent {
 private actor StreamedTextBox {
     private(set) var value = ""
     func append(_ s: String) { value += s }
+}
+
+/// The heuristic plan for a turn (Phase D1): an ordered checklist derived from the
+/// tool calls the model makes, with a per-step status. Not actor state — it lives on
+/// `runTurn`'s stack (the actor already serializes the turn), so a plain struct keeps
+/// it simple and value-typed. Each entry's status is one of ACP's PlanEntry values
+/// (pending|in_progress|completed); the wire builder fills in `priority`.
+private struct TurnPlan {
+    private(set) var entries: [(content: String, status: String)] = []
+
+    var isEmpty: Bool { entries.isEmpty }
+
+    /// Append one entry per title (all `pending`) and return their indices, so the
+    /// caller can flip the right entry as each corresponding tool runs.
+    mutating func addSteps(_ titles: [String]) -> [Int] {
+        var indices: [Int] = []
+        for title in titles {
+            indices.append(entries.count)
+            entries.append((content: title, status: "pending"))
+        }
+        return indices
+    }
+
+    /// Set one entry's status (no-op for an out-of-range index — defensive).
+    mutating func setStatus(_ index: Int, to status: String) {
+        guard entries.indices.contains(index) else { return }
+        entries[index].status = status
+    }
 }
 #endif  // os(macOS) — ACPAgent (node-side: tool-calling loop + ToolExecutor/Process)

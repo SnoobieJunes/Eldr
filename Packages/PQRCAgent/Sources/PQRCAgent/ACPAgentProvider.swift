@@ -29,6 +29,12 @@ public actor ACPAgentProvider: AgentProvider {
     /// Self-bounding: a wedged node (or a bug in our event correlation) surfaces
     /// as a thrown error instead of an `await` that never returns.
     private let turnTimeout: Double
+    /// Optional live-event observer (Phase D1 — plan/TODO visibility). When set, the
+    /// consumer forwards EVERY `ACPUIEvent` to it as it arrives (so the runtime can
+    /// surface a plan checklist, tool activity, etc. live), in ADDITION to folding it
+    /// into the turn result. Default no-op: existing callers/tests see zero behavior
+    /// change. `@Sendable` so it crosses the consumer task boundary cleanly.
+    private let eventObserver: @Sendable (ACPUIEvent) -> Void
 
     /// The single long-lived client + its event-consumer task, created lazily on
     /// the first call and reused thereafter. `nil` until started; torn down by
@@ -56,18 +62,23 @@ public actor ACPAgentProvider: AgentProvider {
     ///   - permissionHandler: decides a mutating tool's permission request.
     ///     Default denies — autonomous file/shell mutation must be opted into,
     ///     never the silent default (privacy #1).
+    ///   - eventObserver: optional live-event sink (Phase D1). Default no-op, so
+    ///     every existing caller is byte-for-byte unchanged; the app sets it to
+    ///     forward plan/tool events to the UI.
     public init(
         transport: any ACPTransport,
         cwd: String? = nil,
         turnTimeout: Double = 120,
         permissionHandler: @escaping @Sendable (_ title: String, _ kind: String) async -> Bool = {
             _, _ in false
-        }
+        },
+        eventObserver: @escaping @Sendable (_ event: ACPUIEvent) -> Void = { _ in }
     ) {
         self.transport = transport
         self.cwd = cwd
         self.turnTimeout = turnTimeout > 0 ? turnTimeout : 120
         self.permissionHandler = permissionHandler
+        self.eventObserver = eventObserver
     }
 
     /// Tear down the live session + consumer. Safe to call when never started.
@@ -143,10 +154,14 @@ public actor ACPAgentProvider: AgentProvider {
         let accumulator = TurnAccumulator()
         // ONE continuous consumer for the SINGLE event stream: it folds each
         // event into whatever turn is currently in flight (correlation lives in
-        // the accumulator's generation, reset by `beginTurn`). It ends when
-        // `shutdown()` finishes the stream.
+        // the accumulator's generation, reset by `beginTurn`) AND forwards it to the
+        // live observer (Phase D1) so the UI can show a plan checklist as it streams.
+        // The observer is a plain `@Sendable` closure (no `await`), so forwarding can
+        // never stall the fold. It ends when `shutdown()` finishes the stream.
+        let observer = eventObserver
         let consumer = Task {
             for await event in client.events {
+                observer(event)
                 await accumulator.ingest(event)
             }
         }
@@ -239,6 +254,10 @@ actor TurnAccumulator {
             activity.append(line)
         case .availableCommands:
             // Session metadata, not turn output — nothing to fold.
+            break
+        case .plan:
+            // Live UI signal (forwarded to the observer), not turn-fold output — the
+            // plan is shown as its own checklist, never inlined into the reply text.
             break
         }
     }

@@ -105,6 +105,64 @@ struct ACPRoundTripTests {
             })
     }
 
+    // Phase D1: a tool-call turn emits a plan/TODO checklist. The agent derives the
+    // plan from the tool calls it makes (heuristic), so a write-file turn must surface
+    // a `.plan` event whose entry tracks that step and ends `completed`.
+    @Test func toolCallTurnEmitsPlanChecklist() async throws {
+        let dir = (NSTemporaryDirectory() as NSString).appendingPathComponent(
+            "eldr-plan-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(atPath: dir) }
+        let target = (dir as NSString).appendingPathComponent("out.txt")
+
+        let llm = ScriptedLLM([
+            LLMResponse(
+                content: "",
+                toolCalls: [
+                    LLMToolCall(
+                        id: "w1", name: "write_file",
+                        arguments: "{\"path\":\"\(target)\",\"content\":\"hello\"}")
+                ]),
+            LLMResponse(content: "done"),
+        ])
+        let (client, agentTask) = makePair(llm: llm, workdir: dir, permission: { _, _ in true })
+        defer { agentTask.cancel() }
+        let events = collect(client)
+
+        _ = try await client.start()
+        let stop = try await client.prompt("write it")
+        #expect(stop == "end_turn")
+        await client.shutdown()
+
+        let plans = await events.value.compactMap { event -> [ACPPlanEntry]? in
+            if case .plan(let entries) = event { return entries } else { return nil }
+        }
+        // At least one plan snapshot arrived, the step is titled for the write, and
+        // the LAST snapshot marks it completed (pending → in_progress → completed).
+        #expect(!plans.isEmpty)
+        let last = try #require(plans.last)
+        #expect(last.contains { $0.content.contains("Write") })
+        #expect(last.allSatisfy { $0.status == "completed" })
+    }
+
+    // A turn with NO tool calls (a plain answer) emits NO plan — the checklist is
+    // only for multi-step tool work, never a single trivial reply.
+    @Test func plainAnswerTurnEmitsNoPlan() async throws {
+        let llm = ScriptedLLM([LLMResponse(content: "Just an answer.")])
+        let (client, agentTask) = makePair(llm: llm, workdir: NSTemporaryDirectory())
+        defer { agentTask.cancel() }
+        let events = collect(client)
+
+        _ = try await client.start()
+        _ = try await client.prompt("hi")
+        await client.shutdown()
+
+        let sawPlan = await events.value.contains {
+            if case .plan = $0 { return true } else { return false }
+        }
+        #expect(!sawPlan)
+    }
+
     @Test func toolCallPermissionDeniedSkipsTheWrite() async throws {
         let dir = (NSTemporaryDirectory() as NSString).appendingPathComponent(
             "eldr-rt-\(UUID().uuidString)")
@@ -132,6 +190,87 @@ struct ACPRoundTripTests {
         await client.shutdown()
 
         #expect(!FileManager.default.fileExists(atPath: target))  // denied ⇒ never written
+    }
+}
+
+// MARK: - Plan parsing (driver → typed ACPUIEvent)
+
+@Suite("ACPClientDriver parses a plan session/update into ACPUIEvent.plan")
+struct ACPPlanParseTests {
+    // Drive a real `ACPClient` against a hand-run agent that, on prompt, emits one
+    // `plan` session/update with a mixed-status checklist, then ends the turn. The
+    // client must surface it as exactly one `.plan` event carrying the right content
+    // and statuses (and drop the spec's `priority`, which the phone ignores).
+    @Test func planNotificationBecomesTypedEvent() async throws {
+        try await withTimeout(10) {
+            let (clientSide, agentSide) = InMemoryACPTransport.makePair()
+            let driver = Task {
+                for await line in agentSide.inboundLines() {
+                    guard let msg = JSONValue.parse(line), let id = msg["id"]?.intValue,
+                        let method = msg["method"]?.stringValue
+                    else { continue }
+                    switch method {
+                    case "initialize":
+                        agentSide.send(
+                            #"{"jsonrpc":"2.0","id":\#(id),"result":{"protocolVersion":1,"agentInfo":{"name":"eldr-acp","version":"0.1.0"}}}"#
+                        )
+                    case "session/new":
+                        agentSide.send(
+                            #"{"jsonrpc":"2.0","id":\#(id),"result":{"sessionId":"plan-1"}}"#)
+                    case "session/prompt":
+                        // One plan snapshot (note the priority field, which the phone
+                        // must ignore), then end the turn.
+                        agentSide.send(
+                            #"{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"plan-1","update":{"sessionUpdate":"plan","entries":[{"content":"Read config","priority":"high","status":"completed"},{"content":"Edit file","priority":"medium","status":"in_progress"},{"content":"Run tests","priority":"low","status":"pending"}]}}}"#
+                        )
+                        agentSide.send(
+                            #"{"jsonrpc":"2.0","id":\#(id),"result":{"stopReason":"end_turn"}}"#)
+                    default:
+                        agentSide.send(
+                            #"{"jsonrpc":"2.0","id":\#(id),"error":{"code":-32601,"message":"x"}}"#)
+                    }
+                }
+            }
+            defer { driver.cancel() }
+
+            let client = ACPClient(transport: clientSide)
+            let collected = Task {
+                var events: [ACPUIEvent] = []
+                for await event in client.events { events.append(event) }
+                return events
+            }
+
+            _ = try await client.start()
+            _ = try await client.prompt("go")
+            await client.shutdown()
+
+            let plans = await collected.value.compactMap { event -> [ACPPlanEntry]? in
+                if case .plan(let entries) = event { return entries } else { return nil }
+            }
+            #expect(plans.count == 1)
+            let entries = try #require(plans.first)
+            #expect(
+                entries == [
+                    ACPPlanEntry(content: "Read config", status: "completed"),
+                    ACPPlanEntry(content: "Edit file", status: "in_progress"),
+                    ACPPlanEntry(content: "Run tests", status: "pending"),
+                ])
+        }
+    }
+
+    // A malformed entry (missing `content`) is dropped; a missing `status` defaults
+    // to "pending" (the conservative not-done state) — forward-compat parsing.
+    @Test func malformedPlanEntriesAreToleranced() {
+        let update = JSONValue.parse(
+            #"{"entries":[{"status":"completed"},{"content":"Only content"},{"content":"Done","status":"completed"}]}"#
+        )
+        let entries = ACPClientDriver.planEntries(update?["entries"])
+        // The first (no content) is dropped; the second defaults to pending.
+        #expect(
+            entries == [
+                ACPPlanEntry(content: "Only content", status: "pending"),
+                ACPPlanEntry(content: "Done", status: "completed"),
+            ])
     }
 }
 

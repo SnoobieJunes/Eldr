@@ -7,6 +7,19 @@ import Foundation
 // NO fs/terminal capabilities, so the agent does its own file/shell I/O on the Mac node —
 // the phone is the remote control, not the worker.
 
+/// One step of the agent's plan (an ACP `PlanEntry`), as the phone consumes it.
+/// Display-only: `content` is agent output and gets the same hygiene as an agent
+/// bubble (no special trust). `priority` is dropped — the phone's checklist keys
+/// solely off `status` (pending|in_progress|completed).
+public struct ACPPlanEntry: Sendable, Equatable {
+    public let content: String
+    public let status: String
+    public init(content: String, status: String) {
+        self.content = content
+        self.status = status
+    }
+}
+
 /// A typed slice of an ACP turn, for the chat UI to render.
 public enum ACPUIEvent: Sendable, Equatable {
     /// A streamed piece of the assistant's prose (`agent_message_chunk`).
@@ -17,6 +30,9 @@ public enum ACPUIEvent: Sendable, Equatable {
     case toolCallUpdate(id: String, status: String, text: String?, isError: Bool)
     /// The agent advertised its slash-commands for the session.
     case availableCommands([String])
+    /// The agent reported its plan for the turn (a checklist). Re-sent in full on
+    /// each change, so the latest `.plan` is the current state of every step.
+    case plan([ACPPlanEntry])
 }
 
 public actor ACPClient {
@@ -51,6 +67,7 @@ public actor ACPClient {
                     .toolCallUpdate(id: id, status: status, text: content, isError: isError))
             },
             onAvailableCommands: { names in emit.yield(.availableCommands(names)) },
+            onPlan: { entries in emit.yield(.plan(entries)) },
             requestPermission: permissionHandler)
         // The phone advertises no fs/terminal caps → the agent uses its own I/O on the Mac.
         self.driver = ACPClientDriver(

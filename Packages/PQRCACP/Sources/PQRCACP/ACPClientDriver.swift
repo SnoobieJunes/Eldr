@@ -31,6 +31,9 @@ public struct ACPClientHandler: Sendable {
             async -> Void
     /// The agent advertised its slash-commands/skills for the session.
     public var onAvailableCommands: @Sendable (_ names: [String]) async -> Void
+    /// The agent reported its plan for the turn (a checklist; re-sent in full on
+    /// each change).
+    public var onPlan: @Sendable (_ entries: [ACPPlanEntry]) async -> Void
     /// Decide a mutating tool's permission request. Default: allow.
     public var requestPermission: @Sendable (_ title: String, _ kind: String) async -> Bool
     /// Serve a client-side file read (only reached if fs caps are advertised); nil →
@@ -49,6 +52,7 @@ public struct ACPClientHandler: Sendable {
             _, _, _, _ in
         },
         onAvailableCommands: @escaping @Sendable ([String]) async -> Void = { _ in },
+        onPlan: @escaping @Sendable ([ACPPlanEntry]) async -> Void = { _ in },
         requestPermission: @escaping @Sendable (String, String) async -> Bool = { _, _ in true },
         readTextFile: @escaping @Sendable (String) async -> String? = { _ in nil },
         writeTextFile: @escaping @Sendable (String, String) async -> Bool = { _, _ in false }
@@ -57,6 +61,7 @@ public struct ACPClientHandler: Sendable {
         self.onToolCall = onToolCall
         self.onToolCallUpdate = onToolCallUpdate
         self.onAvailableCommands = onAvailableCommands
+        self.onPlan = onPlan
         self.requestPermission = requestPermission
         self.readTextFile = readTextFile
         self.writeTextFile = writeTextFile
@@ -337,6 +342,8 @@ public actor ACPClientDriver {
         case "available_commands_update":
             await handler.onAvailableCommands(
                 Self.commandNames(update["availableCommands"]))
+        case "plan":
+            await handler.onPlan(Self.planEntries(update["entries"]))
         default:
             break  // unknown updates ignored (forward-compat)
         }
@@ -468,6 +475,17 @@ public actor ACPClientDriver {
     /// Pull the `name` field out of each availableCommands entry.
     static func commandNames(_ commands: JSONValue?) -> [String] {
         commands?.arrayValue?.compactMap { $0["name"]?.stringValue } ?? []
+    }
+
+    /// Map a plan `entries` array to typed `ACPPlanEntry`s. An entry missing
+    /// `content` is dropped; a missing/unknown `status` defaults to `pending`
+    /// (the most conservative "not done" state). `priority` is ignored.
+    static func planEntries(_ entries: JSONValue?) -> [ACPPlanEntry] {
+        entries?.arrayValue?.compactMap { entry in
+            guard let content = entry["content"]?.stringValue else { return nil }
+            return ACPPlanEntry(
+                content: content, status: entry["status"]?.stringValue ?? "pending")
+        } ?? []
     }
 
     /// Flatten a tool_call_update `content` array to its text (content or error block).

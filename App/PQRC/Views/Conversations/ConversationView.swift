@@ -33,6 +33,12 @@ struct ConversationView: View {
 
     private var conversationScope: AIContextGrant.Scope { .conversation(conversationID) }
 
+    /// Whether this conversation is a paired coding-agent node (drives the plan
+    /// checklist's visibility). Reads the same local tag the wrench icon uses.
+    private var isCodingAgent: Bool {
+        model.conversations.first { $0.id == conversationID }?.isCodingAgent ?? false
+    }
+
     var body: some View {
         VStack(spacing: 0) {
             if model.safetyCodeChangedFor.contains(conversationID) {
@@ -55,6 +61,16 @@ struct ConversationView: View {
             // updates on banner/grant changes exactly as before.
             ConversationStatusHeader(
                 model: model, conversationID: conversationID, scope: conversationScope)
+            // The paired coding agent's live plan/TODO checklist (Phase D1), shown
+            // only for a coding-agent conversation that currently has a plan. It's
+            // node→phone status (not a message), so it sits above the transcript and
+            // gets the bubbles' reading-width cap so it doesn't sprawl on iPad/Mac.
+            if isCodingAgent, let plan = model.acpPlansByConversation[conversationID], !plan.isEmpty {
+                ACPPlanView(entries: plan)
+                    .padding(.horizontal)
+                    .padding(.top, 6)
+                    .frame(maxWidth: 760)
+            }
             threadChips
             messageList
             if selecting { selectionBar } else { composer }

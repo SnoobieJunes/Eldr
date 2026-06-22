@@ -1,5 +1,6 @@
 import Crypto
 import Foundation
+import PQRCACP
 import PQRCAgent
 import PQRCCore
 import PQRCNostr
@@ -30,6 +31,11 @@ enum RuntimeEvent: Sendable {
     /// My own key publish (10420/10421/10050) succeeded or failed — the
     /// relay-liveness signal the UI shows.
     case keyPublishChanged(KeyPublishStatus)
+    /// A paired coding-agent node reported its plan/TODO checklist for the turn it
+    /// is running (Phase D1). Display-only — the entries are agent output, shown as
+    /// a checklist in that node's conversation; never trusted beyond a bubble. The
+    /// node re-sends the whole plan on each change, so this carries the full state.
+    case acpPlan(conversationID: String, entries: [ACPPlanEntry])
 }
 
 /// One configured relay's URL paired with its current connection health.
@@ -272,6 +278,11 @@ actor PersonaRuntime {
         // PHONE owns. Captures only `Sendable` strings (no `self`) so the `@Sendable`
         // handler stays strict-concurrency clean.
         let silo = siloID
+        // Capture the event continuation (it's `Sendable`) so the live-event observer
+        // can forward a node's plan straight into the runtime's stream WITHOUT hopping
+        // back onto the actor — the observer is a synchronous `@Sendable` closure. The
+        // node's conversationID is its identity hex (1:1 conversation id == peer hex).
+        let plansContinuation = eventContinuation
         let provider = ACPAgentProvider(
             transport: transport,
             permissionHandler: { [weak self] title, kind in
@@ -279,6 +290,13 @@ actor PersonaRuntime {
                 guard let self else { return false }  // runtime gone → fail closed
                 return await self.decidePermission(
                     nodeHex: nodeHex, silo: silo, title: title, kind: kind)
+            },
+            eventObserver: { event in
+                // Phase D1: surface ONLY the plan checklist to the UI. Other live
+                // events (assistant text, tool lifecycle) already arrive as the
+                // folded reply message, so re-forwarding them here would double them.
+                guard case .plan(let entries) = event else { return }
+                plansContinuation?.yield(.acpPlan(conversationID: nodeHex, entries: entries))
             })
         ais = ais.map { ai in
             guard ai.kind == "acp" else { return ai }

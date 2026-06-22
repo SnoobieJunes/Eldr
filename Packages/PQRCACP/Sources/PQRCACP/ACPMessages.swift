@@ -82,6 +82,31 @@ enum ACPWire {
         ])
     }
 
+    /// `{ sessionId, update: { sessionUpdate:"plan", entries:[{content,priority,status}] } }`
+    /// The agent's plan for the turn — a checklist the client renders so the user sees
+    /// the agent's approach (ACP `PlanEntry`: `content`, `priority` ∈ low|medium|high,
+    /// `status` ∈ pending|in_progress|completed). The whole plan is re-sent on each
+    /// change (the spec models it as a full snapshot, not a delta), so re-emitting with
+    /// updated statuses is how a step flips to `completed`.
+    static func plan(sessionId: String, entries: [(content: String, status: String)]) -> JSONValue {
+        let entryObjects = entries.map { entry -> JSONValue in
+            .object([
+                "content": .string(entry.content),
+                // We don't infer per-step priority from the heuristic, so every entry
+                // is `medium` (a valid spec value the client may ignore).
+                "priority": .string("medium"),
+                "status": .string(entry.status),
+            ])
+        }
+        return .object([
+            "sessionId": .string(sessionId),
+            "update": .object([
+                "sessionUpdate": .string("plan"),
+                "entries": .array(entryObjects),
+            ]),
+        ])
+    }
+
     // MARK: session/request_permission
 
     /// `{ sessionId, toolCall: { toolCallId, title, kind, status }, options:[…] }`.
