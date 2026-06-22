@@ -141,10 +141,14 @@ final class TestChatSession: ObservableObject {
             : InspectingLLMClient(
                 wrapping: OpenAICompatibleLLMClient(config: llmConfig, rawObserver: rawObserver),
                 model: llmConfig.model)
+        // One snapshot of the config so the maxIterations cap matches the `config` we
+        // pass (and we don't evaluate the provider twice).
+        let agentConfig = agentConfigProvider()
         let agent = ACPAgent(
             connection: connection, llm: llm,
             toolEnvironment: ToolEnvironment(workdir: workdir),
-            config: agentConfigProvider(), configDir: nil)
+            config: agentConfig, configDir: nil,
+            maxIterations: agentConfig.maxIterations)
 
         self.sink = sink
         self.connection = connection

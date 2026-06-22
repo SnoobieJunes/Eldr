@@ -26,6 +26,14 @@ final class ConfigurationStore: ObservableObject {
     @Published var maxHistoryTurns: Int
     @Published var maxContextChars: Int
 
+    // MARK: Agent limits (env file) — all 0 = unlimited (the engine's default).
+    /// Cap on the agent's tool-call loop (`ELDR_ACP_MAX_ITERATIONS`).
+    @Published var maxAgentSteps: Int
+    /// Per-LLM-request wall-clock timeout in seconds (`ELDR_LLM_TIMEOUT_SECONDS`).
+    @Published var llmTimeoutSeconds: Int
+    /// Per-shell-command watchdog timeout in seconds (`ELDR_ACP_SHELL_TIMEOUT`).
+    @Published var shellTimeoutSeconds: Int
+
     // MARK: Tools / skills / prompts (individual files)
     /// Names of the built-in tools the agent may use. Empty in AgentConfig means
     /// "all"; the UI always shows the four checkboxes, so we persist the explicit set.
@@ -77,6 +85,9 @@ final class ConfigurationStore: ObservableObject {
         maxToolResultBytes = agent.maxToolResultBytes == Int.max ? 0 : agent.maxToolResultBytes
         maxHistoryTurns = agent.maxHistoryTurns
         maxContextChars = agent.maxContextChars
+        maxAgentSteps = agent.maxIterations
+        shellTimeoutSeconds = Int(agent.shellTimeoutSeconds)
+        llmTimeoutSeconds = Int(llm.requestTimeoutSeconds)
         enabledTools =
             agent.toolAllowlist.isEmpty
             ? Set(ConfigurationStore.allToolNames) : Set(agent.toolAllowlist)
@@ -123,6 +134,10 @@ final class ConfigurationStore: ObservableObject {
             export("ELDR_ACP_MAX_TOOL_RESULT_BYTES", String(maxToolResultBytes)),
             export("ELDR_ACP_MAX_HISTORY_TURNS", String(maxHistoryTurns)),
             export("ELDR_ACP_MAX_CONTEXT_CHARS", String(maxContextChars)),
+            // Agent limits — 0 = unlimited (the engine's `fromEnvironment` default).
+            export("ELDR_ACP_MAX_ITERATIONS", String(maxAgentSteps)),
+            export("ELDR_ACP_SHELL_TIMEOUT", String(shellTimeoutSeconds)),
+            export("ELDR_LLM_TIMEOUT_SECONDS", String(llmTimeoutSeconds)),
             // Empty value (learning off) → AgentConfig.stringEnv treats "" as nil.
             export("ELDR_ACP_EVENTS_FILE", learningEnabled ? paths.eventsFile : ""),
             export("ELDR_ACP_CONTEXTGRAPH", contextGraphEnabled ? "1" : "0"),
@@ -171,7 +186,11 @@ final class ConfigurationStore: ObservableObject {
 
     // MARK: - Derived config (for the in-process test chat + health checks)
 
-    var llmConfig: LLMConfig { LLMConfig(url: llmURL, token: llmToken, model: llmModel) }
+    var llmConfig: LLMConfig {
+        LLMConfig(
+            url: llmURL, token: llmToken, model: llmModel,
+            requestTimeoutSeconds: Double(llmTimeoutSeconds))
+    }
 
     var agentConfig: AgentConfig {
         AgentConfig(
@@ -183,7 +202,9 @@ final class ConfigurationStore: ObservableObject {
             promptPreamble: promptPreamble.isEmpty ? nil : promptPreamble,
             systemPromptOverride: systemPromptOverride.isEmpty ? nil : systemPromptOverride,
             skillsEnabled: skillsEnabled,
-            eventsFilePath: learningEnabled ? paths.eventsFile : nil)
+            eventsFilePath: learningEnabled ? paths.eventsFile : nil,
+            maxIterations: maxAgentSteps,
+            shellTimeoutSeconds: Double(shellTimeoutSeconds))
     }
 
     // MARK: - Env-file parsing (the inverse of writeEnvFile)

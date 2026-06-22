@@ -40,6 +40,22 @@ struct ConfigurationView: View {
                 .font(.caption).foregroundStyle(.secondary)
             }
 
+            Section("Agent limits") {
+                Stepper(
+                    "Max agent steps: \(limitLabel(store.maxAgentSteps))",
+                    value: $store.maxAgentSteps, in: 0...500)
+                Stepper(
+                    "LLM request timeout: \(secondsLabel(store.llmTimeoutSeconds))",
+                    value: $store.llmTimeoutSeconds, in: 0...600, step: 5)
+                Stepper(
+                    "Shell command timeout: \(secondsLabel(store.shellTimeoutSeconds))",
+                    value: $store.shellTimeoutSeconds, in: 0...600, step: 5)
+                Text(
+                    "0 = unlimited. Steps caps the agent's tool-call loop; the timeouts kill a stalled LLM request or shell command instead of hanging the turn."
+                )
+                .font(.caption).foregroundStyle(.secondary)
+            }
+
             ContextGraphSection()
 
             Section("Tools") {
@@ -117,5 +133,13 @@ struct ConfigurationView: View {
 
     private func byteLabel(_ bytes: Int) -> String {
         bytes == 0 ? "unbounded" : "\(bytes / 1024) KB"
+    }
+
+    private func limitLabel(_ value: Int) -> String {
+        value == 0 ? "unlimited" : "\(value)"
+    }
+
+    private func secondsLabel(_ seconds: Int) -> String {
+        seconds == 0 ? "unlimited" : "\(seconds)s"
     }
 }

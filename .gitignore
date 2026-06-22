@@ -13,6 +13,10 @@ build/
 Apps/Huginn/dist/
 Apps/EldrACPConfigurator/dist/
 **/dist/
+# DMG build scratch + distribution/log output
+**/.dmgbuild/
+Logs/
+logs/
 
 # Merge/editor backup artifacts (e.g. *.swift~<branch> from a botched merge/checkout)
 *.orig
