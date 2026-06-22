@@ -133,6 +133,8 @@ struct SetupWizardView: View {
     private var xcodeStep: some View {
         VStack(alignment: .leading, spacing: 12) {
             Text("Register in Xcode 27").font(.headline)
+            Label("Optional · for developers using Xcode's coding agent", systemImage: "hammer")
+                .font(.caption).foregroundStyle(.secondary)
             Text("In Xcode ▸ Settings ▸ Intelligence ▸ add a model provider of type “Agent (ACP)” and set its command to the launcher path:")
                 .font(.callout).foregroundStyle(.secondary)
             pathRow("Launcher", store.paths.launcher)
@@ -181,6 +183,8 @@ struct SetupWizardView: View {
     private var openClawStep: some View {
         VStack(alignment: .leading, spacing: 12) {
             Text("Register in OpenClaw").font(.headline)
+            Label("Optional · only if you use OpenClaw", systemImage: "hammer")
+                .font(.caption).foregroundStyle(.secondary)
             Text("Adds the eldr agent to OpenClaw's acpx plugin config. Your existing OpenClaw settings are preserved — only the agent entry is merged in.")
                 .font(.callout).foregroundStyle(.secondary)
             pathRow("Launcher", store.paths.openClawLauncher)

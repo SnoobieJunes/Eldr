@@ -1,5 +1,6 @@
 import Foundation
 import PQRCACP
+import PQRCCore
 
 /// A pass-through `LLMClient` decorator that records every model round-trip to
 /// `DiagnosticsLog` for the Agent Inspector — without touching PQRCACP. It surfaces the
@@ -49,9 +50,20 @@ final class InspectingLLMClient: LLMClient {
     }
 
     private func requestSummary(_ messages: [LLMMessage], _ tools: [LLMTool]) -> String {
-        let lastUser = messages.last { $0.role == .user }?.content ?? ""
-        let preview = lastUser.replacingOccurrences(of: "\n", with: " ").prefix(140)
-        return "\(messages.count) msgs · \(tools.count) tools · last user: \(preview)"
+        let base = "\(messages.count) msgs · \(tools.count) tools"
+        #if DEBUG
+            // Dev builds keep a prompt preview for debugging — but credential-scrubbed
+            // so an echoed token/key never lands in the visible Inspector log.
+            let lastUser = messages.last { $0.role == .user }?.content ?? ""
+            let preview = CredentialRedactor.scrub(lastUser)
+                .replacingOccurrences(of: "\n", with: " ").prefix(140)
+            return preview.isEmpty ? base : "\(base) · last user: \(preview)"
+        #else
+            // Release (incl. the build that serves the owner's phone, whose prompts
+            // can carry codename-redacted chat context): never surface prompt text in
+            // the Inspector — report shape only. Cardinal privacy rule over convenience.
+            return base
+        #endif
     }
 
     private func record(_ r: LLMResponse, since start: Date) {
@@ -74,8 +86,15 @@ final class InspectingLLMClient: LLMClient {
                     + "INSTRUCT model, disable the model's “thinking” mode, or check LM Studio's "
                     + "reasoning parser/template. (TEST-PLAN §14.4)")
         } else {
-            log.post(.llm, .success, "← answer · \(r.content.count) chars · \(ms) ms",
-                String(r.content.prefix(200)))
+            #if DEBUG
+                // Dev preview, credential-scrubbed (see requestSummary).
+                log.post(
+                    .llm, .success, "← answer · \(r.content.count) chars · \(ms) ms",
+                    String(CredentialRedactor.scrub(r.content).prefix(200)))
+            #else
+                // Release: report shape, not content.
+                log.post(.llm, .success, "← answer · \(r.content.count) chars · \(ms) ms")
+            #endif
         }
     }
 }

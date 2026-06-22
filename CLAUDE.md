@@ -36,28 +36,29 @@ The user does **not** want a yes-man. This is a hard rule, not a style preferenc
 - **Persistence:** SwiftData in the app layer behind a `MessageStore` protocol defined in core; sensitive fields envelope-encrypted at the application layer per SPEC §3.4 (see APP-SPEC §3).
 - **Testing:** Swift Testing (`@Test`, `#expect`) for all logic; XCTest only where required (XCUITest UI tests, `measure`/XCTMetric performance tests).
 
-## Platform expansion roadmap (iPad / Mac) — planned, not yet built
+## Platform expansion roadmap (iPad / Mac) — responsive pass DONE; verify on-device
 
 The product is text-only and privacy-first (AI/Human context sharing; NOT a media
-platform — images/video stay out of scope, "use iMessage for that"). It is meant
-to **expand to iPad and Mac via native runtime** (Mac Catalyst, or "Designed for
-iPad" / native macOS), with the UI **responsive to screen size and fully usable in
-landscape** — do NOT lock to portrait. When building UI:
-- Adopt **`NavigationSplitView`** (conversation list + detail) so wide screens
-  (iPad/Mac/landscape) show list-and-detail side by side, and compact widths
-  (iPhone portrait) collapse to a stack. The current iPhone-only `NavigationStack`
-  in `MainView` is the thing to evolve here.
-- Constrain reading-width content (`.frame(maxWidth:)`) so chat bubbles/forms don't
-  sprawl edge-to-edge on a 27" display; let lists/detail use the extra width.
-- Verify every primary screen (conversation list, ConversationView, ThreadView,
-  Settings, Onboarding) in **landscape and at iPad/Mac widths** — they were built
-  iPhone-portrait-first and need a responsive pass.
-- The full-screen markdown reader (`FullScreenReaderView`) already supports
-  landscape + zoom — use it as the reference for responsive behavior.
+platform — images/video stay out of scope, "use iMessage for that"). It runs on
+iPhone, iPad, and Mac (Mac Catalyst) from one SwiftUI codebase, with the UI
+**responsive to screen size and usable in landscape** — do NOT lock to portrait.
+The adaptive pass is largely complete (DEVIATIONS AC37/AC40/AC42); when touching UI,
+PRESERVE it and verify on-device — don't regress it:
+- `MainView` is a **`NavigationSplitView`** (conversation list + detail): wide
+  screens (iPad/Mac/landscape) show list-and-detail side by side, compact widths
+  (iPhone portrait) collapse to a stack. Mac Catalyst adds a menu bar, keyboard
+  shortcuts, and a resizable window. Do NOT regress this back to a `NavigationStack`.
+- Reading-width content is constrained (`.frame(maxWidth:)` on the message list /
+  forms) so chat bubbles don't sprawl edge-to-edge on a 27" display, while lists/
+  detail use the extra width. Keep new chrome within this pattern.
+- The full-screen markdown reader (`FullScreenReaderView`) — landscape + pinch-zoom —
+  is the reference for responsive behavior.
+- Remaining work is **on-device verification**: confirm every primary screen
+  (conversation list, ConversationView, ThreadView, Settings, Onboarding) holds up in
+  landscape and at iPad/Mac widths (they were built iPhone-portrait-first). Orientations
+  are enabled app-wide; this is a verification pass, not new layout work.
 - Keep it SwiftUI-only; reuse the existing `AppModel`/`PersonaRuntime` engine (it's
   platform-agnostic). Mac/iPad get the same engine, only the View layer adapts.
-Orientations are already enabled app-wide in project settings; the work is the
-adaptive layout, not enabling rotation.
 
 ## Repository layout (target)
 

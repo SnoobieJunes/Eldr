@@ -1,11 +1,11 @@
-# TESTFLIGHT-GUIDE.md — Getting PQRC onto TestFlight
+# TESTFLIGHT-GUIDE.md — Getting EldrChat onto TestFlight
 
 A phased checklist. Items marked **YOU** need a human (account access, money, or a judgment call); items marked **CLAUDE** can be delegated to Claude Code once you've supplied the inputs in §H. Compliance notes below are practical orientation, not legal advice — an E2EE app touches export-control rules where a quick call with counsel is money well spent.
 
 ## A. Accounts & identity
 
 1. **YOU** — Enroll in the Apple Developer Program ($99/yr) with an account that has Certificates/App Manager rights. Two-factor on.
-2. **YOU** — Pick the public **app name** and **bundle ID** (e.g. `chat.pqrc.app`). Note: the codename "Ratchet & Clank" is a Sony trademark — fine internally, not for any public listing. Decide the real name now; renaming later churns App Store Connect records.
+2. **YOU** — Pick the public **app name** and **bundle ID** (e.g. `chat.eldr.app`). Note: the codename "Ratchet & Clank" is a Sony trademark — fine internally, not for any public listing. Decide the real name now; renaming later churns App Store Connect records.
 3. **CLAUDE** — Set bundle ID, team, display name, version `0.1.0`, build `1` in the project once you provide Team ID.
 
 ## B. Project configuration for distribution
@@ -18,7 +18,7 @@ A phased checklist. Items marked **YOU** need a human (account access, money, or
 
 ## C. Encryption & export compliance (the E2EE-specific part)
 
-9. **CLAUDE** — `ITSAppUsesNonExemptEncryption = YES` in Info.plist. PQRC implements a proprietary E2EE protocol — this is *not* exempt the way HTTPS-only apps are.
+9. **CLAUDE** — `ITSAppUsesNonExemptEncryption = YES` in Info.plist. EldrChat implements a proprietary E2EE protocol (`pqrc-v1`) — this is *not* exempt the way HTTPS-only apps are.
 10. **YOU** — In App Store Connect's encryption questions for the build, expect to answer: uses encryption → **Yes**; only exempt encryption (standard iOS TLS etc.) → **No**. Typical path for mass-market E2EE messengers under US EAR: self-classification as 5D992.c under License Exception ENC §740.17(b), which entails an **annual self-classification report** emailed to BIS and the NSA ENC contact (due each February for the prior year). Read BIS's encryption FAQ, decide, and calendar the report — or have counsel confirm in an hour.
 11. **YOU** — **France:** distributing cryptography in France involves a declaration to ANSSI. Pragmatic options: file the declaration (one-time form per product), or initially exclude France from availability in App Store Connect → Pricing and Availability. Decide before external testing, since TestFlight external builds respect storefront availability.
 
@@ -37,7 +37,7 @@ A phased checklist. Items marked **YOU** need a human (account access, money, or
 ## F. TestFlight
 
 18. **YOU** — **Internal testing first** (up to 100 testers on your team, no review, available within minutes of processing). This is where the team lives until the real Nostr transport exists.
-19. **YOU** — **External testing** (up to 10,000 testers via link/email) triggers **Beta App Review** on the first build and after significant changes. Critical for PQRC: reviewers must be able to exercise messaging without your network being live. Ship the reviewer-facing **Demo Mode** (Settings → "Try the demo" → seeded Local Universe conversation) in beta builds and spell out the steps in the review notes: *"This build runs against a built-in local demo network. Settings → Try the demo → converse as Alice with Bob; tap the ✳︎ AI Thread to see AI participation; all AI messages are labeled."* Mention the block & report features exist (Guideline 1.2 — user-generated content apps need them; they're in APP-SPEC §6.5).
+19. **YOU** — **External testing** (up to 10,000 testers via link/email) triggers **Beta App Review** on the first build and after significant changes. Critical for EldrChat: reviewers must be able to exercise messaging without your network being live. The reviewer-facing **Demo Mode** ships in Release/beta builds — reachable from the lock screen's **"See the live demo"** and from Settings → "Try the demo" (seeded Local Universe conversation). Spell out the steps in the review notes: *"This build runs against a built-in local demo network. On the lock screen tap See the live demo (or create an account, then Settings → Try the demo) → converse as Alice with Bob; tap the ✳︎ AI Thread to see AI participation; all AI messages are labeled."* Mention the block & report features exist (Guideline 1.2 — user-generated content apps need them; they're in APP-SPEC §6.5).
 20. **YOU** — Builds expire after 90 days; plan a refresh cadence. TestFlight's built-in feedback/screenshots is your only telemetry — by design, there is no analytics SDK.
 
 ## G. After TestFlight (so it's on the roadmap, not a surprise)

@@ -590,6 +590,12 @@ public struct ToolExecutor: Sendable {
         } catch {
             return nil  // ripgrep not installed → Foundation fallback
         }
+        // Bound the search the same way as run_shell so a pathological tree can't
+        // wedge the turn. rg is normally fast and self-terminating (`--max-count`);
+        // this is belt-and-suspenders.
+        let watchdog = Self.processWatchdog(
+            pid: process.processIdentifier, seconds: Self.childProcessTimeout)
+        defer { watchdog.cancel() }
         let data = pipe.fileHandleForReading.readDataToEndOfFile()
         process.waitUntilExit()
         // rg exit 1 = no matches (still a valid empty result); 2+ = usage/IO error.
@@ -685,6 +691,35 @@ public struct ToolExecutor: Sendable {
 
     // MARK: run_shell
 
+    /// Wall-clock ceiling for a node-spawned child on the Foundation fallback
+    /// path. The preferred client-terminal route delegates lifetime to the
+    /// editor; this fallback owns it, so a non-terminating command can never hang
+    /// the agent turn. A tool-execution safety bound — not a key-schedule timer.
+    static let childProcessTimeout: TimeInterval = 120
+
+    /// Fire-and-forget watchdog: after `seconds`, SIGTERM then (after a 0.5s
+    /// grace) SIGKILL `pid`. Captures only the Sendable `pid_t` + Doubles, so it
+    /// is safe to spawn from this `Sendable` value type without touching the
+    /// non-Sendable `Process`. Cancel it once the child exits so a normally
+    /// finishing command is never signalled. Kills the direct child — the common
+    /// hang (`sleep` / `tail -f` / a wedged build / a `read` prompt) is a single
+    /// exec'd process; deliberately backgrounded grandchildren are out of scope
+    /// for this fallback (the client-terminal path is the supported long-lived route).
+    static func processWatchdog(pid: pid_t, seconds: TimeInterval) -> Task<Void, Never> {
+        Task {
+            do {
+                try await Task.sleep(nanoseconds: UInt64(seconds * 1_000_000_000))
+                if Task.isCancelled { return }
+                kill(pid, SIGTERM)
+                try await Task.sleep(nanoseconds: 500_000_000)
+                if Task.isCancelled { return }
+                kill(pid, SIGKILL)
+            } catch {
+                // Cancelled — the child exited in time; nothing to reclaim.
+            }
+        }
+    }
+
     private func runShell(_ args: JSONValue) async -> ToolResult {
         guard let command = args["command"]?.stringValue, !command.isEmpty else {
             return ToolResult(text: "run_shell: missing 'command'", isError: true)
@@ -774,6 +809,15 @@ public struct ToolExecutor: Sendable {
                 isError: true)
         }
 
+        // A non-terminating command must never hang the agent turn. The watchdog
+        // captures only the Sendable pid (never the non-Sendable `Process`) and,
+        // on overrun, SIGTERM→SIGKILLs the child — which closes the pipe, ending
+        // the drain below and letting `waitUntilExit()` return. Cancelled the
+        // instant the child exits normally, so a fast command is never signalled.
+        let watchdog = Self.processWatchdog(
+            pid: process.processIdentifier, seconds: Self.childProcessTimeout)
+        defer { watchdog.cancel() }
+
         let handle = pipe.fileHandleForReading
         let limit = outputByteLimit
         // Drain to EOF on a background queue; resume with the captured bytes.
@@ -782,7 +826,7 @@ public struct ToolExecutor: Sendable {
                 var buffer = Data()
                 while true {
                     let chunk = handle.availableData
-                    if chunk.isEmpty { break }  // EOF (pipe closed when child exits)
+                    if chunk.isEmpty { break }  // EOF (pipe closed when child exits/killed)
                     if buffer.count < limit {
                         buffer.append(chunk.prefix(limit - buffer.count))
                     }
@@ -795,14 +839,25 @@ public struct ToolExecutor: Sendable {
         let truncated = collected.count >= limit
         let output = String(data: collected, encoding: .utf8) ?? ""
         let exitCode = Int(process.terminationStatus)
+        // A SIGTERM/SIGKILL exit on this path is the watchdog reclaiming a runaway
+        // (a command that self-signals is a rare, acceptable false-positive label).
+        let timedOut = process.terminationReason == .uncaughtSignal
+            && (process.terminationStatus == SIGKILL || process.terminationStatus == SIGTERM)
         return ToolResult(
-            text: formatShellResult(output: output, truncated: truncated, exitCode: exitCode),
-            isError: exitCode != 0)
+            text: formatShellResult(
+                output: output, truncated: truncated, exitCode: exitCode, timedOut: timedOut),
+            isError: exitCode != 0 || timedOut)
     }
 
-    private func formatShellResult(output: String, truncated: Bool, exitCode: Int?) -> String {
+    private func formatShellResult(
+        output: String, truncated: Bool, exitCode: Int?, timedOut: Bool = false
+    ) -> String {
         var text = output
         if truncated { text += "\n…[output truncated at \(outputByteLimit) bytes]" }
+        if timedOut {
+            text +=
+                "\n…[run_shell: timed out after \(Int(Self.childProcessTimeout))s and was killed — the command did not exit. Use open_terminal for long-lived processes, or background it and poll.]"
+        }
         text += "\n[exit code: \(exitCode.map(String.init) ?? "unknown")]"
         return text
     }

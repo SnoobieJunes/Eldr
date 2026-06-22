@@ -75,6 +75,12 @@ the anchor-relay rule (kind-1059 gift wraps are served ONLY to the
 authenticated, p-tagged recipient — SPEC §9.1), and can inject deterministic
 chaos for resilience demos.
 
+> **Production-relay obligation.** The "non-recipients can't read your wraps"
+> privacy property (THREAT_MODEL §2.2) is enforced by the RELAY, not the client.
+> Any production relay you point at — the default `relay.lerants.com` (khatru,
+> AUTH-gated) included — MUST keep NIP-42 kind-1059 gating on; verify it before
+> relying on that property. `pqrc-relay` here is the reference behavior.
+
 ```bash
 # Build + run (default port 7777):
 1

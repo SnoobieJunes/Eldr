@@ -73,6 +73,17 @@ Ephemeral receiving keys (SPEC §9.3) would mitigate this; in v1 the setting is
 present but disabled and marked experimental. Senders are hidden even from
 this observer (one-time outer keys).
 
+**This "non-recipients can't query your wraps" guarantee is a relay-operator
+obligation, not something the client can enforce.** It holds only where the
+production relay actually AUTH-gates kind-1059 serving (NIP-42) — exactly as the
+bundled reference relay (`pqrc-relay` / `LocalRelaySimulator`) does, asserted by
+the acceptance test `auth_kind1059ServedOnlyToPTaggedAuthedRecipient`. The default
+deployment relay `relay.lerants.com` (khatru, AUTH-gated) is configured to enforce
+it; a misconfigured or hostile public relay that served kind-1059 to any subscriber
+would silently weaken this to the global-passive-observer case above, and the
+client cannot detect that. Verifying the relay's NIP-42 config is part of standing
+up any anchor relay (see SETUP-GUIDE §4).
+
 ### 2.3 No *message* deniability
 v1 signs messages (PQ3 pattern): the seal is signed by your Nostr key and
 agent messages by your agent key. A recipient can cryptographically prove to a

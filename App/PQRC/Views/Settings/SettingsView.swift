@@ -76,14 +76,16 @@ struct SettingsView: View {
                 accountSection
                 dataSection
                 aboutSection
-                #if DEBUG
-                    Section("Demo") {
-                        Button("Try the demo (Local Universe)") {
-                            Task { await session.bootUniverse(runScript: true) }
-                        }
-                        .accessibilityIdentifier("try-demo")
+                Section {
+                    Button("Try the demo (Local Universe)") {
+                        Task { await session.bootUniverse(runScript: true) }
                     }
-                #endif
+                    .accessibilityIdentifier("try-demo")
+                } header: {
+                    Text("Demo")
+                } footer: {
+                    Text("Runs a self-contained, on-device demo — Alice & Bob and their AIs over an in-process relay. Nothing leaves this device and your real account is untouched.")
+                }
             }
             .navigationTitle("Settings")
             .toolbar {

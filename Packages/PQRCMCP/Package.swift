@@ -14,6 +14,10 @@ import PackageDescription
 // runtime bridge is wired. Builds/tests on macOS (`swift test`).
 let package = Package(
     name: "PQRCMCP",
+    // Floor is intentionally lower than the v26 app fleet: PQRCMCP is a headless,
+    // dependency-free MCP server + stdio shim with no v26-SDK needs, kept broadly
+    // portable so the bridge binary runs across a wider range of hosts. (swift-tools
+    // 6.0 above is deliberate for the same reason — no 6.2 manifest features are used.)
     platforms: [.macOS(.v14), .iOS(.v17)],
     products: [
         .library(name: "PQRCMCP", targets: ["PQRCMCP"]),

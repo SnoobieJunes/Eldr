@@ -1166,7 +1166,16 @@ struct RootView: View {
                 if single { tour.presentIfFirstRun(siloID: session.activeSiloID) }
             }
             .task {
-                if isSingleMode { tour.presentIfFirstRun(siloID: session.activeSiloID) }
+                if isSingleMode {
+                    tour.presentIfFirstRun(siloID: session.activeSiloID)
+                } else if isFreshGate {
+                    // Fresh install sitting on the gate: lead with the welcome
+                    // tour before the passphrase form. Same once-per-device "seen"
+                    // gate as the in-account path, so it shows at most once and
+                    // never for a returning user. (UI-test / `--reset` launches are
+                    // already excluded inside `presentIfFirstRun`.)
+                    tour.presentIfFirstRun(siloID: nil)
+                }
             }
     }
 
@@ -1174,6 +1183,15 @@ struct RootView: View {
     private var isSingleMode: Bool {
         if case .single = session.mode { return true }
         return false
+    }
+
+    /// A first-ever launch on the account gate with no account yet — the cue to
+    /// lead with the welcome tour on a fresh install.
+    private var isFreshGate: Bool {
+        switch session.mode {
+        case .locked, .onboarding: return !session.hasDefaultAccount
+        case .single, .universe: return false
+        }
     }
 
     @ViewBuilder private var content: some View {

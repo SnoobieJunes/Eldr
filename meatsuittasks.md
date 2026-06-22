@@ -34,6 +34,13 @@ Last updated: 2026-06-21.
 - [ ] **MCP passthrough (D3):** turn ON **"Share my chat context with this agent"** for the node; confirm the agent reads your conversations as **codenames** (never real names), and that it CANNOT post as you outside a live AI window.
 - [ ] **Interactive terminal (D4):** with **autonomous-changes ON** (the terminal is refused without it), open an interactive terminal, run a REPL/`top`, then hit the red **Stop** and confirm the shell dies. Lock the app / revoke consent mid-session → confirm the shell is killed (no orphan).
 
+## Demo caveats (read before the live funding demo)
+- **Watch-along mode = Direct (default).** Leave the Mac node's Bridge ▸ Watch-along on **Direct** — it fans out group messages itself (owner raw, others redacted) and is the exercised path. **Endpoint** mode is the §13.5 hardening but still needs the iOS phone-side glue (AC24); don't demo it.
+- **Don't quit/relaunch the Mac node (Huginn) mid-demo.** v1 keeps the ratchet session in-memory (AC25); a restart forces a re-pair (identity/keys persist, the live session does not).
+- **Keep multi-party AGENT moments off the live Mac-node path** unless you've done a 2-device-in-a-group dry-run first. The node's per-recipient group fan-out is coded + unit-tested (owner-raw / others-redacted) but has no on-device multi-party proof yet — a redaction slip there would leak the owner's raw text to a non-owner. 1:1 agent moments over the node are the safe, exercised path.
+- **Advertise only the wired ACP backends:** built-in `eldr-acp`, Xcode ACP, OpenClaw. Claude Code / Codex / Gemini CLI / OpenCode / Cursor are scaffold-only (provisional, not UI-wired) — don't present them as available.
+- **Don't tap the "Apple Private Cloud Compute" AI tier.** It's forward-investment scaffolding (the SDK symbols aren't in the shipping toolchain yet — DEVIATIONS A40) and returns a local demo response until they ship; use an on-device or a configured cloud AI in the demo.
+
 ## Distribute (needs your Apple Developer account)
 - [ ] Sign **Huginn** with Developer ID + notarize for the DMG (see `docs/SIGNING-AND-DISTRIBUTION.md`).
 - [ ] **EldrChat App Store prep:** review notes framing it as "remote control of YOUR own Mac on your network" (guideline 4.2.7, cf. Termius/Moshi); set `NSLocalNetworkUsageDescription`; `ITSAppUsesNonExemptEncryption = YES` + export classification (License Exception ENC 5D992.c); privacy nutrition labels; a content report/block path.

@@ -152,18 +152,23 @@ struct BridgeView: View {
                 }
 
                 Divider()
-                Text("Or pin by identity hex (beta — before the owner appears above):")
-                    .font(.caption).foregroundStyle(.secondary)
-                HStack {
-                    TextField("owner identity hex", text: $manualOwnerHex)
-                        .textFieldStyle(.roundedBorder).font(.caption.monospaced())
-                    Button("Pin") {
-                        bridge.setOwnerIdentity(manualOwnerHex)
-                        manualOwnerHex = ""
+                // Advanced/dev escape hatch: pin the owner by raw identity hex
+                // before they appear in the paired-devices list. Tucked behind a
+                // collapsed disclosure so the clean path stays QR + the list above.
+                DisclosureGroup("Advanced — pin by identity hex") {
+                    HStack {
+                        TextField("owner identity hex", text: $manualOwnerHex)
+                            .textFieldStyle(.roundedBorder).font(.caption.monospaced())
+                        Button("Pin") {
+                            bridge.setOwnerIdentity(manualOwnerHex)
+                            manualOwnerHex = ""
+                        }
+                        .controlSize(.small)
+                        .disabled(manualOwnerHex.trimmingCharacters(in: .whitespaces).isEmpty)
                     }
-                    .controlSize(.small)
-                    .disabled(manualOwnerHex.trimmingCharacters(in: .whitespaces).isEmpty)
+                    .padding(.top, 4)
                 }
+                .font(.caption)
 
                 Divider()
                 Picker("Watch-along mode", selection: $bridge.watchAlongMode) {

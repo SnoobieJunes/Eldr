@@ -3,10 +3,11 @@ import PQRCAgent
 import PQRCCore
 import PQRCNostr
 
-/// The Local Universe (APP-SPEC §15, Debug/demo): seeded personas over an
+/// The Local Universe (APP-SPEC §15, demo): five seeded personas over an
 /// in-process relay + Blossom, with a persona switcher and a scripted demo.
-/// Reviewer-facing demo entry stays in Release (TESTFLIGHT-GUIDE §F); chaos
-/// controls and the persona switcher are Debug-only surfaces.
+/// The reviewer-facing demo entry ships in Release — reachable from the lock
+/// screen ("See the live demo") and Settings ▸ Demo (TESTFLIGHT-GUIDE §F).
+/// Chaos controls remain Debug-only.
 ///
 /// The scripted demo (`runDemoScript`) is the live counterpart to the onboarding
 /// tour: it exercises the CURRENT feature set so the tour has real things to point
