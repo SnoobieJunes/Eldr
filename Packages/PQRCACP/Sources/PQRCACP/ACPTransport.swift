@@ -89,7 +89,9 @@ public func runACPAgent(
     let connection = ClientConnection(sink: sink)
     let agent = ACPAgent(
         connection: connection, llm: llm, toolEnvironment: toolEnvironment,
-        config: config, configDir: configDir, streamingEnabled: streamingEnabled,
+        config: config, configDir: configDir,
+        maxIterations: config.maxIterations,
+        streamingEnabled: streamingEnabled,
         extraTools: extraTools)
     for await line in transport.inboundLines() {
         guard let message = JSONValue.parse(line) else { continue }

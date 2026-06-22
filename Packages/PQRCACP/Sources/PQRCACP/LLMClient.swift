@@ -148,12 +148,12 @@ public struct LLMConfig: Sendable {
     /// `ELDR_LLM_TIMEOUT_SECONDS` (default 120).
     public var requestTimeoutSeconds: Double
 
-    public init(url: String, token: String, model: String, requestTimeoutSeconds: Double = 120) {
+    public init(url: String, token: String, model: String, requestTimeoutSeconds: Double = 0) {
         self.url = url
         self.token = token
         self.model = model
-        // A non-positive timeout would fire instantly; treat ≤0 as the default.
-        self.requestTimeoutSeconds = requestTimeoutSeconds > 0 ? requestTimeoutSeconds : 120
+        // 0 (default) = unlimited; a positive value bounds a single request.
+        self.requestTimeoutSeconds = max(0, requestTimeoutSeconds)
     }
 
     /// Read `ELDR_LLM_URL` / `ELDR_LLM_TOKEN` / `ELDR_LLM_MODEL` /
@@ -164,7 +164,7 @@ public struct LLMConfig: Sendable {
     {
         let timeout = env["ELDR_LLM_TIMEOUT_SECONDS"]
             .flatMap { Double($0.trimmingCharacters(in: .whitespaces)) }
-            .flatMap { $0 > 0 ? $0 : nil } ?? 120
+            .map { max(0, $0) } ?? 0  // unset ⇒ 0 = unlimited
         return LLMConfig(
             url: env["ELDR_LLM_URL"].flatMap { $0.isEmpty ? nil : $0 } ?? "http://127.0.0.1:1337/v1",
             token: env["ELDR_LLM_TOKEN"] ?? "",
@@ -205,8 +205,11 @@ public struct OpenAICompatibleLLMClient: LLMClient {
     /// per-request budget, so a wedged server can't hold a socket open forever.
     private static func makeSession(timeout: Double) -> URLSession {
         let configuration = URLSessionConfiguration.ephemeral
-        configuration.timeoutIntervalForRequest = timeout
-        configuration.timeoutIntervalForResource = timeout
+        // ≤0 ⇒ effectively unlimited (one year): a slow local model generating a long
+        // answer must not be cut off; a positive value opts into a bound.
+        let t = timeout > 0 ? timeout : 31_536_000
+        configuration.timeoutIntervalForRequest = t
+        configuration.timeoutIntervalForResource = t
         return URLSession(configuration: configuration)
     }
 
@@ -323,7 +326,7 @@ public struct OpenAICompatibleLLMClient: LLMClient {
         }
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
-        request.timeoutInterval = config.requestTimeoutSeconds
+        request.timeoutInterval = config.requestTimeoutSeconds > 0 ? config.requestTimeoutSeconds : 31_536_000
         if !config.token.isEmpty {
             request.setValue("Bearer \(config.token)", forHTTPHeaderField: "Authorization")
         }

@@ -104,9 +104,9 @@ public actor ACPAgent {
         toolEnvironment: ToolEnvironment = .fromEnvironment(),
         config: AgentConfig = .fromEnvironment(),
         configDir: String? = AgentConfig.defaultConfigDir(ProcessInfo.processInfo.environment),
-        maxIterations: Int = 20,
+        maxIterations: Int = 0,
         streamingEnabled: Bool = true,
-        requestTimeoutSeconds: Double = 120,
+        requestTimeoutSeconds: Double = 0,
         contextGraph: (any ContextGraphAssembling)? = nil,
         extraTools: (any ExtraToolProvider)? = nil
     ) {
@@ -115,9 +115,9 @@ public actor ACPAgent {
         self.toolEnvironment = toolEnvironment
         self.config = config
         self.configDir = configDir
-        self.maxIterations = maxIterations
+        self.maxIterations = max(0, maxIterations)
         self.streamingEnabled = streamingEnabled
-        self.requestTimeoutSeconds = requestTimeoutSeconds > 0 ? requestTimeoutSeconds : 120
+        self.requestTimeoutSeconds = max(0, requestTimeoutSeconds)
         self.extraTools = extraTools
         self.skills = AgentSkillSet.from(config: config)
         // Build the real client from config when enabled and not injected (tests
@@ -384,7 +384,8 @@ public actor ACPAgent {
             capabilities: clientCapabilities, environment: perTurnEnvironment,
             connection: connection, sessionId: sessionId,
             maxResultBytes: config.maxToolResultBytes,
-            maxReadFileBytes: config.maxReadFileBytes)
+            maxReadFileBytes: config.maxReadFileBytes,
+            shellTimeoutSeconds: config.shellTimeoutSeconds)
         var tools = ToolExecutor.toolDefinitions(allowlist: config.toolAllowlist)
         // Phase D3: merge the phone's MCP chat tools into the advertised set, but
         // ONLY when this session opted in (`mcpServers` advertised) AND a provider is
@@ -433,7 +434,11 @@ public actor ACPAgent {
         // This rides alongside the existing tool_call/tool_call_update flow without
         // altering it — purely additive session/updates.
         var plan = TurnPlan()
-        for _ in 0..<maxIterations {
+        // maxIterations == 0 ⇒ unlimited (a capable model may need many rounds for a
+        // real multi-step build); a positive value caps the loop.
+        var iteration = 0
+        while maxIterations <= 0 || iteration < maxIterations {
+            iteration += 1
             if cancelledSessions.contains(sessionId) { return .cancelled }
 
             // Context budgeting: bound the history sent to the model each turn so a
@@ -914,10 +919,13 @@ public actor ACPAgent {
                     return .failed(error)
                 }
             }
-            // 2. Timeout backstop.
-            group.addTask {
-                try? await Task.sleep(nanoseconds: timeoutNanos)
-                return .timedOut
+            // 2. Timeout backstop — skipped when the request timeout is disabled (≤0),
+            //    so a slow local model generating a long answer is never cut off.
+            if requestTimeoutSeconds > 0 {
+                group.addTask {
+                    try? await Task.sleep(nanoseconds: timeoutNanos)
+                    return .timedOut
+                }
             }
             // 3. Cancel poll (session/cancel can land on the actor while we await).
             group.addTask { [weak self] in

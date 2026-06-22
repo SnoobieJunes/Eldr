@@ -89,6 +89,15 @@ public struct AgentConfig: Sendable, Equatable {
     /// silence as a DENIAL (deny-on-timeout), so a non-responding client can neither
     /// hang the turn nor auto-allow a mutating tool. Env: `ELDR_ACP_PERMISSION_TIMEOUT`.
     public var permissionTimeoutSeconds: Double
+    /// Max agent loop iterations (model round-trips) per turn. **0 (default) =
+    /// unlimited** — a capable model doing a real multi-step build can need many
+    /// rounds; the per-call context budget still bounds each request, so an open loop
+    /// doesn't blow the window. Set a positive value to cap. Env: `ELDR_ACP_MAX_ITERATIONS`.
+    public var maxIterations: Int
+    /// Wall-clock cap for a single `run_shell` / search child process, in seconds.
+    /// **0 (default) = unlimited** — real builds/tests legitimately run for minutes.
+    /// Set a positive value to bound a non-terminating command. Env: `ELDR_ACP_SHELL_TIMEOUT`.
+    public var shellTimeoutSeconds: Double
     /// C-1 escape hatch: when true, mutating tools are NOT permission-gated at all —
     /// restoring allow-by-default for a trusted local client that can't prompt (e.g.
     /// one with no session/request_permission support). An EXPLICIT operator risk
@@ -137,6 +146,8 @@ public struct AgentConfig: Sendable, Equatable {
         contextGraphURL: "http://localhost:8302",
         contextGraphAgentName: nil,
         permissionTimeoutSeconds: 120,
+        maxIterations: 0,
+        shellTimeoutSeconds: 0,
         allowUngatedTools: false,
         visionEnabled: false)
 
@@ -156,6 +167,8 @@ public struct AgentConfig: Sendable, Equatable {
         contextGraphURL: String = "http://localhost:8302",
         contextGraphAgentName: String? = nil,
         permissionTimeoutSeconds: Double = 120,
+        maxIterations: Int = 0,
+        shellTimeoutSeconds: Double = 0,
         allowUngatedTools: Bool = false,
         visionEnabled: Bool = false,
         logRedactor: @escaping ACPLogScrubber = ACPLogRedactor.scrub
@@ -178,6 +191,8 @@ public struct AgentConfig: Sendable, Equatable {
         self.contextGraphAgentName = contextGraphAgentName
         // ≤0 ⇒ no wait (deny immediately on no answer); otherwise the given seconds.
         self.permissionTimeoutSeconds = max(0, permissionTimeoutSeconds)
+        self.maxIterations = max(0, maxIterations)
+        self.shellTimeoutSeconds = max(0, shellTimeoutSeconds)
         self.allowUngatedTools = allowUngatedTools
         self.visionEnabled = visionEnabled
         self.logRedactor = logRedactor
@@ -276,6 +291,8 @@ public struct AgentConfig: Sendable, Equatable {
             contextGraphURL: stringEnv("ELDR_ACP_CONTEXTGRAPH_URL") ?? d.contextGraphURL,
             contextGraphAgentName: stringEnv("ELDR_ACP_CONTEXTGRAPH_AGENT"),
             permissionTimeoutSeconds: doubleEnv("ELDR_ACP_PERMISSION_TIMEOUT", default: d.permissionTimeoutSeconds),
+            maxIterations: intEnv("ELDR_ACP_MAX_ITERATIONS", default: d.maxIterations),
+            shellTimeoutSeconds: doubleEnv("ELDR_ACP_SHELL_TIMEOUT", default: d.shellTimeoutSeconds),
             allowUngatedTools: boolEnv("ELDR_ACP_ALLOW_UNGATED_TOOLS", default: d.allowUngatedTools),
             visionEnabled: boolEnv("ELDR_LLM_VISION", default: d.visionEnabled))
     }

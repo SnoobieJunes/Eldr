@@ -104,11 +104,15 @@ public struct ToolExecutor: Sendable {
     /// backpressure (`maxResultBytes` only trims after the whole file is in memory).
     /// Over-cap files are read as a bounded prefix via `FileHandle`. `Int.max` → no cap.
     let maxReadFileBytes: Int
+    /// Wall-clock cap (seconds) for a single `run_shell` / search child process.
+    /// 0 = unlimited (no watchdog) — a real build/test legitimately runs for minutes.
+    let shellTimeoutSeconds: TimeInterval
 
     public init(
         capabilities: ClientCapabilities, environment: ToolEnvironment,
         connection: ClientConnection?, sessionId: String, outputByteLimit: Int = 64 * 1024,
-        maxResultBytes: Int = Int.max, maxReadFileBytes: Int = Int.max
+        maxResultBytes: Int = Int.max, maxReadFileBytes: Int = Int.max,
+        shellTimeoutSeconds: TimeInterval = 0
     ) {
         self.capabilities = capabilities
         self.environment = environment
@@ -117,6 +121,7 @@ public struct ToolExecutor: Sendable {
         self.outputByteLimit = outputByteLimit
         self.maxResultBytes = maxResultBytes
         self.maxReadFileBytes = maxReadFileBytes
+        self.shellTimeoutSeconds = max(0, shellTimeoutSeconds)
     }
 
     /// The built-in tools' names, in advertise order. The single source of truth for
@@ -593,9 +598,12 @@ public struct ToolExecutor: Sendable {
         // Bound the search the same way as run_shell so a pathological tree can't
         // wedge the turn. rg is normally fast and self-terminating (`--max-count`);
         // this is belt-and-suspenders.
-        let watchdog = Self.processWatchdog(
-            pid: process.processIdentifier, seconds: Self.childProcessTimeout)
-        defer { watchdog.cancel() }
+        // 0 = unlimited: no watchdog. A positive shellTimeoutSeconds reclaims a
+        // non-terminating command; a real build/test may legitimately run minutes.
+        let watchdog: Task<Void, Never>? = shellTimeoutSeconds > 0
+            ? Self.processWatchdog(pid: process.processIdentifier, seconds: shellTimeoutSeconds)
+            : nil
+        defer { watchdog?.cancel() }
         let data = pipe.fileHandleForReading.readDataToEndOfFile()
         process.waitUntilExit()
         // rg exit 1 = no matches (still a valid empty result); 2+ = usage/IO error.
@@ -814,9 +822,12 @@ public struct ToolExecutor: Sendable {
         // on overrun, SIGTERM→SIGKILLs the child — which closes the pipe, ending
         // the drain below and letting `waitUntilExit()` return. Cancelled the
         // instant the child exits normally, so a fast command is never signalled.
-        let watchdog = Self.processWatchdog(
-            pid: process.processIdentifier, seconds: Self.childProcessTimeout)
-        defer { watchdog.cancel() }
+        // 0 = unlimited: no watchdog. A positive shellTimeoutSeconds reclaims a
+        // non-terminating command; a real build/test may legitimately run minutes.
+        let watchdog: Task<Void, Never>? = shellTimeoutSeconds > 0
+            ? Self.processWatchdog(pid: process.processIdentifier, seconds: shellTimeoutSeconds)
+            : nil
+        defer { watchdog?.cancel() }
 
         let handle = pipe.fileHandleForReading
         let limit = outputByteLimit
@@ -856,7 +867,7 @@ public struct ToolExecutor: Sendable {
         if truncated { text += "\n…[output truncated at \(outputByteLimit) bytes]" }
         if timedOut {
             text +=
-                "\n…[run_shell: timed out after \(Int(Self.childProcessTimeout))s and was killed — the command did not exit. Use open_terminal for long-lived processes, or background it and poll.]"
+                "\n…[run_shell: timed out after \(Int(shellTimeoutSeconds))s and was killed — the command did not exit. Use open_terminal for long-lived processes, or background it and poll.]"
         }
         text += "\n[exit code: \(exitCode.map(String.init) ?? "unknown")]"
         return text
