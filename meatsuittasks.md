@@ -28,6 +28,12 @@ Last updated: 2026-06-21.
 - [ ] Per-chat **egress firewall** with a cloud AI: confirm ON redacts names/bounds context, OFF sends raw (for your own private agents).
 - [ ] Run the standalone `eldr-node` on a **second Mac/server** and drive it from the phone.
 
+## Phase D — new ACP features to try on-device
+- [ ] **Plan/TODO (D1):** during a multi-step agent turn, confirm the step checklist appears on the phone above the chat and ticks off as steps complete.
+- [ ] **Image input (D2, node-side only):** on the node set `ELDR_LLM_VISION=1` with a vision-capable model, then from a node-side ACP client (e.g. Xcode) attach a screenshot and confirm the agent reads it. (No phone image picker — by design; the product stays text-only on the phone.)
+- [ ] **MCP passthrough (D3):** turn ON **"Share my chat context with this agent"** for the node; confirm the agent reads your conversations as **codenames** (never real names), and that it CANNOT post as you outside a live AI window.
+- [ ] **Interactive terminal (D4):** with **autonomous-changes ON** (the terminal is refused without it), open an interactive terminal, run a REPL/`top`, then hit the red **Stop** and confirm the shell dies. Lock the app / revoke consent mid-session → confirm the shell is killed (no orphan).
+
 ## Distribute (needs your Apple Developer account)
 - [ ] Sign **Huginn** with Developer ID + notarize for the DMG (see `docs/SIGNING-AND-DISTRIBUTION.md`).
 - [ ] **EldrChat App Store prep:** review notes framing it as "remote control of YOUR own Mac on your network" (guideline 4.2.7, cf. Termius/Moshi); set `NSLocalNetworkUsageDescription`; `ITSAppUsesNonExemptEncryption = YES` + export classification (License Exception ENC 5D992.c); privacy nutrition labels; a content report/block path.
