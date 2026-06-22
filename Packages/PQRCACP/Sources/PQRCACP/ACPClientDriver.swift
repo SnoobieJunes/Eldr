@@ -111,6 +111,13 @@ public actor ACPClientDriver {
     /// its own filesystem/shell I/O directly (which is what a real-files runner wants);
     /// advertise fs/terminal only if you intend to serve those via the handler.
     private let capabilities: ClientCapabilities
+    /// Phase D3: advertise a non-empty `mcpServers` at `session/new`, signaling the
+    /// agent that THIS client (the phone) offers MCP chat tools over the relay — the
+    /// node then wires its `MCPOverRelayClient`. Default false (no advertisement, the
+    /// path stays inert). Set true only when the owner consented to share chat context
+    /// with this node. Default `false` so spawn/attach/non-opted-in callers are
+    /// unchanged.
+    private var advertiseChatTools = false
 
     #if os(macOS)
     private var process: Process?  // node-side: only the spawn path holds a Process
@@ -159,11 +166,13 @@ public actor ACPClientDriver {
     public init(
         transport: any ACPTransport,
         handler: ACPClientHandler = ACPClientHandler(),
-        capabilities: ClientCapabilities = ClientCapabilities()
+        capabilities: ClientCapabilities = ClientCapabilities(),
+        advertiseChatTools: Bool = false
     ) {
         self.transport = .preset(transport)
         self.handler = handler
         self.capabilities = capabilities
+        self.advertiseChatTools = advertiseChatTools
     }
 
     // MARK: - Lifecycle
@@ -218,8 +227,21 @@ public actor ACPClientDriver {
         let agentVersion = initResult["agentInfo"]?["version"]?.stringValue
         var commands = Self.commandNames(initResult["agentCapabilities"]?["availableCommands"])
 
-        // session/new → the session id we prompt against.
-        var newParams: [String: JSONValue] = ["mcpServers": .array([])]
+        // session/new → the session id we prompt against. Phase D3: when the owner
+        // opted into sharing chat context with this node, advertise a non-empty
+        // `mcpServers` so the agent wires its MCP-over-relay chat tools (the phone
+        // serves them back over the relay). The descriptor names the relay-carried
+        // server; the agent uses the slot's PRESENCE as the gate, not its contents.
+        let mcpServers: JSONValue =
+            advertiseChatTools
+            ? .array([
+                .object([
+                    "name": .string("eldrchat"),
+                    "transport": .string("relay"),
+                ])
+            ])
+            : .array([])
+        var newParams: [String: JSONValue] = ["mcpServers": mcpServers]
         if let cwd { newParams["cwd"] = .string(cwd) }
         let newResult = try await request(method: "session/new", params: .object(newParams))
         guard let sid = newResult["sessionId"]?.stringValue else {

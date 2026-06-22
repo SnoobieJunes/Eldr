@@ -46,11 +46,17 @@ public actor ACPClient {
     ///     for the phone→node link).
     ///   - permissionHandler: decides a mutating tool's permission request. The plan
     ///     surfaces this to the node owner; default allows (tests / trusted local).
+    /// - Parameters:
+    ///   - advertiseChatTools: Phase D3 — advertise a non-empty `mcpServers` at
+    ///     `session/new`, so the node wires its MCP-over-relay chat tools (the phone
+    ///     serves them back). Set true only when the owner consented to share chat
+    ///     context with this node; default false (the path stays inert).
     public init(
         transport: any ACPTransport,
         permissionHandler: @escaping @Sendable (_ title: String, _ kind: String) async -> Bool = {
             _, _ in true
-        }
+        },
+        advertiseChatTools: Bool = false
     ) {
         var continuation: AsyncStream<ACPUIEvent>.Continuation!
         let stream = AsyncStream<ACPUIEvent> { continuation = $0 }
@@ -71,7 +77,8 @@ public actor ACPClient {
             requestPermission: permissionHandler)
         // The phone advertises no fs/terminal caps → the agent uses its own I/O on the Mac.
         self.driver = ACPClientDriver(
-            transport: transport, handler: handler, capabilities: ClientCapabilities())
+            transport: transport, handler: handler, capabilities: ClientCapabilities(),
+            advertiseChatTools: advertiseChatTools)
     }
 
     /// `initialize` + `session/new`. Returns the live session to prompt.

@@ -35,6 +35,12 @@ public actor ACPAgentProvider: AgentProvider {
     /// into the turn result. Default no-op: existing callers/tests see zero behavior
     /// change. `@Sendable` so it crosses the consumer task boundary cleanly.
     private let eventObserver: @Sendable (ACPUIEvent) -> Void
+    /// Phase D3 — advertise the phone's MCP chat tools to the node at `session/new`
+    /// (so its coding agent can read/draft/search the owner's chat over the relay).
+    /// Default false; set true only when the owner gave the per-node "share chat
+    /// context" consent. The phone serves those tool calls back from its redacting,
+    /// window-gating MCP server (`RelayMCPHost`).
+    private let advertiseChatTools: Bool
 
     /// The single long-lived client + its event-consumer task, created lazily on
     /// the first call and reused thereafter. `nil` until started; torn down by
@@ -72,13 +78,15 @@ public actor ACPAgentProvider: AgentProvider {
         permissionHandler: @escaping @Sendable (_ title: String, _ kind: String) async -> Bool = {
             _, _ in false
         },
-        eventObserver: @escaping @Sendable (_ event: ACPUIEvent) -> Void = { _ in }
+        eventObserver: @escaping @Sendable (_ event: ACPUIEvent) -> Void = { _ in },
+        advertiseChatTools: Bool = false
     ) {
         self.transport = transport
         self.cwd = cwd
         self.turnTimeout = turnTimeout > 0 ? turnTimeout : 120
         self.permissionHandler = permissionHandler
         self.eventObserver = eventObserver
+        self.advertiseChatTools = advertiseChatTools
     }
 
     /// Tear down the live session + consumer. Safe to call when never started.
@@ -150,7 +158,9 @@ public actor ACPAgentProvider: AgentProvider {
     /// Start the client + consumer once; reuse on every later call.
     private func ensureStarted() async throws -> Live {
         if let live { return live }
-        let client = ACPClient(transport: transport, permissionHandler: permissionHandler)
+        let client = ACPClient(
+            transport: transport, permissionHandler: permissionHandler,
+            advertiseChatTools: advertiseChatTools)
         let accumulator = TurnAccumulator()
         // ONE continuous consumer for the SINGLE event stream: it folds each
         // event into whatever turn is currently in flight (correlation lives in

@@ -3,6 +3,7 @@ import Foundation
 import PQRCACP
 import PQRCAgent
 import PQRCCore
+import PQRCMCP
 import PQRCNostr
 import SwiftData
 
@@ -104,6 +105,23 @@ actor PersonaRuntime {
     /// even after the wrap overhead; `RelayACPTransport` chunks longer ACP lines to
     /// fit. Conservative on purpose (correctness over throughput).
     private let relayACPMaxFrameBytes = 16 * 1024
+
+    /// Phase D3 — relay-carried MCP hosts, one per CONSENTED `coding_agent` node,
+    /// keyed by the node's PQRC identity hex. Each serves the phone's redacting +
+    /// window-gating `MCPServer` to that node's coding agent over the SAME mesh: the
+    /// node's `MCP1|` chat-tool requests arrive on the message stream, are fed to the
+    /// host (which answers from `RuntimeSecureChatBridge` — redaction enforced HERE,
+    /// phone-side), and the responses are framed back. Created lazily by
+    /// `ensureRelayMCPHost(nodeHex:)` ONLY when the node is a consented coding agent
+    /// AND `shareChatContextConsent` is on; torn down on revoke / `shutdown()`. nil
+    /// `secureChatBridge` (the bridge not yet injected by `AppModel`) ⇒ no host is
+    /// ever created, so the path is inert until the app wires the redacting source.
+    private var relayMCPHosts: [String: RelayMCPHost] = [:]
+    /// The firewall-redacted data source the relay MCP hosts serve. Injected by
+    /// `AppModel` once it exists (`setSecureChatBridge`); the SAME bridge the local
+    /// loopback MCP server uses, so the relay path's redaction/window-gating is
+    /// byte-identical. `Sendable`; holds `AppModel` weakly.
+    private var secureChatBridge: (any SecureChatBridge)?
 
     private var store: SwiftDataMessageStore!
     private var crypter: EncryptedStore!
@@ -283,6 +301,12 @@ actor PersonaRuntime {
         // back onto the actor — the observer is a synchronous `@Sendable` closure. The
         // node's conversationID is its identity hex (1:1 conversation id == peer hex).
         let plansContinuation = eventContinuation
+        // Phase D3: advertise the phone's MCP chat tools to THIS node only when the
+        // owner gave the per-node "share chat context" consent. The phone then serves
+        // those tool calls back over the relay from its redacting `RelayMCPHost` (set
+        // up lazily on the first inbound MCP frame). Off ⇒ no `mcpServers` advertised,
+        // so the node never even discovers the chat tools exist.
+        let shareChat = AppSession.shareChatContextConsent(nodeID: nodeHex, siloID: silo)
         let provider = ACPAgentProvider(
             transport: transport,
             permissionHandler: { [weak self] title, kind in
@@ -297,7 +321,8 @@ actor PersonaRuntime {
                 // folded reply message, so re-forwarding them here would double them.
                 guard case .plan(let entries) = event else { return }
                 plansContinuation?.yield(.acpPlan(conversationID: nodeHex, entries: entries))
-            })
+            },
+            advertiseChatTools: shareChat)
         ais = ais.map { ai in
             guard ai.kind == "acp" else { return ai }
             var live = ai
@@ -739,6 +764,11 @@ actor PersonaRuntime {
         // ACP client/consumer awaiting it unwinds (no orphaned reassembly state).
         for transport in relayACPTransports.values { transport.close() }
         relayACPTransports.removeAll()
+        // Phase D3: stop every relay-MCP host (closes its transport + pump) so the
+        // node's chat-tool channel goes dark with the silo — nothing MCP-serving may
+        // outlive the unlocked, redacting state it depends on.
+        for host in relayMCPHosts.values { await host.stop() }
+        relayMCPHosts.removeAll()
         await localLink?.stop()
         await messenger?.stop()
         eventContinuation?.finish()
@@ -992,6 +1022,59 @@ actor PersonaRuntime {
         await permissionAsker?.cancelAll(nodeHex: nodeHex)
         guard let transport = relayACPTransports.removeValue(forKey: nodeHex) else { return }
         transport.close()
+    }
+
+    // MARK: - Relay-carried MCP (Phase D3 — serve the phone's chat tools to a node)
+
+    /// Inject the firewall-redacted MCP data source (the SAME `RuntimeSecureChatBridge`
+    /// the loopback MCP server uses). Called once by `AppModel` after it exists. Until
+    /// this is set, `ensureRelayMCPHost` returns nil and NO node's MCP frames are ever
+    /// serviced (fail-closed: no redacting source ⇒ no service).
+    func setSecureChatBridge(_ bridge: any SecureChatBridge) {
+        secureChatBridge = bridge
+    }
+
+    /// C-3 + Phase-D3 gate: an identity may have the phone's MCP chat tools served to
+    /// it ONLY when it is the owner's paired `coding_agent` node (so it can be driven
+    /// at all — `isConsentedCodingAgentNode`) AND the SEPARATE "share chat context"
+    /// consent is on for it. Chat context ≠ dev-control: BOTH must be granted. The
+    /// single predicate every relay-MCP path checks, so the path stays inert until the
+    /// owner opts in.
+    private func isMCPSharingNode(_ identityHex: String) -> Bool {
+        isConsentedCodingAgentNode(identityHex)
+            && AppSession.shareChatContextConsent(nodeID: identityHex, siloID: siloID)
+    }
+
+    /// The live relay-MCP host bound to a node sharing chat context, creating it on
+    /// first use. Returns nil (fails closed) when the node is NOT an MCP-sharing node
+    /// (C-3 + share-chat-context) OR no redacting bridge has been injected — so a host
+    /// is never wired for a node the owner hasn't opted into, and never without a
+    /// redacting source. The host's `send` publishes each framed `MCP1|` chunk to the
+    /// node over the relay as an ordinary (agent-typed) message; inbound frames are
+    /// delivered by `handleReceived`. Idempotent: the same host is reused so the MCP
+    /// session/reassembly stay coherent.
+    func ensureRelayMCPHost(nodeHex: String) async -> RelayMCPHost? {
+        guard isMCPSharingNode(nodeHex), let bridge = secureChatBridge else { return nil }
+        if let existing = relayMCPHosts[nodeHex] { return existing }
+        let host = RelayMCPHost(
+            bridge: bridge,
+            maxFrameBytes: relayACPMaxFrameBytes,
+            publish: { [weak self] framedBody in
+                guard let self else { return }
+                // Publish the framed MCP chunk to the node, exactly like an ACP frame:
+                // an agent-typed ratcheted message (transport, not chat). Best-effort.
+                try? await self.sendRelayACPFrame(framedBody, to: nodeHex)
+            })
+        await host.start()
+        relayMCPHosts[nodeHex] = host
+        return host
+    }
+
+    /// Tear down a node's relay-MCP host (and drop it), e.g. when the share-chat-context
+    /// consent is revoked or the node is unpaired. Safe when none exists.
+    func teardownRelayMCPHost(nodeHex: String) async {
+        guard let host = relayMCPHosts.removeValue(forKey: nodeHex) else { return }
+        await host.stop()
     }
 
     /// Sets my alias and broadcasts it to every connected contact over the
@@ -2131,6 +2214,23 @@ actor PersonaRuntime {
         if body.chunk != nil {
             guard let whole = accumulateChunk(body, from: senderHex) else { return }
             body = whole
+        }
+
+        // Relay-carried MCP frame (Phase D3): an MCP chat-tool REQUEST from the
+        // owner's chat-context-sharing `coding_agent` node, riding the message mesh.
+        // The C-3 + share-chat-context gate (`isMCPSharingNode`, via
+        // `ensureRelayMCPHost`) is what makes this safe: ONLY the paired node the owner
+        // explicitly opted into is serviced, and the host answers from the redacting +
+        // ai_window-gating `MCPServer` (redaction enforced phone-side, here). A
+        // recognized `MCP1|` frame is ALWAYS swallowed (returned), never rendered as
+        // chat: if no host exists (consent off / not a coding agent / wrong sender) the
+        // phone REFUSES to service it AND drops it — it never reaches the chat path and
+        // the node gets no answer. So an un-opted-in or non-owner node learns nothing.
+        if RelayMCPTransport.isMCPFrame(body.text) {
+            if let host = await ensureRelayMCPHost(nodeHex: senderHex) {
+                await host.deliverInbound(body.text)
+            }
+            return
         }
 
         // Relay-carried ACP frame (ACPRouterplan Phase 3): an ACP line from the

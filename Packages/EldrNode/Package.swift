@@ -28,6 +28,11 @@ let package = Package(
         .package(path: "../PQRCCore"),
         .package(path: "../PQRCNostr"),
         .package(path: "../PQRCACP"),
+        // Test-only: the phone's MCP SERVER, so the node-side MCP-over-relay client can
+        // be exercised end-to-end over a LocalRelaySimulator against a real `MCPServer`
+        // (the same redacting/window-gating server the phone hosts). EldrNodeCore itself
+        // does NOT depend on PQRCMCP — only the test target below does.
+        .package(path: "../PQRCMCP"),
     ],
     targets: [
         .target(
@@ -56,6 +61,7 @@ let package = Package(
                 "PQRCCore",
                 "PQRCNostr",
                 .product(name: "PQRCACP", package: "PQRCACP"),
+                .product(name: "PQRCMCP", package: "PQRCMCP"),
             ],
             swiftSettings: [.swiftLanguageMode(.v6)]
         ),

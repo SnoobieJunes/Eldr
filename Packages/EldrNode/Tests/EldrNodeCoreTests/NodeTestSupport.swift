@@ -195,6 +195,23 @@ actor NodeUIEventCollector {
         return false
     }
 
+    /// All `tool_call_update` result text joined — what a tool returned. Used by the
+    /// MCP matrix to assert the REDACTED chat-tool result (codenames) reached the phone.
+    private func toolResultText() -> String {
+        events.compactMap {
+            if case .toolCallUpdate(_, _, let text, _) = $0 { return text } else { return nil }
+        }.joined(separator: "\n")
+    }
+
+    func toolResultJoined(containing marker: String, timeoutMillis: Int = 8_000) async -> String {
+        var waited = 0
+        while !toolResultText().contains(marker) && waited < timeoutMillis {
+            try? await Task.sleep(for: .milliseconds(10))
+            waited += 10
+        }
+        return toolResultText()
+    }
+
     func stop() { task?.cancel() }
 }
 

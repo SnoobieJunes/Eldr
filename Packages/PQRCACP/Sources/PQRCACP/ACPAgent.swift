@@ -52,6 +52,14 @@ public actor ACPAgent {
     private let contextGraph: (any ContextGraphAssembling)?
     /// Cached `contextGraph.health()` result (checked once, before first use).
     private var contextGraphHealthy: Bool?
+    /// Phase D3 — optional EXTRA tool source (the phone's MCP chat tools, served over
+    /// the relay). nil → the agent advertises/runs only its built-in tools, exactly
+    /// as before. When present, its tools are merged into the advertised set AND a
+    /// tool the model calls that this provider owns is routed to it — but ONLY for
+    /// sessions where the CLIENT advertised `mcpServers` (the phone's "share chat
+    /// context" opt-in; see `sessionsWithMCP`). PQRCACP stays MCP-knowledge-free: the
+    /// provider is the seam, and the MCP/relay wiring lives in its implementation.
+    private let extraTools: (any ExtraToolProvider)?
 
     /// Negotiated at `initialize`. Defaults to "everything off" until then (so a
     /// stray prompt before initialize still works via Foundation fallbacks).
@@ -69,6 +77,12 @@ public actor ACPAgent {
     /// Per-session last observed build result ("green" | "red" | "unknown"), updated
     /// whenever a run_shell command looks like a build/test (for `session_end.build`).
     private var sessionBuildStatus: [String: String] = [:]
+    /// Phase D3 — sessions where the CLIENT advertised a non-empty `mcpServers` at
+    /// `session/new`. ONLY these sessions get `extraTools` merged in / routed: the
+    /// phone advertises `mcpServers` exactly when its owner consented to share chat
+    /// context, so this gate keeps the MCP-passthrough path inert otherwise (and
+    /// inert entirely when `extraTools` is nil).
+    private var sessionsWithMCP: Set<String> = []
 
     public init(
         connection: ClientConnection,
@@ -79,7 +93,8 @@ public actor ACPAgent {
         maxIterations: Int = 20,
         streamingEnabled: Bool = true,
         requestTimeoutSeconds: Double = 120,
-        contextGraph: (any ContextGraphAssembling)? = nil
+        contextGraph: (any ContextGraphAssembling)? = nil,
+        extraTools: (any ExtraToolProvider)? = nil
     ) {
         self.connection = connection
         self.llm = llm
@@ -89,6 +104,7 @@ public actor ACPAgent {
         self.maxIterations = maxIterations
         self.streamingEnabled = streamingEnabled
         self.requestTimeoutSeconds = requestTimeoutSeconds > 0 ? requestTimeoutSeconds : 120
+        self.extraTools = extraTools
         self.skills = AgentSkillSet.from(config: config)
         // Build the real client from config when enabled and not injected (tests
         // inject a stub so they stay network-free).
@@ -207,6 +223,14 @@ public actor ACPAgent {
         // Per-session cwd: the client's `cwd`, else the agent's configured workdir.
         let cwd = params["cwd"]?.stringValue ?? toolEnvironment.effectiveWorkdir
         sessions[sessionId] = cwd
+        // Phase D3: did the CLIENT advertise any `mcpServers`? ACP carries them as a
+        // native `session/new` slot. A non-empty list is the phone's signal that its
+        // owner consented to share chat context, so this session may use the
+        // `extraTools` (MCP-over-relay) provider. An empty/absent list (or a nil
+        // provider) keeps the passthrough path fully inert.
+        if Self.advertisesMCPServers(params["mcpServers"]) {
+            sessionsWithMCP.insert(sessionId)
+        }
         // Resolve this project's persistent context (explicit ELDR_ACP_CONTEXT_FILE,
         // else the auto-discovered per-project eldr.md). Stored once; prepended to
         // the system prompt on every turn of this session.
@@ -328,7 +352,16 @@ public actor ACPAgent {
             connection: connection, sessionId: sessionId,
             maxResultBytes: config.maxToolResultBytes,
             maxReadFileBytes: config.maxReadFileBytes)
-        let tools = ToolExecutor.toolDefinitions(allowlist: config.toolAllowlist)
+        var tools = ToolExecutor.toolDefinitions(allowlist: config.toolAllowlist)
+        // Phase D3: merge the phone's MCP chat tools into the advertised set, but
+        // ONLY when this session opted in (`mcpServers` advertised) AND a provider is
+        // wired. The provider's `toolDefinitions()` lazily handshakes over the relay;
+        // if the phone is unreachable it returns [] and nothing extra is advertised
+        // (the turn proceeds with just the built-in tools). Names are `mcp_`-prefixed
+        // by the provider, so they can never shadow a built-in tool.
+        if let extraTools, sessionsWithMCP.contains(sessionId) {
+            tools.append(contentsOf: await extraTools.toolDefinitions())
+        }
 
         // Leading system run: optional project-context block FIRST (so the model
         // reads the project's accumulated facts/corrections before its operating
@@ -546,7 +579,19 @@ public actor ACPAgent {
             params: ACPWire.toolCallUpdate(
                 sessionId: sessionId, toolCallId: toolCallId, status: "in_progress"))
 
-        let result = await executor.run(tool: name, args: args)
+        // Phase D3: a tool the `extraTools` provider owns (the phone's MCP chat tools,
+        // `mcp_`-prefixed) is run by the PROVIDER — a round-trip to the phone over the
+        // relay — not by the local file/shell `ToolExecutor`. Redaction + the
+        // ai_window write-gate are enforced PHONE-SIDE inside its `MCPServer`; this
+        // path only carries the request and the already-redacted result. Routed only
+        // for an opted-in session with a provider wired; otherwise it falls through to
+        // the built-in executor (which reports "unknown tool" for an mcp_ name).
+        let result: ToolResult
+        if let extraTools, Self.isExtraTool(name), sessionsWithMCP.contains(sessionId) {
+            result = await extraTools.call(name: name, arguments: args)
+        } else {
+            result = await executor.run(tool: name, args: args)
+        }
 
         // tool_call_update (completed | failed) with the result text.
         await connection.notify(
@@ -806,6 +851,22 @@ public actor ACPAgent {
     static func isBuildCommand(_ command: String) -> Bool {
         let c = command.lowercased()
         return c.contains("xcodebuild") || c.contains("swift build") || c.contains("swift test")
+    }
+
+    /// Phase D3: did the client's `session/new` carry a non-empty `mcpServers`? ACP's
+    /// `mcpServers` is an ARRAY of server descriptors; a non-empty array means the
+    /// client wants the agent to use those servers. We don't connect to them
+    /// ourselves (the phone serves chat over the relay-backed `extraTools` provider) —
+    /// we use the presence of the slot purely as the consent gate for that provider.
+    static func advertisesMCPServers(_ value: JSONValue?) -> Bool {
+        (value?.arrayValue?.isEmpty == false)
+    }
+
+    /// Whether a tool name belongs to the `extraTools` provider (the phone's MCP chat
+    /// tools, namespaced by `mcp_`). Pure + static so `runOneTool` routes without an
+    /// async query into the provider on the hot path.
+    static func isExtraTool(_ name: String) -> Bool {
+        name.hasPrefix(MCPOverRelayClient.toolNamePrefix)
     }
 
     static func describe(_ error: Error) -> String {

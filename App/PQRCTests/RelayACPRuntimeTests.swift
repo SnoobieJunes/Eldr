@@ -3,6 +3,7 @@ import Foundation
 import PQRCACP
 import PQRCAgent
 import PQRCCore
+import PQRCMCP
 import PQRCNostr
 import Testing
 
@@ -384,5 +385,151 @@ struct RelayACPRuntimeTests {
 
         await owner.shutdown()
         await node.shutdown()
+    }
+}
+
+// MARK: - Phase D3: phone-side MCP serving gates (the consent + C-3 enforcement)
+
+/// The PHONE-side proof for MCP passthrough over the relay (Phase D3). The system
+/// under test is the OWNER's real `PersonaRuntime` acting as the MCP SERVER: a node
+/// asks for chat tools, and the phone must service them ONLY when (a) the node is the
+/// owner's paired `coding_agent` with remote-dev-control AND (b) the per-node "share
+/// chat context" consent is on AND (c) a redacting bridge is injected. Any miss ⇒ no
+/// host (`ensureRelayMCPHost` returns nil), so the node's `MCP1|` frame is dropped and
+/// the phone serves nothing.
+///
+/// This is the phone-side complement to EldrNode's end-to-end matrix (which models the
+/// phone); here the REAL runtime gate (`isMCPSharingNode` → `ensureRelayMCPHost`) is
+/// exercised, including that redaction is delegated to the injected bridge and never
+/// bypassed.
+@Suite("Relay-carried MCP — phone-side gates (Phase D3)", .serialized)
+struct RelayMCPRuntimeTests {
+
+    /// A trivial redacting bridge (codename-only, window-gated) — the stand-in for
+    /// `RuntimeSecureChatBridge`. Records whether it was ever asked, so a test can
+    /// prove a non-consented node never reaches it.
+    final class RecordingBridge: SecureChatBridge, @unchecked Sendable {
+        // @unchecked Sendable: `asked` is only mutated from the actor-serialized host
+        // pump in these single-threaded tests; the box keeps the conformance simple.
+        final class Box: @unchecked Sendable { var asked = false }
+        let box = Box()
+        func conversations() async -> [MCPConversation] { box.asked = true; return [] }
+        func messages(conversationID: String, limit: Int) async -> [MCPMessage] {
+            box.asked = true
+            return [MCPMessage(conversationID: conversationID, sender: "a contact", role: "human", text: "hi", sentAt: 1)]
+        }
+        func search(query: String, limit: Int) async -> [MCPMessage] { box.asked = true; return [] }
+        func contextPreview(conversationID: String) async -> [MCPMessage] { box.asked = true; return [] }
+        func draftReply(conversationID: String, text: String) async -> MCPWriteResult {
+            box.asked = true; return .ok(detail: "drafted")
+        }
+        func markAIContext(conversationID: String, messageIDs: [String], value: Bool) async -> MCPWriteResult {
+            box.asked = true; return .ok(detail: "marked")
+        }
+        func sendAsMyAI(conversationID: String, text: String) async -> MCPWriteResult {
+            box.asked = true; return .failedClosed(reason: "no window")
+        }
+    }
+
+    private func makeRuntime(_ name: String, seed: UInt64) async -> PersonaRuntime {
+        let runtime = await PersonaRuntime(
+            displayName: name, transports: [LocalRelaySimulator().connect()],
+            blobStore: LocalBlossomSimulator(),
+            ais: [TetheredAI(id: "a", name: "ai", provider: DemoAgentProvider())],
+            randomSource: SeededRandomSource(seed: seed),
+            nonceSource: SeededRandomSource(seed: seed &+ 1),
+            keychainService: "chat.pqrc.test-relaymcp-\(name)-\(UUID().uuidString)")
+        await runtime.keychain.deleteAll()
+        _ = try? await runtime.bootstrap(inMemoryStore: true)
+        return runtime
+    }
+
+    /// Make an owner + a REAL verified node contact, returning (owner, node hex). A
+    /// `ContactRecord` requires a real identity binding, so `setContactType` only sticks
+    /// for a contact that ACTUALLY EXISTS — these gate tests must pair a real node
+    /// (mirrors the ACP suite), not invent a hex. The node runtime is torn down right
+    /// after pairing; its binding now lives in the owner's contactRecords.
+    private func makePairedNode(_ ownerName: String, seed: UInt64) async throws
+        -> (owner: PersonaRuntime, nodeHex: String)
+    {
+        let owner = await makeRuntime(ownerName, seed: seed)
+        let node = await makeRuntime("\(ownerName)Node", seed: seed &+ 500)
+        try await owner.addVerifiedPeer(node)
+        let nodeHex = await node.identityHex
+        await node.shutdown()
+        return (owner, nodeHex)
+    }
+
+    private func reset(_ nodeHex: String) {
+        AppSession.setRemoteDevControlConsent(false, nodeID: nodeHex, siloID: "")
+        AppSession.setShareChatContextConsent(false, nodeID: nodeHex, siloID: "")
+    }
+
+    // MARK: (1) consent OFF ⇒ no host
+
+    @Test func noHost_whenShareChatContextOff() async throws {
+        let (owner, nodeHex) = try await makePairedNode("Owner1", seed: 8_100)
+        reset(nodeHex)
+        await owner.setSecureChatBridge(RecordingBridge())
+        // Coding agent + dev-control ON, but share-chat-context OFF.
+        await owner.setContactType(nodeHex, type: "coding_agent")
+        AppSession.setRemoteDevControlConsent(true, nodeID: nodeHex, siloID: "")
+        let host = await owner.ensureRelayMCPHost(nodeHex: nodeHex)
+        #expect(host == nil, "share-chat-context OFF ⇒ the phone serves NO MCP host for the node")
+        reset(nodeHex)
+        await owner.shutdown()
+    }
+
+    // MARK: (2) not a coding agent ⇒ no host (even with the chat-context flag set)
+
+    @Test func noHost_whenNotACodingAgent() async throws {
+        let (owner, nodeHex) = try await makePairedNode("Owner2", seed: 8_200)
+        reset(nodeHex)
+        await owner.setSecureChatBridge(RecordingBridge())
+        // Both consents flipped on, but the contact is NOT a coding_agent node.
+        AppSession.setRemoteDevControlConsent(true, nodeID: nodeHex, siloID: "")
+        AppSession.setShareChatContextConsent(true, nodeID: nodeHex, siloID: "")
+        let host = await owner.ensureRelayMCPHost(nodeHex: nodeHex)
+        #expect(host == nil, "a non-coding-agent contact never gets chat tools served (C-3)")
+        reset(nodeHex)
+        await owner.shutdown()
+    }
+
+    // MARK: (3) no redacting bridge injected ⇒ no host (fail-closed)
+
+    @Test func noHost_whenNoBridgeInjected() async throws {
+        let (owner, nodeHex) = try await makePairedNode("Owner3", seed: 8_300)
+        reset(nodeHex)
+        // Fully consented, but NO bridge injected → no redacting source → no host.
+        await owner.setContactType(nodeHex, type: "coding_agent")
+        AppSession.setRemoteDevControlConsent(true, nodeID: nodeHex, siloID: "")
+        AppSession.setShareChatContextConsent(true, nodeID: nodeHex, siloID: "")
+        let host = await owner.ensureRelayMCPHost(nodeHex: nodeHex)
+        #expect(host == nil, "no redacting bridge ⇒ fail closed (never serve raw chat)")
+        reset(nodeHex)
+        await owner.shutdown()
+    }
+
+    // MARK: (4) fully consented ⇒ a host IS created (and is the serving point)
+
+    @Test func host_createdAndReused_whenFullyConsented() async throws {
+        let (owner, nodeHex) = try await makePairedNode("Owner4", seed: 8_400)
+        reset(nodeHex)
+        await owner.setSecureChatBridge(RecordingBridge())
+        await owner.setContactType(nodeHex, type: "coding_agent")
+        AppSession.setRemoteDevControlConsent(true, nodeID: nodeHex, siloID: "")
+        AppSession.setShareChatContextConsent(true, nodeID: nodeHex, siloID: "")
+        let host1 = await owner.ensureRelayMCPHost(nodeHex: nodeHex)
+        #expect(host1 != nil, "fully consented ⇒ the phone serves an MCP host for the node")
+        // Idempotent — the same host is reused (reassembly/session coherence).
+        let host2 = await owner.ensureRelayMCPHost(nodeHex: nodeHex)
+        #expect(host2 === host1, "the host is reused across frames, not rebuilt")
+        // Revoking share-chat-context tears it down; a later ensure refuses (nil).
+        AppSession.setShareChatContextConsent(false, nodeID: nodeHex, siloID: "")
+        await owner.teardownRelayMCPHost(nodeHex: nodeHex)
+        let host3 = await owner.ensureRelayMCPHost(nodeHex: nodeHex)
+        #expect(host3 == nil, "after revoke, the phone refuses to serve the node again")
+        reset(nodeHex)
+        await owner.shutdown()
     }
 }

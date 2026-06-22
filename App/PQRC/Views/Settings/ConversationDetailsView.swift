@@ -35,6 +35,12 @@ struct ConversationDetailsView: View {
     /// drive this paired Mac node's ACP agent over the relay at all. OFF by default — the
     /// relay path is inert until this is on.
     @State private var remoteDevControl = false
+    /// Per-node SHARE-CHAT-CONTEXT consent (Phase D3): whether this paired Mac's coding
+    /// agent may USE the phone's MCP chat tools (read REDACTED conversations, draft,
+    /// search; `send_as_my_ai` only inside a live AI window). OFF by default — separate
+    /// from dev-control (chat context ≠ dev-control). Off ⇒ the phone refuses to serve
+    /// MCP frames AND refuses to advertise the tools to the node.
+    @State private var shareChatContext = false
 
     var body: some View {
         NavigationStack {
@@ -134,8 +140,12 @@ struct ConversationDetailsView: View {
                                 Task { await model.runtime.refreshACPBindings() }
                                 if !newValue {
                                     // Revoking dev-control also drops the transport + denies
-                                    // any pending prompts for this node (fail-closed).
+                                    // any pending prompts for this node (fail-closed). Phase D3:
+                                    // chat-context sharing presupposes dev-control, so also tear
+                                    // down any live relay-MCP host (the gate `isMCPSharingNode`
+                                    // now fails, but stop the running host immediately too).
                                     Task { await model.runtime.teardownRelayACPTransport(nodeHex: nodeHex) }
+                                    Task { await model.runtime.teardownRelayMCPHost(nodeHex: nodeHex) }
                                 }
                             }
                         Label(
@@ -164,6 +174,32 @@ struct ConversationDetailsView: View {
                             .font(.caption)
                             .foregroundStyle(autonomousChanges ? AnyShapeStyle(.orange) : AnyShapeStyle(.secondary))
                             .accessibilityIdentifier("acp-autonomous-changes-status")
+
+                        Toggle("Share my chat context with this agent", isOn: $shareChatContext)
+                            .accessibilityIdentifier("acp-share-chat-context")
+                            .disabled(!remoteDevControl)
+                            .onChange(of: shareChatContext) { _, newValue in
+                                // Per-node, per-silo — the conversationID IS the node's hex.
+                                AppSession.setShareChatContextConsent(
+                                    newValue, nodeID: conversationID, siloID: model.siloID)
+                                let nodeHex = conversationID
+                                // Re-bind the ACP provider so the next session advertises (or
+                                // stops advertising) the chat tools to the node…
+                                Task { await model.runtime.refreshACPBindings() }
+                                // …and, when turning OFF, tear down any live relay-MCP host so
+                                // the node's chat-tool channel goes dark immediately.
+                                if !newValue {
+                                    Task { await model.runtime.teardownRelayMCPHost(nodeHex: nodeHex) }
+                                }
+                            }
+                        Label(
+                            shareChatContext
+                                ? "ON — this agent can read your REDACTED conversations (codenames only), draft replies, and search. It can post as your AI ONLY while you have an AI window open."
+                                : "OFF — this agent cannot see or search any of your chats. (Your real names are never shared either way — reads are always redacted.)",
+                            systemImage: shareChatContext ? "bubble.left.and.text.bubble.right" : "bubble.left.and.bubble.right")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .accessibilityIdentifier("acp-share-chat-context-status")
                     } header: {
                         Text("Mac coding agent")
                             .helpInfo("Two switches, both off by default. The first lets your phone drive this paired Mac's coding agent over the relay at all. The second lets it create/modify files and run shell commands WITHOUT prompting — with it off, every mutating action asks you here, and your phone is the last brake before a destructive change runs on that Mac.")
@@ -205,6 +241,8 @@ struct ConversationDetailsView: View {
                 autonomousChanges = AppSession.autonomousChangesConsent(
                     nodeID: conversationID, siloID: model.siloID)
                 remoteDevControl = AppSession.remoteDevControlConsent(
+                    nodeID: conversationID, siloID: model.siloID)
+                shareChatContext = AppSession.shareChatContextConsent(
                     nodeID: conversationID, siloID: model.siloID)
             }
             .toolbar {

@@ -82,13 +82,15 @@ public func runACPAgent(
     toolEnvironment: ToolEnvironment = .fromEnvironment(),
     config: AgentConfig = .fromEnvironment(),
     configDir: String? = nil,
-    streamingEnabled: Bool = true
+    streamingEnabled: Bool = true,
+    extraTools: (any ExtraToolProvider)? = nil
 ) async {
     let sink = TransportOutputSink(transport: transport)
     let connection = ClientConnection(sink: sink)
     let agent = ACPAgent(
         connection: connection, llm: llm, toolEnvironment: toolEnvironment,
-        config: config, configDir: configDir, streamingEnabled: streamingEnabled)
+        config: config, configDir: configDir, streamingEnabled: streamingEnabled,
+        extraTools: extraTools)
     for await line in transport.inboundLines() {
         guard let message = JSONValue.parse(line) else { continue }
         if message["method"] == nil, message["id"] != nil {
