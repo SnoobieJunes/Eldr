@@ -66,6 +66,10 @@ private struct ProjectMemoryDetail: View {
                     .padding(12)
             }
         }
-        .frame(width: 560, height: 420)
+        // Resizable instead of hard-fixed: long eldr.md content no longer clips, and the
+        // user can drag the sheet larger. min keeps it readable; ideal is the old size.
+        .frame(
+            minWidth: 480, idealWidth: 680, maxWidth: .infinity,
+            minHeight: 360, idealHeight: 600, maxHeight: .infinity)
     }
 }

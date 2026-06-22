@@ -21,7 +21,9 @@ struct StatusBarView: View {
 
             Divider()
 
-            Text(installText).font(.callout)
+            Text(installText)
+                .font(.callout)
+                .fixedSize(horizontal: false, vertical: true)
 
             Divider()
 
@@ -35,7 +37,7 @@ struct StatusBarView: View {
             Button("Quit") { NSApp.terminate(nil) }
         }
         .padding(14)
-        .frame(width: 260)
+        .frame(width: 320)
     }
 
     private func recheck() async {

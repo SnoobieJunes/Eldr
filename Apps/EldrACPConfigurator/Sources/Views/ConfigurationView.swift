@@ -81,7 +81,12 @@ struct ConfigurationView: View {
             ProjectMemorySection()
         }
         .formStyle(.grouped)
-        .frame(maxWidth: 720)
+        // Cap the reading width (CLAUDE.md: don't let forms sprawl edge-to-edge on a
+        // big display) but fill the rest of the window so the form uses the full height
+        // and stays top-aligned instead of clustering at its natural size. Matches the
+        // BridgeView/TestChatView/RelayWizardView pattern.
+        .frame(maxWidth: 720, alignment: .leading)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
     }
 
     private var healthRow: some View {
