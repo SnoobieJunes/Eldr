@@ -122,15 +122,16 @@ struct ConversationView: View {
                 .accessibilityIdentifier("thread-create-button")
                 .help("Start a thread where each person's AI can join and collaborate — everything they say is recorded right there.")
                 Button {
-                    // The "My AI responds" control now lives inline in Details,
-                    // beside the AI-context / egress-firewall pickers — open it there.
-                    showDetails = true
+                    // The "My AI responds" control now lives inline in the in-chat
+                    // "AI here" sheet, beside the AI-context picker / egress-firewall
+                    // padlock — open it there.
+                    showAIHere = true
                 } label: {
                     Image(systemName: "sparkles")
                 }
                 .accessibilityLabel("My AI")
                 .accessibilityIdentifier("ai-window-button")
-                .help("My AI: respond in chat for a set time (everyone sees it's active, context shared), or draft replies privately. Opens Details.")
+                .help("My AI: respond in chat for a set time (everyone sees it's active, context shared), or draft replies privately. Opens the in-chat “AI here” sheet.")
                 Button {
                     showDetails = true
                 } label: {
@@ -630,11 +631,18 @@ struct ThreadCreateSheet: View {
     }
 }
 
+/// Mode for the "My AI responds" control: drafts privately (default,
+/// privacy-first — nothing posted, no context shared) vs responds in chat as the
+/// signed agent for a bounded window (announces an active window + shares context).
+enum AIRespondsMode: Hashable { case draftsPrivately, respondsInChat }
+
 /// Tap-target of the in-chat "AI here" chip: the per-conversation AI context
 /// override, surfaced in the chat itself (the SAME control as
 /// ConversationDetailsView's "AI context here"). Writes/reads the SAME
 /// `AppSession.conversationContextMode`, so chip · this sheet · Details stay in
-/// sync, and the engine reads it every turn (changes apply in real time).
+/// sync, and the engine reads it every turn (changes apply in real time). Also
+/// hosts the "My AI responds" control (moved here from Details) so it sits beside
+/// the AI-context picker + egress-firewall indicator.
 struct AIHereSheet: View {
     @Bindable var model: AppModel
     let conversationID: String
@@ -643,6 +651,23 @@ struct AIHereSheet: View {
     @State private var aiContextMode = "default"
     @State private var summary: (mode: String, isRemote: Bool, firewallOn: Bool) =
         ("active", false, true)
+    /// "My AI responds" control (moved here from Details): how this AI acts in
+    /// THIS conversation — drafts privately (default, privacy-first) vs responds
+    /// in chat as the signed agent. The duration is the AI window's life AND the
+    /// context-sharing grant when in "responds in chat" mode.
+    @State private var aiRespondsMode: AIRespondsMode = .draftsPrivately
+    /// Window/grant duration in HOURS (stored as 1 / 8 / 24; sent as ×60 minutes).
+    @State private var aiRespondsHours = 1
+    /// Last on-demand private draft, presented in the DraftSheet.
+    @State private var aiRespondsDraft: String?
+    @State private var showAIRespondsDraft = false
+
+    /// Context-sharing scope for the "My AI responds" control — this conversation.
+    private var aiRespondsScope: AIContextGrant.Scope { .conversation(conversationID) }
+    /// Human-readable window/grant duration ("1 hour" / "8 hours" / "24 hours").
+    private var aiRespondsDurationLabel: String {
+        aiRespondsHours == 1 ? "1 hour" : "\(aiRespondsHours) hours"
+    }
 
     var body: some View {
         NavigationStack {
@@ -670,6 +695,68 @@ struct AIHereSheet: View {
                 } footer: {
                     Text("Overrides your AIs' own context setting, just here. \"Off\" keeps every AI from gathering anything from this conversation. Applies in real time. Set per-AI defaults and the egress firewall in Settings ▸ AI.")
                 }
+                Section {
+                    // "My AI responds" — folds the AI window (responds-in-chat) and
+                    // private drafting into one control, styled like the AI-context
+                    // picker above. The chosen duration is the window's life;
+                    // context-sharing is implied by the mode — only "responds in chat"
+                    // shares and only it announces an active window. Privacy-first
+                    // default: drafts privately (nothing posted, no context shared).
+                    Picker("Mode", selection: $aiRespondsMode) {
+                        Text("Drafts privately").tag(AIRespondsMode.draftsPrivately)
+                        Text("Responds in chat").tag(AIRespondsMode.respondsInChat)
+                    }
+                    .accessibilityIdentifier("ai-responds-mode")
+                    Picker("For", selection: $aiRespondsHours) {
+                        Text("1 hour").tag(1)
+                        Text("8 hours").tag(8)
+                        Text("24 hours").tag(24)
+                    }
+                    .accessibilityIdentifier("ai-responds-duration")
+                    if aiRespondsMode == .respondsInChat {
+                        Button {
+                            // Identical privacy semantics to the former AIRespondsSheet:
+                            // open the signed AI window for the chosen time, THEN grant
+                            // context-sharing for the same scope/duration.
+                            Task {
+                                await model.startWindow(
+                                    conversationID: conversationID, minutes: aiRespondsHours * 60)
+                                await model.grantContextSharing(
+                                    scope: aiRespondsScope, minutes: aiRespondsHours * 60,
+                                    conversationID: conversationID)
+                            }
+                        } label: {
+                            Label(
+                                "Turn on for \(aiRespondsDurationLabel)", systemImage: "sparkles")
+                        }
+                        .accessibilityIdentifier("ai-responds-turn-on")
+                    } else {
+                        Button {
+                            // On-demand private draft — nothing posted, no context shared.
+                            Task {
+                                aiRespondsDraft = await model.draft(conversationID: conversationID)
+                                showAIRespondsDraft = aiRespondsDraft != nil
+                            }
+                        } label: {
+                            Label("Draft a reply now", systemImage: "square.and.pencil")
+                        }
+                        .accessibilityIdentifier("ai-responds-draft-now")
+                    }
+                    if model.iGrantedContext(
+                        scope: aiRespondsScope, now: Int64(Date().timeIntervalSince1970))
+                    {
+                        Button("Stop sharing AI context", role: .destructive) {
+                            Task { await model.withdrawContextSharing(scope: aiRespondsScope) }
+                        }
+                        .accessibilityIdentifier("ai-responds-stop-sharing")
+                    }
+                } header: {
+                    Text("My AI responds")
+                } footer: {
+                    Text(aiRespondsMode == .respondsInChat
+                        ? "Your AI replies in this conversation as your signed agent for the chosen time and shares your AI context with the others present. Everyone in the conversation will see that your AI is active."
+                        : "Your AI only drafts replies for you to review and send — nothing is posted to the conversation and no AI context is shared. Drafting is on demand; tap below whenever you want one.")
+                }
             }
             .navigationTitle("AI here")
             .navigationBarTitleDisplayMode(.inline)
@@ -683,7 +770,15 @@ struct AIHereSheet: View {
                     Button("Done") { dismiss() }
                 }
             }
+            // On-demand private draft from "My AI responds" → reuses the same
+            // DraftSheet so the preview / "Send as my AI" / "Edit & send as me"
+            // flow is identical.
+            .sheet(isPresented: $showAIRespondsDraft) {
+                DraftSheet(
+                    model: model, conversationID: conversationID, draft: aiRespondsDraft ?? "")
+            }
         }
-        .presentationDetents([.medium])
+        .presentationDetents([.large])
+        .presentationSizing(.page)
     }
 }

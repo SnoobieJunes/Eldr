@@ -99,6 +99,10 @@ struct MainView: View {
             // to this subtree so it isn't visible app-wide.
             SettingsView(model: model)
                 .environment(settingsNav)
+                // Settings is a full page you navigate, not a quick action: fill
+                // the window on Mac/Catalyst & iPad (and stay full-height on
+                // iPhone) instead of a tiny centered sheet.
+                .presentationSizing(.page)
         }
         // A "Message" tap in Contacts set the target: close Settings and select
         // that conversation in the split view (the same `selection` the sidebar
