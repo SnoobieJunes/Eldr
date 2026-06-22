@@ -5,7 +5,7 @@ import PQRCCore
 import PQRCNostr
 import Testing
 
-@testable import EldrACPConfigurator
+@testable import Huginn
 
 // Phase 3 LIVE node side, CONFIGURATOR proof: the Mac node serves the FULL ACP protocol
 // to the OWNER's phone over the relay (so the phone drives the agent REMOTELY), and the

@@ -99,7 +99,7 @@ final class InstallerService: ObservableObject {
     private func writeLauncherScript(at path: String, comment: String) throws {
         let script = """
             #!/bin/zsh
-            # Written by EldrACPConfigurator. \(comment)
+            # Written by Huginn. \(comment)
             # EldrChat builds against the iOS 27 / macOS 26 beta SDK (Private Cloud
             # Compute symbols), which exist only in Xcode-beta. Force the agent's
             # xcodebuild/xcrun onto the beta toolchain even when xcode-select (or the
@@ -115,7 +115,7 @@ final class InstallerService: ObservableObject {
             # (The Configurator injects it directly; this covers external clients like
             # Xcode/OpenClaw. The first read may prompt once for Keychain access.)
             if [[ -z "${ELDR_LLM_TOKEN:-}" ]]; then
-              ELDR_LLM_TOKEN="$(security find-generic-password -w -s 'chat.eldr.acp.configurator' -a 'llm-token' 2>/dev/null)"
+              ELDR_LLM_TOKEN="$(security find-generic-password -w -s 'chat.eldr.huginn' -a 'llm-token' 2>/dev/null)"
               export ELDR_LLM_TOKEN
             fi
             exec "\(paths.installedBinary)" "$@" 2>> "\(paths.logFile)"

@@ -113,7 +113,7 @@ final class ConfigurationStore: ObservableObject {
     /// the long prompt strings are their own files (read directly by AgentConfig).
     private func writeEnvFile() {
         var lines: [String] = [
-            "# Written by EldrACPConfigurator — do not edit by hand.",
+            "# Written by Huginn — do not edit by hand.",
             export("ELDR_LLM_URL", llmURL),
             // C-8: ELDR_LLM_TOKEN is intentionally NOT written here — it used to land in
             // cleartext at the umask (commonly world-readable). It's in the Keychain now;

@@ -5,7 +5,7 @@ import PQRCCore
 import PQRCNostr
 import Testing
 
-@testable import EldrACPConfigurator
+@testable import Huginn
 
 @Suite("Bridge — pairing payload + activity formatting")
 struct BridgePureTests {

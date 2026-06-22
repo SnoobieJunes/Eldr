@@ -1,7 +1,7 @@
 import Foundation
 import Testing
 
-@testable import EldrACPConfigurator
+@testable import Huginn
 
 // C-8: the LLM token must live in the Keychain (WhenUnlockedThisDeviceOnly), never in
 // the cleartext env file the launcher sources (it previously landed world-readable at

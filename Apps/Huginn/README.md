@@ -1,4 +1,4 @@
-# Eldr ACP Configurator
+# Huginn
 
 A SwiftUI **macOS** app that wraps the `eldr-acp` coding-agent CLI in a friendly
 setup wizard, a live configuration panel, a log viewer, an in-app test chat, a
@@ -15,7 +15,7 @@ pilot **Xcode 27** — write code, build, and run on simulators — entirely on 
 own machine, with no cloud and no API key. The Configurator wraps that CLI; the CLI
 is unchanged and still runs headless (DEVIATIONS AC1).
 
-- App target / scheme: **`EldrACPConfigurator`** (`chat.eldr.acp.configurator`)
+- App target / scheme: **`Huginn`** (`chat.eldr.huginn`)
 - Deployment target: **macOS 26.0** (forced by the linked `PQRCNostr`/`PQRCCore`
   packages, and matching the rest of the repo — DEVIATIONS AC2)
 - Version: **0.1.0**
@@ -25,7 +25,7 @@ is unchanged and still runs headless (DEVIATIONS AC1).
   DEVIATIONS AC6)
 
 For the design decisions behind every piece below, see the
-**"Eldr ACP Configurator (macOS GUI app + DMG)"** section of
+**"Huginn (macOS GUI app + DMG)"** section of
 [`docs/DEVIATIONS.md`](../../docs/DEVIATIONS.md) (entries AC1–AC13). This README does
 not duplicate that rationale; it tells you how to build, run, and use the app.
 
@@ -39,13 +39,13 @@ The app builds and runs straight from Xcode with **no certificates** — only
 
 ```bash
 # From the repo root:
-cd Apps/EldrACPConfigurator
+cd Apps/Huginn
 
 # Build from the command line:
-xcodebuild -scheme EldrACPConfigurator -destination 'platform=macOS' build
+xcodebuild -scheme Huginn -destination 'platform=macOS' build
 
 # Or just open it in Xcode and press Run:
-open EldrACPConfigurator.xcodeproj
+open Huginn.xcodeproj
 ```
 
 > The Run Script build phase compiles the bundled `eldr-acp` binary from
@@ -217,7 +217,7 @@ reach the agent) and appends the agent's stderr to the log the Logs tab follows:
 
 ```zsh
 #!/bin/zsh
-# Written by EldrACPConfigurator. Xcode 27 is pointed at this launcher.
+# Written by Huginn. Xcode 27 is pointed at this launcher.
 source "$HOME/.config/eldr-acp/env" 2>/dev/null || true
 exec "$HOME/.local/bin/eldr-acp" "$@" 2>> "$HOME/.config/eldr-acp/eldr-acp.log"
 ```

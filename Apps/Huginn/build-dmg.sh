@@ -1,5 +1,5 @@
 #!/bin/zsh
-# build-dmg.sh — archive, sign, notarize, and package EldrACPConfigurator as a DMG.
+# build-dmg.sh — archive, sign, notarize, and package Huginn as a DMG.
 #
 # PREREQUISITES (NOT part of CI — requires a paid Apple Developer account):
 #   • A "Developer ID Application" signing certificate in your login keychain.
@@ -19,9 +19,9 @@
 set -euo pipefail
 
 cd "$(dirname "$0")"
-PROJECT="EldrACPConfigurator.xcodeproj"
-SCHEME="EldrACPConfigurator"
-APP_NAME="EldrACPConfigurator"
+PROJECT="Huginn.xcodeproj"
+SCHEME="Huginn"
+APP_NAME="Huginn"
 CONFIG="Release"
 
 BUILD_DIR="$(pwd)/.dmgbuild"

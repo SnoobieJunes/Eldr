@@ -1,7 +1,7 @@
 import Foundation
 import Testing
 
-@testable import EldrACPConfigurator
+@testable import Huginn
 
 /// Generator-logic tests for the relay-provisioning wizard. They prove the install
 /// script carries the right NON-secret structure, that NO secret token value leaks into

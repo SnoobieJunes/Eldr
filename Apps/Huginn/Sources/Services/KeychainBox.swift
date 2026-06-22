@@ -8,7 +8,7 @@ import Security
 /// in the app target, so the Configurator carries its own copy of the same policy.)
 struct KeychainBox: Sendable {
     let service: String
-    init(service: String = "chat.eldr.acp.configurator") { self.service = service }
+    init(service: String = "chat.eldr.huginn") { self.service = service }
 
     func save(_ data: Data, account: String) throws {
         let base: [String: Any] = [

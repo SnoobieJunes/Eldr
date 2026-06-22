@@ -85,7 +85,7 @@ public struct HarnessDescriptor: Sendable, Equatable, Identifiable {
 ///
 /// IMPORTANT — the `.stdioSpawn` commands below are of two confidences:
 ///   • NOT provisional — `eldr-acp-xcode` / `eldr-acp-openclaw`: the launchers the
-///     EldrACPConfigurator actually installs into `~/.local/bin` (see `ConfigPaths.launcher`
+///     Huginn actually installs into `~/.local/bin` (see `ConfigPaths.launcher`
 ///     / `.openClawLauncher`). These exist on this machine today.
 ///   • Provisional (`isProvisional: true`) — Claude Code, Codex, Gemini CLI, OpenCode,
 ///     Cursor: SCAFFOLDING DATA. The commands/args are the tools' *conventional* ACP launch

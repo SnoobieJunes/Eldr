@@ -16,9 +16,9 @@
             <BuildableReference
                BuildableIdentifier = "primary"
                BlueprintIdentifier = "BB0000000000000000000011"
-               BuildableName = "EldrACPConfigurator.app"
-               BlueprintName = "EldrACPConfigurator"
-               ReferencedContainer = "container:EldrACPConfigurator.xcodeproj">
+               BuildableName = "Huginn.app"
+               BlueprintName = "Huginn"
+               ReferencedContainer = "container:Huginn.xcodeproj">
             </BuildableReference>
          </BuildActionEntry>
       </BuildActionEntries>
@@ -36,9 +36,9 @@
             <BuildableReference
                BuildableIdentifier = "primary"
                BlueprintIdentifier = "BB0000000000000000000012"
-               BuildableName = "EldrACPConfiguratorTests.xctest"
-               BlueprintName = "EldrACPConfiguratorTests"
-               ReferencedContainer = "container:EldrACPConfigurator.xcodeproj">
+               BuildableName = "HuginnTests.xctest"
+               BlueprintName = "HuginnTests"
+               ReferencedContainer = "container:Huginn.xcodeproj">
             </BuildableReference>
          </TestableReference>
       </Testables>
@@ -59,9 +59,9 @@
          <BuildableReference
             BuildableIdentifier = "primary"
             BlueprintIdentifier = "BB0000000000000000000011"
-            BuildableName = "EldrACPConfigurator.app"
-            BlueprintName = "EldrACPConfigurator"
-            ReferencedContainer = "container:EldrACPConfigurator.xcodeproj">
+            BuildableName = "Huginn.app"
+            BlueprintName = "Huginn"
+            ReferencedContainer = "container:Huginn.xcodeproj">
          </BuildableReference>
       </BuildableProductRunnable>
    </LaunchAction>
@@ -76,9 +76,9 @@
          <BuildableReference
             BuildableIdentifier = "primary"
             BlueprintIdentifier = "BB0000000000000000000011"
-            BuildableName = "EldrACPConfigurator.app"
-            BlueprintName = "EldrACPConfigurator"
-            ReferencedContainer = "container:EldrACPConfigurator.xcodeproj">
+            BuildableName = "Huginn.app"
+            BlueprintName = "Huginn"
+            ReferencedContainer = "container:Huginn.xcodeproj">
          </BuildableReference>
       </BuildableProductRunnable>
    </ProfileAction>

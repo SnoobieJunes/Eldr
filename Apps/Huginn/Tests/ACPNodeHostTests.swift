@@ -6,7 +6,7 @@ import PQRCCore
 import PQRCNostr
 import Testing
 
-@testable import EldrACPConfigurator
+@testable import Huginn
 
 /// The HIGH-VALUE proof for the NODE side of the ACP router: the FULL composition runs
 /// OVER THE SEAL, end to end, headlessly.

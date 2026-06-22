@@ -6,7 +6,7 @@ import SwiftUI
 /// infrastructure (the relay-setup wizard). It installs the binary + launcher so Xcode
 /// 27 can drive a self-hosted LLM as a coding agent.
 @main
-struct EldrACPConfiguratorApp: App {
+struct HuginnApp: App {
     @StateObject private var store = ConfigurationStore()
     @StateObject private var health = LLMHealthChecker()
     @StateObject private var installer = InstallerService()
