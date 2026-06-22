@@ -15,9 +15,6 @@ struct ConversationView: View {
     @State private var fullScreenContent: FullScreenContent?
     /// Set while the AI is drafting a response into the composer.
     @State private var aiDrafting = false
-    @State private var aiDraft: String?
-    @State private var showDraftSheet = false
-    @State private var showWindowPicker = false
     @State private var showThreadSheet = false
     @State private var showDetails = false
     /// Multi-select mode for batch "Add to AI Context" (Feature 3).
@@ -125,13 +122,15 @@ struct ConversationView: View {
                 .accessibilityIdentifier("thread-create-button")
                 .help("Start a thread where each person's AI can join and collaborate — everything they say is recorded right there.")
                 Button {
-                    showWindowPicker = true
+                    // The "My AI responds" control now lives inline in Details,
+                    // beside the AI-context / egress-firewall pickers — open it there.
+                    showDetails = true
                 } label: {
                     Image(systemName: "sparkles")
                 }
                 .accessibilityLabel("My AI")
                 .accessibilityIdentifier("ai-window-button")
-                .help("My AI: respond in chat for a set time (everyone sees it's active, context shared), or draft replies privately.")
+                .help("My AI: respond in chat for a set time (everyone sees it's active, context shared), or draft replies privately. Opens Details.")
                 Button {
                     showDetails = true
                 } label: {
@@ -140,12 +139,6 @@ struct ConversationView: View {
                 .accessibilityLabel("Conversation details")
                 .help("Verify this contact's safety code, set a local name, control AI here, or block.")
             }
-        }
-        .sheet(isPresented: $showWindowPicker) {
-            AIRespondsSheet(model: model, conversationID: conversationID)
-        }
-        .sheet(isPresented: $showDraftSheet) {
-            DraftSheet(model: model, conversationID: conversationID, draft: aiDraft ?? "")
         }
         .sheet(isPresented: $showThreadSheet) {
             ThreadCreateSheet(model: model, conversationID: conversationID)
@@ -549,96 +542,6 @@ struct AIWindowBanner: View {
 
 /// AI draft preview: "Send as my AI" (agent-signed + labeled) or
 /// "Edit & send as me" (human message, human-signed) — APP-SPEC §9.
-/// "My AI responds" — folds the AI window (responds-in-chat) and private drafting
-/// into one control, styled like the AI-context picker. The chosen duration is the
-/// window's life; context-sharing is implied by the mode — only "responds in chat"
-/// shares and only it announces an active window. Privacy-first default: private.
-struct AIRespondsSheet: View {
-    @Bindable var model: AppModel
-    let conversationID: String
-    @Environment(\.dismiss) private var dismiss
-
-    enum Mode: Hashable { case draftsPrivately, respondsInChat }
-    @State private var mode: Mode = .draftsPrivately
-    @State private var hours = 1
-    @State private var draft: String?
-    @State private var showDraft = false
-    @State private var working = false
-
-    private var scope: AIContextGrant.Scope { .conversation(conversationID) }
-    private var durationLabel: String { hours == 1 ? "1 hour" : "\(hours) hours" }
-
-    var body: some View {
-        NavigationStack {
-            Form {
-                Section {
-                    Picker("Mode", selection: $mode) {
-                        Text("Drafts privately").tag(Mode.draftsPrivately)
-                        Text("Responds in chat").tag(Mode.respondsInChat)
-                    }
-                    .accessibilityIdentifier("ai-responds-mode")
-                    Picker("For", selection: $hours) {
-                        Text("1 hour").tag(1)
-                        Text("8 hours").tag(8)
-                        Text("24 hours").tag(24)
-                    }
-                    .accessibilityIdentifier("ai-responds-duration")
-                } header: {
-                    Text("My AI responds")
-                } footer: {
-                    Text(mode == .respondsInChat
-                        ? "Your AI replies in this conversation as your signed agent for the chosen time and shares your AI context with the others present. Everyone in the conversation will see that your AI is active."
-                        : "Your AI only drafts replies for you to review and send — nothing is posted to the conversation and no AI context is shared. Drafting is on demand; tap below whenever you want one.")
-                }
-                Section {
-                    if mode == .respondsInChat {
-                        Button {
-                            working = true
-                            Task {
-                                await model.startWindow(
-                                    conversationID: conversationID, minutes: hours * 60)
-                                await model.grantContextSharing(
-                                    scope: scope, minutes: hours * 60, conversationID: conversationID)
-                                dismiss()
-                            }
-                        } label: {
-                            Label("Turn on for \(durationLabel)", systemImage: "sparkles")
-                        }
-                        .accessibilityIdentifier("ai-responds-turn-on")
-                    } else {
-                        Button {
-                            Task {
-                                draft = await model.draft(conversationID: conversationID)
-                                showDraft = draft != nil
-                            }
-                        } label: {
-                            Label("Draft a reply now", systemImage: "square.and.pencil")
-                        }
-                        .accessibilityIdentifier("ai-responds-draft-now")
-                    }
-                    if model.iGrantedContext(
-                        scope: scope, now: Int64(Date().timeIntervalSince1970))
-                    {
-                        Button("Stop sharing AI context", role: .destructive) {
-                            Task { await model.withdrawContextSharing(scope: scope) }
-                        }
-                        .accessibilityIdentifier("ai-responds-stop-sharing")
-                    }
-                }
-            }
-            .navigationTitle("My AI")
-            .navigationBarTitleDisplayMode(.inline)
-            .disabled(working)
-            .toolbar {
-                ToolbarItem(placement: .confirmationAction) { Button("Done") { dismiss() } }
-            }
-            .sheet(isPresented: $showDraft) {
-                DraftSheet(model: model, conversationID: conversationID, draft: draft ?? "")
-            }
-        }
-    }
-}
-
 struct DraftSheet: View {
     @Bindable var model: AppModel
     let conversationID: String

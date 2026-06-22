@@ -127,10 +127,17 @@ final class PQRCUITests: XCTestCase {
     func test_aiDraft_previewThenSendAsAI_rendersAgentBubble() throws {
         let app = launchUniverse()
         openConversation(app, "Bob")
+        // The "My AI responds" control now lives inline in Conversation Details;
+        // the sparkles toolbar button (ai-window-button) opens that Details sheet.
         tapWhenReady(app, button: "ai-window-button")
-        // The "My AI" sheet opens in "Drafts privately" mode by default, so the
-        // on-demand draft action is shown immediately.
-        tapWhenReady(app, button: "ai-responds-draft-now")
+        // The control defaults to "Drafts privately", so the on-demand draft
+        // action is shown immediately in the "My AI responds" section. It sits
+        // below the verify/AI-context sections, so make sure it's on screen
+        // (tap auto-scrolls, but swipe up first in case it's below the fold).
+        let draftNow = app.buttons["ai-responds-draft-now"]
+        XCTAssertTrue(draftNow.waitForExistence(timeout: 15), "ai-responds-draft-now missing")
+        if !draftNow.isHittable { app.swipeUp() }
+        draftNow.tap()
         XCTAssertTrue(app.textViews["draft-editor"].waitForExistence(timeout: 20))
         tapWhenReady(app, button: "send-as-ai")
         XCTAssertTrue(
