@@ -128,7 +128,9 @@ final class PQRCUITests: XCTestCase {
         let app = launchUniverse()
         openConversation(app, "Bob")
         tapWhenReady(app, button: "ai-window-button")
-        tapWhenReady(app, button: "Draft a reply privately")
+        // The "My AI" sheet opens in "Drafts privately" mode by default, so the
+        // on-demand draft action is shown immediately.
+        tapWhenReady(app, button: "ai-responds-draft-now")
         XCTAssertTrue(app.textViews["draft-editor"].waitForExistence(timeout: 20))
         tapWhenReady(app, button: "send-as-ai")
         XCTAssertTrue(
