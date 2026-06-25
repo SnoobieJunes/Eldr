@@ -2,14 +2,19 @@ import SwiftUI
 
 /// The enterprise / funder "Why Eldr for teams" tour, hosted in Huginn (the agent
 /// cockpit) rather than EldrChat — this is where the team + self-hosted-AI story
-/// lands, and where the agent-security guarantees (owner-gated agent, credential
+/// lands, and where the agent-security guarantees (owner-bound agent, credential
 /// scrubbing, human-in-the-loop tool approval, file jail) are most concrete.
+///
+/// Theme (matching EldrChat's voyaging tour): **Eldr** is each person's boat through
+/// unknown waters; **Huginn** — named for Óðinn's raven, "thought" — is the AI that
+/// flies from boat to boat over Eldr's sealed line, keeping the whole fleet rowing in
+/// unison. The cards carry that metaphor while teaching one real, shipped guarantee
+/// each.
 ///
 /// Self-contained: it mirrors EldrChat's polished card tour (glowing hero badge,
 /// two-tone gradients, progress rail, the honest "field note" pill) but is
 /// macOS-native — a `.sheet`-presented, button-driven walkthrough (no iOS-only
-/// `TabView(.page)` / `fullScreenCover`). Pure content + view code; no Huginn
-/// domain dependencies.
+/// `TabView(.page)` / `fullScreenCover`). Pure content + view code.
 
 // MARK: - Model
 
@@ -27,128 +32,129 @@ struct EnterpriseTourStep: Identifiable {
 }
 
 enum EnterpriseTour {
-    /// Leads with the private network + sovereign/owner-gated AI, then the concrete
-    /// agent-security guarantees (secrets scrubbed, every action approved, jailed),
-    /// then honest labeling, self-hosted infra, the phone↔agent bridge, post-quantum
-    /// resilience, and the close. Shipped capabilities are stated as present; the
-    /// team / self-hosted bridges are labeled as rolling out (the honesty rule).
+    /// Eldr (the boats) + Huginn (the raven of thought flying between them): leads with
+    /// what Huginn is, then the agent-security guarantees made concrete here — the raven
+    /// answers only to you, its cargo stays sealed, no oar moves without your word —
+    /// then honest labeling, your own waters, sending the raven home, the hardest seas,
+    /// and the fleet as one. Shipped capabilities are stated as present; the team /
+    /// self-hosted bridges are labeled as rolling out (the honesty rule).
     static let steps: [EnterpriseTourStep] = [
         EnterpriseTourStep(
             id: 0,
-            symbol: "building.2.fill", accentSymbol: "lock.fill",
+            symbol: "bird.fill", accentSymbol: "sailboat.fill",
             gradient: [.indigo, .blue],
-            title: "AI without the leak",
-            subtitle: "Powerful agents, none of the exposure.",
+            title: "Huginn — the raven of thought",
+            subtitle: "Your thought, flying boat to boat.",
             body:
-                "Eldr is the private network for your team and its AI — end-to-end encrypted, post-quantum, and yours to run. Huginn is the cockpit on this Mac; Eldr is the secure line your people reach it over, so your data never leaves your control.",
+                "Eldr is each person's boat through unknown waters — private, post-quantum, yours to steer. Huginn is the thought that flies between them: your AI, carried from Eldr to Eldr over a sealed line, so a whole crew can think and work as one — every ship rowing in unison — without your data ever leaving your hands.",
             fieldNote:
-                "Everything in this tour ships today. Pair a phone from the EldrChat Bridge tab to try it; the team integrations are rolling out now.",
+                "Named for Óðinn's raven Huginn — “thought.” Send it out by pairing a phone from the EldrChat Bridge tab; the team integrations are rolling out now.",
             voiceOver:
-                "A.I. without the leak. Powerful agents, none of the exposure. Eldr is the private network for your team and its A.I., end-to-end encrypted, post-quantum, and yours to run. Huginn is the cockpit on this Mac; Eldr is the secure line your people reach it over, so your data never leaves your control."
+                "Huginn, the raven of thought. Your thought, flying boat to boat. Eldr is each person's boat through unknown waters, private, post-quantum, yours to steer. Huginn is the thought that flies between them: your A.I., carried from Eldr to Eldr over a sealed line, so a whole crew can think and work as one, every ship rowing in unison, without your data ever leaving your hands. Named for Odin's raven Huginn, thought."
         ),
         EnterpriseTourStep(
             id: 1,
-            symbol: "person.badge.shield.checkmark.fill", accentSymbol: "hand.raised.fill",
+            symbol: "shield.lefthalf.filled", accentSymbol: "bird.fill",
             gradient: [.teal, .green],
-            title: "Your AI answers to you alone",
-            subtitle: "Sovereign by design — and only yours to drive.",
+            title: "Your raven answers only to you",
+            subtitle: "Sovereign by design — yours alone to send.",
             body:
-                "Your settings alone decide when your AI speaks and what it sees — no one else in a chat can switch it on, off, or change it. And the agent on this Mac is pinned to you: invite a colleague in and they can collaborate, but they can never task your agent, run its tools, or hijack it. It answers to its owner.",
+                "Your hand alone decides when your thought takes wing and what it carries — no one else aboard can launch it, ground it, or turn it. And the raven on this Mac is bound to you: invite a shipmate aboard and they can row alongside, but they can never command it, set it to a task, or bend it to their will. It heeds its master, and no other.",
             fieldNote:
-                "Owner-pinned at pairing: a non-owner's message can never become an agent command — no confused-deputy, no colleague reaching a shell on your Mac.",
+                "Bound to you at pairing: a shipmate's words can never become your agent's orders — no stowaway ever reaches the helm of your Mac.",
             voiceOver:
-                "Your A.I. answers to you alone. Sovereign by design, and only yours to drive. Your settings alone decide when your A.I. speaks and what it sees; no one else in a chat can switch it on, off, or change it. And the agent on this Mac is pinned to you: invite a colleague in and they can collaborate, but they can never task your agent, run its tools, or hijack it. Owner-pinned at pairing: a non-owner's message can never become an agent command."
+                "Your raven answers only to you. Sovereign by design, yours alone to send. Your hand alone decides when your thought takes wing and what it carries; no one else aboard can launch it, ground it, or turn it. And the raven on this Mac is bound to you: invite a shipmate aboard and they can row alongside, but they can never command it, set it to a task, or bend it to their will. Bound to you at pairing: a shipmate's words can never become your agent's orders."
         ),
         EnterpriseTourStep(
             id: 2,
             symbol: "key.horizontal.fill", accentSymbol: "eye.slash.fill",
             gradient: [.blue, .cyan],
-            title: "Secrets never leave the room",
-            subtitle: "Keys and tokens are scrubbed automatically.",
+            title: "What's sealed stays sealed",
+            subtitle: "Keys and secrets never make the crossing.",
             body:
-                "Before anything your agent says reaches another person — or a cloud model — Eldr strips credential-shaped secrets: API keys, tokens, passwords. Even if someone tries to coax a key out of your agent, the copy they receive is redacted. You see the raw answer; they don't.",
+                "Before your raven carries a word to another ship — or to a far-off model — Eldr strips the secrets from its talons: API keys, tokens, passwords. Even if a shipmate tries to coax a key loose, the message they receive is sealed shut. You see the cargo whole; they never do.",
             fieldNote:
-                "Pattern-scrubs OpenAI / Anthropic / AWS / GitHub / Slack keys, bearer tokens, and high-entropy blobs — per recipient, and before any cloud egress.",
+                "Scrubs OpenAI / Anthropic / AWS / GitHub / Slack keys, bearer tokens, and high-entropy blobs — per recipient, and before any crossing to a cloud model.",
             voiceOver:
-                "Secrets never leave the room. Keys and tokens are scrubbed automatically. Before anything your agent says reaches another person, or a cloud model, Eldr strips credential-shaped secrets: A.P.I. keys, tokens, passwords. Even if someone tries to coax a key out of your agent, the copy they receive is redacted. You see the raw answer; they don't."
+                "What's sealed stays sealed. Keys and secrets never make the crossing. Before your raven carries a word to another ship, or to a far-off model, Eldr strips the secrets from its talons: A.P.I. keys, tokens, passwords. Even if a shipmate tries to coax a key loose, the message they receive is sealed shut. You see the cargo whole; they never do."
         ),
         EnterpriseTourStep(
             id: 3,
             symbol: "hand.raised.fill", accentSymbol: "lock.shield.fill",
             gradient: [.orange, .pink],
-            title: "Every action needs your hand",
-            subtitle: "Nothing mutates without your approval.",
+            title: "No oar moves without your word",
+            subtitle: "Nothing changes course without you.",
             body:
-                "Write a file, run a command — every action that changes something waits for your yes on your phone, and silence means no. The agent is boxed into one working directory it can't escape. A powerful agent, on a short, observable leash.",
+                "When your raven would change something on your ship — write a file, run a command — it waits for your yes, and silence is a no. It's kept to one deck it cannot leave. A powerful thought, on a line you can always see and always cut.",
             fieldNote:
-                "Fail-closed by default: mutating tools need explicit approval and stay inside the workdir jail. Auto-approve is an explicit opt-in, never the default.",
+                "Real and shipping: a mutating action from your paired Mac agent raises an “Allow this action?” prompt on your phone — Allow once, Always allow, or Deny. Fail-closed, bounded to one workdir; standing approval is a choice you make, never the default.",
             voiceOver:
-                "Every action needs your hand. Nothing mutates without your approval. Write a file, run a command: every action that changes something waits for your yes on your phone, and silence means no. The agent is boxed into one working directory it can't escape. Fail-closed by default; auto-approve is an explicit opt-in, never the default."
+                "No oar moves without your word. Nothing changes course without you. When your raven would change something on your ship, write a file, run a command, it waits for your yes, and silence is a no. It's kept to one deck it cannot leave. Real and shipping: a mutating action from your paired Mac agent raises an Allow this action prompt on your phone, Allow once, Always allow, or Deny. Fail-closed; standing approval is a choice you make, never the default."
         ),
         EnterpriseTourStep(
             id: 4,
-            symbol: "doc.text.magnifyingglass", accentSymbol: "checkmark.seal.fill",
-            gradient: [.pink, .orange],
-            title: "Nothing happens in the dark",
-            subtitle: "Every AI action, labeled and on the record.",
+            symbol: "checkmark.seal.fill", accentSymbol: "bird.fill",
+            gradient: [.indigo, .purple],
+            title: "Every word flies its colors",
+            subtitle: "Shipmate or raven — never mistaken on the wire.",
             body:
-                "Eldr cryptographically labels every AI-authored message as AI — it can't be forged or stripped — and shows exactly what each assistant can read. For a regulated team, that's an audit trail by construction, not a bolt-on.",
+                "Eldr marks every word your raven speaks as the raven's — a rune signed inside the encryption, that can't be forged or stripped — and shows exactly what it was given to read. For a crew that answers to rules, that's a ship's log by construction, not a bolt-on.",
             fieldNote:
-                "The AI label is signed inside the encryption, so human and machine can never be confused on the wire.",
+                "The mark is signed inside the encryption, so shipmate and raven can never be passed off for one another on the wire.",
             voiceOver:
-                "Nothing happens in the dark. Every A.I. action, labeled and on the record. Eldr cryptographically labels every A.I.-authored message as A.I., so it can't be forged or stripped, and shows exactly what each assistant can read. For a regulated team, that's an audit trail by construction, not a bolt-on."
+                "Every word flies its colors. Shipmate or raven, never mistaken on the wire. Eldr marks every word your raven speaks as the raven's, a rune signed inside the encryption that can't be forged or stripped, and shows exactly what it was given to read. For a crew that answers to rules, that's a ship's log by construction, not a bolt-on."
         ),
         EnterpriseTourStep(
             id: 5,
             symbol: "server.rack", accentSymbol: "key.horizontal.fill",
             gradient: [.blue, .cyan],
-            title: "Your AI, your infrastructure",
-            subtitle: "No cloud vendor in the middle.",
+            title: "Your raven, your waters",
+            subtitle: "No harbor master in the middle.",
             body:
-                "Run the model yourself — on this Mac, or your own server — and run the network yourself too. No API key, no third-party cloud, no lock-in. Your code, your AI, your rules, extended to the very wire your messages travel on.",
+                "Fly a raven you keep yourself — on this Mac, or your own server — and sail waters you chart yourself. No API key, no distant cloud, no harbor that owns you. Your crew, your thought, your rules, all the way down to the wire your words travel on.",
             fieldNote:
-                "Point Huginn at a local LLM (LM Studio, Ollama, vLLM) in Configuration; stand up your own relay from the Relay tab.",
+                "Point Huginn at a local model (LM Studio, Ollama, vLLM) in Configuration; raise your own relay from the Relay tab.",
             voiceOver:
-                "Your A.I., your infrastructure. No cloud vendor in the middle. Run the model yourself, on this Mac or your own server, and run the network yourself too. No A.P.I. key, no third-party cloud, no lock-in. Point Huginn at a local L.L.M. in Configuration, and stand up your own relay from the Relay tab."
+                "Your raven, your waters. No harbor master in the middle. Fly a raven you keep yourself, on this Mac or your own server, and sail waters you chart yourself. No A.P.I. key, no distant cloud, no harbor that owns you. Your crew, your thought, your rules, all the way down to the wire. Point Huginn at a local model in Configuration, and raise your own relay from the Relay tab."
         ),
         EnterpriseTourStep(
             id: 6,
-            symbol: "antenna.radiowaves.left.and.right", accentSymbol: "brain.head.profile.fill",
+            symbol: "antenna.radiowaves.left.and.right", accentSymbol: "bird.fill",
             gradient: [.purple, .blue],
-            title: "Reach your agent from anywhere",
-            subtitle: "Your phone. Your self-hosted AI. One secure line.",
+            title: "Send the raven from any shore",
+            subtitle: "Your phone, your ship's thought, one sealed line.",
             body:
-                "Eldr links your phone to the AI running on your own machines over a post-quantum, end-to-end-encrypted line — so you can task your self-hosted assistant from anywhere, with nothing exposed to the open internet.",
+                "Eldr ties your phone to the thought running on your own ships over a post-quantum, sealed line — so you can send your raven from any shore and have it wing home, with nothing left exposed on open water.",
             fieldNote:
-                "Built to bridge self-hosted agent stacks like sybilclaw to your phone — pair from the EldrChat Bridge tab. Rolling out now.",
+                "Built to carry self-hosted agent crews like sybilclaw to your phone — pair from the EldrChat Bridge tab. Rolling out now.",
             voiceOver:
-                "Reach your agent from anywhere. Your phone, your self-hosted A.I., one secure line. Eldr links your phone to the A.I. running on your own machines over a post-quantum, end-to-end-encrypted line, so you can task your self-hosted assistant from anywhere, with nothing exposed to the open internet."
+                "Send the raven from any shore. Your phone, your ship's thought, one sealed line. Eldr ties your phone to the thought running on your own ships over a post-quantum, sealed line, so you can send your raven from any shore and have it wing home, with nothing left exposed on open water."
         ),
         EnterpriseTourStep(
             id: 7,
             symbol: "atom", accentSymbol: "point.3.connected.trianglepath.dotted",
             gradient: [.purple, .indigo],
-            title: "Built for the hardest networks",
-            subtitle: "Post-quantum. Decentralized. No single point to fail.",
+            title: "Built for the hardest seas",
+            subtitle: "Post-quantum. Decentralized. No harbor to lose.",
             body:
-                "Encryption designed to outlast tomorrow's quantum computers, over a network with no company in the pipe — and it keeps working when the internet doesn't, falling back to local radio or a phone-hosted relay. The same properties that survive an outage are what communication needs at the edge, and eventually off-Earth.",
+                "Encryption forged to outlast tomorrow's storms — the quantum machines still being built — over waters no company owns, that hold their bearing when the internet goes dark, falling back to local radio or a ship that hosts the harbor itself. The qualities that ride out a squall are the ones thought will need at the edge of the map, and one day beyond it.",
             fieldNote:
-                "Post-quantum on every conversation; works offline over Bluetooth and Wi-Fi with no router or carrier.",
+                "Post-quantum on every crossing; rows on over Bluetooth and Wi-Fi with no router or carrier.",
             voiceOver:
-                "Built for the hardest networks. Post-quantum, decentralized, no single point to fail. Encryption designed to outlast tomorrow's quantum computers, over a network with no company in the pipe, and it keeps working when the internet doesn't, falling back to local radio or a phone-hosted relay. The same properties that survive an outage are what communication needs at the edge, and eventually off-Earth."
+                "Built for the hardest seas. Post-quantum, decentralized, no harbor to lose. Encryption forged to outlast tomorrow's storms, the quantum machines still being built, over waters no company owns, that hold their bearing when the internet goes dark, falling back to local radio or a ship that hosts the harbor itself. The qualities that ride out a squall are the ones thought will need at the edge of the map, and one day beyond it."
         ),
         EnterpriseTourStep(
             id: 8,
-            symbol: "flag.checkered", accentSymbol: "sparkles",
+            symbol: "sailboat.fill", accentSymbol: "sparkles",
             gradient: [.pink, .purple],
-            title: "Own the network your AI runs on",
+            title: "A fleet that rows as one",
             subtitle: "Private by right. Sovereign by design.",
             body:
-                "Zero-trust collaboration, self-hosted AI, and post-quantum resilience in one fabric — so teams can put powerful agents to work with vendors, contractors, and each other without handing their data to anyone. That's the company we're building.",
+                "Boats that trust no harbor, ravens that answer only to their masters, and thought that flies sealed between them — so a whole fleet can put powerful AI to the oars together, in unison, without ever handing over the tiller. That's the company we're building.",
             fieldNote:
-                "Replay this tour anytime from the “Why Eldr for teams” button in Configuration.",
+                "Replay this anytime from the “Why Eldr for teams” card in Configuration.",
             voiceOver:
-                "Own the network your A.I. runs on. Private by right, sovereign by design. Zero-trust collaboration, self-hosted A.I., and post-quantum resilience in one fabric, so teams can put powerful agents to work with vendors, contractors, and each other without handing their data to anyone. That's the company we're building."
+                "A fleet that rows as one. Private by right, sovereign by design. Boats that trust no harbor, ravens that answer only to their masters, and thought that flies sealed between them, so a whole fleet can put powerful A.I. to the oars together, in unison, without ever handing over the tiller. That's the company we're building."
         ),
     ]
 }
@@ -345,7 +351,7 @@ struct EnterpriseTourView: View {
                 Button {
                     if isLast { onFinish() } else { advance(to: index + 1) }
                 } label: {
-                    Text(isLast ? "Get started" : "Next")
+                    Text(isLast ? "Set sail" : "Next")
                         .frame(maxWidth: .infinity)
                         .padding(.vertical, 4)
                 }
