@@ -779,16 +779,6 @@ struct SettingsView: View {
             }
             .accessibilityIdentifier("take-the-tour")
             .accessibilityHint("Replays the guided tour of EldrChat's features and privacy.")
-            Button {
-                // Same deferred-relaunch dance as "Take the tour": dismiss Settings
-                // first so the full-screen cover doesn't collide with the sheet.
-                dismiss()
-                tour.relaunch(.enterprise)
-            } label: {
-                Label("Why Eldr for teams", systemImage: "building.2.fill")
-            }
-            .accessibilityIdentifier("enterprise-tour")
-            .accessibilityHint("Plays the enterprise tour: zero-trust collaboration, sovereign self-hosted AI, and post-quantum resilience.")
             LabeledContent("Protocol", value: "pqrc-v1")
             LabeledContent("License", value: "AGPL-3.0")
             Text("Honest limits: relays can see your IP address and that someone messaged you. They cannot see who sent it or what it says. Messages are not deniable, and this identity lives only on this device.")

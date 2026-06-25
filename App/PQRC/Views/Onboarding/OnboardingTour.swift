@@ -134,9 +134,9 @@ enum TourScript {
             body:
                 "Bring in a powerful model like Claude, or one you run yourself, and let assistants collaborate in a shared thread — comparing notes, drafting a plan, dividing a task, on the record. You stay in command of what the AI sees, who sees it, where it goes, and when it must leave the device — and an egress firewall obfuscates contacts and caps how much can ever leave when it does.",
             fieldNote:
-                "The firewall is on by default for every off-device AI; the on-device model never leaves the phone at all.",
+                "On by default for every off-device AI — each chat shows whether it's on, and secrets like API keys are scrubbed before anything reaches a cloud model. Your AI follows only your settings; no one else in a chat can switch it on or off.",
             voiceOver:
-                "Tether AI on a leash. Collaborate, alone or in a crew. Bring in a powerful model like Claude, or one you run yourself, and let assistants collaborate in a shared thread — comparing notes, drafting a plan, dividing a task, on the record. You stay in command of what the AI sees, who sees it, where it goes, and when it must leave the device — and an egress firewall obfuscates contacts and caps how much can ever leave when it does. The firewall is on by default for every off-device AI."
+                "Tether AI on a leash. Collaborate, alone or in a crew. Bring in a powerful model like Claude, or one you run yourself, and let assistants collaborate in a shared thread — comparing notes, drafting a plan, dividing a task, on the record. You stay in command of what the AI sees, who sees it, where it goes, and when it must leave the device — and an egress firewall obfuscates contacts and caps how much can ever leave when it does. It's on by default for every off-device AI, each chat shows whether it's on, and secrets like A.P.I. keys are scrubbed before anything reaches a cloud model. Your A.I. follows only your settings; no one else in a chat can switch it on or off."
         ),
         TourStep(
             id: 7,
@@ -180,113 +180,6 @@ enum TourScript {
                 "Set sail. A mind forever voyaging through strange seas of thought. That's the lay of the water: private by right, transparent about AI, post-quantum, and decentralized — a boat that lets people and their robots communicate and collaborate safely. Add a contact, tether an assistant, and chart your course. You can replay this tour anytime from Settings, About, Take the tour."
         ),
     ]
-
-    /// The enterprise / funder pitch — the same card system as the welcome tour,
-    /// surfaced on demand from Settings ▸ About ("Why Eldr for teams"). It leads with
-    /// zero-trust collaboration, then sovereign self-hosted AI, then post-quantum /
-    /// decentralized resilience. Shipped capabilities are stated as present; the team
-    /// and self-hosted bridges are labeled as rolling out (the honesty rule applies
-    /// here exactly as it does to the welcome tour).
-    static let enterpriseSteps: [TourStep] = [
-        TourStep(
-            id: 0,
-            symbol: "building.2.fill",
-            accentSymbol: "lock.fill",
-            gradient: [Color.indigo, Color.blue],
-            title: "AI without the leak",
-            subtitle: "Powerful agents, none of the exposure.",
-            body:
-                "AI is only as safe as the channel you reach it through. Eldr is the private network for your team and its agents — end-to-end encrypted, post-quantum, and yours to run. A place where people and AI work together without your data ever leaving your control.",
-            fieldNote:
-                "Every capability in this tour ships in the app today; the team and self-hosted integrations are rolling out now.",
-            voiceOver:
-                "A.I. without the leak. Powerful agents, none of the exposure. A.I. is only as safe as the channel you reach it through. Eldr is the private network for your team and its agents: end-to-end encrypted, post-quantum, and yours to run. A place where people and A.I. work together without your data ever leaving your control. Every capability in this tour ships in the app today; the team and self-hosted integrations are rolling out now."
-        ),
-        TourStep(
-            id: 1,
-            symbol: "shield.lefthalf.filled",
-            accentSymbol: "person.line.dotted.person.fill",
-            gradient: [Color.teal, Color.green],
-            title: "Collaboration without risk",
-            subtitle: "Vendors, new hires, anyone — on a leash.",
-            body:
-                "Give a contractor, a new hire, or a non-technical teammate a scoped, observable, revocable line to an AI agent. A per-chat egress firewall caps and obfuscates whatever could leave, agents can't act on their own, and access is one unpair away from gone.",
-            fieldNote:
-                "Fail-closed by default: an agent can't self-activate, and the firewall is on for every off-device model.",
-            voiceOver:
-                "Collaboration without risk. Vendors, new hires, anyone, on a leash. Give a contractor, a new hire, or a non-technical teammate a scoped, observable, revocable line to an A.I. agent. A per-chat egress firewall caps and obfuscates whatever could leave, agents can't act on their own, and access is one unpair away from gone. Fail-closed by default: an agent can't self-activate, and the firewall is on for every off-device model."
-        ),
-        TourStep(
-            id: 2,
-            symbol: "doc.text.magnifyingglass",
-            accentSymbol: "checkmark.seal.fill",
-            gradient: [Color.orange, Color.pink],
-            title: "Nothing happens in the dark",
-            subtitle: "Every AI action, labeled and on the record.",
-            body:
-                "Eldr cryptographically labels every AI-authored message as AI — it can't be forged or stripped — and shows you exactly what each assistant can read. For a regulated team, that's an audit trail by construction, not a bolt-on.",
-            fieldNote:
-                "The AI label is signed inside the encryption, so human and machine can never be confused on the wire.",
-            voiceOver:
-                "Nothing happens in the dark. Every A.I. action, labeled and on the record. Eldr cryptographically labels every A.I.-authored message as A.I., so it can't be forged or stripped, and shows you exactly what each assistant can read. For a regulated team, that's an audit trail by construction, not a bolt-on. The label is signed inside the encryption, so human and machine can never be confused on the wire."
-        ),
-        TourStep(
-            id: 3,
-            symbol: "server.rack",
-            accentSymbol: "key.horizontal.fill",
-            gradient: [Color.blue, Color.cyan],
-            title: "Your AI, your infrastructure",
-            subtitle: "No cloud vendor in the middle.",
-            body:
-                "Run the model yourself — on the device, or on your own server — and run the network yourself too. No API key, no third-party cloud, no lock-in. Your code, your AI, your rules, extended to the very wire your messages travel on.",
-            fieldNote:
-                "Bring your own model, on-device or self-hosted; stand up your own relay in minutes.",
-            voiceOver:
-                "Your A.I., your infrastructure. No cloud vendor in the middle. Run the model yourself, on the device or on your own server, and run the network yourself too. No A.P.I. key, no third-party cloud, no lock-in. Your code, your A.I., your rules, extended to the very wire your messages travel on. Bring your own model, on-device or self-hosted, and stand up your own relay in minutes."
-        ),
-        TourStep(
-            id: 4,
-            symbol: "antenna.radiowaves.left.and.right",
-            accentSymbol: "brain.head.profile.fill",
-            gradient: [Color.purple, Color.blue],
-            title: "Reach your agent from anywhere",
-            subtitle: "Your phone. Your self-hosted AI. One secure line.",
-            body:
-                "Eldr links your phone to the AI running on your own machines over a post-quantum, end-to-end-encrypted line — so you can task your self-hosted assistant from anywhere, with nothing exposed to the open internet. The cockpit stays yours; Eldr is the private network it flies over.",
-            fieldNote:
-                "Built to bridge self-hosted agent stacks like sybilclaw to your phone — rolling out now.",
-            voiceOver:
-                "Reach your agent from anywhere. Your phone, your self-hosted A.I., one secure line. Eldr links your phone to the A.I. running on your own machines over a post-quantum, end-to-end-encrypted line, so you can task your self-hosted assistant from anywhere, with nothing exposed to the open internet. The cockpit stays yours; Eldr is the private network it flies over. Built to bridge self-hosted agent stacks like sybilclaw to your phone, rolling out now."
-        ),
-        TourStep(
-            id: 5,
-            symbol: "atom",
-            accentSymbol: "point.3.connected.trianglepath.dotted",
-            gradient: [Color.purple, Color.indigo],
-            title: "Built for the hardest networks",
-            subtitle: "Post-quantum. Decentralized. No single point to fail.",
-            body:
-                "Encryption designed to outlast tomorrow's quantum computers, over a decentralized network with no company in the pipe — and it keeps working when the internet doesn't, falling back to local radio or a phone-hosted relay. The same properties that survive an outage are what communication needs at the edge, and eventually off-Earth.",
-            fieldNote:
-                "Post-quantum on every conversation; works offline over Bluetooth and Wi-Fi with no router or carrier.",
-            voiceOver:
-                "Built for the hardest networks. Post-quantum, decentralized, no single point to fail. Encryption designed to outlast tomorrow's quantum computers, over a decentralized network with no company in the pipe, and it keeps working when the internet doesn't, falling back to local radio or a phone-hosted relay. The same properties that survive an outage are what communication needs at the edge, and eventually off-Earth. Post-quantum is on for every conversation, and it works offline over Bluetooth and Wi-Fi with no router or carrier."
-        ),
-        TourStep(
-            id: 6,
-            symbol: "flag.checkered",
-            accentSymbol: "sparkles",
-            gradient: [Color.pink, Color.purple],
-            title: "Own the network your AI runs on",
-            subtitle: "Private by right. Sovereign by design.",
-            body:
-                "Zero-trust collaboration, self-hosted AI, and post-quantum resilience in one fabric — so teams can put powerful agents to work with vendors, contractors, and each other without handing their data to anyone. That's the company we're building.",
-            fieldNote:
-                "Replay anytime from Settings ▸ About ▸ Why Eldr for teams.",
-            voiceOver:
-                "Own the network your A.I. runs on. Private by right, sovereign by design. Zero-trust collaboration, self-hosted A.I., and post-quantum resilience in one fabric, so teams can put powerful agents to work with vendors, contractors, and each other without handing their data to anyone. That's the company we're building. You can replay this anytime from Settings, About, Why Eldr for teams."
-        ),
-    ]
 }
 
 /// Tracks whether the first-run tour has been shown, and lets Settings relaunch
@@ -298,19 +191,9 @@ final class TourCoordinator {
     /// Currently presenting the tour.
     var isPresenting = false
 
-    /// Which script the presented tour shows. `welcome` is the first-run default;
-    /// `enterprise` is the on-demand "Why Eldr for teams" pitch (Settings ▸ About).
-    enum Variant: Sendable { case welcome, enterprise }
-    private(set) var variant: Variant = .welcome
-
-    /// Cards for the currently-selected variant — the view reads this, not the
-    /// `TourScript` arrays directly.
-    var steps: [TourStep] {
-        switch variant {
-        case .welcome: return TourScript.steps
-        case .enterprise: return TourScript.enterpriseSteps
-        }
-    }
+    /// Cards for the first-run welcome tour. (The enterprise / funder "Why Eldr for
+    /// teams" pitch moved to the Huginn app — Apps/Huginn ▸ EnterpriseTourView.swift.)
+    var steps: [TourStep] { TourScript.steps }
 
     private static let baseKey = "hasSeenOnboardingTour"
 
@@ -333,22 +216,17 @@ final class TourCoordinator {
             // can be reviewed and screenshotted without going through account
             // creation. Compiled out of Release; never reachable in a shipped build.
             if args.contains("--show-tour") {
-                variant = .welcome
                 isPresenting = true
                 return
             }
         #endif
         if args.contains("--uitest") || args.contains("--local-universe")
             || args.contains("--uitest-biometric") || args.contains("--reset")
-            || args.contains("--show-enterprise-tour")  // QA forces the enterprise variant instead
         {
             return
         }
         let key = Self.seenKey(siloID: siloID)
         guard !UserDefaults.standard.bool(forKey: key) else { return }
-        // Pin the welcome variant only now that we're definitely presenting the first-run
-        // tour — doing it earlier clobbered a concurrently-set enterprise variant (QA path).
-        variant = .welcome
         isPresenting = true
     }
 
@@ -363,36 +241,20 @@ final class TourCoordinator {
     /// fully tears down first, then present. (`isPresenting` already drives the
     /// cover, so a one-tick hop after the dismissal lands is enough; we wait a
     /// touch longer than the sheet's dismiss animation to be safe.)
-    func relaunch(_ variant: Variant = .welcome) {
+    func relaunch() {
         guard !isPresenting else { return }
-        self.variant = variant
         Task { @MainActor in
             try? await Task.sleep(for: .milliseconds(450))
             isPresenting = true
         }
     }
 
-    #if DEBUG
-        /// QA only (`--show-enterprise-tour`): force the enterprise pitch tour on launch so
-        /// it can be reviewed/screenshotted without navigating to Settings ▸ About. Compiled
-        /// out of Release; never reachable in a shipped build.
-        func presentEnterpriseForQA() {
-            variant = .enterprise
-            isPresenting = true
-        }
-    #endif
-
     /// Mark seen + dismiss (Skip or finishing the last card). Records against the
     /// active account when known, and also the device key so a re-lock to the gate
     /// doesn't re-trigger it.
     func finish(siloID: String?) {
-        // Only the first-run WELCOME tour records "seen"; the on-demand enterprise
-        // pitch is replayable and must never suppress a user's welcome tour.
-        if variant == .welcome {
-            UserDefaults.standard.set(true, forKey: Self.seenKey(siloID: siloID))
-            UserDefaults.standard.set(true, forKey: Self.baseKey)
-        }
+        UserDefaults.standard.set(true, forKey: Self.seenKey(siloID: siloID))
+        UserDefaults.standard.set(true, forKey: Self.baseKey)
         isPresenting = false
-        variant = .welcome
     }
 }

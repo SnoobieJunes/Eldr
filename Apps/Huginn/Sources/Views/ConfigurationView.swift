@@ -8,9 +8,32 @@ struct ConfigurationView: View {
     @StateObject private var connections = ConnectionStatusProbe()
     @State private var acpxRegistered = false
     @State private var sybilclawRegistered = false
+    @State private var showTour = false
 
     var body: some View {
         Form {
+            Section {
+                Button {
+                    showTour = true
+                } label: {
+                    HStack(spacing: 12) {
+                        Image(systemName: "sparkles")
+                            .font(.title3)
+                            .foregroundStyle(.tint)
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("Why Eldr for teams").font(.headline)
+                            Text("A 2-minute tour: zero-trust agent collaboration, sovereign self-hosted AI, post-quantum resilience.")
+                                .font(.caption).foregroundStyle(.secondary)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+                        Spacer()
+                        Image(systemName: "chevron.right").foregroundStyle(.tertiary)
+                    }
+                }
+                .buttonStyle(.plain)
+                .accessibilityIdentifier("enterprise-tour-launch")
+            }
+
             Section("Local LLM") {
                 LabeledContent("Server URL") {
                     TextField("http://127.0.0.1:1337/v1", text: $store.llmURL)
@@ -108,6 +131,9 @@ struct ConfigurationView: View {
         // BridgeView/TestChatView/RelayWizardView pattern.
         .frame(maxWidth: 720, alignment: .leading)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+        .sheet(isPresented: $showTour) {
+            EnterpriseTourView { showTour = false }
+        }
     }
 
     private var healthRow: some View {

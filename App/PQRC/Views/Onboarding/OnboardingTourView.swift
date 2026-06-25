@@ -8,8 +8,7 @@ import SwiftUI
 /// Accessibility: every page is one VoiceOver element (`TourStepCard`); the
 /// controls are labeled; the progress rail announces "step N of M".
 struct OnboardingTourView: View {
-    /// The cards to show — the welcome script by default, or the enterprise pitch
-    /// when the coordinator's variant is `.enterprise`.
+    /// The cards to show — the first-run welcome script.
     var steps: [TourStep] = TourScript.steps
     /// Label for the final-page primary button (themed per variant).
     var finishLabel: String = "Set sail"
@@ -183,7 +182,7 @@ extension View {
         fullScreenCover(isPresented: Bindable(coordinator).isPresenting) {
             OnboardingTourView(
                 steps: coordinator.steps,
-                finishLabel: coordinator.variant == .enterprise ? "Get started" : "Set sail",
+                finishLabel: "Set sail",
                 onFinish: { coordinator.finish(siloID: activeSiloID) })
         }
         // Dev/QA-only: `--show-tour` forces the welcome tour up over whatever mode
@@ -195,9 +194,6 @@ extension View {
                 let args = ProcessInfo.processInfo.arguments
                 if args.contains("--show-tour") {
                     coordinator.presentIfFirstRun(siloID: activeSiloID)
-                }
-                if args.contains("--show-enterprise-tour") {
-                    coordinator.presentEnterpriseForQA()
                 }
             }
         #endif
