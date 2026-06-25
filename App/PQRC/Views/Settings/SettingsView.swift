@@ -9,6 +9,9 @@ struct SettingsView: View {
     @Bindable var model: AppModel
     @Environment(\.dismiss) private var dismiss
     @Environment(AppSession.self) private var session
+    /// The split-view navigation bridge MainView injects here. Re-injected into the
+    /// "Connect your Mac coding agent" sheet so the new chat OPENS after pairing.
+    @Environment(SettingsNavigation.self) private var settingsNav: SettingsNavigation?
     /// Relaunch the first-run "explore a new planet" tour (provided by RootView).
     @Environment(TourCoordinator.self) private var tour
     @State private var wipeConfirmStage = 0
@@ -469,8 +472,11 @@ struct SettingsView: View {
         .sheet(isPresented: $showConnectAgent) {
             // Reuse the verified-pairing flow, pre-tagged as a coding agent so its
             // drafts are voice-trusted. The user scans the Configurator's QR or pastes
-            // its npub.
+            // its npub. Re-inject the split-view navigation bridge so the new chat OPENS
+            // after pairing — a nested sheet doesn't reliably inherit it, and without it
+            // the agent paired but nothing appeared ("it doesn't do anything").
             NewChatView(model: model, prefilledContactType: "coding_agent")
+                .environment(settingsNav)
         }
     }
 

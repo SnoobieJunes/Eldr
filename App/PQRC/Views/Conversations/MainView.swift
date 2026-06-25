@@ -602,6 +602,13 @@ struct NewChatView: View {
     /// owner's coding agent — required for the §13.5 watch-along draft path to fire.
     var prefilledContactType: String? = nil
     @Environment(\.dismiss) private var dismiss
+    /// Optional — present whenever this sheet is hosted inside the split view (the
+    /// "+" New Chat, a `pqrc:add` deep link, or Settings ▸ "Connect your Mac coding
+    /// agent"). Setting it makes `MainView` close any open sheet/Settings and OPEN the
+    /// just-created conversation, instead of dropping the user back where they were
+    /// with the new chat stranded in the list — the coding-agent "it doesn't do
+    /// anything / opens nothing" bug.
+    @Environment(SettingsNavigation.self) private var settingsNav: SettingsNavigation?
     @State private var npub = ""
     @State private var firstMessage = ""
     @State private var error: String?
@@ -648,6 +655,11 @@ struct NewChatView: View {
                             if let type = prefilledContactType, !type.isEmpty {
                                 await model.runtime.setContactType(identityHex, type: type)
                             }
+                            // Open the new conversation in the split view — closes this
+                            // sheet AND Settings if it was hosting us. Without this the
+                            // coding-agent pairing created the chat but left the user in
+                            // Settings with nothing visible ("it doesn't do anything").
+                            settingsNav?.openConversationID = identityHex
                             dismiss()
                         } catch PQRCError.relayUnreachable {
                             self.error = "Can't reach your relay right now. Check your connection or your relay in Settings — or use Nearby below to connect in person, no server needed."
