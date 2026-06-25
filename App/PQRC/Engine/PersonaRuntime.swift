@@ -609,7 +609,8 @@ actor PersonaRuntime {
             redactNames
             ? (contactRecords[conversationID]?.autoName ?? "a contact")
             : (groupRosters[conversationID]?.name ?? contactName(conversationID))
-        let override: String? = threadID.map { tid in
+        let override: String?
+        if let tid = threadID {
             let base = AgentSkills.threadSystemPrompt(
                 displayName: promptDisplayName,
                 contextDomain: AppSession.aiContextDomain(siloID: siloID),
@@ -622,7 +623,18 @@ actor PersonaRuntime {
             // catalog stays the built-in source of truth; these are merged in only
             // for the prompt. Still just message text — no wire/privacy exception.
             let custom = customSkillFragments(threadID: tid)
-            return custom.isEmpty ? base : base + "\n\n" + custom
+            override = custom.isEmpty ? base : base + "\n\n" + custom
+        } else {
+            // Conversation-scope WINDOW reply prompt (BUG-6 fix). Without this, an
+            // `ai_window` turn fell through to the generic `turnSystemPrompt()` — "you
+            // are X's AI in a shared thread with ANOTHER person's AI … reply exactly
+            // PASS to stay silent" — which is wrong here (the latest message is a HUMAN
+            // guest's; there is no other AI), so real providers PASSed and the owner's
+            // AI silently never answered. The Mock/Demo providers are eager and ignore
+            // the prompt, which is why the engine tests stayed green while live failed.
+            override = windowReplySystemPrompt(
+                displayName: promptDisplayName, peerName: promptPeerName,
+                instructions: ai.instructions, summarize: ai.summarizes)
         }
         let ctx = await agentContext(
             conversationID: conversationID, threadID: threadID, depth: ai.contextDepth,
@@ -630,6 +642,33 @@ actor PersonaRuntime {
             systemPromptOverride: override)
         guard ai.appliesEgressFirewall, firewallOn else { return ctx }
         return redactedForRemote(ctx)
+    }
+
+    /// System prompt for a conversation-scope `ai_window` reply (BUG-6 fix). The owner
+    /// has explicitly turned their AI ON for everyone in this conversation for a bounded
+    /// time, so the AI SHOULD answer the latest message rather than default to silence.
+    /// PASS stays available, but only for a message that genuinely warrants no reply.
+    /// `peerName` is already firewall-safe (a codename when redacting for a remote AI);
+    /// mirrors the summarize + user-instructions augmentation of `turnSystemPrompt()`.
+    private func windowReplySystemPrompt(
+        displayName: String, peerName: String, instructions: String?, summarize: Bool
+    ) -> String {
+        var p = """
+            You are \(displayName)'s AI assistant, and \(displayName) has turned you ON \
+            for this conversation with \(peerName) — everyone here knows you're an AI \
+            taking part. Read the recent messages and reply helpfully to the most recent \
+            one, in one short, natural message, as \(displayName)'s assistant. Reply \
+            exactly PASS (nothing else) ONLY if the latest message clearly needs no \
+            response — a bare acknowledgement like "ok" or "thanks", or something plainly \
+            not meant for a reply. Otherwise, answer.
+            """
+        if summarize {
+            p += " Prefer a brief summary of the relevant context over verbatim quoting."
+        }
+        if let instructions, !instructions.isEmpty {
+            p += "\n\nYour user's instructions: \(instructions)"
+        }
+        return p
     }
 
     /// Replaces real display names with each identity's LOCAL codename (and self
@@ -2631,9 +2670,24 @@ private struct RuntimeSink: AgentMessageSink {
             body.text, conversationID: conversationID, participantType: .agent,
             threadID: threadID, agentName: agentName, localTextOverride: rawText)
     }
+
+    /// Surface an autonomous-reply provider failure (window/thread) to the conversation
+    /// UI. The engine already logs it and calls this, but the protocol's default impl is
+    /// a no-op, so a window reply that failed (unavailable model / bad key) left the user
+    /// staring at silence with a running countdown — the "the timer doesn't work" symptom
+    /// (BUG-5). The solo path already yields `.agentError`; this gives the window/thread
+    /// paths the same visible feedback.
+    func reportAgentFailure(_ reason: String, threadID: String?, agentName: String?) async {
+        await runtime.surfaceAgentFailure(reason)
+    }
 }
 
 extension PersonaRuntime {
+    /// Bridge `RuntimeSink.reportAgentFailure` to the UI event stream (BUG-5).
+    func surfaceAgentFailure(_ reason: String) {
+        eventContinuation?.yield(.agentError(reason))
+    }
+
     func windowConversation() -> String? {
         myWindowConversationID
     }
