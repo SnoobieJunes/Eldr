@@ -571,18 +571,26 @@ actor PersonaRuntime {
     /// on-device AI, or the firewalled (name-redacted) context for a remote AI
     /// when the firewall is on. This is the single boundary every byte crosses
     /// before reaching an off-device model.
+    /// The AI's resolved context policy for this conversation: the AI's own gather
+    /// policy with a per-conversation override (Settings → conversation details)
+    /// layered on top. "off" is the SILENCE contract — the AI must neither gather
+    /// context nor post. `contextFor` AND every autonomous turn consult this, so the
+    /// in-chat "AI off here" chip and the actual behavior can never disagree.
+    private func resolvedPolicy(_ ai: TetheredAI, conversationID: String) -> String {
+        switch AppSession.conversationContextMode(conversationID, siloID: siloID) {
+        case "off": return "off"
+        case "marked": return "strict"
+        case "full": return "active"
+        default: return ai.contextPolicy
+        }
+    }
+
     private func contextFor(
         _ ai: TetheredAI, conversationID: String, threadID: String?
     ) async -> AgentContext {
         // A per-conversation override (Settings → conversation details) wins over
         // the AI's own gather policy.
-        var policy = ai.contextPolicy
-        switch AppSession.conversationContextMode(conversationID, siloID: siloID) {
-        case "off": policy = "off"
-        case "marked": policy = "strict"
-        case "full": policy = "active"
-        default: break
-        }
+        let policy = resolvedPolicy(ai, conversationID: conversationID)
         guard policy != "off" else {
             // Gathers nothing here — an empty transcript (still carrying the AI's
             // instructions so a manual draft can respond generically).
@@ -1548,6 +1556,9 @@ actor PersonaRuntime {
         for ai in aiSelection.participants(
             from: ais, conversationID: conversationID, threadID: nil)
         {
+            // "off" is the silence contract: never invoke a provider whose resolved
+            // policy is off here, even if a future selection policy lets it through.
+            guard resolvedPolicy(ai, conversationID: conversationID) != "off" else { continue }
             let context = await contextFor(ai, conversationID: conversationID, threadID: nil)
             do {
                 // Race generation against a timeout so a wedged/slow on-device
@@ -2195,6 +2206,8 @@ actor PersonaRuntime {
         for ai in aiSelection.participants(
             from: ais, conversationID: conversationID, threadID: threadID)
         {
+            // "off" is the silence contract — never let a provider run here.
+            guard resolvedPolicy(ai, conversationID: conversationID) != "off" else { continue }
             _ = await engine.runThreadTurn(
                 provider: ai.provider,
                 context: await contextFor(ai, conversationID: conversationID, threadID: threadID),
@@ -2598,6 +2611,8 @@ actor PersonaRuntime {
             for ai in aiSelection.participants(
                 from: ais, conversationID: conversationID, threadID: nil)
             {
+                // "off" is the silence contract — never let a provider run here.
+                guard resolvedPolicy(ai, conversationID: conversationID) != "off" else { continue }
                 _ = await engine.runWindowReply(
                     provider: ai.provider,
                     context: await contextFor(ai, conversationID: conversationID, threadID: nil),

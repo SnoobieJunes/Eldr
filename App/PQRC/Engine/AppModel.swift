@@ -562,7 +562,15 @@ final class AppModel {
         // `makeRuntimeAIs(...).filter(\.isEnabled)` → `ais[0]`.
         let enabled = AppSession.loadConfiguredAIs(siloID: siloID).filter(\.isEnabled)
         let primary = enabled.first
-        var mode = primary?.effectivePolicy ?? "off"
+        // Honest at-a-glance state: "off" must mean NO enabled AI gathers or responds
+        // here — not merely that the FIRST AI is off. With two AIs (primary "off", a
+        // second "active") the chip used to read "AI off here" while the second AI still
+        // replied — the user's "the off in this chat is still going to the AI". Resolve
+        // from the STRONGEST policy across ALL enabled AIs (active > strict > off) so the
+        // chip never under-reports a participating AI. A per-conversation override below
+        // still wins (it forces every AI to the same mode in `resolvedPolicy`).
+        func policyRank(_ p: String) -> Int { p == "active" ? 2 : (p == "strict" ? 1 : 0) }
+        var mode = enabled.map(\.effectivePolicy).max(by: { policyRank($0) < policyRank($1) }) ?? "off"
         switch AppSession.conversationContextMode(conversationID, siloID: siloID) {
         case "off": mode = "off"
         case "marked": mode = "strict"

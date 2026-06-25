@@ -604,7 +604,12 @@ private struct ConversationStatusHeader: View {
                     .font(.caption.weight(.medium))
                     .frame(maxWidth: .infinity)
                     .padding(.vertical, 6)
-                    .background(Color.purple.opacity(0.12))
+                    // OPAQUE tint, not `Color.purple.opacity(0.12)`: the accessibility
+                    // contrast auditor hard-fails a full-width label over a translucent
+                    // fill because it can't determine the effective background. The mix is
+                    // the same 12%-purple look but opaque, so contrast is computable and
+                    // it adapts to light/dark (DEVIATIONS A7 / build-conventions).
+                    .background(Color.purple.mix(with: Color(.systemBackground), by: 0.88))
                     .accessibilityIdentifier("context-sharing-banner")
             }
         }
@@ -767,7 +772,7 @@ struct AIHereSheet: View {
             Form {
                 Section {
                     Picker("AI context here", selection: $aiContextMode) {
-                        Text("Use default").tag("default")
+                        Text("Follow each AI's own setting").tag("default")
                         Text("Off in this conversation").tag("off")
                         Text("Marked only — messages I add to context").tag("marked")
                         Text("Live — full conversation while active").tag("full")
@@ -786,7 +791,7 @@ struct AIHereSheet: View {
                 } header: {
                     Text("AI in this conversation — overrides your AI's default (now: \(AIContextVocab.glance(summary)))")
                 } footer: {
-                    Text("Overrides your AIs' own context setting, just here. \"Off\" keeps every AI from gathering anything from this conversation. Applies in real time. Set per-AI defaults and the egress firewall in Settings ▸ AI.")
+                    Text("Overrides your AIs' own context setting, just here. \"Off\" keeps every AI from gathering anything OR replying in this conversation. Each conversation is separate — your AI never carries context from one chat into another. Applies in real time. Set per-AI defaults and the egress firewall in Settings ▸ AI.")
                 }
                 Section {
                     // "My AI responds" — folds the AI window (responds-in-chat) and
