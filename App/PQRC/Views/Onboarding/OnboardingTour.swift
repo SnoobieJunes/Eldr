@@ -88,13 +88,13 @@ enum TourScript {
             accentSymbol: "hourglass",
             gradient: [Color.purple, Color.blue],
             title: "Ready for tomorrow's storms",
-            subtitle: "Post-quantum, in plain language.",
+            subtitle: "Post-quantum encryption, in plain language.",
             body:
                 "Today's encryption could one day be broken by powerful quantum computers still being built. Eldr already uses encryption designed to resist them, so a message you send now stays private even years from now — long after the seas have changed.",
             fieldNote:
-                "Post-quantum cryptography is on for every conversation — no toggle, no extra steps.",
+                "Post-quantum encryption is on for every conversation — no toggle, no extra steps.",
             voiceOver:
-                "Ready for tomorrow's storms. Post-quantum, in plain language. Today's encryption could one day be broken by powerful quantum computers still being built. Eldr already uses encryption designed to resist them, so a message you send now stays private even years from now, long after the seas have changed. Post-quantum cryptography is on for every conversation, with no toggle and no extra steps."
+                "Ready for tomorrow's storms. Post-quantum encryption, in plain language. Today's encryption could one day be broken by powerful quantum computers still being built. Eldr already uses encryption designed to resist them, so a message you send now stays private even years from now, long after the seas have changed. Post-quantum encryption is on for every conversation, with no toggle and no extra steps."
         ),
         TourStep(
             id: 4,
@@ -174,10 +174,10 @@ enum TourScript {
             title: "Set sail",
             subtitle: "\u{201C}A mind forever voyaging through strange seas of thought.\u{201D}",
             body:
-                "That's the lay of the water: private by right, transparent about AI, post-quantum, and decentralized — a boat that lets people and their robots communicate and collaborate safely. Add a contact, tether an assistant, and chart your course. Curious to see it all in motion? Try the live demo from Settings.",
+                "That's the lay of the water: private by right, transparent about AI, post-quantum encrypted, and decentralized — a boat that lets people and their robots communicate and collaborate safely. Add a contact, tether an assistant, and chart your course. Curious to see it all in motion? Try the live demo from Settings.",
             fieldNote: "Replay this tour anytime from Settings ▸ About ▸ Take the tour.",
             voiceOver:
-                "Set sail. A mind forever voyaging through strange seas of thought. That's the lay of the water: private by right, transparent about AI, post-quantum, and decentralized — a boat that lets people and their robots communicate and collaborate safely. Add a contact, tether an assistant, and chart your course. You can replay this tour anytime from Settings, About, Take the tour."
+                "Set sail. A mind forever voyaging through strange seas of thought. That's the lay of the water: private by right, transparent about AI, post-quantum encrypted, and decentralized — a boat that lets people and their robots communicate and collaborate safely. Add a contact, tether an assistant, and chart your course. You can replay this tour anytime from Settings, About, Take the tour."
         ),
     ]
 }

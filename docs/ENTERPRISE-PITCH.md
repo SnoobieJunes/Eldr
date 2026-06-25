@@ -90,7 +90,7 @@ integration is the proof point: drive *your* assistant on *your* infrastructure 
 
 The properties that make Eldr safe are the same ones that make it survive:
 
-- **Post-quantum** (PQXDH + Double Ratchet + periodic PQ rekey) defeats
+- **Post-quantum encryption** (PQXDH + Double Ratchet + periodic PQ rekey) defeats
   harvest-now-decrypt-later — a message sent today stays private years from now.
 - **Decentralized:** rides Nostr — no single company owns the route. No central server
   to fail, be subpoenaed, or be cut off.
@@ -142,7 +142,7 @@ timing.
 ## The ask / the vision
 
 **Own the network your AI runs on.** Zero-trust collaboration, sovereign self-hosted AI,
-and post-quantum resilience in one fabric — so teams can put powerful agents to work with
+and post-quantum encryption in one fabric — so teams can put powerful agents to work with
 vendors, contractors, and each other without handing their data to anyone. That's the
 company we're building.
 

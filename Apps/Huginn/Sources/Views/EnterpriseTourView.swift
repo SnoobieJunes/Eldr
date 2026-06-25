@@ -5,7 +5,7 @@ import SwiftUI
 /// lands, and where the agent-security guarantees (owner-bound agent, credential
 /// scrubbing, human-in-the-loop tool approval, file jail) are most concrete.
 ///
-/// Theme (matching EldrChat's voyaging tour): **Eldr** is each person's boat through
+/// Theme (matching EldrChat's voyaging tour): **Eldr** is each org's boat through
 /// unknown waters; **Huginn** — named for Óðinn's raven, "thought" — is the AI that
 /// flies from boat to boat over Eldr's sealed line, keeping the whole fleet rowing in
 /// unison. The cards carry that metaphor while teaching one real, shipped guarantee
@@ -35,9 +35,12 @@ enum EnterpriseTour {
     /// Eldr (the boats) + Huginn (the raven of thought flying between them): leads with
     /// what Huginn is, then the agent-security guarantees made concrete here — the raven
     /// answers only to you, its cargo stays sealed, no oar moves without your word —
-    /// then honest labeling, your own waters, sending the raven home, the hardest seas,
-    /// and the fleet as one. Shipped capabilities are stated as present; the team /
-    /// self-hosted bridges are labeled as rolling out (the honesty rule).
+    /// then honest labeling, your own model + your own network, sending the raven home,
+    /// the hardest seas, and the fleet as one. Shipped capabilities are stated as
+    /// present; the team / self-hosted bridges are labeled as rolling out (honesty rule).
+    ///
+    /// NOTE: `id` MUST equal the array index (the progress rail keys `step.id == index`),
+    /// so inserting a card means renumbering the ones after it.
     static let steps: [EnterpriseTourStep] = [
         EnterpriseTourStep(
             id: 0,
@@ -111,40 +114,53 @@ enum EnterpriseTour {
             title: "Your raven, your waters",
             subtitle: "No harbor master in the middle.",
             body:
-                "Fly a raven you keep yourself — on this Mac, or your own server — and sail waters you chart yourself. No API key, no distant cloud, no harbor that owns you. Your crew, your thought, your rules, all the way down to the wire your words travel on.",
+                "Fly a raven you keep yourself — on this Mac, or your own server — no API key, no distant cloud, no lock-in. Your crew, your thought, your rules, all the way down to the model that does the thinking.",
             fieldNote:
-                "Point Huginn at a local model (LM Studio, Ollama, vLLM) in Configuration; raise your own relay from the Relay tab.",
+                "Point Huginn at a local model — LM Studio, Ollama, or vLLM — in Configuration. Nothing about your thought has to leave a machine you own.",
             voiceOver:
-                "Your raven, your waters. No harbor master in the middle. Fly a raven you keep yourself, on this Mac or your own server, and sail waters you chart yourself. No A.P.I. key, no distant cloud, no harbor that owns you. Your crew, your thought, your rules, all the way down to the wire. Point Huginn at a local model in Configuration, and raise your own relay from the Relay tab."
+                "Your raven, your waters. No harbor master in the middle. Fly a raven you keep yourself, on this Mac or your own server, no A.P.I. key, no distant cloud, no lock-in. Your crew, your thought, your rules, all the way down to the model that does the thinking. Point Huginn at a local model, L.M. Studio, Ollama, or vLLM, in Configuration."
         ),
         EnterpriseTourStep(
             id: 6,
+            symbol: "point.3.connected.trianglepath.dotted", accentSymbol: "server.rack",
+            gradient: [.teal, .blue],
+            title: "Sail open waters, or raise your own harbor",
+            subtitle: "Decentralized by default. Self-hosted when you want.",
+            body:
+                "Eldr sails on Nostr — an open, decentralized network where no single company owns the sea-lanes your words travel. Trust no harbor at all? Raise your own: Huginn fits out a hardened relay in a few clicks from the Relay tab — domain, port, allowlist, TLS — so your whole fleet routes through a harbor you alone command.",
+            fieldNote:
+                "The Relay tab generates a ready-to-run, hardened relay server; or a phone can host a pocket harbor over Bluetooth and Wi-Fi. Either way the harbor only ever sees sealed ciphertext — never your words.",
+            voiceOver:
+                "Sail open waters, or raise your own harbor. Decentralized by default, self-hosted when you want. Eldr sails on Nostr, an open, decentralized network where no single company owns the sea-lanes your words travel. Trust no harbor at all? Raise your own: Huginn fits out a hardened relay in a few clicks from the Relay tab, domain, port, allowlist, T.L.S., so your whole fleet routes through a harbor you alone command. The Relay tab generates a ready-to-run, hardened relay server, or a phone can host a pocket harbor over Bluetooth and Wi-Fi. Either way the harbor only ever sees sealed ciphertext, never your words."
+        ),
+        EnterpriseTourStep(
+            id: 7,
             symbol: "antenna.radiowaves.left.and.right", accentSymbol: "bird.fill",
             gradient: [.purple, .blue],
             title: "Send the raven from any shore",
             subtitle: "Your phone, your ship's thought, one sealed line.",
             body:
-                "Eldr ties your phone to the thought running on your own ships over a post-quantum, sealed line — so you can send your raven from any shore and have it wing home, with nothing left exposed on open water.",
+                "Eldr ties your phone to the thought running on your own ships over a post-quantum, end-to-end-encrypted line — so you can send your raven from any shore and have it wing home, with nothing left exposed on open water.",
             fieldNote:
                 "Built to carry self-hosted agent crews like sybilclaw to your phone — pair from the EldrChat Bridge tab. Rolling out now.",
             voiceOver:
-                "Send the raven from any shore. Your phone, your ship's thought, one sealed line. Eldr ties your phone to the thought running on your own ships over a post-quantum, sealed line, so you can send your raven from any shore and have it wing home, with nothing left exposed on open water."
-        ),
-        EnterpriseTourStep(
-            id: 7,
-            symbol: "atom", accentSymbol: "point.3.connected.trianglepath.dotted",
-            gradient: [.purple, .indigo],
-            title: "Built for the hardest seas",
-            subtitle: "Post-quantum. Decentralized. No harbor to lose.",
-            body:
-                "Encryption forged to outlast tomorrow's storms — the quantum machines still being built — over waters no company owns, that hold their bearing when the internet goes dark, falling back to local radio or a ship that hosts the harbor itself. The qualities that ride out a squall are the ones thought will need at the edge of the map, and one day beyond it.",
-            fieldNote:
-                "Post-quantum on every crossing; rows on over Bluetooth and Wi-Fi with no router or carrier.",
-            voiceOver:
-                "Built for the hardest seas. Post-quantum, decentralized, no harbor to lose. Encryption forged to outlast tomorrow's storms, the quantum machines still being built, over waters no company owns, that hold their bearing when the internet goes dark, falling back to local radio or a ship that hosts the harbor itself. The qualities that ride out a squall are the ones thought will need at the edge of the map, and one day beyond it."
+                "Send the raven from any shore. Your phone, your ship's thought, one sealed line. Eldr ties your phone to the thought running on your own ships over a post-quantum, end-to-end-encrypted line, so you can send your raven from any shore and have it wing home, with nothing left exposed on open water."
         ),
         EnterpriseTourStep(
             id: 8,
+            symbol: "atom", accentSymbol: "point.3.connected.trianglepath.dotted",
+            gradient: [.purple, .indigo],
+            title: "Built for the hardest seas",
+            subtitle: "Post-quantum encryption. Holds when the net doesn't.",
+            body:
+                "Encryption forged to outlast tomorrow's storms — the quantum machines still being built — that holds its bearing when the internet goes dark, falling back to local radio or a phone that hosts the harbor itself. The qualities that ride out a squall are the ones thought will need at the edge of the map, and one day beyond it.",
+            fieldNote:
+                "Post-quantum encryption on every crossing; rows on over Bluetooth and Wi-Fi with no router or carrier.",
+            voiceOver:
+                "Built for the hardest seas. Post-quantum encryption that holds when the net doesn't. Encryption forged to outlast tomorrow's storms, the quantum machines still being built, that holds its bearing when the internet goes dark, falling back to local radio or a phone that hosts the harbor itself. The qualities that ride out a squall are the ones thought will need at the edge of the map, and one day beyond it. Post-quantum encryption on every crossing; it rows on over Bluetooth and Wi-Fi with no router or carrier."
+        ),
+        EnterpriseTourStep(
+            id: 9,
             symbol: "sailboat.fill", accentSymbol: "sparkles",
             gradient: [.pink, .purple],
             title: "A fleet that rows as one",

@@ -22,7 +22,7 @@ struct ConfigurationView: View {
                             .foregroundStyle(.tint)
                         VStack(alignment: .leading, spacing: 2) {
                             Text("Why Eldr for teams").font(.headline)
-                            Text("A 2-minute tour: zero-trust agent collaboration, sovereign self-hosted AI, post-quantum resilience.")
+                            Text("A 2-minute tour: zero-trust agent collaboration, sovereign self-hosted AI, post-quantum encryption.")
                                 .font(.caption).foregroundStyle(.secondary)
                                 .fixedSize(horizontal: false, vertical: true)
                         }
