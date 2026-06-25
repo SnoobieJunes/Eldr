@@ -105,9 +105,12 @@ struct AgentContextGrantTests {
         await #expect(throws: AgentEngineError.windowDurationUnbounded) {
             try await fx.engine.startMyContextGrant(scope: Self.scope, durationSeconds: 99)
         }
-        // A received grant claiming > 2h is rejected.
+        // A received grant claiming MORE than the 24h max window/grant duration is
+        // rejected. (The cap rose from 2h to 24h when the 8h/24h "My AI responds"
+        // windows were added — AgentEngine.maxWindowDuration; send side still validates
+        // by the exact allowed set, receive side by this hard cap.)
         let tooLong = try AIContextGrant.make(
-            scope: Self.scope, activeUntil: fx.clock.now() + 3 * 60 * 60, identity: fx.bob)
+            scope: Self.scope, activeUntil: fx.clock.now() + 25 * 60 * 60, identity: fx.bob)
         await #expect(throws: AgentEngineError.windowDurationUnbounded) {
             try await fx.engine.receiveContextGrant(
                 tooLong, fromSenderIdentityHex: fx.bob.publicKeyData.hexString)

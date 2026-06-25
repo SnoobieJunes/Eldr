@@ -129,11 +129,17 @@ final class UXVerificationTests: XCTestCase {
         shot(app, "rec1-03-single-ai-control-landscape")
 
         // Details hosts a THIRD copy of the same per-conversation AI-context control.
-        let info = app.buttons["Conversation details"]
-        XCTAssertTrue(info.waitForExistence(timeout: 10), "info button missing")
+        // After the toolbar consolidation it lives inside the single "•••" menu, so
+        // open that first, then tap the item.
+        let moreMenu = element(app, "conversation-more-menu")
+        XCTAssertTrue(moreMenu.waitForExistence(timeout: 10), "the '•••' menu is missing")
+        moreMenu.tap()
+        let info = app.descendants(matching: .any).matching(
+            NSPredicate(format: "label == %@", "Conversation details")).firstMatch
+        XCTAssertTrue(info.waitForExistence(timeout: 10), "the 'Conversation details' menu item is missing")
         info.tap()
         XCTAssertTrue(app.navigationBars["Details"].waitForExistence(timeout: 10),
-                      "info button opens Details")
+                      "the menu item opens Details")
         // The Form lazily renders rows; scroll the AI picker into view. In
         // landscape the sheet is an inset card, so swipe its scroll container,
         // not the whole app.
@@ -153,8 +159,14 @@ final class UXVerificationTests: XCTestCase {
                       "Details also has the per-conversation egress-firewall override")
         shot(app, "rec1-04-Details-has-same-control")
         XCUIDevice.shared.orientation = .portrait
-        XCTAssertTrue(overflowed && sparklesHiddenInPortrait,
-                      "documented: trailing toolbar overflowed on iPhone portrait — the sparkles 'My AI' button is pushed into the 'More' menu")
+        // Toolbar consolidation (rec1): there is no separate sparkles 'My AI' button to
+        // overflow on iPhone portrait — the AI:live chip is the single AI entry point and
+        // every other conversation action lives in the one "•••" menu. The single-chip /
+        // no-duplicate invariant is asserted above; there is no overflow left to check.
+        XCTAssertTrue(element(app, "ai-here-chip").waitForExistence(timeout: 10),
+                      "the AI:live chip is the single AI entry point in portrait")
+        XCTAssertFalse(app.buttons["ai-window-button"].exists,
+                       "no separate sparkles 'My AI' button exists to overflow")
     }
 
     // MARK: Rec 4 — large-paste chip: non-interactive + typed text dropped on send
