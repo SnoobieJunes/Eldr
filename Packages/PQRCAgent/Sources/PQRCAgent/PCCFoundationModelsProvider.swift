@@ -25,16 +25,17 @@ import Foundation
 ///
 /// BUILD GATE — `ELDR_PCC_SDK`: the PCC symbols
 /// (`PrivateCloudComputeLanguageModel`, `ContextOptions`, `ContextOptions.ReasoningLevel`,
-/// the `respond(to:options:contextOptions:)` overload) are documented by Apple for the
-/// iOS-27 / macOS-27 SDK, but are NOT YET exported by the installed Xcode 27.0 seed
-/// (verified absent from every FoundationModels .swiftinterface, 2026-06-18). So the
-/// real PCC path is compiled ONLY when `ELDR_PCC_SDK` is defined — and defining it
-/// against this seed fails to build. Because this provider lives in the PQRCAgent
-/// SwiftPM package, the flag is set in `Package.swift`
-/// (`swiftSettings: [.define("ELDR_PCC_SDK")]`) — NOT the app target's
-/// `SWIFT_ACTIVE_COMPILATION_CONDITIONS`, which doesn't reach package compilation.
-/// Without the flag the file still compiles everywhere and the provider degrades to a
-/// clear "not built with the PCC SDK" reason → Demo fallback.
+/// the `respond(to:options:contextOptions:)` overload) ship in the **Xcode 27 / iOS 27**
+/// SDK — VERIFIED present in both the iPhoneOS and iPhoneSimulator
+/// FoundationModels.swiftinterface (2026-06). They are ABSENT from the Xcode 26.x SDK, so
+/// this file MUST be compiled with Xcode 27
+/// (`DEVELOPER_DIR=/Applications/Xcode-beta.app/Contents/Developer`); building it against
+/// 26.x fails with "cannot find type … in scope". The real PCC path is therefore gated on
+/// `ELDR_PCC_SDK`, which is ON in `Package.swift`
+/// (`swiftSettings: [.define("ELDR_PCC_SDK")]`) — set there, NOT in the app target's
+/// `SWIFT_ACTIVE_COMPILATION_CONDITIONS`, which doesn't reach package compilation. With
+/// the flag OFF the file still compiles on any SDK and the provider degrades to a clear
+/// "not built with the PCC SDK" reason → Demo fallback.
 ///
 /// RUNTIME GATE: even once the symbols ship, `PrivateCloudComputeLanguageModel` & friends
 /// require iOS/macOS 27 while the package deploys to iOS/macOS 26 — so every PCC symbol
@@ -89,7 +90,7 @@ public struct PCCFoundationModelsProvider: AgentProvider {
                 }
             }
         #elseif canImport(FoundationModels)
-            return "This build was compiled without the Private Cloud Compute SDK. Replies use the Demo stub until the app is rebuilt with the Xcode 26 SDK + PCC entitlement."
+            return "This build was compiled without the Private Cloud Compute SDK. Replies use the Demo stub until the app is rebuilt with the Xcode 27 SDK (ELDR_PCC_SDK) + PCC entitlement."
         #else
             return "This OS build doesn't include the Foundation Models framework."
         #endif
