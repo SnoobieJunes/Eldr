@@ -127,9 +127,9 @@ final class PQRCUITests: XCTestCase {
     func test_aiDraft_previewThenSendAsAI_rendersAgentBubble() throws {
         let app = launchUniverse()
         openConversation(app, "Bob")
-        // The "My AI responds" control now lives inline in the in-chat "AI here"
-        // sheet; the sparkles toolbar button (ai-window-button) opens that sheet.
-        tapWhenReady(app, button: "ai-window-button")
+        // The "My AI responds" control lives inline in the in-chat "AI here" sheet;
+        // the leading AI:live chip (ai-here-chip) opens that sheet.
+        tapWhenReady(app, button: "ai-here-chip")
         // The control defaults to "Drafts privately", so the on-demand draft
         // action is shown immediately in the "My AI responds" section. It sits
         // below the AI-context section, so make sure it's on screen

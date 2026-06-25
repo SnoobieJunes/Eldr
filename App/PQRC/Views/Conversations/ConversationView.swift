@@ -22,6 +22,9 @@ struct ConversationView: View {
     @State private var selection: Set<String> = []
     /// The "AI here" toolbar chip's sheet.
     @State private var showAIHere = false
+    /// In-chat contact rename (1:1 only) — tap the title.
+    @State private var showRename = false
+    @State private var renameText = ""
     /// Read-only summary of the primary AI's effective mode for THIS conversation,
     /// driving the glance chip. Re-read on appear and whenever the override sheet
     /// changes it (it lives in UserDefaults, not @Observable state).
@@ -34,6 +37,13 @@ struct ConversationView: View {
     /// checklist's visibility). Reads the same local tag the wrench icon uses.
     private var isCodingAgent: Bool {
         model.conversations.first { $0.id == conversationID }?.isCodingAgent ?? false
+    }
+
+    private var isGroup: Bool {
+        model.conversations.first { $0.id == conversationID }?.isGroup ?? false
+    }
+    private var currentContactName: String {
+        model.contactNames[conversationID] ?? "Conversation"
     }
 
     var body: some View {
@@ -93,6 +103,32 @@ struct ConversationView: View {
         .navigationBarTitleDisplayMode(.inline)
         // Opaque bar: the title fails the contrast audit over scrolled content.
         .toolbarBackground(.visible, for: .navigationBar)
+        // Rename a 1:1 contact right from the chat: tap the title → "Rename contact".
+        // Local-only (`localNickname`), never broadcast (SPEC §0). Groups keep their
+        // plain title (a group id isn't a contact identity).
+        .toolbarTitleMenu {
+            if !isGroup {
+                Button {
+                    renameText = currentContactName
+                    showRename = true
+                } label: {
+                    Label("Rename contact", systemImage: "pencil")
+                }
+            }
+        }
+        .alert("Rename contact", isPresented: $showRename) {
+            TextField("Name", text: $renameText)
+            Button("Save") {
+                let trimmed = renameText.trimmingCharacters(in: .whitespacesAndNewlines)
+                Task {
+                    await model.renameContact(
+                        conversationID, nickname: trimmed.isEmpty ? nil : trimmed)
+                }
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("This name is local to your device and never shared.")
+        }
         .onAppear {
             if ProcessInfo.processInfo.arguments.contains("--uitest-bigpaste"), largePaste == nil {
                 largePaste = String(repeating: "PQRC large paste demo line.\n", count: 8000)
@@ -121,17 +157,9 @@ struct ConversationView: View {
                 .accessibilityLabel("Start AI thread")
                 .accessibilityIdentifier("thread-create-button")
                 .help("Start a thread where each person's AI can join and collaborate — everything they say is recorded right there.")
-                Button {
-                    // The "My AI responds" control now lives inline in the in-chat
-                    // "AI here" sheet, beside the AI-context picker / egress-firewall
-                    // padlock — open it there.
-                    showAIHere = true
-                } label: {
-                    Image(systemName: "sparkles")
-                }
-                .accessibilityLabel("My AI")
-                .accessibilityIdentifier("ai-window-button")
-                .help("My AI: respond in chat for a set time (everyone sees it's active, context shared), or draft replies privately. Opens the in-chat “AI here” sheet.")
+                // (Removed the redundant "My AI" sparkles button here — it merely
+                // re-opened the same AI:live sheet the leading `aiHereChip` opens.
+                // All of its functionality lives in that one AI:live control now.)
                 Button {
                     showDetails = true
                 } label: {
@@ -181,10 +209,13 @@ struct ConversationView: View {
                 Text(AIContextVocab.glance(aiSummary))
                 // Remote AI: the egress-firewall state is always visible (privacy
                 // cardinal rule) — shielded when on, an orange open lock when off.
-                if aiSummary.mode != "off" && aiSummary.isRemote {
-                    Image(systemName: aiSummary.firewallOn ? "lock.shield" : "lock.open")
-                        .foregroundStyle(aiSummary.firewallOn ? AnyShapeStyle(.secondary) : AnyShapeStyle(.orange))
-                }
+                // Every chat is E2EE, so the lock is ALWAYS shown (it used to vanish
+                // whenever no remote AI was active — the "lost lock"). It sharpens to a
+                // shield when a remote AI's egress firewall is on, or an orange OPEN
+                // lock when a remote AI is active with the firewall OFF — that downgrade
+                // must stay visible (privacy cardinal rule).
+                Image(systemName: lockGlyph)
+                    .foregroundStyle(lockTint)
             }
             .font(.caption.weight(.medium))
             .foregroundStyle(.primary)
@@ -204,6 +235,18 @@ struct ConversationView: View {
         // iOS). The shield/open-lock glyph reflects the egress firewall for a
         // remote AI — shielded when on, an orange open lock when off.
         .help("What your AI sees in this chat, at a glance. Tap to change it just here. The shield shows the egress firewall is on for a remote AI; an orange open lock means it's off.")
+    }
+
+    /// The AI:live lock, ALWAYS present (every chat is E2EE): a plain closed lock by
+    /// default, a shield when a remote AI's egress firewall is on, an open lock when a
+    /// remote AI is active with the firewall off.
+    private var lockGlyph: String {
+        guard aiSummary.mode != "off", aiSummary.isRemote else { return "lock" }
+        return aiSummary.firewallOn ? "lock.shield" : "lock.open"
+    }
+    private var lockTint: AnyShapeStyle {
+        (aiSummary.mode != "off" && aiSummary.isRemote && !aiSummary.firewallOn)
+            ? AnyShapeStyle(.orange) : AnyShapeStyle(.secondary)
     }
 
     private var threadChips: some View {
@@ -340,6 +383,16 @@ struct ConversationView: View {
         .background(.bar)
     }
 
+    /// Send whatever's in the composer (a large paste or the typed text), then clear it.
+    /// Factored out so the Send button and the macOS Return key share one path.
+    private func sendCurrent() {
+        let outgoing = largePaste ?? draftText
+        guard !outgoing.isEmpty else { return }
+        largePaste = nil
+        draftText = ""
+        Task { await model.send(outgoing, conversationID: conversationID) }
+    }
+
     private var composer: some View {
         VStack(spacing: 6) {
             if let paste = largePaste {
@@ -419,11 +472,19 @@ struct ConversationView: View {
                         }
                         .disabled(aiDrafting)
                     }
+                    #if os(macOS) || targetEnvironment(macCatalyst)
+                        // Mac: Return sends, Shift+Return inserts a newline for multi-line
+                        // blocks. (The all-keys overload — `.onKeyPress(.return)` doesn't
+                        // surface the press for a TextField.) iOS/iPadOS are untouched.
+                        .onKeyPress { press in
+                            guard press.key == .return, !press.modifiers.contains(.shift)
+                            else { return .ignored }
+                            sendCurrent()
+                            return .handled
+                        }
+                    #endif
                 Button {
-                    let outgoing = largePaste ?? draftText
-                    largePaste = nil
-                    draftText = ""
-                    Task { await model.send(outgoing, conversationID: conversationID) }
+                    sendCurrent()
                 } label: {
                     Image(systemName: "arrow.up.circle.fill")
                         .font(.title)

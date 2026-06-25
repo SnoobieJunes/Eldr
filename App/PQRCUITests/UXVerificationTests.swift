@@ -104,12 +104,12 @@ final class UXVerificationTests: XCTestCase {
         // The leading AI chip is one affordance...
         let chip = element(app, "ai-here-chip")
         XCTAssertTrue(chip.waitForExistence(timeout: 15), "leading AI chip missing")
-        // ...and the toolbar is so crowded that the sparkles 'My AI' button +
-        // 'Conversation details' overflow into a 'More' menu on iPhone portrait.
-        let overflowed = app.buttons["OverflowBarButtonItem"].waitForExistence(timeout: 10)
-        // Corroborate: the sparkles button is NOT directly on the bar in portrait.
-        let sparklesHiddenInPortrait = !app.buttons["ai-window-button"].exists
-        shot(app, "rec1-01-toolbar-crowded-overflow")
+        // The redundant SECOND AI entry point (the sparkles 'My AI' toolbar button)
+        // has been REMOVED — the leading AI:live chip is now the single in-chat AI
+        // control, so the toolbar no longer overflows from AI-button crowding.
+        XCTAssertFalse(app.buttons["ai-window-button"].exists,
+                       "the redundant 'My AI' sparkles button should be removed")
+        shot(app, "rec1-01-single-ai-chip")
 
         // The CHIP opens the "AI here" sheet (context picker + My-AI-responds).
         chip.tap()
@@ -120,22 +120,13 @@ final class UXVerificationTests: XCTestCase {
         shot(app, "rec1-02-chip-opens-AIHereSheet")
         app.buttons["Done"].firstMatch.tap()
 
-        // Rotate to landscape: the wider bar un-overflows, so the SECOND AI
-        // entry point (the sparkles 'My AI' button) and the info button are
-        // directly on the bar — proving they coexist with the chip.
+        // Still the single AI entry point after rotating to landscape (no duplicate).
         XCUIDevice.shared.orientation = .landscapeLeft
-        let sparkles = app.buttons["ai-window-button"]
-        XCTAssertTrue(sparkles.waitForExistence(timeout: 10),
-                      "in landscape the sparkles 'My AI' button is a direct toolbar item")
-        shot(app, "rec1-03a-landscape-all-ai-controls-visible")
-
-        // The SPARKLES button opens the SAME sheet (duplicate entry point).
-        sparkles.tap()
-        XCTAssertTrue(app.navigationBars["AI here"].waitForExistence(timeout: 10),
-                      "the sparkles button opens the SAME 'AI here' sheet — duplicate entry point")
-        XCTAssertTrue(element(app, "conversation-ai-mode").exists)
-        shot(app, "rec1-03b-sparkles-opens-SAME-sheet")
-        app.buttons["Done"].firstMatch.tap()
+        XCTAssertTrue(element(app, "ai-here-chip").waitForExistence(timeout: 10),
+                      "the AI:live chip remains the single AI entry point in landscape")
+        XCTAssertFalse(app.buttons["ai-window-button"].exists,
+                       "no duplicate AI button in landscape either")
+        shot(app, "rec1-03-single-ai-control-landscape")
 
         // Details hosts a THIRD copy of the same per-conversation AI-context control.
         let info = app.buttons["Conversation details"]
