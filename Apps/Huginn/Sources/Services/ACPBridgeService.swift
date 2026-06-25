@@ -901,8 +901,14 @@ final class ACPBridgeService: ObservableObject {
 
     /// Send a formatted report to every enabled conversation as an agent message.
     private func broadcast(_ text: String) async {
-        let body = MessageBody(text: text, sentAt: clock.now())
+        // Owner sees the raw report; every other recipient gets the credential-scrubbed
+        // copy — tool args / build output / session summaries routinely carry tokens and
+        // paths, and these reports fan out to every enabled conversation incl. non-owner
+        // peers (H-4). Mirrors the DIRECT-mode agent-message per-recipient fan-out.
+        let redacted = CredentialRedactor.scrub(text)
         for conversation in activeConversations where conversation.enabled {
+            let visible = conversation.id == ownerIdentityHex ? text : redacted
+            let body = MessageBody(text: visible, sentAt: clock.now())
             do {
                 try await messaging.send(body, to: conversation.id, participantType: .agent)
             } catch {
