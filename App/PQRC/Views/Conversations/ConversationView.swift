@@ -595,6 +595,7 @@ private struct ConversationStatusHeader: View {
     private let ticker = Timer.publish(every: 1, on: .main, in: .common).autoconnect()
 
     var body: some View {
+        let summary = model.primaryAIContextSummary(conversationID)
         VStack(spacing: 0) {
             if let banner = model.activeWindowBanner(conversationID: conversationID, now: now) {
                 AIWindowBanner(name: banner.name, until: banner.until, now: now)
@@ -611,6 +612,32 @@ private struct ConversationStatusHeader: View {
                     // it adapts to light/dark (DEVIATIONS A7 / build-conventions).
                     .background(Color.purple.mix(with: Color(.systemBackground), by: 0.88))
                     .accessibilityIdentifier("context-sharing-banner")
+            }
+            // Egress-firewall state for this chat. Shown only when a REMOTE AI is here —
+            // the only time the firewall does anything (on-device AI never leaves the
+            // device). ON is the calm, protected state; OFF is a LOUD warning that real
+            // names + full context leave the device unredacted (privacy cardinal rule:
+            // the downgrade must stay visible). Opaque tint so the contrast auditor can
+            // resolve it (A7).
+            if summary.mode != "off", summary.isRemote {
+                Label(
+                    summary.firewallOn
+                        ? "Egress firewall on — names & secrets redacted before this chat reaches your cloud AI"
+                        : "Egress firewall OFF — real names & full context leave your device",
+                    systemImage: summary.firewallOn ? "lock.shield" : "lock.open")
+                    .font(.caption.weight(.medium))
+                    .foregroundStyle(.primary)
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 6)
+                    .background(
+                        summary.firewallOn
+                            ? Color.green.mix(with: Color(.systemBackground), by: 0.86)
+                            : Color.orange.mix(with: Color(.systemBackground), by: 0.78))
+                    .accessibilityIdentifier("conversation-firewall-status")
+                    .accessibilityLabel(
+                        summary.firewallOn
+                            ? "Egress firewall on for this conversation"
+                            : "Warning: egress firewall off — full context leaves your device")
             }
         }
         .onReceive(ticker) { _ in
