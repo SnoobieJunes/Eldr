@@ -106,19 +106,6 @@ struct ConversationView: View {
         .navigationBarTitleDisplayMode(.inline)
         // Opaque bar: the title fails the contrast audit over scrolled content.
         .toolbarBackground(.visible, for: .navigationBar)
-        // Rename a 1:1 contact right from the chat: tap the title → "Rename contact".
-        // Local-only (`localNickname`), never broadcast (SPEC §0). Groups keep their
-        // plain title (a group id isn't a contact identity).
-        .toolbarTitleMenu {
-            if !isGroup {
-                Button {
-                    renameText = currentContactName
-                    showRename = true
-                } label: {
-                    Label("Rename contact", systemImage: "pencil")
-                }
-            }
-        }
         .alert("Rename contact", isPresented: $showRename) {
             TextField("Name", text: $renameText)
             Button("Save") {
@@ -143,33 +130,51 @@ struct ConversationView: View {
                 aiHereChip
             }
             ToolbarItemGroup(placement: .topBarTrailing) {
-                Button {
-                    selecting.toggle()
-                    selection = []
-                } label: {
-                    Image(systemName: selecting ? "checkmark.circle" : "checklist")
+                if selecting {
+                    // In multi-select, a single explicit Done — no crowded bar.
+                    Button("Done") {
+                        selecting = false
+                        selection = []
+                    }
+                    .accessibilityIdentifier("select-messages-button")
+                } else {
+                    // One real "•••" menu (the auto-overflow one didn't respond) holding
+                    // every conversation action — including the in-chat rename — so the
+                    // nav bar stays just the AI:live chip + this menu, not cramped.
+                    Menu {
+                        if !isGroup {
+                            Button {
+                                renameText = currentContactName
+                                showRename = true
+                            } label: {
+                                Label("Rename contact", systemImage: "pencil")
+                            }
+                        }
+                        Button {
+                            selecting = true
+                            selection = []
+                        } label: {
+                            Label("Select messages", systemImage: "checklist")
+                        }
+                        .accessibilityIdentifier("select-messages-menu-item")
+                        Button {
+                            showThreadSheet = true
+                        } label: {
+                            Label("Start AI thread", systemImage: "text.bubble")
+                        }
+                        .accessibilityIdentifier("thread-create-button")
+                        Button {
+                            showDetails = true
+                        } label: {
+                            Label("Conversation details", systemImage: "info.circle")
+                        }
+                        .accessibilityIdentifier("conversation-details-item")
+                    } label: {
+                        Image(systemName: "ellipsis.circle")
+                    }
+                    .accessibilityLabel("More")
+                    .accessibilityIdentifier("conversation-more-menu")
                 }
-                .accessibilityLabel(selecting ? "Done selecting" : "Select messages")
-                .accessibilityIdentifier("select-messages-button")
-                .help("Select several messages at once to add them to your AI's context.")
-                Button {
-                    showThreadSheet = true
-                } label: {
-                    Image(systemName: "text.bubble")
-                }
-                .accessibilityLabel("Start AI thread")
-                .accessibilityIdentifier("thread-create-button")
-                .help("Start a thread where each person's AI can join and collaborate — everything they say is recorded right there.")
-                // (Removed the redundant "My AI" sparkles button here — it merely
-                // re-opened the same AI:live sheet the leading `aiHereChip` opens.
-                // All of its functionality lives in that one AI:live control now.)
-                Button {
-                    showDetails = true
-                } label: {
-                    Image(systemName: "info.circle")
-                }
-                .accessibilityLabel("Conversation details")
-                .help("Verify this contact's safety code, set a local name, control AI here, or block.")
             }
         }
         .sheet(isPresented: $showThreadSheet) {

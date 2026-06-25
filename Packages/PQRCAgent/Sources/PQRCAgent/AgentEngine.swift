@@ -73,9 +73,14 @@ extension AgentMessageSink {
 /// Enforcement core for AI participation (SPEC §13, APP-SPEC §8–9).
 /// Owns every gate between an `AgentProvider`'s output and the wire.
 public actor AgentEngine {
-    /// Allowed always-on durations (APP-SPEC §8: bounded only).
-    public static let allowedWindowDurations: [Int64] = [15 * 60, 30 * 60, 60 * 60, 2 * 60 * 60]
-    public static let maxWindowDuration: Int64 = 2 * 60 * 60
+    /// Allowed always-on durations (APP-SPEC §8: bounded only). Includes the longer
+    /// 8h/24h options the "My AI responds" picker offers — without them, selecting 8h or
+    /// 24h threw `invalidDuration` (swallowed by `try?` in the app), so only 1h appeared
+    /// to work. Still strictly bounded (24h max) + visible-indicator per invariant 9.
+    public static let allowedWindowDurations: [Int64] = [
+        15 * 60, 30 * 60, 60 * 60, 2 * 60 * 60, 8 * 60 * 60, 24 * 60 * 60,
+    ]
+    public static let maxWindowDuration: Int64 = 24 * 60 * 60
 
     private let myIdentity: PQRCIdentity
     private let clock: any Clock
