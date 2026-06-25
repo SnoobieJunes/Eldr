@@ -36,7 +36,8 @@ This is **staged** so there is always a working fallback:
 
 - A Mac (Apple Silicon) already running **sybilclaw** (its gateway daemon, default
   `:18789`).
-- **Huginn.app** — the Eldr ACP Configurator (DMG; see `docs/SIGNING-AND-DISTRIBUTION.md`).
+- **Huginn.app** — the Eldr agent cockpit (build the notarized DMG with
+  `Apps/Huginn/build-dmg.sh`; see `docs/SIGNING-AND-DISTRIBUTION.md`).
 - A local, OpenAI-compatible LLM (LM Studio / Ollama / vLLM) for `eldr-acp`.
 - *(Stages 1–2 only)* an iPhone running EldrChat.
 
@@ -92,16 +93,20 @@ and reply. That's the local half of the demo already working end-to-end.
 
 ---
 
-## Stage 1 — phone (EldrChat) → `eldr-acp` over the relay  ✅ implemented (needs a 2-device run)
+## Stage 1 — phone (EldrChat) → `eldr-acp` over the relay  🚧 wired + headless-tested; not yet run on two devices
 
-**What it is:** EldrChat on your phone drives the Mac's `eldr-acp` over Eldr's E2EE,
-post-quantum relay — the reliable path. Phone = ACP client; Huginn on the Mac hosts the
-agent (`ACPRelayHost`), admitting only the owner's frames (the C-3 gate).
+**What it is:** EldrChat on your phone drives the Mac's `eldr-acp` over Eldr's post-quantum,
+end-to-end-encrypted relay — the reliable path. Phone = ACP client; Huginn on the Mac hosts
+the agent (`ACPRelayHost`), admitting only the owner's frames (the C-3 gate).
 
-**Status:** wired end-to-end on both sides and proven headlessly
-(`RelayCarriedACPE2ETests`, `RelayACPHostTests`). The live `BridgeMessaging` seam is the
-production `PQRCMessenger` (DEVIATIONS **AC25**, which superseded the old AC9 "sends
-throw" stub). What remains is exercising it on two physical devices.
+**Status — honest:** the bridge LOGIC is wired on both sides and proven headlessly
+(`RelayCarriedACPE2ETests`, `RelayACPHostTests`), and the production messaging seam exists
+(`PQRCMessengerMessaging` over the live `PQRCMessenger`, DEVIATIONS **AC25**). At runtime it
+stays **fail-closed**: the bridge's default `BridgeMessaging` is `UnpairedMessaging`, which
+**throws on send until the live two-device PQXDH pairing handshake completes**
+(`startMessagingNode`) — and that live pairing has **not yet been run on two physical
+devices** (it can't be exercised headlessly). Do not present this as "working" until you've
+done a real 2-device run (below).
 
 **Run it (2 devices, all [human]):**
 1. **Mac / Huginn:** open the **EldrChat Bridge** tab → **Enable bridge** → set the
@@ -109,8 +114,10 @@ throw" stub). What remains is exercising it on two physical devices.
    "Copy pairing link" (`pqrc:add?npub=…&type=coding_agent`). Make sure the LLM is
    reachable (Connections panel) — the relay-ACP host stays off (fail-closed) without a
    pinned owner and a usable model.
-2. **Phone / EldrChat:** New conversation ▸ **Scan** the QR (or open the link). The
-   contact is tagged `coding_agent`.
+2. **Phone / EldrChat:** New conversation ▸ paste the npub, or **open the pairing link**
+   from the QR — scan it with the **system Camera app** (EldrChat has no built-in scanner
+   yet) or AirDrop/paste the `pqrc:add?npub=…&type=coding_agent` link. The contact is
+   tagged `coding_agent`.
 3. **Phone:** open that conversation ▸ **Details** ▸ **Mac agent control** ▸ toggle
    **"Drive this agent from here"** — this sets `remoteDevControlConsent` and binds the
    live relay-ACP provider. (Optionally allow autonomous file/shell changes.)
@@ -121,7 +128,7 @@ throw" stub). What remains is exercising it on two physical devices.
 
 ---
 
-## Stage 2 — phone → sybilclaw's own assistant via the Gateway bridge  ✅ built (verify the protocol on his sybilclaw)
+## Stage 2 — phone → sybilclaw's own assistant via the Gateway bridge  🚧 built against the documented protocol; UNVERIFIED on a live gateway
 
 **What it is:** your phone's chat reaches **sybilclaw's own assistant** (its model, persona,
 memory, tools) — *not* eldr-acp, and **no eldr-acp LLM is used**. The phone's message rides
