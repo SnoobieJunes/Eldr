@@ -577,7 +577,11 @@ final class AppModel {
         case "full": mode = "active"
         default: break
         }
-        let isRemote = primary.map { ConfiguredAI.isRemote($0.kind) } ?? false
+        // ANY enabled remote AI means context can leave the device — the chip + the
+        // egress-firewall row must reflect that, not just the PRIMARY AI's kind. With
+        // an on-device #1 and a cloud #2, the old primary-only check wrongly read
+        // "stays on device" while #2 egressed (H-3).
+        let isRemote = enabled.contains { ConfiguredAI.isRemote($0.kind) }
         let firewallOn =
             AppSession.conversationFirewall(conversationID, siloID: siloID) ?? AppSession.firewallEnabled
         return (mode, isRemote, firewallOn)

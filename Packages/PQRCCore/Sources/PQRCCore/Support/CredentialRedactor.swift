@@ -14,7 +14,8 @@ import Foundation
 ///    the OTHER participants' copy (never the owner's), which is the privacy-maximizing
 ///    failure (SPEC §0). A false NEGATIVE would leak a real secret — far worse — so the
 ///    patterns lean broad.
-///  - Detects common shapes: OpenAI/Anthropic `sk-…`, AWS `AKIA…`, GitHub/Slack
+///  - Detects common shapes: PEM private-key blocks, connection-string URL credentials
+///    (`scheme://user:pass@…`), OpenAI/Anthropic `sk-…`, AWS `AKIA…`, GitHub/Slack
 ///    tokens, `Bearer …`, `api_key = …` / `password: …` assignments, and long
 ///    high-entropy base64/hex runs.
 ///  - Never emits the secret in the replacement; the marker is fixed text.
@@ -50,6 +51,21 @@ public enum CredentialRedactor {
     /// earlier rules have already turned into inert markers).
     private static let rules: [Rule] = {
         let specs: [(String, String, NSRegularExpression.Options)] = [
+            // PEM private-key blocks — redact the WHOLE block. Its base64 body is
+            // newline-wrapped, so no single-line entropy rule catches it; run this FIRST
+            // so nothing else mangles the body (H-1).
+            (
+                "-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----[\\s\\S]*?-----END [A-Z0-9 ]*PRIVATE KEY-----",
+                apiKeyMarker, []
+            ),
+            // Credentials in a connection-string URL: scheme://user:PASSWORD@host —
+            // redact the password, keep scheme + user. Very common in agent output
+            // (postgres://, redis://, mongodb://, https://user:pass@…) and missed by the
+            // assignment + entropy rules (H-1).
+            (
+                "([A-Za-z][A-Za-z0-9+.\\-]*://[^\\s:/@]+):([^\\s/@]+)@",
+                "$1:\(tokenMarker)@", []
+            ),
             // OpenAI / Anthropic secret keys: sk-… and sk-ant-… (the `ant-` is covered
             // by the char class, so one pattern handles both).
             ("sk-[A-Za-z0-9_-]{12,}", apiKeyMarker, []),

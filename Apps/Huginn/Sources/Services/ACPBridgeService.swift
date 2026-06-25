@@ -106,8 +106,18 @@ struct ACPDriverAgentRunner: BridgeAgentRunner {
 
     func run(prompt: String, workdir: String?) async throws -> String {
         let collected = AgentAnswerCollector()
+        // CR-1: this watch-along / Mac-responder runner has no interactive client to
+        // approve a mutating tool, so the default `requestPermission` ({ _,_ in true })
+        // AUTO-APPROVED run_shell / write_file / edit_file UNATTENDED — an owner-window-open
+        // + prompt-injected task could run arbitrary shell on the Mac. This path is a
+        // chat-participant / drafting role that needs only file READS for context, and
+        // reads never request permission, so DENY every permission request (which denies
+        // exactly the mutating tools). Real mutating work goes through the phone-driven
+        // relay-ACP path (ACPRelayHost), which routes each request to the owner's phone
+        // for an explicit Allow / Deny.
         let handler = ACPClientHandler(
-            onAgentMessageChunk: { await collected.append($0) })
+            onAgentMessageChunk: { await collected.append($0) },
+            requestPermission: { _, _ in false })
         var env = environmentOverrides
         env["ELDR_ACP_STREAM"] = "0"  // need the complete message to scrub it (§10)
         let driver = ACPClientDriver(
