@@ -958,6 +958,22 @@ actor PersonaRuntime {
         persistContact(contact.identityHex)
     }
 
+    /// Every locally-generated name already in use — across all contacts'
+    /// person/AI codenames, user renames, and my own display name/alias — so a
+    /// freshly generated name can REGENERATE until it's unique (the fix for
+    /// look-alike names). `excluding` drops one identity's own current names so
+    /// re-applying an upgrade for that contact isn't counted as a self-collision.
+    private func takenAutoNames(excluding identityHex: String? = nil) -> Set<String> {
+        var taken: Set<String> = [displayName]
+        if let alias = myAlias { taken.insert(alias) }
+        for (hex, record) in contactRecords where hex != identityHex {
+            if let name = record.autoName { taken.insert(name) }
+            if let aiName = record.autoAIName { taken.insert(aiName) }
+            if let nickname = record.localNickname { taken.insert(nickname) }
+        }
+        return taken
+    }
+
     /// Assigns local, never-broadcast friendly codenames to a contact and their
     /// AI if they don't have any yet. The deterministic local name is set
     /// instantly (so the UI never shows a raw key), then an on-device Core AI
@@ -966,23 +982,31 @@ actor PersonaRuntime {
     private func ensureFriendlyNames(_ identityHex: String) {
         guard var record = contactRecords[identityHex] else { return }
         var changed = false
+        // Build the taken set once and grow it as we assign, so this contact's
+        // own person- and AI-name can't collide with each other either.
+        var taken = takenAutoNames(excluding: identityHex)
         if record.autoName == nil {
-            record.autoName = FriendlyName.local(seed: identityHex)
+            let name = FriendlyName.unique(seed: identityHex, taken: taken)
+            record.autoName = name
+            taken.insert(name)
             changed = true
         }
         if record.autoAIName == nil {
-            record.autoAIName = FriendlyName.local(seed: identityHex + ":ai")
+            record.autoAIName = FriendlyName.unique(seed: identityHex + ":ai", taken: taken)
             changed = true
         }
         guard changed else { return }
         contactRecords[identityHex] = record
         persistContact(identityHex)
         // Upgrade to on-device AI codenames when the model is available. Stays
-        // on device (FriendlyName.generate never calls a remote API).
+        // on device (FriendlyName.generate never calls a remote API). The upgraded
+        // names are re-rolled for uniqueness against everyone else's.
         Task { [weak self] in
             guard let self else { return }
-            let person = await FriendlyName.generate(seed: identityHex)
-            let ai = await FriendlyName.generate(seed: identityHex + ":ai")
+            let taken = await self.takenAutoNames(excluding: identityHex)
+            let person = await FriendlyName.generate(seed: identityHex, taken: taken)
+            let ai = await FriendlyName.generate(
+                seed: identityHex + ":ai", taken: taken.union([person]))
             await self.applyAutoNames(identityHex, person: person, ai: ai)
         }
     }

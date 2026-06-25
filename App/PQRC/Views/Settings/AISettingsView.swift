@@ -48,10 +48,13 @@ struct AISettingsView: View {
                     persist()
                 }
                 Button {
+                    let newID = UUID().uuidString
                     ais.append(
                         ConfiguredAI(
-                            id: UUID().uuidString,
-                            name: FriendlyName.local(seed: UUID().uuidString),
+                            id: newID,
+                            // Unique among the AIs already configured, so two
+                            // tethered AIs never share a name (the look-alike fix).
+                            name: FriendlyName.unique(seed: newID, taken: Set(ais.map(\.name))),
                             kind: "ondevice"))
                     persist()
                 } label: {
