@@ -18,7 +18,7 @@ A phased checklist. Items marked **YOU** need a human (account access, money, or
 
 ## C. Encryption & export compliance (the E2EE-specific part)
 
-9. **CLAUDE** — `ITSAppUsesNonExemptEncryption = YES` in Info.plist. EldrChat implements a proprietary E2EE protocol (`pqrc-v1`) — this is *not* exempt the way HTTPS-only apps are.
+9. **CLAUDE** — `ITSAppUsesNonExemptEncryption = YES` in Info.plist. EldrChat composes standard, published primitives into a custom E2EE protocol (`pqrc-v1`) — no invented primitives, but a custom composition — and this is *not* exempt the way HTTPS-only apps are.
 10. **YOU** — In App Store Connect's encryption questions for the build, expect to answer: uses encryption → **Yes**; only exempt encryption (standard iOS TLS etc.) → **No**. Typical path for mass-market E2EE messengers under US EAR: self-classification as 5D992.c under License Exception ENC §740.17(b), which entails an **annual self-classification report** emailed to BIS and the NSA ENC contact (due each February for the prior year). Read BIS's encryption FAQ, decide, and calendar the report — or have counsel confirm in an hour.
 11. **YOU** — **France:** distributing cryptography in France involves a declaration to ANSSI. Pragmatic options: file the declaration (one-time form per product), or initially exclude France from availability in App Store Connect → Pricing and Availability. Decide before external testing, since TestFlight external builds respect storefront availability.
 

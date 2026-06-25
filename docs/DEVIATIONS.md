@@ -144,7 +144,7 @@ and affects interop; `[app-only]` — client behavior, no wire impact;
   `ai_window`/`ai_invite` family, authorizing the *consume* axis only (the
   other party's agent may ingest the granter's `ai_context`-marked messages,
   and reciprocally). Human-identity-signed, bounded duration
-  {15m,30m,1h,2h} ≤ 2h, scope = `conversation`|`thread` (+id). Uses a DISTINCT
+  {15m,30m,1h,2h,8h,24h} ≤ 24h (grants included), scope = `conversation`|`thread` (+id). Uses a DISTINCT
   domain string `pqrc-ai-context-grant-v1` with the scope bound in, so a grant
   signature can never be replayed as a window/invite or across scopes.
   Invariant 9 preserved: consume-authorization carries its own human signature,
@@ -282,8 +282,9 @@ and affects interop; `[app-only]` — client behavior, no wire impact;
   payload blobs.
 - **A3 — Window replies route to the conversation the window was started in**
   (one active window scope per user in v1).
-- **A4 — Bounded AI durations** {15, 30, 60, 120 min}; incoming announcements
-  beyond 2 h are rejected as unbounded.
+- **A4 — Bounded AI durations** {15m, 30m, 1h, 2h, 8h, 24h} (the conversation
+  "My AI responds" window offers 1/8/24 h; thread invites stay 15/30/60/120 min);
+  incoming windows, invites, and grants beyond 24 h are rejected as unbounded.
 - **A5 — Local Universe** ships five personas including Eve (unknown sender)
   to exercise the message-request gate; demo agents are scripted
   MockAgentProviders so the demo is deterministic.
@@ -905,30 +906,25 @@ and affects interop; `[app-only]` — client behavior, no wire impact;
   Eligibility (App Store Small Business Program, < 2M lifetime downloads, PCC
   entitlement) and rate-limits surface as actionable `availabilityReason` strings →
   Demo fallback, never a silent confidentiality downgrade.
-- **A40-tech-debt — PCC APIs are build-gated behind `ELDR_PCC_SDK`** `[tech-debt]`
-  (2026-06-18): the WWDC26 PCC symbols (`PrivateCloudComputeLanguageModel`,
-  `ContextOptions`, the `respond(to:options:contextOptions:)` overload) are absent from
-  the 2025 on-device-only SDK currently installed, so the provider's PCC path compiles
-  only when the target defines `ELDR_PCC_SDK` (set
-  `SWIFT_ACTIVE_COMPILATION_CONDITIONS` once building with the Xcode-26 SDK + PCC
-  entitlement). Without the flag the file still compiles and reports "not built with the
-  PCC SDK" → Demo. The structured-output / tool-calling / vision / adapter seams from the
-  "everything" scope are deferred to that same flagged path; **adapters are
-  specifically NOT pursued** (the training toolkit is EOL at v26.0.0, incompatible with
-  OS 27+) — prompt engineering is the supported path. Exact symbol spellings must be
-  verified in Xcode Quick Help when flipping the flag on. **Update (2026-06-18):**
-  confirmed the symbols are STILL absent even with the **Xcode 27.0** SDK installed
-  (`SDKROOT=iphoneos27.0`) — `PrivateCloudComputeLanguageModel` / `ContextOptions` /
-  reasoning appear in zero FoundationModels `.swiftinterface` files (iPhoneOS,
-  Simulator, macOS, Catalyst all checked); Apple's online docs are ahead of this seed.
-  Defining `ELDR_PCC_SDK` therefore breaks the build, so the gate stays OFF until a
-  later seed ships the symbols. Two prep changes landed meanwhile: (1) the
+- **A40-tech-debt — PCC is ON; the `ELDR_PCC_SDK` gate is enabled, and the build
+  REQUIRES Xcode 27** `[tech-debt]` (updated; supersedes the earlier "symbols absent"
+  reading): the WWDC26 PCC symbols (`PrivateCloudComputeLanguageModel`, `ContextOptions`,
+  the `respond(to:options:contextOptions:)` overload) **are present in the Xcode 27 SDK** —
+  verified in the iPhoneOS, iPhoneSimulator, and macOS SDKs. `Packages/PQRCAgent/Package.swift`
+  therefore **re-enables `.define("ELDR_PCC_SDK")`** (PCC ON by default), so the provider's
+  PCC path compiles and the `pcc` backend is live. **Hard toolchain requirement:** the app
+  MUST be built with **Xcode 27 (Xcode-beta)** — the 26.x SDK lacks these symbols, so a 26.x
+  build fails with "cannot find type … in scope" (this is what the earlier note mistook for
+  the symbols being absent everywhere). The structured-output / tool-calling / vision /
+  adapter seams from the "everything" scope are still deferred; **adapters are specifically
+  NOT pursued** (the training toolkit is EOL at v26.0.0, incompatible with OS 27+) — prompt
+  engineering is the supported path. Two supporting pieces: (1) the
   `com.apple.developer.private-cloud-compute` **managed** entitlement is wired
   (`App/EldrChat.entitlements` + `CODE_SIGN_ENTITLEMENTS`; Apple must still grant it via
-  the PCC access request before device signing succeeds); (2) the gated PCC code paths
-  now carry `@available(iOS 27, macOS 27, *)` guards (the package deploys to 26, the PCC
-  symbols are 27-only) and `availabilityReason` reports the OS-version gap. The flag
-  belongs in `Package.swift` (`swiftSettings: [.define("ELDR_PCC_SDK")]`), not the app's
+  the PCC access request before device signing succeeds); (2) the gated PCC code paths carry
+  `@available(iOS 27, macOS 27, *)` guards (the package deploys to 26, the PCC symbols are
+  27-only) and `availabilityReason` reports the OS-version gap. The define lives in
+  `Package.swift` (`swiftSettings: [.define("ELDR_PCC_SDK")]`), not the app's
   `SWIFT_ACTIVE_COMPILATION_CONDITIONS` — the provider lives in the PQRCAgent package.
 - **A41 — Mac Catalyst for a freely-resizable desktop window** `[app-only]`
   (2026-06-18): EldrChat on Mac ran as "Designed for iPad" (`TARGETED_DEVICE_FAMILY

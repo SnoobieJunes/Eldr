@@ -14,7 +14,7 @@ two transports added by the S1/S2 stretch goals:
 
 | Requirement | Notes |
 |---|---|
-| macOS with Xcode 26.x | Swift 6.2 toolchain; the packages build with `swift test` on macOS directly |
+| macOS with Xcode 27 (Xcode-beta) | Required per CLAUDE.md's toolchain rule and §9 (export `DEVELOPER_DIR=…/Xcode-beta.app`); the 26.x SDK is missing iOS-27 symbols this app uses. Swift 6.2 toolchain; the packages build with `swift test` on macOS directly |
 | iOS 26.5 simulator runtime | Pin `OS=26.5` in destinations — machines with a beta runtime installed can silently resolve an ambiguous name to the beta |
 | Two iPhones or iPhone+iPad (optional) | Only needed for real-radio Multipeer testing (§6) |
 | An Apple Development team | The project uses automatic signing (`DEVELOPMENT_TEAM` is set in the pbxproj; change it to yours if needed) |
@@ -83,7 +83,7 @@ chaos for resilience demos.
 
 ```bash
 # Build + run (default port 7777):
-1
+swift run --package-path Packages/PQRCNostr pqrc-relay
 
 # Custom port and chaos injection:
 swift run --package-path Packages/PQRCNostr pqrc-relay \
