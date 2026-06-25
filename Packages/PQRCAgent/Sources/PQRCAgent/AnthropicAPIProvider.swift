@@ -44,12 +44,15 @@ public struct AnthropicAPIProvider: AgentProvider {
         request.setValue(apiKey, forHTTPHeaderField: "x-api-key")
         request.setValue("2023-06-01", forHTTPHeaderField: "anthropic-version")
         request.setValue("application/json", forHTTPHeaderField: "content-type")
-        let payload: [String: Any] = [
+        var payload: [String: Any] = [
             "model": model,
             "max_tokens": 512,
-            "system": system,
             "messages": [["role": "user", "content": user]],
         ]
+        // Conduit default: only send a system prompt when the user wrote one.
+        if !system.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            payload["system"] = system
+        }
         request.httpBody = try JSONSerialization.data(withJSONObject: payload)
         let (data, response) = try await session.data(for: request)
         // Surface real failures (401 bad key, 400 bad model, 429 rate limit)

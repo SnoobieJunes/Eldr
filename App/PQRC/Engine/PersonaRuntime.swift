@@ -608,9 +608,17 @@ actor PersonaRuntime {
         // local autoName) instead of real display names — otherwise the skills
         // prompt would leak the very social graph the firewall withholds from the
         // redacted transcript (DEVIATIONS A19/A20).
+        // The user's OWN trusted Mac coding agent (paired + consented) defaults to
+        // RAW + CONDUIT: it's their device behind the app's E2EE, not a cloud model
+        // to guard against. So the egress firewall defaults OFF for it, and the
+        // hard-coded guardrail/window "chaff" is skipped — it gets only the raw
+        // transcript + the user's own instructions. An explicit per-conversation
+        // setting still wins either way (the user can re-enable the firewall).
+        let trustedNode = isConsentedCodingAgentNode(conversationID)
         // Per-conversation override (Settings → conversation details) wins over the
         // account default — a private, paired chat with your own agents can pass raw.
-        let firewallOn = AppSession.conversationFirewall(conversationID, siloID: siloID) ?? firewallEnabled
+        let firewallOn = AppSession.conversationFirewall(conversationID, siloID: siloID)
+            ?? (trustedNode ? false : firewallEnabled)
         let redactNames = ai.appliesEgressFirewall && firewallOn
         let promptDisplayName = redactNames ? "you" : displayName
         let promptPeerName =
@@ -618,7 +626,12 @@ actor PersonaRuntime {
             ? (contactRecords[conversationID]?.autoName ?? "a contact")
             : (groupRosters[conversationID]?.name ?? contactName(conversationID))
         let override: String?
-        if let tid = threadID {
+        if trustedNode {
+            // Pure conduit to your own agent: no guardrail/window preamble. The
+            // provider falls back to the instructions-only system prompt (empty
+            // unless the user set instructions for this AI).
+            override = nil
+        } else if let tid = threadID {
             let base = AgentSkills.threadSystemPrompt(
                 displayName: promptDisplayName,
                 contextDomain: AppSession.aiContextDomain(siloID: siloID),
@@ -652,31 +665,25 @@ actor PersonaRuntime {
         return redactedForRemote(ctx)
     }
 
-    /// System prompt for a conversation-scope `ai_window` reply (BUG-6 fix). The owner
-    /// has explicitly turned their AI ON for everyone in this conversation for a bounded
-    /// time, so the AI SHOULD answer the latest message rather than default to silence.
-    /// PASS stays available, but only for a message that genuinely warrants no reply.
-    /// `peerName` is already firewall-safe (a codename when redacting for a remote AI);
-    /// mirrors the summarize + user-instructions augmentation of `turnSystemPrompt()`.
+    /// System prompt for a conversation-scope `ai_window` reply. EldrChat is a
+    /// conduit: the user's own `instructions` ARE the system prompt — empty by
+    /// default, so an active window hands the model the raw transcript and nothing
+    /// the user didn't write (the user-request "stop passing chaff"). The old
+    /// hard-coded "you are X's AI assistant … reply PASS only if …" preamble is no
+    /// longer auto-injected; it's restorable from Settings (`ConfiguredAI`
+    /// default-instructions). `displayName`/`peerName` are retained for signature
+    /// stability and any future restore-default that wants them. Returns "" when
+    /// there's nothing to send; `contextFor` passes it as an explicit (empty)
+    /// override so `turnSystemPrompt()` emits no built-in text either.
     private func windowReplySystemPrompt(
         displayName: String, peerName: String, instructions: String?, summarize: Bool
     ) -> String {
-        var p = """
-            You are \(displayName)'s AI assistant, and \(displayName) has turned you ON \
-            for this conversation with \(peerName) — everyone here knows you're an AI \
-            taking part. Read the recent messages and reply helpfully to the most recent \
-            one, in one short, natural message, as \(displayName)'s assistant. Reply \
-            exactly PASS (nothing else) ONLY if the latest message clearly needs no \
-            response — a bare acknowledgement like "ok" or "thanks", or something plainly \
-            not meant for a reply. Otherwise, answer.
-            """
+        var parts: [String] = []
+        if let instructions, !instructions.isEmpty { parts.append(instructions) }
         if summarize {
-            p += " Prefer a brief summary of the relevant context over verbatim quoting."
+            parts.append("Prefer a brief summary of the relevant context over verbatim quoting.")
         }
-        if let instructions, !instructions.isEmpty {
-            p += "\n\nYour user's instructions: \(instructions)"
-        }
-        return p
+        return parts.joined(separator: "\n\n")
     }
 
     /// Replaces real display names with each identity's LOCAL codename (and self
@@ -1165,6 +1172,20 @@ actor PersonaRuntime {
     private func isConsentedCodingAgentNode(_ identityHex: String) -> Bool {
         contactType(identityHex) == "coding_agent"
             && AppSession.remoteDevControlConsent(nodeID: identityHex, siloID: siloID)
+    }
+
+    /// True ONLY when this node's ACP channel is carried over a LOCAL link
+    /// (NearbyACPTransport / Multipeer LAN), never the relay. The 64 KB context
+    /// byte-cap is lifted only here — the relay path must keep it (SPEC §7/§11:
+    /// content >64 KB is never inlined on the wire; Blossom pointer / chunking
+    /// only, padded to fixed buckets). Conservative by construction: a node we hold
+    /// a relay-ACP transport for is, by definition, relayed → not local; otherwise
+    /// lift only for a peer present on the local nearby link. Today coding-agent
+    /// nodes are relay-bound (`ensureRelayACPTransport`), so this is false for them
+    /// and the relayed Huginn path stays capped until a local ACP link is wired.
+    private func isLocalTransportNode(_ identityHex: String) -> Bool {
+        if relayACPTransports[identityHex] != nil { return false }
+        return nearbyContactNames[identityHex] != nil
     }
 
     /// The live relay-ACP transport bound to a consented `coding_agent` node, creating
@@ -1677,9 +1698,13 @@ actor PersonaRuntime {
         -> [AIContextInspection]
     {
         var out: [AIContextInspection] = []
-        // Per-conversation firewall override wins over the account default (same
-        // resolution as contextFor), so the inspector shows the EFFECTIVE state.
-        let firewallOn = AppSession.conversationFirewall(conversationID, siloID: siloID) ?? firewallEnabled
+        // Per-conversation firewall override wins over the account default, and a
+        // consented coding-agent node defaults OFF — same resolution as contextFor,
+        // so the inspector shows the EFFECTIVE state (real names, not codenames, for
+        // a trusted node).
+        let trustedNode = isConsentedCodingAgentNode(conversationID)
+        let firewallOn = AppSession.conversationFirewall(conversationID, siloID: siloID)
+            ?? (trustedNode ? false : firewallEnabled)
         for ai in ais {
             // Resolve the effective gather policy exactly as contextFor does: the
             // per-conversation override (Settings ▸ conversation details) wins.
@@ -2133,8 +2158,17 @@ actor PersonaRuntime {
         // A "strict" gather policy (per-AI or a per-conversation "marked only"
         // override) forces marked-context-only even while the AI is active.
         let effectiveActive = aiActive && !strict
+        // The user's OWN trusted Mac coding agent (paired + consented) is not a
+        // cloud model to be guarded against — it's their device behind the app's
+        // E2EE. For it, lift the "only messages since the AI turned on" floor so it
+        // can see the full recent conversation (still bounded by `depth`). A "marked
+        // only" override (strict) still wins — that's an explicit user choice.
+        let trustedNode = isConsentedCodingAgentNode(conversationID)
+        let liftWindow = trustedNode && !strict
         let since = aiActiveSince[threadID ?? conversationID] ?? Int64.max
         let recent = stored.filter { message in
+            // Trusted node: full recent history, no since-floor.
+            if liftWindow { return true }
             // While the AI is on, it reads the LIVE conversation from the moment
             // it was turned on (the window/invite/solo state is the authorization
             // to participate) — but never messages from before that.
@@ -2149,11 +2183,19 @@ actor PersonaRuntime {
         // Byte-bound the window: keep the most recent entries whose combined text
         // fits a budget, so a few multi-MB pastes can't balloon memory or a remote
         // payload (the AI-to-AI OOM cap). Always keep at least the newest message.
+        //
+        // The cap is lifted ONLY for a trusted coding-agent node reached over a
+        // LOCAL link (NearbyACPTransport / LAN) — never the relay. Over the relay
+        // the cap (and SPEC §7/§11: content >64 KB is never inlined — Blossom
+        // pointer / chunking only, everything padded to fixed buckets) MUST hold,
+        // so a relayed Huginn node still caps at 64 KB. Today coding-agent nodes are
+        // relay-bound, so this stays capped until a local ACP link is wired.
+        let liftByteCap = trustedNode && isLocalTransportNode(conversationID)
         var budget = 64 * 1024
         var bounded: [StoredMessage] = []
         for message in recent.reversed() {
             let cost = message.text.utf8.count
-            if !bounded.isEmpty, budget - cost < 0 { break }
+            if !liftByteCap, !bounded.isEmpty, budget - cost < 0 { break }
             bounded.append(message)
             budget -= cost
         }

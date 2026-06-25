@@ -252,13 +252,29 @@ struct AISettingsView: View {
                     .accessibilityIdentifier("ai-context-behavior-header")
                     .helpInfo("Three knobs per AI. Instructions give it a persona. Gathers sets what it can read: the live conversation while it's active, only messages you add to context, or nothing. Does sets whether it participates, drafts for your approval, or just summarizes. Depth is how many recent messages it sees.")
                 VStack(alignment: .leading, spacing: 2) {
-                    Text("Instructions (custom persona)")
+                    Text("Instructions (system prompt)")
                         .font(.caption).foregroundStyle(.secondary)
                     TextField(
                         "e.g. You're my terse scheduling assistant; never speculate.",
                         text: optionalBinding(ai.instructions), axis: .vertical)
                         .lineLimit(1...4)
                         .accessibilityIdentifier("ai-instructions")
+                    // EldrChat is a conduit: this field IS the entire system prompt
+                    // and is EMPTY by default — nothing is added on your behalf. This
+                    // restores the old built-in behavior (helpful reply + PASS) for
+                    // anyone who wants it back.
+                    HStack {
+                        Text("Empty = pure conduit (no system prompt sent).")
+                            .font(.caption2).foregroundStyle(.secondary)
+                        Spacer()
+                        Button("Use EldrChat's default") {
+                            ai.wrappedValue.instructions = ConfiguredAI.defaultInstructions
+                            persist()
+                        }
+                        .font(.caption2)
+                        .buttonStyle(.borderless)
+                        .accessibilityIdentifier("ai-instructions-restore-default")
+                    }
                 }
                 Picker("Gathers", selection: policyBinding(ai)) {
                     ForEach(ConfiguredAI.policies, id: \.tag) { Text($0.label).tag($0.tag) }
