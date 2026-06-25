@@ -22,3 +22,6 @@ logs/
 *.orig
 *~
 *.swift~*
+
+# Claude Code background-agent worktrees
+.claude/worktrees/
