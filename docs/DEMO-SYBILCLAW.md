@@ -92,16 +92,32 @@ and reply. That's the local half of the demo already working end-to-end.
 
 ---
 
-## Stage 1 — phone (EldrChat) → `eldr-acp` over the relay  🚧 in development
+## Stage 1 — phone (EldrChat) → `eldr-acp` over the relay  ✅ implemented (needs a 2-device run)
 
-**Target:** EldrChat on your phone drives the Mac's `eldr-acp` over Eldr's E2EE,
-post-quantum relay — the **reliable fallback** path. The phone is the ACP client; Huginn
-on the Mac hosts the agent (`ACPRelayHost`).
+**What it is:** EldrChat on your phone drives the Mac's `eldr-acp` over Eldr's E2EE,
+post-quantum relay — the reliable path. Phone = ACP client; Huginn on the Mac hosts the
+agent (`ACPRelayHost`), admitting only the owner's frames (the C-3 gate).
 
-**Status:** the relay-carried ACP path is proven headlessly (`RelayCarriedACPE2ETests`,
-the C-3 owner gate). The live runtime pairing handshake in the app is being wired
-(DEVIATIONS AC9). When it lands, the flow will be: **[human]** pair the phone to Huginn
-(scan its QR), then task the agent from the phone and watch it work on the Mac.
+**Status:** wired end-to-end on both sides and proven headlessly
+(`RelayCarriedACPE2ETests`, `RelayACPHostTests`). The live `BridgeMessaging` seam is the
+production `PQRCMessenger` (DEVIATIONS **AC25**, which superseded the old AC9 "sends
+throw" stub). What remains is exercising it on two physical devices.
+
+**Run it (2 devices, all [human]):**
+1. **Mac / Huginn:** open the **EldrChat Bridge** tab → **Enable bridge** → set the
+   **owner** to your phone's identity and pick the **project folder**. It shows a QR /
+   "Copy pairing link" (`pqrc:add?npub=…&type=coding_agent`). Make sure the LLM is
+   reachable (Connections panel) — the relay-ACP host stays off (fail-closed) without a
+   pinned owner and a usable model.
+2. **Phone / EldrChat:** New conversation ▸ **Scan** the QR (or open the link). The
+   contact is tagged `coding_agent`.
+3. **Phone:** open that conversation ▸ **Details** ▸ **Mac agent control** ▸ toggle
+   **"Drive this agent from here"** — this sets `remoteDevControlConsent` and binds the
+   live relay-ACP provider. (Optionally allow autonomous file/shell changes.)
+4. **Phone:** in the conversation, open an AI window and type a coding task ("list the
+   files in the project"). **Success:** the Mac's `eldr-acp` runs the tool and the result
+   streams back to the phone — over the relay, which only ever carries kind-1059
+   ciphertext.
 
 ---
 
