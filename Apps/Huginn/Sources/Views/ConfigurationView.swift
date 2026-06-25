@@ -5,6 +5,9 @@ import SwiftUI
 struct ConfigurationView: View {
     @EnvironmentObject private var store: ConfigurationStore
     @EnvironmentObject private var health: LLMHealthChecker
+    @StateObject private var connections = ConnectionStatusProbe()
+    @State private var acpxRegistered = false
+    @State private var sybilclawRegistered = false
 
     var body: some View {
         Form {
@@ -23,6 +26,8 @@ struct ConfigurationView: View {
                 }
                 healthRow
             }
+
+            connectionsSection
 
             Section("Context budget") {
                 Stepper(
@@ -141,5 +146,85 @@ struct ConfigurationView: View {
 
     private func secondsLabel(_ seconds: Int) -> String {
         seconds == 0 ? "unlimited" : "\(seconds)s"
+    }
+
+    // MARK: - Connections (answers "is the daemon running?" and "what port?")
+
+    private var connectionsSection: some View {
+        Section("Connections") {
+            VStack(alignment: .leading, spacing: 4) {
+                HStack(spacing: 8) {
+                    Image(systemName: "bolt.horizontal.circle").foregroundStyle(.secondary)
+                    Text("eldr-acp agent")
+                    Spacer()
+                    Text("Spawned on demand").font(.caption).foregroundStyle(.secondary)
+                }
+                Text(agentActivityText).font(.caption).foregroundStyle(.secondary)
+            }
+            HStack(spacing: 8) {
+                Circle().fill(gatewayColor).frame(width: 8, height: 8)
+                Text("sybilclaw gateway")
+                Spacer()
+                Text(gatewayText).font(.caption).foregroundStyle(.secondary)
+                Button("Check") {
+                    Task { await connections.probeGateway(port: store.sybilclawGatewayPort) }
+                }
+                .controlSize(.small)
+            }
+            LabeledContent("Gateway port") {
+                TextField(
+                    "18789", value: $store.sybilclawGatewayPort,
+                    format: .number.grouping(.never))
+                    .textFieldStyle(.roundedBorder)
+                    .frame(maxWidth: 90)
+            }
+            LabeledContent("Registered in acpx") { registrationStatus(acpxRegistered) }
+            LabeledContent("Registered in sybilclaw") { registrationStatus(sybilclawRegistered) }
+            Text(
+                "eldr-acp speaks over stdio and has no port of its own — a harness (Xcode, OpenClaw, sybilclaw) launches it per session, so there is no background process of ours to watch. The gateway above is sybilclaw's own daemon (default :18789); the port here only tells this panel where to look. Register or re-register from the setup wizard."
+            )
+            .font(.caption).foregroundStyle(.secondary)
+        }
+        .task {
+            connections.refreshAgentActivity(logFile: store.paths.logFile)
+            acpxRegistered = HarnessRegistration.isRegistered(path: store.paths.acpxGlobalConfig)
+            sybilclawRegistered = HarnessRegistration.isRegistered(
+                path: store.paths.defaultSybilclawConfig)
+            await connections.probeGateway(port: store.sybilclawGatewayPort)
+        }
+    }
+
+    private var gatewayColor: Color {
+        switch connections.gateway {
+        case .up: return .green
+        case .down: return .orange
+        case .checking: return .yellow
+        case .unknown: return .secondary
+        }
+    }
+
+    private var gatewayText: String {
+        switch connections.gateway {
+        case .up: return "Running on :\(store.sybilclawGatewayPort)"
+        case .down(let message): return message
+        case .checking: return "Checking…"
+        case .unknown: return "Not checked"
+        }
+    }
+
+    private var agentActivityText: String {
+        let base = "Not a background daemon — it runs only while a harness is using it."
+        guard let date = connections.lastAgentActivity else {
+            return base + " No activity logged yet."
+        }
+        let formatter = RelativeDateTimeFormatter()
+        return base + " Last activity \(formatter.localizedString(for: date, relativeTo: Date()))."
+    }
+
+    private func registrationStatus(_ on: Bool) -> some View {
+        Label(on ? "Yes" : "No", systemImage: on ? "checkmark.circle.fill" : "circle")
+            .labelStyle(.titleAndIcon)
+            .font(.caption)
+            .foregroundStyle(on ? Color.green : Color.secondary)
     }
 }

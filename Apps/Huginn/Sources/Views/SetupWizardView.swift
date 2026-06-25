@@ -14,9 +14,14 @@ struct SetupWizardView: View {
     @State private var installing = false
     @State private var installError: String?
     @State private var xcodeOpenError: String?
-    @State private var openClawConfigPath = ""
-    @State private var openClawStatus: String?
-    @State private var openClawError: String?
+    @State private var harnessKind: HarnessKindUI = .sybilclaw
+    @State private var harnessConfigPath = ""
+    @State private var harnessStatus: String?
+    @State private var harnessError: String?
+    /// Set when we refused to hot-edit a RUNNING gateway: the JSON to apply when idle.
+    @State private var deferredJSON: String?
+    @State private var registering = false
+    @StateObject private var connections = ConnectionStatusProbe()
 
     private let lastStep = 5
 
@@ -48,7 +53,7 @@ struct SetupWizardView: View {
         case 1: testStep
         case 2: installStep
         case 3: xcodeStep
-        case 4: openClawStep
+        case 4: harnessStep
         default: doneStep
         }
     }
@@ -179,55 +184,137 @@ struct SetupWizardView: View {
             "Couldn't find Xcode. Open it yourself, then go to Xcode ▸ Settings ▸ Intelligence."
     }
 
-    // MARK: Step 4 — OpenClaw
-    private var openClawStep: some View {
+    // MARK: Step 4 — Harness (sybilclaw / OpenClaw / acpx)
+    private var harnessStep: some View {
         VStack(alignment: .leading, spacing: 12) {
-            Text("Register in OpenClaw").font(.headline)
-            Label("Optional · only if you use OpenClaw", systemImage: "hammer")
+            Text("Register in your harness").font(.headline)
+            Label("Optional · point sybilclaw, OpenClaw, or acpx at the eldr agent", systemImage: "hammer")
                 .font(.caption).foregroundStyle(.secondary)
-            Text("Adds the eldr agent to OpenClaw's acpx plugin config. Your existing OpenClaw settings are preserved — only the agent entry is merged in.")
+            Text("The agent command is written to acpx's own ~/.acpx/config.json (safe anytime). For a gateway (sybilclaw / OpenClaw) we also enable the acpx plugin and allowlist the agent — but never while the gateway is running, since that restarts it and would kill a live session.")
                 .font(.callout).foregroundStyle(.secondary)
-            pathRow("Launcher", store.paths.openClawLauncher)
-            VStack(alignment: .leading, spacing: 4) {
-                Text("OpenClaw config file").font(.caption).foregroundStyle(.secondary)
-                TextField("~/.config/openclaw/config.json", text: $openClawConfigPath)
-                    .textFieldStyle(.roundedBorder)
-                    .font(.system(.caption, design: .monospaced))
-                    .autocorrectionDisabled()
+
+            Picker("Harness", selection: $harnessKind) {
+                Text("sybilclaw").tag(HarnessKindUI.sybilclaw)
+                Text("OpenClaw").tag(HarnessKindUI.openClaw)
+                Text("acpx only").tag(HarnessKindUI.acpxOnly)
+                Text("Custom…").tag(HarnessKindUI.custom)
             }
-            Button("Register with OpenClaw") { registerOpenClaw() }
-            if let openClawStatus {
-                Label(openClawStatus, systemImage: "checkmark.circle.fill")
+            .pickerStyle(.segmented)
+            .onChange(of: harnessKind) { _, newKind in
+                harnessConfigPath = defaultPath(for: newKind)
+                harnessStatus = nil
+                harnessError = nil
+                deferredJSON = nil
+            }
+
+            if harnessKind != .acpxOnly {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Gateway config file").font(.caption).foregroundStyle(.secondary)
+                    TextField("~/.sybilclaw/sybilclaw.json", text: $harnessConfigPath)
+                        .textFieldStyle(.roundedBorder)
+                        .font(.system(.caption, design: .monospaced))
+                        .autocorrectionDisabled()
+                        .disabled(harnessKind != .custom)  // fixed paths for known harnesses
+                }
+            }
+            pathRow("Launcher", store.paths.openClawLauncher)
+
+            Button(registering ? "Registering…" : "Register") {
+                Task { await registerHarness() }
+            }
+            .disabled(registering)
+
+            if let harnessStatus {
+                Label(harnessStatus, systemImage: "checkmark.circle.fill")
                     .font(.caption).foregroundStyle(.green)
             }
-            if let openClawError {
-                Label(openClawError, systemImage: "exclamationmark.triangle.fill")
+            if let harnessError {
+                Label(harnessError, systemImage: "exclamationmark.triangle.fill")
                     .font(.caption).foregroundStyle(.orange)
+            }
+            if let deferredJSON {
+                VStack(alignment: .leading, spacing: 4) {
+                    Label("Your gateway is running — its config was left untouched", systemImage: "exclamationmark.shield.fill")
+                        .font(.caption).foregroundStyle(.orange)
+                    Text("Editing it live would restart the gateway and kill the running session. Apply this when you're idle (paste into \(harnessConfigPath); the gateway reloads then):")
+                        .font(.caption).foregroundStyle(.secondary)
+                    ScrollView {
+                        Text(deferredJSON)
+                            .font(.system(.caption2, design: .monospaced))
+                            .textSelection(.enabled)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                    }
+                    .frame(maxHeight: 140).border(.quaternary)
+                    Button("Copy JSON") {
+                        NSPasteboard.general.clearContents()
+                        NSPasteboard.general.setString(deferredJSON, forType: .string)
+                    }
+                    .controlSize(.small)
+                }
             }
         }
         .onAppear {
-            if openClawConfigPath.isEmpty { openClawConfigPath = store.paths.defaultOpenClawConfig }
+            if harnessConfigPath.isEmpty { harnessConfigPath = defaultPath(for: harnessKind) }
         }
     }
 
-    /// Merge the eldr agent into OpenClaw's config (creating it if absent),
-    /// preserving any existing keys. Surfaces a clear status/error instead of
-    /// failing silently.
-    private func registerOpenClaw() {
-        openClawError = nil
-        openClawStatus = nil
-        let raw = openClawConfigPath.isEmpty ? store.paths.defaultOpenClawConfig : openClawConfigPath
-        let path = (raw as NSString).expandingTildeInPath
+    /// Register crash-safely: always write the command to acpx-global; for a gateway
+    /// target, add the plugin-enable + allowlist only when the gateway is NOT running
+    /// (otherwise defer with the exact JSON to apply when idle).
+    @MainActor
+    private func registerHarness() async {
+        registering = true
+        defer { registering = false }
+        harnessError = nil
+        harnessStatus = nil
+        deferredJSON = nil
+        let launcher = store.paths.openClawLauncher
+        let cg = store.contextGraphEnabled ? store.contextGraphURL : nil
+        var messages: [String] = []
         do {
-            let written = try OpenClawRegistration.register(
-                configPath: path, launcherPath: store.paths.openClawLauncher,
-                contextGraphURL: store.contextGraphEnabled ? store.contextGraphURL : nil)
-            let extra = store.contextGraphEnabled ? " (contextgraph plugin enabled too)" : ""
-            openClawStatus = "Registered the eldr agent in \(written).\(extra)"
+            // 1) Always register the COMMAND in acpx-global (unwatched → safe anytime).
+            let acpxPlan = try HarnessRegistration.plan(target: .acpxGlobal, launcherPath: launcher)
+            switch try HarnessRegistration.apply(acpxPlan, gatewayRunning: false) {
+            case .wrote(let p, _): messages.append("Wrote the agent command to \(p).")
+            case .unchanged(let p): messages.append("\(p) already had the agent.")
+            case .deferredGatewayRunning: break  // not applicable to acpx-global
+            }
+
+            // 2) For a gateway target, add the plugin enable + allowlist crash-safely.
+            if harnessKind != .acpxOnly {
+                let path =
+                    harnessConfigPath.isEmpty ? defaultPath(for: harnessKind) : harnessConfigPath
+                let plan = try HarnessRegistration.plan(
+                    target: .gateway(path: path), launcherPath: launcher, contextGraphURL: cg)
+                await connections.probeGateway(port: store.sybilclawGatewayPort)
+                let running = connections.gateway == .up
+                switch try HarnessRegistration.apply(plan, gatewayRunning: running) {
+                case .wrote(let p, let backup):
+                    messages.append(
+                        "Enabled the agent in \(p)"
+                            + (backup.map { " (backed up to \($0))" } ?? "") + ".")
+                case .unchanged(let p):
+                    messages.append("\(p) already had the agent.")
+                case .deferredGatewayRunning(_, let json):
+                    deferredJSON = json
+                }
+            }
+            harnessStatus =
+                messages.isEmpty ? "Nothing to change." : messages.joined(separator: " ")
         } catch {
-            openClawError =
-                (error as? OpenClawRegistration.RegError)?.errorDescription
+            harnessError =
+                (error as? HarnessRegistration.RegError)?.errorDescription
                 ?? error.localizedDescription
+        }
+    }
+
+    private func defaultPath(for kind: HarnessKindUI) -> String {
+        switch kind {
+        case .sybilclaw: return store.paths.defaultSybilclawConfig
+        case .openClaw: return store.paths.defaultOpenClawConfig
+        case .acpxOnly: return store.paths.acpxGlobalConfig
+        case .custom:
+            return harnessConfigPath.isEmpty ? store.paths.defaultSybilclawConfig : harnessConfigPath
         }
     }
 
@@ -268,4 +355,9 @@ struct SetupWizardView: View {
         }
         .padding(16)
     }
+}
+
+/// The harness choices in the setup wizard's "Register" step.
+private enum HarnessKindUI: Hashable {
+    case sybilclaw, openClaw, acpxOnly, custom
 }

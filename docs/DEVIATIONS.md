@@ -1213,3 +1213,18 @@ driven from the phone), so the safeguards are the deliverable, not the feature.
   (`swift test`) and the plain app `xcodebuild build` are green; the App-side gate suite
   (`ACPInteractiveTerminalGateTests`) compiles but can't be RUN until that environmental
   test-host link issue is resolved separately. `[tech-debt]`
+
+## sybilclaw demo + ACP config UX pass (2026-06-24) — `[app-only]`
+
+This push wires Eldr toward a **sybilclaw**-hosted funder demo and smooths the ACP
+configuration UX. Judgment calls:
+
+| # | Decision | Tag |
+|---|---|---|
+| AC44 | **Crash-safe harness registration.** `OpenClawRegistration` → `HarnessRegistration`. The hazard: a running OpenClaw/sybilclaw gateway *watches* its config and **restarts** on a change it can't hot-apply, killing the live session (the reported "crash"). New strategy: the agent **command** always goes to acpx's own `~/.acpx/config.json` (NOT gateway-watched → safe anytime); the gateway config (`~/.sybilclaw/sybilclaw.json` / OpenClaw) gets the `acpx` plugin enable + `acp.allowedAgents` **only when the gateway is down** — otherwise `apply` returns `.deferredGatewayRunning` and the wizard shows the exact JSON to paste when idle. Every write backs up once + is atomic. Fixes two latent bugs in the old code: it wrote ONLY OpenClaw's path (`~/.config/openclaw/config.json`, which stock sybilclaw never reads) and omitted `acp.allowedAgents` (so the gateway silently rejected the agent). | app-only |
+| AC45 | **Connections panel + configurable gateway port** (`ConfigurationView` ▸ "Connections"; new `ConnectionStatusProbe`). Answers the two questions the wizard left open, honestly: `eldr-acp` is labeled **"spawned on demand — not a daemon"** (+ last-run time from the log mtime), since it has no port and runs only while a harness drives it; the long-running daemon is **sybilclaw's gateway**, shown with a live status dot (a plain HTTP-GET liveness probe — never speaks the WS protocol) and an editable port (default 18789, persisted to UserDefaults as a Huginn-only pref, not the eldr-acp env). Post-wizard "Registered in acpx / sybilclaw" rows surface registration state. | app-only |
+| AC46 | **Enterprise "Why Eldr for teams" tour** (`TourScript.enterpriseSteps`, App/PQRC). A second variant on the shipped onboarding tour engine (reused unchanged): a 7-card funder/enterprise pitch (zero-trust collaboration → sovereign self-hosted AI → post-quantum / decentralized resilience), launched on demand from Settings ▸ About via a new `TourCoordinator.Variant`. Separate from the first-run welcome tour (does not consume its "seen" flag). Source of truth: `docs/ENTERPRISE-PITCH.md`. Shipped capabilities are stated as present; the team / self-hosted bridges are labeled "rolling out" (honesty rule). | app-only |
+
+The phone↔sybilclaw bridge (Stage 1 relay pairing, Stage 2 Gateway WS bridge), the
+notarized DMG, and on-device verification of the above remain open — see the plan and
+`docs/DEMO-SYBILCLAW.md`.

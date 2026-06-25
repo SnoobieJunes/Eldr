@@ -53,6 +53,14 @@ final class ConfigurationStore: ObservableObject {
     /// contextgraph REST endpoint the agent calls (and the wizard health-checks).
     @Published var contextGraphURL: String
 
+    // MARK: sybilclaw gateway (Huginn-only pref — NOT an eldr-acp env var)
+    /// The port sybilclaw's gateway daemon listens on (default 18789). Used by the
+    /// Connections panel's status probe (and, later, the gateway bridge). `eldr-acp`
+    /// itself has no port, so this is persisted to UserDefaults, never the env file.
+    @Published var sybilclawGatewayPort: Int
+    static let gatewayPortKey = "sybilclawGatewayPort"
+    static let defaultGatewayPort = 18789
+
     /// The four built-in tools, in advertise order (mirrors ToolExecutor.allToolNames).
     static let allToolNames = ["read_file", "write_file", "list_dir", "run_shell"]
 
@@ -97,6 +105,9 @@ final class ConfigurationStore: ObservableObject {
         learningEnabled = (agent.eventsFilePath?.isEmpty == false)
         contextGraphEnabled = agent.contextGraphEnabled
         contextGraphURL = agent.contextGraphURL
+        sybilclawGatewayPort =
+            (UserDefaults.standard.object(forKey: Self.gatewayPortKey) as? Int)
+            ?? Self.defaultGatewayPort
 
         loaded = true
         // Debounced auto-save: any published change schedules one write 0.5s after the
@@ -112,6 +123,8 @@ final class ConfigurationStore: ObservableObject {
 
     func save() {
         guard loaded else { return }
+        // Huginn-only pref (no eldr-acp env var): persisted separately from the CLI files.
+        UserDefaults.standard.set(sybilclawGatewayPort, forKey: Self.gatewayPortKey)
         saveTokenToKeychain()
         writeEnvFile()
         writeFile(paths.toolsFile, contents: toolsFileContents())
@@ -262,10 +275,27 @@ struct ConfigPaths: Sendable {
     var openClawLauncher: String { join(binDir, "eldr-acp-openclaw") }
 
     /// Default OpenClaw config file the agent is registered into (user-overridable
-    /// in the wizard). OpenClaw loads ACP agents via its `acpx` plugin.
+    /// in the wizard). OpenClaw loads ACP agents via its `acpx` plugin. Gateway-WATCHED.
     var defaultOpenClawConfig: String {
         let home = FileManager.default.homeDirectoryForCurrentUser.path
         return ((home as NSString).appendingPathComponent(".config/openclaw") as NSString)
+            .appendingPathComponent("config.json")
+    }
+
+    /// Default sybilclaw gateway config (`~/.sybilclaw/sybilclaw.json`). Gateway-WATCHED:
+    /// editing it can hot-reload/restart a running gateway, so registration treats it
+    /// crash-safely (see `HarnessRegistration`).
+    var defaultSybilclawConfig: String {
+        let home = FileManager.default.homeDirectoryForCurrentUser.path
+        return ((home as NSString).appendingPathComponent(".sybilclaw") as NSString)
+            .appendingPathComponent("sybilclaw.json")
+    }
+
+    /// acpx's OWN global config (`~/.acpx/config.json`). A running gateway does NOT watch
+    /// this, so the agent COMMAND can be written here anytime without restarting anything.
+    var acpxGlobalConfig: String {
+        let home = FileManager.default.homeDirectoryForCurrentUser.path
+        return ((home as NSString).appendingPathComponent(".acpx") as NSString)
             .appendingPathComponent("config.json")
     }
 

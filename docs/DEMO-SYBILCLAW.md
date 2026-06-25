@@ -1,0 +1,129 @@
+# DEMO-SYBILCLAW.md — running the Eldr × sybilclaw demo
+
+How to wire EldrChat/Eldr to a **sybilclaw** install for the funder demo, with every
+step marked for *who* (or *what*) performs it. The goal: drive an AI agent on a Mac
+running sybilclaw, securely, eventually from a phone over Eldr's post-quantum E2EE relay.
+
+This is **staged** so there is always a working fallback:
+- **Stage 0 — install + register** (✅ works today): get `eldr-acp` registered into
+  sybilclaw, crash-safely, and drive it locally.
+- **Stage 1 — phone → `eldr-acp` over the relay** (🚧 in development): the reliable
+  remote path.
+- **Stage 2 — phone → sybilclaw's *own* assistant via a Gateway bridge** (🚧 in
+  development): the headline.
+
+> **Honesty:** Stage 0 is implemented and build-verified. Stages 1–2 describe the target
+> and are in active development — do not present them as working until this doc says so.
+
+---
+
+## Legend — who runs each step
+
+| Tag | Who | Safe to do while the gateway is busy? |
+|---|---|---|
+| **[human]** | You, physically — Gatekeeper approval, plugging in / QR-pairing a phone, GUI clicks | n/a |
+| **[agent]** | sybilclaw's own agent, via its shell/file tools | ✅ yes — these never touch the watched gateway config |
+| **[controlled]** | A deliberate gateway-config change that **reloads/restarts the gateway** | ❌ **no** — do it only when you're not mid-task |
+
+> **The cardinal rule of this integration:** *never hot-edit a running gateway's config.*
+> sybilclaw's gateway watches `~/.sybilclaw/sybilclaw.json` and, by default, **restarts**
+> on a change it can't hot-apply — which kills the live session (the crash you saw).
+> Huginn enforces this for you; if you do it by hand, follow the **[controlled]** rule.
+
+---
+
+## What you need
+
+- A Mac (Apple Silicon) already running **sybilclaw** (its gateway daemon, default
+  `:18789`).
+- **Huginn.app** — the Eldr ACP Configurator (DMG; see `docs/SIGNING-AND-DISTRIBUTION.md`).
+- A local, OpenAI-compatible LLM (LM Studio / Ollama / vLLM) for `eldr-acp`.
+- *(Stages 1–2 only)* an iPhone running EldrChat.
+
+---
+
+## Stage 0 — install + register (works today)
+
+1. **[human]** Install Huginn — open the DMG, drag to Applications, approve Gatekeeper on
+   first launch.
+2. **[human / agent]** Connect the LLM — in the wizard's first step, or **[agent]** by
+   writing `~/.config/eldr-acp/env` (`ELDR_LLM_URL`, `ELDR_LLM_MODEL`; token goes in the
+   Keychain via the GUI).
+3. **[human / agent]** Install the binary + launcher — the wizard's *Install* step copies
+   `eldr-acp` and the `eldr-acp-openclaw` launcher into `~/.local/bin`. An **[agent]** can
+   run the equivalent copy itself.
+4. **Register — crash-safely** (the wizard's *Register* step, harness = **sybilclaw**):
+   - **[agent]** The agent **command** is written to acpx's own
+     `~/.acpx/config.json` (`agents.eldr = { command: <launcher>, args: [] }`). This file
+     is **not** watched by the gateway, so it's safe anytime — no restart.
+   - **[controlled]** For the *gateway* to use `eldr`, it also needs the acpx plugin
+     enabled + `eldr` in `acp.allowedAgents` inside `~/.sybilclaw/sybilclaw.json`. Huginn
+     writes this **automatically only if the gateway is down**. If the gateway is **up**,
+     Huginn does **not** touch it — it shows you the exact JSON to paste, which you apply
+     when idle (then the gateway reloads).
+5. **[agent]** Verify — `sybilclaw /acp doctor` (or its list-agents command): `eldr` should
+   appear and be allowed.
+
+### The exact register moves (if doing it by hand / via the agent)
+
+**Safe anytime** — `~/.acpx/config.json`:
+```json
+{ "agents": { "eldr": { "command": "/Users/<you>/.local/bin/eldr-acp-openclaw", "args": [] } } }
+```
+
+**[controlled] — only when the gateway is idle** — merge into `~/.sybilclaw/sybilclaw.json`
+(preserve existing keys), then restart the gateway:
+```json
+{
+  "acp": { "allowedAgents": ["eldr"] },
+  "plugins": { "entries": { "acpx": { "enabled": true,
+    "config": { "agents": { "eldr": {
+      "command": "/Users/<you>/.local/bin/eldr-acp-openclaw", "args": [] } } } } } }
+}
+```
+Back up first; the gateway reloads on the change. Restart it via your service manager
+(e.g. `launchctl kickstart -k gui/$(id -u)/<sybilclaw-service>`) **when not mid-task**.
+
+### Verify locally (works today): sybilclaw drives `eldr-acp`
+
+**[human]** Start an ACP session with the `eldr` agent through sybilclaw / acpx. Ask it to
+read or write a file or run a shell command — you should see `eldr-acp` execute the tool
+and reply. That's the local half of the demo already working end-to-end.
+
+---
+
+## Stage 1 — phone (EldrChat) → `eldr-acp` over the relay  🚧 in development
+
+**Target:** EldrChat on your phone drives the Mac's `eldr-acp` over Eldr's E2EE,
+post-quantum relay — the **reliable fallback** path. The phone is the ACP client; Huginn
+on the Mac hosts the agent (`ACPRelayHost`).
+
+**Status:** the relay-carried ACP path is proven headlessly (`RelayCarriedACPE2ETests`,
+the C-3 owner gate). The live runtime pairing handshake in the app is being wired
+(DEVIATIONS AC9). When it lands, the flow will be: **[human]** pair the phone to Huginn
+(scan its QR), then task the agent from the phone and watch it work on the Mac.
+
+---
+
+## Stage 2 — phone → sybilclaw's own assistant via the Gateway bridge  🚧 in development
+
+**Target:** your phone command reaches **sybilclaw's own assistant** (its persona, memory,
+tools) over the relay, via a Huginn → sybilclaw-Gateway WebSocket bridge. The cockpit is
+sybilclaw's; Eldr is the private network the phone reaches it over.
+
+**Status:** the next build (`SybilclawGatewayClient` + `SybilclawBridge`). It needs the
+gateway's WS JSON-RPC method shapes confirmed on the actual sybilclaw version (v4
+`agent`/`send`); see the plan's open verifications.
+
+---
+
+## Troubleshooting
+
+- **"Registering crashed my sybil agent."** Something hot-edited the **running** gateway's
+  config, forcing a restart. Use Huginn's deferred-JSON flow: apply gateway-config changes
+  only when the gateway is **down/idle** (the **[controlled]** rule).
+- **"sybilclaw doesn't see `eldr`."** Confirm `acp.allowedAgents` contains `"eldr"` and the
+  gateway reloaded; confirm the launcher path is executable (`chmod +x`).
+- **"Which config file?"** Stock sybilclaw reads `~/.sybilclaw/sybilclaw.json`; standalone
+  `acpx` reads `~/.acpx/config.json`. Huginn writes **both** as needed, so either entry
+  point finds the agent.
