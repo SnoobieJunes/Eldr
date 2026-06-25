@@ -44,13 +44,13 @@ enum EnterpriseTour {
             symbol: "bird.fill", accentSymbol: "sailboat.fill",
             gradient: [.indigo, .blue],
             title: "Huginn — the raven of thought",
-            subtitle: "Your thought, flying boat to boat.",
+            subtitle: "Shared thoughts, flying boat to boat.",
             body:
-                "Eldr is each person's boat through unknown waters — private, post-quantum, yours to steer. Huginn is the thought that flies between them: your AI, carried from Eldr to Eldr over a sealed line, so a whole crew can think and work as one — every ship rowing in unison — without your data ever leaving your hands.",
+                "Eldr is each org's boat through unknown waters — private, end-to-end encrypted, yours to steer. Huginn is the thought that flies between them: your AI, carried from Eldr to Eldr over a sealed line, so a whole crew can think and work as one — every ship rowing in unison — without your data ever leaking overboard.",
             fieldNote:
                 "Named for Óðinn's raven Huginn — “thought.” Send it out by pairing a phone from the EldrChat Bridge tab; the team integrations are rolling out now.",
             voiceOver:
-                "Huginn, the raven of thought. Your thought, flying boat to boat. Eldr is each person's boat through unknown waters, private, post-quantum, yours to steer. Huginn is the thought that flies between them: your A.I., carried from Eldr to Eldr over a sealed line, so a whole crew can think and work as one, every ship rowing in unison, without your data ever leaving your hands. Named for Odin's raven Huginn, thought."
+                "Huginn, the raven of thought. Shared thoughts, flying boat to boat. Eldr is each org's boat through unknown waters, private, end-to-end encrypted, yours to steer. Huginn is the thought that flies between them: your A.I., carried from Eldr to Eldr over a sealed line, so a whole crew can think and work as one, every ship rowing in unison, without your data ever leaking overboard. Named for Óðinn's raven Huginn, thought."
         ),
         EnterpriseTourStep(
             id: 1,
