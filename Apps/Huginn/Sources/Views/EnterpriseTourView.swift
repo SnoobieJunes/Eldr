@@ -57,6 +57,21 @@ enum EnterpriseTour {
         ),
         EnterpriseTourStep(
             id: 1,
+            // The raven (big) carrying the OpenClaw "lobster" (the satellite emoji) —
+            // Huginn picking your thought up and dropping it into the tools you use.
+            symbol: "bird.fill", accentSymbol: "🦞",
+            gradient: [.mint, .teal],
+            title: "Delivered, never rewritten",
+            subtitle: "Tool-agnostic. Huginn routes your thought — it doesn't replace it.",
+            body:
+                "Huginn is the router, not another brain. Speaking ACP — the common tongue of agents — it carries your thought between Eldr and the models and tools you already sail with: OpenClaw, Xcode, and more. It never augments your thought or bends it on the way; it simply gets it where you meant it to go.",
+            fieldNote:
+                "ACP, the Agent Client Protocol, is the shared tongue — Huginn connects to your stack instead of replacing it. Your thought, unchanged, to the tools you already use.",
+            voiceOver:
+                "Delivered, never rewritten. Tool-agnostic. Huginn routes your thought; it doesn't replace it. Huginn is the router, not another brain. Speaking A.C.P., the common tongue of agents, it carries your thought between Eldr and the models and tools you already sail with: OpenClaw, Xcode, and more. It never augments your thought or bends it on the way; it simply gets it where you meant it to go. A.C.P., the Agent Client Protocol, is the shared tongue; Huginn connects to your stack instead of replacing it, your thought unchanged, to the tools you already use."
+        ),
+        EnterpriseTourStep(
+            id: 2,
             symbol: "shield.lefthalf.filled", accentSymbol: "bird.fill",
             gradient: [.teal, .green],
             title: "Your raven answers only to you",
@@ -69,7 +84,7 @@ enum EnterpriseTour {
                 "Your raven answers only to you. Sovereign by design, yours alone to send. Your hand alone decides when your thought takes wing and what it carries; no one else aboard can launch it, ground it, or turn it. And the raven on this Mac is bound to you: invite a shipmate aboard and they can row alongside, but they can never command it, set it to a task, or bend it to their will. Bound to you at pairing: a shipmate's words can never become your agent's orders."
         ),
         EnterpriseTourStep(
-            id: 2,
+            id: 3,
             symbol: "key.horizontal.fill", accentSymbol: "eye.slash.fill",
             gradient: [.blue, .cyan],
             title: "What's sealed stays sealed",
@@ -82,7 +97,7 @@ enum EnterpriseTour {
                 "What's sealed stays sealed. Keys and secrets never make the crossing. Before your raven carries a word to another ship, or to a far-off model, Eldr strips the secrets from its talons: A.P.I. keys, tokens, passwords. Even if a shipmate tries to coax a key loose, the message they receive is sealed shut. You see the cargo whole; they never do."
         ),
         EnterpriseTourStep(
-            id: 3,
+            id: 4,
             symbol: "hand.raised.fill", accentSymbol: "lock.shield.fill",
             gradient: [.orange, .pink],
             title: "No oar moves without your word",
@@ -95,7 +110,7 @@ enum EnterpriseTour {
                 "No oar moves without your word. Nothing changes course without you. When your raven would change something on your ship, write a file, run a command, it waits for your yes, and silence is a no. It's kept to one deck it cannot leave. Real and shipping: a mutating action from your paired Mac agent raises an Allow this action prompt on your phone, Allow once, Always allow, or Deny. Fail-closed; standing approval is a choice you make, never the default."
         ),
         EnterpriseTourStep(
-            id: 4,
+            id: 5,
             symbol: "checkmark.seal.fill", accentSymbol: "bird.fill",
             gradient: [.indigo, .purple],
             title: "Every word flies its colors",
@@ -108,7 +123,7 @@ enum EnterpriseTour {
                 "Every word flies its colors. Shipmate or raven, never mistaken on the wire. Eldr marks every word your raven speaks as the raven's, a rune signed inside the encryption that can't be forged or stripped, and shows exactly what it was given to read. For a crew that answers to rules, that's a ship's log by construction, not a bolt-on."
         ),
         EnterpriseTourStep(
-            id: 5,
+            id: 6,
             symbol: "server.rack", accentSymbol: "key.horizontal.fill",
             gradient: [.blue, .cyan],
             title: "Your raven, your waters",
@@ -121,7 +136,7 @@ enum EnterpriseTour {
                 "Your raven, your waters. No harbor master in the middle. Fly a raven you keep yourself, on this Mac or your own server, no A.P.I. key, no distant cloud, no lock-in. Your crew, your thought, your rules, all the way down to the model that does the thinking. Point Huginn at a local model, L.M. Studio, Ollama, or vLLM, in Configuration."
         ),
         EnterpriseTourStep(
-            id: 6,
+            id: 7,
             symbol: "point.3.connected.trianglepath.dotted", accentSymbol: "server.rack",
             gradient: [.teal, .blue],
             title: "Sail open waters, or raise your own harbor",
@@ -134,7 +149,7 @@ enum EnterpriseTour {
                 "Sail open waters, or raise your own harbor. Decentralized by default, self-hosted when you want. Eldr sails on Nostr, an open, decentralized network where no single company owns the sea-lanes your words travel. Trust no harbor at all? Raise your own: Huginn fits out a hardened relay in a few clicks from the Relay tab, domain, port, allowlist, T.L.S., so your whole fleet routes through a harbor you alone command. The Relay tab generates a ready-to-run, hardened relay server, or a phone can host a pocket harbor over Bluetooth and Wi-Fi. Either way the harbor only ever sees sealed ciphertext, never your words."
         ),
         EnterpriseTourStep(
-            id: 7,
+            id: 8,
             symbol: "antenna.radiowaves.left.and.right", accentSymbol: "bird.fill",
             gradient: [.purple, .blue],
             title: "Send the raven from any shore",
@@ -147,7 +162,7 @@ enum EnterpriseTour {
                 "Send the raven from any shore. Your phone, your ship's thought, one sealed line. Eldr ties your phone to the thought running on your own ships over a post-quantum, end-to-end-encrypted line, so you can send your raven from any shore and have it wing home, with nothing left exposed on open water."
         ),
         EnterpriseTourStep(
-            id: 8,
+            id: 9,
             symbol: "atom", accentSymbol: "point.3.connected.trianglepath.dotted",
             gradient: [.purple, .indigo],
             title: "Built for the hardest seas",
@@ -160,7 +175,7 @@ enum EnterpriseTour {
                 "Built for the hardest seas. Post-quantum encryption that holds when the net doesn't. Encryption forged to outlast tomorrow's storms, the quantum machines still being built, that holds its bearing when the internet goes dark, falling back to local radio or a phone that hosts the harbor itself. The qualities that ride out a squall are the ones thought will need at the edge of the map, and one day beyond it. Post-quantum encryption on every crossing; it rows on over Bluetooth and Wi-Fi with no router or carrier."
         ),
         EnterpriseTourStep(
-            id: 9,
+            id: 10,
             symbol: "sailboat.fill", accentSymbol: "sparkles",
             gradient: [.pink, .purple],
             title: "A fleet that rows as one",
@@ -309,17 +324,27 @@ struct EnterpriseTourView: View {
                 )
                 .symbolRenderingMode(.hierarchical)
             if let accent = current.accentSymbol {
-                Image(systemName: accent)
-                    .font(.system(size: 22, weight: .bold))
-                    .foregroundStyle(.white)
-                    .padding(10)
-                    .background(
-                        Circle().fill(
-                            LinearGradient(
-                                colors: current.gradient, startPoint: .top, endPoint: .bottom))
-                    )
-                    .overlay(Circle().strokeBorder(.background, lineWidth: 3))
-                    .offset(x: 58, y: 54)
+                Group {
+                    // SF Symbol names are ASCII; anything else is a literal emoji
+                    // accent (e.g. the 🦞 the raven carries). Emoji render in their own
+                    // colors, so they ride the gradient disc directly rather than a
+                    // white tint.
+                    if accent.first?.isASCII == false {
+                        Text(accent).font(.system(size: 22))
+                    } else {
+                        Image(systemName: accent)
+                            .font(.system(size: 22, weight: .bold))
+                            .foregroundStyle(.white)
+                    }
+                }
+                .padding(10)
+                .background(
+                    Circle().fill(
+                        LinearGradient(
+                            colors: current.gradient, startPoint: .top, endPoint: .bottom))
+                )
+                .overlay(Circle().strokeBorder(.background, lineWidth: 3))
+                .offset(x: 58, y: 54)
             }
         }
         .frame(height: 240)
