@@ -182,6 +182,20 @@ struct BridgeView: View {
                         : "Direct: the Mac voices to the group itself (owner raw, others redacted). Verified fallback."
                 )
                 .font(.caption2).foregroundStyle(.secondary)
+
+                Divider()
+                Picker("Mac-side responder", selection: $bridge.responder) {
+                    Text("eldr-acp (our agent)").tag(ACPBridgeService.Responder.eldrAcp)
+                    Text("sybilclaw assistant").tag(ACPBridgeService.Responder.sybilclaw)
+                }
+                .pickerStyle(.segmented)
+                .accessibilityIdentifier("bridge-responder")
+                Text(
+                    bridge.responder == .sybilclaw
+                        ? "Chat to sybilclaw: the owner's messages are forwarded to sybilclaw's OWN assistant (its model, persona, memory, tools) over its local Gateway (default :18789), and the reply comes back over the relay. eldr-acp's LLM isn't used — needs sybilclaw running on this Mac."
+                        : "eldr-acp: the owner drives our agent (its own configured LLM) — works even without sybilclaw."
+                )
+                .font(.caption2).foregroundStyle(.secondary)
             }
             .padding(4)
         }

@@ -121,15 +121,33 @@ throw" stub). What remains is exercising it on two physical devices.
 
 ---
 
-## Stage 2 — phone → sybilclaw's own assistant via the Gateway bridge  🚧 in development
+## Stage 2 — phone → sybilclaw's own assistant via the Gateway bridge  ✅ built (verify the protocol on his sybilclaw)
 
-**Target:** your phone command reaches **sybilclaw's own assistant** (its persona, memory,
-tools) over the relay, via a Huginn → sybilclaw-Gateway WebSocket bridge. The cockpit is
-sybilclaw's; Eldr is the private network the phone reaches it over.
+**What it is:** your phone's chat reaches **sybilclaw's own assistant** (its model, persona,
+memory, tools) — *not* eldr-acp, and **no eldr-acp LLM is used**. The phone's message rides
+the E2EE relay to Huginn; Huginn forwards it to sybilclaw's local Gateway (WebSocket
+JSON-RPC, default :18789); the reply comes back over the relay. The cockpit is sybilclaw's;
+Eldr is the private network the phone reaches it over.
 
-**Status:** the next build (`SybilclawGatewayClient` + `SybilclawBridge`). It needs the
-gateway's WS JSON-RPC method shapes confirmed on the actual sybilclaw version (v4
-`agent`/`send`); see the plan's open verifications.
+**How it's wired:** `SybilclawGatewayClient` (WS JSON-RPC) + `SybilclawAgentRunner` (a
+`BridgeAgentRunner`) swapped in when **Mac-side responder = "sybilclaw assistant"**. The
+owner's chat hits `handleInboundPrompt` (C-3 owner gate + redaction + timeout — all reused
+from Stage 1) → the runner asks sybilclaw → the reply is sent back. Switching the responder
+re-wires the live runner with no restart.
+
+**Run it (builds on the Stage 1 pairing):**
+1. **[human] Mac / Huginn:** pair the phone (Stage 1 steps 1–2). In the **EldrChat Bridge**
+   tab, set **Mac-side responder → "sybilclaw assistant"**. Confirm sybilclaw's gateway is
+   running (the Connections panel shows it green on the configured port).
+2. **[human] Phone:** in the paired conversation, with your AI window on, just chat — your
+   messages are forwarded to sybilclaw's assistant and its replies come back over the relay.
+
+**⚠️ Confirm on his sybilclaw (the one thing not verifiable headlessly):** the exact Gateway
+**method name + params** that run an agent turn and the **reply-frame shape** (OpenClaw
+Gateway protocol v4 — documented as `agent`/`send`). These live in three helpers in
+`SybilclawGatewayClient` (`requestMethod`, `makeParams`, `extractText`) with a robust
+multi-shape reply parser, so a mismatch is a one-spot fix. A "didn't reply in time" on a
+chat is the signal to check those against his gateway's logs.
 
 ---
 

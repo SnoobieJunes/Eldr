@@ -202,6 +202,33 @@ final class ACPBridgeService: ObservableObject {
     /// so switch to it once you're testing the multi-party scenario.
     @Published var watchAlongMode: WatchAlongMode = .direct
 
+    /// Who answers the owner's chat on the Mac: our own `eldr-acp` agent (its configured
+    /// LLM), or the user's **sybilclaw** assistant via its local Gateway (the "chat to
+    /// sybilclaw" path — its own model, persona, memory, tools). A Huginn-only pref
+    /// (persisted to UserDefaults). Switching it re-wires the live runner with no restart.
+    enum Responder: String, Sendable, CaseIterable, Identifiable {
+        case eldrAcp = "eldr-acp"
+        case sybilclaw = "sybilclaw"
+        var id: String { rawValue }
+        var label: String {
+            switch self {
+            case .eldrAcp: return "eldr-acp (our agent)"
+            case .sybilclaw: return "sybilclaw assistant"
+            }
+        }
+    }
+    static let responderKey = "bridgeResponder"
+    static func loadResponder() -> Responder {
+        Responder(rawValue: UserDefaults.standard.string(forKey: responderKey) ?? "") ?? .eldrAcp
+    }
+    @Published var responder: Responder = ACPBridgeService.loadResponder() {
+        didSet {
+            UserDefaults.standard.set(responder.rawValue, forKey: Self.responderKey)
+            // Re-wire the live runner immediately if the node is already up.
+            if messenger != nil { applyProductionRunner() }
+        }
+    }
+
     // Per-message-type opt-in — OFF by default (the user chooses to share).
     @Published var shareToolCalls = false
     @Published var shareBuildResults = false
@@ -435,16 +462,44 @@ final class ACPBridgeService: ObservableObject {
     /// persistence. What remains the boundary: a live `BridgeMessaging` and the inbound
     /// receive path that would call `receiveOwnerWindow`/`handleInboundPrompt`.
     func configureProduction() {
-        if agentRunner is UnavailableAgentRunner,
-            let executable = Self.resolveAgentExecutable(
-                paths: .standard,
-                bundled: Bundle.main.url(forResource: "eldr-acp", withExtension: nil))
-        {
-            agentRunner = ACPDriverAgentRunner(
-                executableURL: executable, environmentOverrides: Self.llmTokenEnvironment())
-        }
+        // Don't clobber a test-injected runner; otherwise wire the selected responder.
+        if agentRunner is UnavailableAgentRunner { applyProductionRunner() }
         if ownerEngine == nil, let identity = try? PQRCIdentity(randomSource: SystemRandomSource()) {
             ownerEngine = AgentEngine(myIdentity: identity, clock: clock, sink: NoopAgentSink())
+        }
+    }
+
+    /// Point `agentRunner` at the selected responder: `eldr-acp` spawns the installed
+    /// launcher (its own LLM); `sybilclaw` forwards the owner's chat to sybilclaw's local
+    /// Gateway and returns its assistant's reply. Called at startup (only when not
+    /// test-injected) and on a live responder switch (its `didSet`).
+    private func applyProductionRunner() {
+        switch responder {
+        case .eldrAcp:
+            if let executable = Self.resolveAgentExecutable(
+                paths: .standard,
+                bundled: Bundle.main.url(forResource: "eldr-acp", withExtension: nil))
+            {
+                agentRunner = ACPDriverAgentRunner(
+                    executableURL: executable, environmentOverrides: Self.llmTokenEnvironment())
+            }
+        case .sybilclaw:
+            agentRunner = SybilclawAgentRunner(
+                client: SybilclawGatewayClient(
+                    port: Self.sybilclawGatewayPort(), token: Self.sybilclawGatewayToken()))
+        }
+    }
+
+    /// sybilclaw gateway port — the SAME Huginn pref the Connections panel writes
+    /// (`ConfigurationStore.gatewayPortKey`), default 18789.
+    static func sybilclawGatewayPort() -> Int {
+        (UserDefaults.standard.object(forKey: ConfigurationStore.gatewayPortKey) as? Int)
+            ?? ConfigurationStore.defaultGatewayPort
+    }
+    /// Optional gateway auth token from the Keychain (nil = no auth, typical for localhost).
+    static func sybilclawGatewayToken() -> String? {
+        KeychainBox().load(account: "sybilclaw-gateway-token").flatMap {
+            String(data: $0, encoding: .utf8)
         }
     }
 
