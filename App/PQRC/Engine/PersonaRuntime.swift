@@ -2002,11 +2002,33 @@ actor PersonaRuntime {
         return threadID
     }
 
-    func draftReply(conversationID: String, threadID: String? = nil) async throws -> Draft {
+    func draftReply(
+        conversationID: String, threadID: String? = nil, focus: String? = nil
+    ) async throws -> Draft {
         let primary = primaryAI(conversationID: conversationID, threadID: threadID)
-        return try await engine.draft(
-            provider: primary.provider,
-            context: await contextFor(primary, conversationID: conversationID, threadID: threadID))
+        var context = await contextFor(
+            primary, conversationID: conversationID, threadID: threadID)
+        if let focus, !focus.isEmpty {
+            // "Have my AI answer this" — focus the draft on the specific message the user
+            // long-pressed. It's already in `context.transcript` (redacted there for a
+            // remote AI); a directive points the model at THAT one. Scrub it for a remote
+            // AI with the firewall on so a secret in the message can't ride along raw.
+            let firewallOn =
+                AppSession.conversationFirewall(conversationID, siloID: siloID) ?? firewallEnabled
+            let safe =
+                (primary.appliesEgressFirewall && firewallOn)
+                ? CredentialRedactor.scrub(focus) : focus
+            let directive =
+                "Answer THIS specific message from the conversation, directly and helpfully: \"\(safe)\""
+            let merged = [context.instructions, directive].compactMap { $0 }
+                .joined(separator: "\n\n")
+            context = AgentContext(
+                myIdentityHex: context.myIdentityHex, myDisplayName: context.myDisplayName,
+                transcript: context.transcript, threadID: context.threadID,
+                threadTitle: context.threadTitle, instructions: merged,
+                summarize: context.summarize, systemPromptOverride: context.systemPromptOverride)
+        }
+        return try await engine.draft(provider: primary.provider, context: context)
     }
 
     /// Diagnostic for Settings "Test AI now": run the active provider against a

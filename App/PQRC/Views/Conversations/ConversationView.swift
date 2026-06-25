@@ -25,6 +25,9 @@ struct ConversationView: View {
     /// In-chat contact rename (1:1 only) — tap the title.
     @State private var showRename = false
     @State private var renameText = ""
+    /// "Have my AI answer this" → the drafted reply, shown in a DraftSheet. nil = no sheet.
+    @State private var answerDraft: String?
+    @State private var answerDrafting = false
     /// Read-only summary of the primary AI's effective mode for THIS conversation,
     /// driving the glance chip. Re-read on appear and whenever the override sheet
     /// changes it (it lives in UserDefaults, not @Observable state).
@@ -181,6 +184,15 @@ struct ConversationView: View {
         }) {
             AIHereSheet(model: model, conversationID: conversationID)
         }
+        // "Have my AI answer this" (long-press a guest message) → preview the drafted
+        // reply, then "Send as my AI" or "Edit & send as me" — the same DraftSheet the
+        // private-draft path uses.
+        .sheet(
+            isPresented: Binding(
+                get: { answerDraft != nil }, set: { if !$0 { answerDraft = nil } })
+        ) {
+            DraftSheet(model: model, conversationID: conversationID, draft: answerDraft ?? "")
+        }
         .fullScreenCover(item: $fullScreenContent) { content in
             FullScreenReaderView(text: content.text)
         }
@@ -336,6 +348,21 @@ struct ConversationView: View {
                 },
             onFullScreen: selecting ? nil : { fullScreenContent = FullScreenContent(text: $0) },
             onRetry: selecting ? nil : { Task { await model.retry(message) } },
+            // Guest messages only: have my AI draft a reply to THIS message → a preview
+            // sheet (Send as my AI / Edit & send as me). User-initiated, so no ai_window
+            // is needed (the §13 gate stops UNBIDDEN agent sends; this is bidden).
+            onAnswerWithAI: (selecting || isMine || message.participantType == .agent)
+                ? nil
+                : {
+                    guard !answerDrafting else { return }
+                    answerDrafting = true
+                    Task {
+                        let text = await model.draft(
+                            conversationID: conversationID, focus: message.text)
+                        answerDrafting = false
+                        if let text { answerDraft = text }
+                    }
+                },
             // Strip the AgentSkills ⟡⟡ envelope from agent bubbles unless the
             // per-silo "Show agent protocol envelope" toggle is on (default off).
             // Display-only — the stored record keeps the raw bytes (§23).

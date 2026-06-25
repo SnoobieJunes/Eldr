@@ -380,10 +380,10 @@ final class AppModel {
     /// so the user sees *why* instead of silently getting nothing.
     var agentError: String?
 
-    func draft(conversationID: String, threadID: String? = nil) async -> String? {
+    func draft(conversationID: String, threadID: String? = nil, focus: String? = nil) async -> String? {
         do {
             let text = try await runtime.draftReply(
-                conversationID: conversationID, threadID: threadID).text
+                conversationID: conversationID, threadID: threadID, focus: focus).text
                 .trimmingCharacters(in: .whitespacesAndNewlines)
             // A blank draft (some providers return "" instead of erroring) would
             // insert nothing and read as "the AI silently did nothing". Treat it
