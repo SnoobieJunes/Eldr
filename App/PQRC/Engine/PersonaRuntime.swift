@@ -1631,9 +1631,6 @@ actor PersonaRuntime {
         try await reviseRoster(groupID: conversationID, name: roster.name, members: members)
     }
 
-    /// Names of my tethered AIs, for the Settings "AI context" view.
-    func tetheredAINames() -> [String] { ais.map(\.name) }
-
     /// A peer's locally-generated AI codename, if known (never broadcast).
     func contactAIName(_ identityHex: String) -> String? {
         contactRecords[identityHex]?.autoAIName

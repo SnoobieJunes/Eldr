@@ -512,12 +512,6 @@ final class AppModel {
         await refreshConversationRow(conversationID, lastMessage: nil)
     }
 
-    /// The transcript the tethered LLM(s) currently see for a conversation
-    /// (read-only, for the Settings "AI context" view).
-    func contextPreview(conversationID: String) async -> [ContextPreviewLine] {
-        await runtime.contextPreview(conversationID: conversationID)
-    }
-
     /// Per-AI assembled context windows — exactly what each tethered AI receives
     /// for a conversation (system prompt + policy + depth + transcript), for the
     /// Context inspector. Remote AIs are already codename-redacted.
@@ -525,11 +519,6 @@ final class AppModel {
         -> [PersonaRuntime.AIContextInspection]
     {
         await runtime.contextInspections(conversationID: conversationID)
-    }
-
-    /// Names of the AIs tethered to me right now.
-    func tetheredAINames() async -> [String] {
-        await runtime.tetheredAINames()
     }
 
     /// The `acp` ("Mac coding harness") backend's live connectedness for the

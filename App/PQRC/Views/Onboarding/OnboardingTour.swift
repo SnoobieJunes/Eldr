@@ -183,7 +183,7 @@ enum TourScript {
 }
 
 /// The enterprise / funder "Why Eldr for teams" tour, surfaced INSIDE EldrChat (a
-/// "Why Eldr for teams" entry pinned at the bottom of the conversation list) so it
+/// "Why Eldr for teams" entry in Settings ▸ About, next to "Take the tour") so it
 /// can be shown on a phone when the cofounder's Mac running Huginn isn't in the
 /// room. Ported verbatim from the macOS Huginn app's `EnterpriseTour.steps`
 /// (Apps/Huginn ▸ EnterpriseTourView.swift) — same cards, same words — reusing
@@ -334,7 +334,7 @@ enum EnterpriseTourScript {
             body:
                 "Boats that trust no harbor, ravens that answer only to their masters, and thought that flies sealed between them — so a whole fleet can put powerful AI to the oars together, in unison, without ever handing over the tiller. That's the company we're building.",
             fieldNote:
-                "Replay this anytime from the \u{201C}Why Eldr for teams\u{201D} card at the bottom of your conversation list.",
+                "Replay this anytime from Settings ▸ About ▸ \u{201C}Why Eldr for teams.\u{201D}",
             voiceOver:
                 "A fleet that rows as one. Private by right, sovereign by design. Boats that trust no harbor, ravens that answer only to their masters, and thought that flies sealed between them, so a whole fleet can put powerful A.I. to the oars together, in unison, without ever handing over the tiller. That's the company we're building."
         ),

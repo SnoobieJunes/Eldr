@@ -1,8 +1,8 @@
 import PQRCCore
 import SwiftUI
 
-/// The Context inspector (SPEC §0 transparency, taken further than the read-only
-/// `AIContextView`): for each tethered AI, show EXACTLY what context is assembled
+/// The Context inspector (SPEC §0 transparency): for each tethered AI, show
+/// EXACTLY what context is assembled
 /// and sent for a conversation — the system/instructions prompt, the gather
 /// policy + depth, and the actual transcript entries — and make the safely-editable
 /// parts editable.
@@ -72,6 +72,12 @@ struct AIContextInspectorView: View {
             if selectedConversation == nil { selectedConversation = model.conversations.first?.id }
             await reload()
         }
+        // Instruction edits save per keystroke but defer the heavy provider re-bind
+        // to here (same as Settings ▸ AI) — so the next turn uses the new prompt
+        // without the field fighting you mid-type.
+        .onDisappear {
+            Task { await session.applyAIProvider() }
+        }
     }
 
     @ViewBuilder private func inspectorSections(
@@ -109,26 +115,51 @@ struct AIContextInspectorView: View {
             Text(inspection.aiName)
         }
 
-        // The system / instructions prompt — collapsible, selectable, verbatim.
+        // The system / instructions prompt — now EDITABLE right here, bound to the
+        // SAME persisted `ConfiguredAI.instructions` Settings ▸ AI writes (no
+        // parallel store), so you can adjust what's sent where you inspect it.
         Section {
+            TextField(
+                "Instructions — empty = pure conduit (only the transcript is sent)",
+                text: instructionsBinding(for: inspection), axis: .vertical)
+                .lineLimit(2...8)
+                .font(.callout)
+                .accessibilityIdentifier("inspector-system-prompt-\(inspection.id)")
+            HStack {
+                Text("This is the entire system prompt — empty by default; EldrChat adds nothing.")
+                    .font(.caption2).foregroundStyle(.secondary)
+                Spacer()
+                Button("Use EldrChat's default") {
+                    setInstructions(ConfiguredAI.defaultInstructions, for: inspection)
+                }
+                .font(.caption2)
+                .buttonStyle(.borderless)
+                .accessibilityIdentifier("inspector-instructions-default-\(inspection.id)")
+            }
+            // The verbatim prompt the model receives this turn — your instructions
+            // plus any engine additions (a summarize note here; coordination
+            // guardrails + pinned skills in a shared thread). Read-only, collapsed:
+            // the SPEC §0 exact-transparency guarantee without crowding the editor.
             DisclosureGroup {
                 let prompt = inspection.systemPrompt.trimmingCharacters(in: .whitespacesAndNewlines)
                 Text(prompt.isEmpty
-                    ? "No system prompt — EldrChat sends this AI only the transcript (pure conduit). Add instructions in Settings ▸ AI to change this."
+                    ? "Empty — only the transcript is sent (pure conduit)."
                     : inspection.systemPrompt)
                     .font(.caption.monospaced())
-                    .foregroundStyle(prompt.isEmpty ? .secondary : .primary)
+                    .foregroundStyle(.secondary)
                     .textSelection(.enabled)
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .padding(.vertical, 2)
-                    .accessibilityIdentifier("inspector-system-prompt-\(inspection.id)")
             } label: {
-                Label("System & instructions", systemImage: "text.alignleft")
-                    .font(.callout)
+                Label("Exactly what's sent", systemImage: "text.alignleft")
+                    .font(.caption)
             }
+            .accessibilityIdentifier("inspector-assembled-prompt-\(inspection.id)")
         } header: {
             Text("Instructions sent")
-                .helpInfo("The exact system prompt this AI receives — the instructions YOU set in Settings ▸ AI, which is EMPTY by default (EldrChat adds nothing on your behalf). In a shared thread it also includes the EldrChat coordination guardrails + any pinned skills. Word for word.")
+                .helpInfo("The exact system prompt this AI receives — the instructions YOU set, EMPTY by default (EldrChat adds nothing on your behalf). Editable right here. In a shared thread it also includes the EldrChat coordination guardrails + any pinned skills.")
+        } footer: {
+            Text("Editable — the same instructions as Settings ▸ AI, saved to this AI (no separate copy). Takes effect on the next turn.")
         }
 
         // The transcript — every entry, each with a real include/exclude toggle.
@@ -189,6 +220,47 @@ struct AIContextInspectorView: View {
     }
 
     // MARK: - Bindings to real, persisted controls
+
+    /// Instructions → the AI's `ConfiguredAI.instructions`, persisted via the SAME
+    /// store Settings ▸ AI writes (no parallel copy). Saved per keystroke, but we do
+    /// NOT re-bind providers or reload here: doing either per character makes the
+    /// field fight the user (it reads as "not editable"). The provider re-bind runs
+    /// on `.onDisappear`; the read-only "Exactly what's sent" echo refreshes on the
+    /// next reload (a discrete edit like "Use default" reloads immediately).
+    private func instructionsBinding(
+        for inspection: PersonaRuntime.AIContextInspection
+    ) -> Binding<String> {
+        Binding(
+            get: { currentInstructions(for: inspection) },
+            set: { newValue in
+                var list = AppSession.loadConfiguredAIs(siloID: siloID)
+                guard let idx = list.firstIndex(where: { $0.id == inspection.id }) else { return }
+                list[idx].instructions = newValue.isEmpty ? nil : newValue
+                AppSession.saveConfiguredAIs(list, siloID: siloID)
+            })
+    }
+
+    private func currentInstructions(
+        for inspection: PersonaRuntime.AIContextInspection
+    ) -> String {
+        AppSession.loadConfiguredAIs(siloID: siloID)
+            .first(where: { $0.id == inspection.id })?.instructions ?? ""
+    }
+
+    /// Discrete action ("Use EldrChat's default"): set, save, re-bind providers, and
+    /// reload so the assembled "Exactly what's sent" echo updates immediately.
+    private func setInstructions(
+        _ value: String, for inspection: PersonaRuntime.AIContextInspection
+    ) {
+        var list = AppSession.loadConfiguredAIs(siloID: siloID)
+        guard let idx = list.firstIndex(where: { $0.id == inspection.id }) else { return }
+        list[idx].instructions = value.isEmpty ? nil : value
+        AppSession.saveConfiguredAIs(list, siloID: siloID)
+        Task {
+            await session.applyAIProvider()
+            await reload()
+        }
+    }
 
     /// Depth → the AI's `ConfiguredAI.contextDepth`, then re-apply providers so the
     /// runtime's `TetheredAI.contextDepth` updates, then re-assemble live.

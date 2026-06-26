@@ -15,6 +15,11 @@ struct SettingsView: View {
     /// Relaunch the first-run "explore a new planet" tour (provided by RootView).
     @Environment(TourCoordinator.self) private var tour
     @State private var wipeConfirmStage = 0
+    /// The enterprise / funder "Why Eldr for teams" tour (the ported Huginn cards),
+    /// launched from the About section next to "Take the tour". A self-contained,
+    /// manually-launched cover — no first-run trigger, no "seen" flag. Surfaced
+    /// here so the pitch runs on a phone when the Mac running Huginn isn't present.
+    @State private var showEnterpriseTour = false
     /// Mirrors the per-silo "Show agent protocol envelope" pref (a per-silo
     /// UserDefaults read, which `@AppStorage` can't namespace and `@Observable`
     /// can't track) so the toggle re-renders when flipped. Loaded in `.onAppear`,
@@ -22,7 +27,6 @@ struct SettingsView: View {
     /// ⟡⟡ envelope is stripped from agent bubbles (only the body shows); the
     /// stored record always keeps every raw byte (§23) — this is display-only.
     @State private var showAgentEnvelope = false
-    @AppStorage("ephemeralReceivingKeys") private var ephemeralKeys = false
     @AppStorage("localLinkEnabled") private var localLinkEnabled = AppSession.localLinkEnabled
     @State private var relayURLs: [String] = []
     @State private var newRelayURL = ""
@@ -517,11 +521,6 @@ struct SettingsView: View {
 
     private var privacySection: some View {
         Section("Privacy") {
-            Toggle("Ephemeral receiving keys", isOn: $ephemeralKeys)
-                .disabled(true)
-            Text("Experimental — hides your address from relay observers per conversation. Off in this build; see THREAT_MODEL.md.")
-                .font(.caption)
-                .foregroundStyle(.secondary)
             Toggle("Show agent protocol envelope", isOn: Binding(
                 get: { showAgentEnvelope },
                 set: { on in
@@ -779,11 +778,28 @@ struct SettingsView: View {
             }
             .accessibilityIdentifier("take-the-tour")
             .accessibilityHint("Replays the guided tour of EldrChat's features and privacy.")
+            // The funder / "Why Eldr for teams" pitch (the ported Huginn cards),
+            // presented over Settings as a full-screen cover. Lives next to "Take
+            // the tour" rather than pinned to the conversation list so the chat
+            // list stays uncluttered.
+            Button {
+                showEnterpriseTour = true
+            } label: {
+                Label("Why Eldr for teams", systemImage: "bird.fill")
+            }
+            .accessibilityIdentifier("why-eldr-for-teams")
+            .accessibilityHint("Opens the \u{201C}Why Eldr for teams\u{201D} tour — the Huginn enterprise pitch.")
             LabeledContent("Protocol", value: "pqrc-v1")
             LabeledContent("License", value: "AGPL-3.0")
             Text("Honest limits: relays can see your IP address and that someone messaged you. They cannot see who sent it or what it says. Messages are not deniable, and this identity lives only on this device.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
+        }
+        .fullScreenCover(isPresented: $showEnterpriseTour) {
+            OnboardingTourView(
+                steps: EnterpriseTourScript.steps,
+                finishLabel: "Aye",
+                onFinish: { showEnterpriseTour = false })
         }
     }
 }

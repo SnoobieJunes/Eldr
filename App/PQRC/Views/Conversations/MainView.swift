@@ -49,10 +49,6 @@ struct MainView: View {
     /// and select the conversation in the real split view. Injected ONLY into the
     /// Settings subtree (below), so it stays scoped.
     @State private var settingsNav = SettingsNavigation()
-    /// The enterprise / funder "Why Eldr for teams" tour, launched from a row
-    /// pinned at the bottom of the conversation list. Surfaced inside EldrChat so
-    /// it can be shown on a phone when the Mac running Huginn isn't in the room.
-    @State private var showEnterpriseTour = false
 
     /// Conversations after applying the search filter (Mac ⌘F).
     private var visibleConversations: [ConversationVM] {
@@ -233,31 +229,6 @@ struct MainView: View {
             if let personaSwitcher {
                 personaSwitcher
             }
-        }
-        // Pinned at the very bottom of the conversation list: the enterprise /
-        // funder "Why Eldr for teams" pitch, reusing the welcome tour's card
-        // renderer (OnboardingTourView) with the ported Huginn cards. A second,
-        // manually-launched tour — no first-run trigger, no "seen" flag.
-        .safeAreaInset(edge: .bottom) {
-            Button {
-                showEnterpriseTour = true
-            } label: {
-                Label("Why Eldr for teams", systemImage: "bird.fill")
-                    .font(.subheadline)
-                    .frame(maxWidth: .infinity)
-                    .padding(.vertical, 10)
-            }
-            .buttonStyle(.plain)
-            .foregroundStyle(.secondary)
-            .background(.ultraThinMaterial)
-            .accessibilityIdentifier("why-eldr-for-teams")
-            .accessibilityHint("Opens the \u{201C}Why Eldr for teams\u{201D} tour — the Huginn enterprise pitch.")
-        }
-        .fullScreenCover(isPresented: $showEnterpriseTour) {
-            OnboardingTourView(
-                steps: EnterpriseTourScript.steps,
-                finishLabel: "Aye",
-                onFinish: { showEnterpriseTour = false })
         }
         .navigationTitle("EldrChat")
         .toolbar {
