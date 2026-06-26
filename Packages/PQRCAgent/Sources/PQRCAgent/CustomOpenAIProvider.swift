@@ -79,10 +79,7 @@ public struct CustomOpenAIProvider: AgentProvider {
             // single token of answer — which used to vanish silently (now surfaced
             // below). 1024 was hitting exactly that on chatty reasoning models.
             "max_tokens": 4096,
-            "messages": [
-                ["role": "system", "content": system],
-                ["role": "user", "content": user],
-            ],
+            "messages": openAIChatMessages(system: system, user: user),
         ]
         request.httpBody = try JSONSerialization.data(withJSONObject: payload)
         let (data, response) = try await session.data(for: request)

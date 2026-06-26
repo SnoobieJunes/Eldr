@@ -215,6 +215,11 @@ public actor ACPAgentProvider: AgentProvider {
     /// transcript every other provider sends — identical context, one wire shape.
     static func composePrompt(system: String, context: AgentContext) -> String {
         let transcript = FoundationModelsAgentProvider.renderTranscript(context)
+        // Conduit default: with no user system prompt, send only the transcript —
+        // no empty "[System]" header (chaff the node would otherwise see).
+        guard !system.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            return "[Conversation]\n\(transcript)"
+        }
         return "[System]\n\(system)\n\n[Conversation]\n\(transcript)"
     }
 

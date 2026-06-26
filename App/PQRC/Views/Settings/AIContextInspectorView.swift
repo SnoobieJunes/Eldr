@@ -112,8 +112,12 @@ struct AIContextInspectorView: View {
         // The system / instructions prompt — collapsible, selectable, verbatim.
         Section {
             DisclosureGroup {
-                Text(inspection.systemPrompt)
+                let prompt = inspection.systemPrompt.trimmingCharacters(in: .whitespacesAndNewlines)
+                Text(prompt.isEmpty
+                    ? "No system prompt — EldrChat sends this AI only the transcript (pure conduit). Add instructions in Settings ▸ AI to change this."
+                    : inspection.systemPrompt)
                     .font(.caption.monospaced())
+                    .foregroundStyle(prompt.isEmpty ? .secondary : .primary)
                     .textSelection(.enabled)
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .padding(.vertical, 2)
@@ -124,7 +128,7 @@ struct AIContextInspectorView: View {
             }
         } header: {
             Text("Instructions sent")
-                .helpInfo("The exact system prompt this AI receives — its persona/instructions plus, in a shared thread, the EldrChat guardrails and any pinned skills. Word for word, read-only.")
+                .helpInfo("The exact system prompt this AI receives — the instructions YOU set in Settings ▸ AI, which is EMPTY by default (EldrChat adds nothing on your behalf). In a shared thread it also includes the EldrChat coordination guardrails + any pinned skills. Word for word.")
         }
 
         // The transcript — every entry, each with a real include/exclude toggle.

@@ -44,10 +44,7 @@ public struct GroqAPIProvider: AgentProvider {
         let payload: [String: Any] = [
             "model": model,
             "max_tokens": 512,
-            "messages": [
-                ["role": "system", "content": system],
-                ["role": "user", "content": user],
-            ],
+            "messages": openAIChatMessages(system: system, user: user),
         ]
         request.httpBody = try JSONSerialization.data(withJSONObject: payload)
         let (data, response) = try await session.data(for: request)

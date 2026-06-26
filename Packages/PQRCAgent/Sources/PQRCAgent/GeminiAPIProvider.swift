@@ -48,11 +48,14 @@ public struct GeminiAPIProvider: AgentProvider {
         request.setValue(apiKey, forHTTPHeaderField: "x-goog-api-key")
         request.setValue("application/json", forHTTPHeaderField: "content-type")
         // Token-based consumption: bound the completion length explicitly.
-        let payload: [String: Any] = [
-            "systemInstruction": ["parts": [["text": system]]],
+        var payload: [String: Any] = [
             "contents": [["role": "user", "parts": [["text": user]]]],
             "generationConfig": ["maxOutputTokens": 512],
         ]
+        // Conduit default: only send a system instruction when the user wrote one.
+        if !system.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            payload["systemInstruction"] = ["parts": [["text": system]]]
+        }
         request.httpBody = try JSONSerialization.data(withJSONObject: payload)
         let (data, response) = try await session.data(for: request)
         // Surface real failures (400 bad key, 404 bad model, 429 rate limit).

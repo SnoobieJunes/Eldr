@@ -20,7 +20,10 @@ struct ConfiguredAI: Identifiable, Codable, Equatable, Sendable {
 
     // MARK: Context profile (all optional → default when absent)
 
-    /// Custom system prompt / persona. nil → the backend's built-in default.
+    /// Custom system prompt / persona — and, by default, the AI's ENTIRE system
+    /// prompt. nil/empty → no system prompt is sent at all (EldrChat is a conduit
+    /// and prepends nothing). `defaultInstructions` is what the Settings "Use
+    /// EldrChat's default" button restores.
     var instructions: String?
     /// What the AI may gather: "active" (live convo once it's on — default),
     /// "strict" (ONLY messages I tap "Add to AI Context"), or "off" (disabled).
@@ -73,6 +76,16 @@ struct ConfiguredAI: Identifiable, Codable, Equatable, Sendable {
     }
 
     static let defaultDepth = 20
+
+    /// The built-in EldrChat assistant instructions, offered as a one-tap "Use
+    /// EldrChat's default" in Settings. By DEFAULT `instructions` is EMPTY —
+    /// EldrChat is a conduit and prepends nothing on the user's behalf; this is
+    /// only the text that button restores for someone who wants the old behavior
+    /// (a helpful reply + the PASS convention) back.
+    static let defaultInstructions =
+        "You are my AI assistant. Read the recent messages and reply helpfully and "
+        + "concisely in one short, natural message. Reply exactly PASS (nothing else) "
+        + "if the latest message clearly needs no response."
 
     var effectivePolicy: String { contextPolicy ?? "active" }
     var effectiveOutputMode: String { outputMode ?? "participate" }

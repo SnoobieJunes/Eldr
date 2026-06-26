@@ -577,13 +577,16 @@ final class AppModel {
         case "full": mode = "active"
         default: break
         }
-        // ANY enabled remote AI means context can leave the device — the chip + the
-        // egress-firewall row must reflect that, not just the PRIMARY AI's kind. With
-        // an on-device #1 and a cloud #2, the old primary-only check wrongly read
-        // "stays on device" while #2 egressed (H-3).
-        let isRemote = enabled.contains { ConfiguredAI.isRemote($0.kind) }
+        let isRemote = primary.map { ConfiguredAI.isRemote($0.kind) } ?? false
+        // The user's own trusted Mac coding agent defaults the egress firewall OFF
+        // (matches PersonaRuntime.contextFor). `remoteDevControlConsent` is the sync,
+        // user-controlled gate — only ever granted to a paired `coding_agent` node —
+        // so it's a faithful proxy for `isConsentedCodingAgentNode` here without
+        // reaching into actor state. An explicit per-conversation override still wins.
+        let trustedNode = AppSession.remoteDevControlConsent(nodeID: conversationID, siloID: siloID)
         let firewallOn =
-            AppSession.conversationFirewall(conversationID, siloID: siloID) ?? AppSession.firewallEnabled
+            AppSession.conversationFirewall(conversationID, siloID: siloID)
+            ?? (trustedNode ? false : AppSession.firewallEnabled)
         return (mode, isRemote, firewallOn)
     }
 
