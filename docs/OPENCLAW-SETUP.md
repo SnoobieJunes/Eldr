@@ -4,6 +4,10 @@ A start-to-finish guide for wiring **EldrChat's ACP agent (`eldr-acp`)** into
 **OpenClaw** so a self-hosted LLM can write code, build, and run shell commands
 from inside OpenClaw.
 
+> **Note — the default harness is now sybilclaw** (`~/.sybilclaw/sybilclaw.json`),
+> which the app foregrounds. OpenClaw remains a fully supported option; this guide
+> covers the OpenClaw path.
+
 This is the OpenClaw-focused walkthrough. The canonical reference (Xcode-framed,
 plus the full env/tuning tables) is [`SETUP-GUIDE.md §9`](SETUP-GUIDE.md); the
 design decisions are DEVIATIONS **A42** (OpenClaw first-class) and **A43**
@@ -30,7 +34,7 @@ credential plumbing is a no-op.
 
 | Requirement | Notes |
 |---|---|
-| macOS with the Swift 6.2 toolchain | Needed to build `eldr-acp` (Xcode 26.x). See [`SETUP-GUIDE.md §1`](SETUP-GUIDE.md). |
+| macOS with the Swift 6.2 toolchain | Needed to build `eldr-acp` (Xcode 27 / Xcode-beta). See [`SETUP-GUIDE.md §1`](SETUP-GUIDE.md). |
 | OpenClaw installed | With its `acpx` plugin available. |
 | A local OpenAI-compatible LLM endpoint | LM Studio or Ollama on e.g. `http://127.0.0.1:1337/v1`. The model **must support tool/function calling**; prefer an **instruct** model over a reasoning model for snappy, low-confusion tool use. |
 
@@ -40,16 +44,16 @@ equivalent for anyone not using the GUI.
 
 ---
 
-## Path A — GUI (recommended): the Eldr ACP Configurator
+## Path A — GUI (recommended): Huginn
 
-The `EldrACPConfigurator` macOS app wraps the whole setup in a wizard and
-registers OpenClaw first-class, exactly like Xcode (A42).
+The **Huginn** macOS app (formerly "Eldr ACP Configurator") wraps the whole setup
+in a wizard and registers OpenClaw first-class, exactly like Xcode (A42).
 
-1. **Build / open the Configurator.**
+1. **Build / open Huginn.**
    ```bash
-   xcodebuild -scheme EldrACPConfigurator -destination 'platform=macOS' build
+   xcodebuild -scheme Huginn -destination 'platform=macOS' build
    ```
-   Or open `Apps/EldrACPConfigurator/EldrACPConfigurator.xcodeproj` and Run.
+   Or open `Apps/Huginn/Huginn.xcodeproj` and Run.
 
 2. **Walk the wizard:** connect your LLM → test it → install the binary +
    launcher. These steps write `~/.config/eldr-acp/env`, `~/.local/bin/eldr-acp`,

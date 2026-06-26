@@ -140,7 +140,7 @@ and set each one's instructions, what it gathers, how deep, and whether it draft
 or posts.
 
 **Transparency first:** see exactly what each model receives in **Settings ▸ AI ▸
-What your AI sees**. Tap **Test primary AI now** to confirm it works (it shows the
+What your AI sees**. Tap **Test** (on any AI row) to confirm it works (it shows the
 real reply or the exact error).
 
 #### Running your own model (self-hosted)
@@ -178,7 +178,7 @@ Open any conversation and tap the **sparkles icon** for AI options:
   and drops it into your message box. **Nothing is sent** — you read it, edit it,
   and decide. You can also send it labeled *as your AI*.
 - **Turn your AI "on" (an AI window):** give your AI permission to talk to
-  **everyone in the chat** for a set time (15, 30, 60, or 120 minutes). While
+  **everyone in the chat** for a set time (1, 8, or 24 hours). While
   it's on, **everyone in the conversation sees a banner** saying your AI is active
   and counting down. AIs can never switch themselves on — only you can.
 
@@ -212,7 +212,7 @@ By default, **your AI does not read your whole history.** It only sees:
 
 A peer's marked messages reach your AI only when **both of you** have turned on
 context sharing. You can **see exactly what your AI receives** anytime in
-**Settings ▸ AI ▸ View tethered LLM context** — it's read-only and sent nowhere.
+**Settings ▸ AI ▸ Context inspector** — it's read-only and sent nowhere.
 
 ### AI privacy in one line
 
@@ -311,9 +311,10 @@ Two integrations are available if you run EldrChat on a Mac:
 - **Let an AI agent (Goose, Xcode, Claude) read your secure chat** — turn on
   **Settings ▸ Local agent access (MCP)**; EldrChat shows a one-line command + a
   pairing token to paste into your MCP client. Be clear-eyed about what this does:
-  a local agent on *this machine* gets to **read your conversations**. It is
-  read-only (there is no way for it to send or post anything), it talks to the app
-  only over a **loopback socket** that never leaves the device, it needs the
+  a local agent on *this machine* gets to **read your conversations**. It can also
+  draft replies, mark messages as context, and **send as your AI** (`send_as_my_ai`)
+  — but a send is **gated on a human-opened AI window** (no window, no send), it talks
+  to the app only over a **loopback socket** that never leaves the device, it needs the
   pairing token to connect, and every contact's name is replaced with a **local
   codename** (never a real name or key) with message text **size-capped** first.
   It is **off by default**, there is **no remembered "leave it on" setting**, and
@@ -330,7 +331,7 @@ Two integrations are available if you run EldrChat on a Mac:
 Both are off by default and documented step-by-step in **docs/SETUP-GUIDE.md §9**
 (Xcode 27 registration) and the in-app Settings.
 
-For the Xcode 27 agent, there's also a point-and-click **Eldr ACP Configurator**
+For the Xcode 27 agent, there's also a point-and-click **Huginn**
 macOS app (`Apps/Huginn/`) that wraps the whole setup in a wizard, with
 a live config panel, a log viewer, an in-app test chat, and self-learning per-project
 memory. See **Apps/Huginn/README.md**.

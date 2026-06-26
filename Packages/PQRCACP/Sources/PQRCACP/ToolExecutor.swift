@@ -357,7 +357,26 @@ public struct ToolExecutor: Sendable {
         }
         var root = canonical(environment.effectiveWorkdir)
         if root.count > 1, root.hasSuffix("/") { root.removeLast() }
-        let resolved = canonical(absolutePath(path))
+        // `resolvingSymlinksInPath` only resolves a symlinked component when the FULL
+        // path exists on disk. For a NEW file (the normal `write_file` case) the leaf
+        // doesn't exist, so a symlinked PARENT dir is left unresolved — `write_file(
+        // "link/newfile")` through `link -> ~/.ssh` then passed the prefix check while
+        // the actual write followed the link OUT of the jail (CR-2, PoC-confirmed). Fix:
+        // canonicalize the deepest EXISTING ancestor (whose symlinks DO resolve), then
+        // re-append the not-yet-existing leaf components and re-check.
+        let fm = FileManager.default
+        let absURL = URL(fileURLWithPath: absolutePath(path)).standardizedFileURL
+        var existing = absURL
+        var tail: [String] = []
+        while !fm.fileExists(atPath: existing.path) {
+            let parent = existing.deletingLastPathComponent()
+            if parent.path == existing.path { break }  // reached "/"
+            tail.insert(existing.lastPathComponent, at: 0)
+            existing = parent
+        }
+        var resolved = canonical(existing.path)
+        for component in tail { resolved += "/" + component }
+        resolved = canonical(resolved)  // also resolve a leaf that is itself a symlink
         return resolved == root || resolved.hasPrefix(root + "/") ? resolved : nil
     }
 

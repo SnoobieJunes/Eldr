@@ -341,7 +341,7 @@ otherwise; see below):
 |---|---|
 | Agent impersonating its human | distinct derived key; `participant_type` bound into AEAD AD; `agent_sig` required; human-label-with-agent-evidence rejected and surfaced as a red protocol-violation row |
 | Agent self-activating | windows/invites valid only with the HUMAN identity-key signature; engine rejects agent-signed announcements |
-| Stale windows | bounded durations (≤ 2 h), expiry enforced fail-closed at send time |
+| Stale windows | bounded durations (conversation-window cap ≤ 24 h; thread invites stay ≤ 2 h), expiry enforced fail-closed at send time |
 | Agent loops | hard cap: 6 consecutive agent messages per thread, then pause until a human speaks |
 | Covert agent-to-agent channel | none exists: the engine's only output path posts signed, labeled thread messages (the recording guarantee); verified by the spy-sink suite. Thread "skills" (A32) are prompt composition only — no new channel |
 | Agent key exposure | derivation is one-way from the identity key; exposure of the agent key does not expose the identity key |
