@@ -434,7 +434,8 @@ drops into all of them. Configure the launcher as the agent command:
   ```json
   { "agent_servers": { "eldr": { "command": "/Users/<you>/.local/bin/eldr-acp-xcode", "args": [] } } }
   ```
-- **OpenClaw — one-click in the Configurator (A42).** The Eldr ACP Configurator now
+- **OpenClaw — one-click in the Configurator (A42).** Full walkthrough:
+  [`docs/OPENCLAW-SETUP.md`](OPENCLAW-SETUP.md). The Eldr ACP Configurator now
   registers OpenClaw first-class, like Xcode: it installs a dedicated
   `~/.local/bin/eldr-acp-openclaw` launcher and the wizard's **"Register in OpenClaw"**
   step merges the agent into OpenClaw's config (default `~/.config/openclaw/config.json`,
