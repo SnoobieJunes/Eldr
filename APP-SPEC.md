@@ -116,7 +116,7 @@ Double-Ratcheted ciphertext over the **same** mesh as chat; a relay sees only
 
 **Send pipeline** (mirrors SPEC §0 diagram ①–⑥): compose → pad to bucket → ratchet-encrypt (AD per SPEC §8.3, with the fuzzed timestamp chosen *before* encryption and reused on the wrap) → rumor(1420, unsigned) → seal(13, sender Nostr key) → gift wrap(1059, fresh random key, fuzzed `created_at`) → outbox → `RelayTransport.publish` to recipient's kind-10050 relays. **Receive pipeline:** subscribe `{kinds:[1059], #p:[me]}` → dedupe by event id → unwrap → unseal → blocklist check on revealed sender **[D8]** → session lookup (or handshake / message-request path) → ratchet-decrypt → unpad → store → UI.
 
-**Concurrency:** one actor per session; `RelaySync` actor drains envelopes on foreground/scenePhase change and pull-to-refresh (no background fetch in v1 **[D6]**).
+**Concurrency:** one actor per session; `RelaySync` actor drains envelopes on foreground/scenePhase change and pull-to-refresh (no background fetch in v1 **[D6]**). *(Caveat — DEVIATIONS AC38/AC40: the `RelaySync`-actor / `scenePhase`-drain design described here is **aspirational and was never implemented**. The shipped transport is a long-lived, persistent WebSocket to the relay — not a per-scenePhase drain — kept alive under Mac Catalyst by an App-Nap suppression assertion. Treat this paragraph as the original intent, not current behavior.)*
 
 ## 3. Persistence & key custody
 

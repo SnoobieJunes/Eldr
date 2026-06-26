@@ -194,9 +194,13 @@ public struct DoubleRatchet: Sendable {
 
         // Peer rekeys fold before the recv-half of the peer's new chain —
         // the peer applied the same folds before their send-half (NIP-XX §6).
-        let inboundFolds = pendingInboundRootFolds
+        var inboundFolds = pendingInboundRootFolds
         pendingInboundRootFolds = []
         applyFolds(inboundFolds)
+        // The folds (KEM shared secrets) are now consumed into the root; wipe
+        // the drained copies. `applyFolds` took them by value, so this changes
+        // no derivation.
+        for i in inboundFolds.indices { inboundFolds[i].zeroize() }
         let recvOut = try dhs.sharedSecretFromKeyAgreement(with: remotePub)
         let (rootAfterRecv, recvChain) = Self.kdfRootKey(rootKey, recvOut)
         rootKey = rootAfterRecv
@@ -204,9 +208,10 @@ public struct DoubleRatchet: Sendable {
 
         // Our own rekeys fold before our send-half — the peer applies them
         // before the recv-half of this new chain of ours.
-        let outboundFolds = pendingOutboundRootFolds
+        var outboundFolds = pendingOutboundRootFolds
         pendingOutboundRootFolds = []
         applyFolds(outboundFolds)
+        for i in outboundFolds.indices { outboundFolds[i].zeroize() }
         dhs = try Curve25519.KeyAgreement.PrivateKey(rawRepresentation: randomSource.bytes(32))
         let sendOut = try dhs.sharedSecretFromKeyAgreement(with: remotePub)
         let (rootAfterSend, sendChain) = Self.kdfRootKey(rootKey, sendOut)
@@ -225,6 +230,10 @@ public struct DoubleRatchet: Sendable {
                 info: Data("\(PQRCConstants.rekeyHKDFInfoPrefix)-root".utf8),
                 outputByteCount: 32
             )
+            // `deriveKey` has copied the IKM into its own (CryptoKit-zeroed)
+            // key; wipe our transient old-root||ss copy now that `rootKey`
+            // holds the independently derived successor.
+            ikm.zeroize()
         }
     }
 
@@ -279,13 +288,19 @@ public struct DoubleRatchet: Sendable {
         chainInfo.append(Data(uint32BE: UInt32(counter)))
         func refreshed(_ chain: SymmetricKey) -> SymmetricKey {
             var chainIKM = chain.rawData
-            chainIKM.append(ss.rawData)
-            return HKDF<SHA256>.deriveKey(
+            var ssBytes = ss.rawData
+            chainIKM.append(ssBytes)
+            let next = HKDF<SHA256>.deriveKey(
                 inputKeyMaterial: SymmetricKey(data: chainIKM),
                 salt: Data(PQRCConstants.rekeyHKDFSalt.utf8),
                 info: chainInfo,
                 outputByteCount: 32
             )
+            // Bytes copied into `deriveKey`'s own zeroed key; wipe our transient
+            // old-chain||ss copies (the returned chain is derived, unaffected).
+            chainIKM.zeroize()
+            ssBytes.zeroize()
+            return next
         }
         if sending {
             if let chain = cks { cks = refreshed(chain) }
@@ -336,33 +351,58 @@ public struct DoubleRatchet: Sendable {
     static func kdfRootKey(_ rootKey: SymmetricKey, _ dhOut: SharedSecret) -> (SymmetricKey, SymmetricKey) {
         var ikm = Data()
         dhOut.withUnsafeBytes { ikm.append(contentsOf: $0) }
-        let okm = HKDF<SHA256>.deriveKey(
+        var salt = rootKey.rawData
+        var okm = HKDF<SHA256>.deriveKey(
             inputKeyMaterial: SymmetricKey(data: ikm),
-            salt: rootKey.rawData,
+            salt: salt,
             info: Data("pqrc-v1-ratchet-root".utf8),
             outputByteCount: 64
         ).rawData
-        return (SymmetricKey(data: okm.prefix(32)), SymmetricKey(data: okm.suffix(32)))
+        // `SymmetricKey(data:)` copies each half into its own zeroed storage;
+        // build the results, then wipe the transient dh_out IKM, the root-key
+        // salt copy, and the 64-byte OKM. Identical bytes, just not left behind.
+        let result = (SymmetricKey(data: okm.prefix(32)), SymmetricKey(data: okm.suffix(32)))
+        ikm.zeroize()
+        salt.zeroize()
+        okm.zeroize()
+        return result
     }
 
     /// KDF_CK: message key = HMAC(ck, 0x01); next chain key = HMAC(ck, 0x02).
     static func kdfChainKey(_ chainKey: SymmetricKey) -> (messageKey: SymmetricKey, nextChainKey: SymmetricKey) {
         let mk = HMAC<SHA256>.authenticationCode(for: Data([0x01]), using: chainKey)
         let ck = HMAC<SHA256>.authenticationCode(for: Data([0x02]), using: chainKey)
-        return (SymmetricKey(data: Data(mk)), SymmetricKey(data: Data(ck)))
+        // `Data(mac)` materializes the raw key bytes; capture so we can wipe the
+        // transient copies after `SymmetricKey(data:)` has copied them in. The
+        // HMAC tags themselves (CryptoKit `HashedAuthenticationCode`) carry no
+        // exposed mutable buffer, so the `Data` copies are the only ones we own.
+        var mkBytes = Data(mk)
+        var ckBytes = Data(ck)
+        let result = (SymmetricKey(data: mkBytes), SymmetricKey(data: ckBytes))
+        mkBytes.zeroize()
+        ckBytes.zeroize()
+        return result
     }
 
     /// Message key → AES-256-GCM key + deterministic 12-byte nonce. The nonce
     /// is derived (Signal pattern), never transmitted: each message key is used
     /// exactly once, so key/nonce reuse is structurally impossible.
     static func messageKeyMaterial(_ messageKey: SymmetricKey) -> (key: SymmetricKey, nonce: Data) {
-        let okm = HKDF<SHA256>.deriveKey(
+        var okm = HKDF<SHA256>.deriveKey(
             inputKeyMaterial: messageKey,
             salt: Data("pqrc-v1-msg".utf8),
             info: Data("pqrc-msgkeys".utf8),
             outputByteCount: 44
         ).rawData
-        return (SymmetricKey(data: okm.prefix(32)), Data(okm.suffix(12)))
+        // `SymmetricKey(data:)` copies the AES key into its own zeroed storage.
+        // The nonce is built via `Array(...)` to force an eager, independent
+        // allocation — a plain `Data(slice)` can retain `okm`'s 44-byte backing
+        // store, which would both alias the wipe and leave the key half of that
+        // buffer un-zeroed. Same bytes out; only the lingering copy differs.
+        let key = SymmetricKey(data: okm.prefix(32))
+        let nonce = Data(Array(okm.suffix(12)))
+        okm.zeroize()
+        return (key, nonce)
     }
 
     static func aeadSeal(messageKey: SymmetricKey, plaintext: Data, ad: Data) throws -> Data {

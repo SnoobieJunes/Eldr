@@ -72,7 +72,9 @@ struct PQRCApp: App {
                 .environment(commands)
                 .frame(
                     minWidth: onMac ? 760 : nil, idealWidth: onMac ? 1100 : nil,
-                    minHeight: onMac ? 520 : nil, idealHeight: onMac ? 760 : nil)
+                    maxWidth: onMac ? .infinity : nil,
+                    minHeight: onMac ? 520 : nil, idealHeight: onMac ? 760 : nil,
+                    maxHeight: onMac ? .infinity : nil)
                 .onOpenURL { url in
                     session.handleDeepLink(url)
                 }
@@ -454,6 +456,32 @@ final class AppSession {
         else { UserDefaults.standard.removeObject(forKey: key) }
     }
 
+    /// Per-node AUTONOMOUS-CHANGES consent (statusreport §2.3, P0): whether the
+    /// owner has consented to let a paired `coding_agent` node's agent perform
+    /// MUTATING tool calls — `write_file` / `edit_file` / `run_shell` (ACP
+    /// ToolKind `edit` / `execute`) — WITHOUT a per-action prompt on the phone.
+    /// OFF by default — the cardinal rule. This is STRICTLY NARROWER than, and
+    /// distinct from, `remoteDevControlConsent`: that gate decides whether the
+    /// node may be driven AT ALL (it admits the relay-ACP path); THIS gate decides
+    /// whether, once driven, the agent may autonomously change files / run shell on
+    /// the node. With this OFF, the phone-side permission handler FAILS CLOSED on
+    /// every mutating tool — read-only tools (`read`) still run — so a destructive
+    /// op is never auto-approved without an explicit, separate opt-in. `nodeID` is
+    /// the node contact's PQRC identity hex (the only ACP peer — C-3). Per-silo
+    /// (deniability — A33), same store as `remoteDevControlConsent`. `nonisolated`
+    /// so the (actor) `PersonaRuntime` reads it without an await.
+    nonisolated static func autonomousChangesConsent(nodeID: String, siloID: String = "") -> Bool {
+        UserDefaults.standard.bool(
+            forKey: siloDefaultsKey("acpAutonomousChanges.\(nodeID)", siloID))
+    }
+    nonisolated static func setAutonomousChangesConsent(
+        _ value: Bool, nodeID: String, siloID: String = ""
+    ) {
+        let key = siloDefaultsKey("acpAutonomousChanges.\(nodeID)", siloID)
+        if value { UserDefaults.standard.set(true, forKey: key) }
+        else { UserDefaults.standard.removeObject(forKey: key) }
+    }
+
     /// Agent-skills asymmetry knob: a short label of THIS workstation's context
     /// domain (e.g. "iOS / Xcode"), injected into shared-thread prompts so each
     /// tether advertises what it has without dumping its full context.
@@ -465,6 +493,24 @@ final class AppSession {
         let t = value.trimmingCharacters(in: .whitespacesAndNewlines)
         if t.isEmpty { UserDefaults.standard.removeObject(forKey: key) }
         else { UserDefaults.standard.set(t, forKey: key) }
+    }
+
+    /// Display toggle: show the raw AgentSkills `⟡⟡ … ⟡⟡ end` protocol envelope in
+    /// agent chat bubbles instead of just the inner body. OFF by default — the
+    /// envelope header/footer is machine-plumbing noise for a human reader, so we
+    /// strip it at DISPLAY time (the raw bytes stay in the stored record — §23
+    /// "every byte recorded"). ON shows the unstripped envelope for debugging /
+    /// transparency. Per-silo (deniability — A33), mirroring the other display
+    /// knobs; `nonisolated` so the (main-actor) bubble view reads it without a hop.
+    nonisolated static func showAgentEnvelope(siloID: String = "") -> Bool {
+        UserDefaults.standard.bool(forKey: siloDefaultsKey("showAgentEnvelope", siloID))
+    }
+    nonisolated static func setShowAgentEnvelope(_ value: Bool, siloID: String = "") {
+        let key = siloDefaultsKey("showAgentEnvelope", siloID)
+        // Default is OFF, so an explicit `false` clears the key (no stale value
+        // lingers at rest) and `true` is the only thing we persist.
+        if value { UserDefaults.standard.set(true, forKey: key) }
+        else { UserDefaults.standard.removeObject(forKey: key) }
     }
 
     /// Agent skills pinned to a thread (ids from `AgentSkills.catalog`), appended
@@ -1073,6 +1119,12 @@ struct RootView: View {
 
     var body: some View {
         content
+            // Mac Catalyst ONLY: make the window freely resizable above a sane
+            // minimum via AppKit-level `UIWindowScene.sizeRestrictions`. SwiftUI's
+            // `.windowResizability` is unreliable under Catalyst; this is the lever
+            // that actually sticks. Inert (renders nothing) on iPhone/iPad — see
+            // `WindowSizeConfigurator` (compiled in only under macCatalyst).
+            .modifier(WindowSizeConfiguratorModifier())
             .environment(tour)
             .onboardingTour(tour, activeSiloID: session.activeSiloID)
             // First entry into a real account → present the welcome tour once.

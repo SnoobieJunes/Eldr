@@ -14,23 +14,16 @@ struct ThreadView: View {
     @State private var showInvitePicker = false
     @State private var showSkills = false
     @State private var pinnedSkillCount = 0
-    @State private var now = Int64(Date().timeIntervalSince1970)
     /// Markdown/HTML message currently open in the full-screen reader.
     @State private var fullScreenContent: FullScreenContent?
-    private let ticker = Timer.publish(every: 1, on: .main, in: .common).autoconnect()
-
-    private var myInviteUntil: Int64? {
-        guard let until = model.aiInvites[thread.id]?[model.myIdentityHex], until > now else {
-            return nil
-        }
-        return until
-    }
-
-    private var threadScope: AIContextGrant.Scope { .thread(thread.id) }
 
     var body: some View {
         VStack(spacing: 0) {
-            header
+            // The header carries the live per-AI invite countdowns; it owns its
+            // own 1 Hz clock (ThreadHeader) so the per-second tick re-evaluates
+            // only the header — NOT this body, and therefore not the thread
+            // message `ForEach`/`ScrollView` below.
+            ThreadHeader(model: model, thread: thread, showInvitePicker: $showInvitePicker)
             messageList
                 // Bottom bars as a safe-area inset, not VStack siblings: when
                 // the loop-guard row appears mid-conversation the inset grows
@@ -78,9 +71,6 @@ struct ThreadView: View {
         .fullScreenCover(item: $fullScreenContent) { content in
             FullScreenReaderView(text: content.text)
         }
-        .onReceive(ticker) { _ in
-            now = Int64(Date().timeIntervalSince1970)
-        }
         .confirmationDialog("Invite my AI", isPresented: $showInvitePicker) {
             ForEach([15, 30, 60, 120], id: \.self) { minutes in
                 Button("\(minutes) minutes") {
@@ -92,7 +82,120 @@ struct ThreadView: View {
         }
     }
 
-    private var header: some View {
+    private var messageList: some View {
+        ScrollViewReader { proxy in
+            ScrollView {
+                LazyVStack(spacing: 6) {
+                    ForEach(model.threadMessages(thread.id, conversationID: thread.conversationID)) { message in
+                        MessageBubble(
+                            message: message,
+                            isMine: message.senderIdentity == model.myIdentityHex,
+                            senderName: model.contactNames[message.senderIdentity] ?? "Contact",
+                            agentName: message.agentName ?? model.aiNames[message.senderIdentity],
+                            onToggleAIContext: {
+                                Task {
+                                    await model.markAIContext(
+                                        messageIDs: [message.id], value: !message.aiContext,
+                                        conversationID: thread.conversationID)
+                                }
+                            },
+                            onFullScreen: { fullScreenContent = FullScreenContent(text: $0) },
+                            onRetry: { Task { await model.retry(message) } },
+                            // Strip the AgentSkills ⟡⟡ envelope from agent bubbles
+                            // unless the per-silo "Show agent protocol envelope"
+                            // toggle is on (default off). Display-only — the
+                            // stored record keeps the raw bytes (§23). Thread
+                            // bubbles are where the envelope shows up most.
+                            showEnvelope: AppSession.showAgentEnvelope(siloID: model.siloID))
+                    }
+                }
+                .padding()
+            }
+            // Explicit scroll-to-last (same as ConversationView): the lazy
+            // stack's estimated height defeats defaultScrollAnchor alone, and
+            // a last bubble left under the loop-guard band also reads as a
+            // contrast-audit failure (A7).
+            .onAppear {
+                if let last = model.threadMessages(thread.id, conversationID: thread.conversationID).last {
+                    proxy.scrollTo(last.id, anchor: .bottom)
+                }
+            }
+            .onChange(of: model.threadMessages(thread.id, conversationID: thread.conversationID).count) {
+                if let last = model.threadMessages(thread.id, conversationID: thread.conversationID).last {
+                    withAnimation { proxy.scrollTo(last.id, anchor: .bottom) }
+                }
+            }
+        }
+        // Hard bottom edge: the soft scroll-edge blur leaves bubbles near the
+        // loop-guard/composer bars without a determinable background, which
+        // the contrast auditor hard-fails (A7).
+        .scrollEdgeEffectStyle(.hard, for: .bottom)
+        // Open at the latest message (same as conversations, A8). Also
+        // audit-load-bearing: an unanchored list can leave the last bubble
+        // clipped mid-text under the loop-guard band, which reads as a
+        // contrast failure.
+        .defaultScrollAnchor(.bottom)
+        .accessibilityIdentifier("thread-message-list")
+    }
+
+    private var composer: some View {
+        HStack(alignment: .bottom, spacing: 8) {
+            TextField("Message the thread", text: $draftText, axis: .vertical)
+                .lineLimit(1...4)
+                .textFieldStyle(.roundedBorder)
+                .accessibilityIdentifier("thread-composer-field")
+                // Explicit Paste for iPad/Mac (right-click / long-press) — the
+                // main composer has the same affordance.
+                .contextMenu {
+                    Button {
+                        if let clip = UIPasteboard.general.string { draftText += clip }
+                    } label: {
+                        Label("Paste", systemImage: "doc.on.clipboard")
+                    }
+                }
+            Button {
+                let text = draftText
+                draftText = ""
+                Task {
+                    await model.send(text, conversationID: thread.conversationID, threadID: thread.id)
+                }
+            } label: {
+                Image(systemName: "arrow.up.circle.fill").font(.title2)
+            }
+            .frame(minWidth: 44, minHeight: 44)
+            .disabled(draftText.isEmpty)
+            .accessibilityLabel("Send to thread")
+        }
+        .padding(.horizontal)
+        .padding(.vertical, 8)
+        .background(.bar)
+    }
+}
+
+/// Pinned thread header (APP-SPEC §8): live per-human AI-invite status with a
+/// per-minute countdown, the invite/withdraw control, and the context-sharing
+/// control. Isolated from `ThreadView` so its OWN 1 Hz clock (`now`) re-renders
+/// only this card on each tick — never the parent body or the thread message
+/// `ForEach`. Reads the same `@Observable` model state as before; `now` only
+/// affects which invites are still "active" and the displayed minutes, so the
+/// visible content is identical to the inline version.
+private struct ThreadHeader: View {
+    let model: AppModel
+    let thread: ThreadVM
+    @Binding var showInvitePicker: Bool
+    @State private var now = Int64(Date().timeIntervalSince1970)
+    private let ticker = Timer.publish(every: 1, on: .main, in: .common).autoconnect()
+
+    private var myInviteUntil: Int64? {
+        guard let until = model.aiInvites[thread.id]?[model.myIdentityHex], until > now else {
+            return nil
+        }
+        return until
+    }
+
+    private var threadScope: AIContextGrant.Scope { .thread(thread.id) }
+
+    var body: some View {
         VStack(alignment: .leading, spacing: 6) {
             ForEach(Array((model.aiInvites[thread.id] ?? [:]).keys.sorted()), id: \.self) { identityHex in
                 if let until = model.aiInvites[thread.id]?[identityHex], until > now {
@@ -147,89 +250,9 @@ struct ThreadView: View {
         // the first scroll rows and leaves the contrast auditor with an
         // indeterminate background for anything near it (A7).
         .background(Color(.secondarySystemGroupedBackground))
-    }
-
-    private var messageList: some View {
-        ScrollViewReader { proxy in
-            ScrollView {
-                LazyVStack(spacing: 6) {
-                    ForEach(model.threadMessages(thread.id)) { message in
-                        MessageBubble(
-                            message: message,
-                            isMine: message.senderIdentity == model.myIdentityHex,
-                            senderName: model.contactNames[message.senderIdentity] ?? "Contact",
-                            agentName: message.agentName ?? model.aiNames[message.senderIdentity],
-                            onToggleAIContext: {
-                                Task {
-                                    await model.markAIContext(
-                                        messageIDs: [message.id], value: !message.aiContext,
-                                        conversationID: thread.conversationID)
-                                }
-                            },
-                            onFullScreen: { fullScreenContent = FullScreenContent(text: $0) },
-                            onRetry: { Task { await model.retry(message) } })
-                    }
-                }
-                .padding()
-            }
-            // Explicit scroll-to-last (same as ConversationView): the lazy
-            // stack's estimated height defeats defaultScrollAnchor alone, and
-            // a last bubble left under the loop-guard band also reads as a
-            // contrast-audit failure (A7).
-            .onAppear {
-                if let last = model.threadMessages(thread.id).last {
-                    proxy.scrollTo(last.id, anchor: .bottom)
-                }
-            }
-            .onChange(of: model.threadMessages(thread.id).count) {
-                if let last = model.threadMessages(thread.id).last {
-                    withAnimation { proxy.scrollTo(last.id, anchor: .bottom) }
-                }
-            }
+        .onReceive(ticker) { _ in
+            now = Int64(Date().timeIntervalSince1970)
         }
-        // Hard bottom edge: the soft scroll-edge blur leaves bubbles near the
-        // loop-guard/composer bars without a determinable background, which
-        // the contrast auditor hard-fails (A7).
-        .scrollEdgeEffectStyle(.hard, for: .bottom)
-        // Open at the latest message (same as conversations, A8). Also
-        // audit-load-bearing: an unanchored list can leave the last bubble
-        // clipped mid-text under the loop-guard band, which reads as a
-        // contrast failure.
-        .defaultScrollAnchor(.bottom)
-        .accessibilityIdentifier("thread-message-list")
-    }
-
-    private var composer: some View {
-        HStack(alignment: .bottom, spacing: 8) {
-            TextField("Message the thread", text: $draftText, axis: .vertical)
-                .lineLimit(1...4)
-                .textFieldStyle(.roundedBorder)
-                .accessibilityIdentifier("thread-composer-field")
-                // Explicit Paste for iPad/Mac (right-click / long-press) — the
-                // main composer has the same affordance.
-                .contextMenu {
-                    Button {
-                        if let clip = UIPasteboard.general.string { draftText += clip }
-                    } label: {
-                        Label("Paste", systemImage: "doc.on.clipboard")
-                    }
-                }
-            Button {
-                let text = draftText
-                draftText = ""
-                Task {
-                    await model.send(text, conversationID: thread.conversationID, threadID: thread.id)
-                }
-            } label: {
-                Image(systemName: "arrow.up.circle.fill").font(.title2)
-            }
-            .frame(minWidth: 44, minHeight: 44)
-            .disabled(draftText.isEmpty)
-            .accessibilityLabel("Send to thread")
-        }
-        .padding(.horizontal)
-        .padding(.vertical, 8)
-        .background(.bar)
     }
 }
 

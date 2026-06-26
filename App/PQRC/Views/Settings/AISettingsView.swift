@@ -24,6 +24,13 @@ struct AISettingsView: View {
     /// The asymmetry knob for shared-thread agent skills (what THIS device brings).
     /// Loaded per-silo in `.task` (can't read `siloID` in a property initializer).
     @State private var contextDomain = ""
+    /// The `acp` ("Mac coding harness") backend's live connectedness: the consented
+    /// `coding_agent` node (identity hex + local name) or nil when none is paired AND
+    /// consented. Loaded from the runtime — the SAME signal that decides whether the
+    /// backend runs the real `ACPAgentProvider` vs. the Demo stub — so the status line
+    /// can't claim "connected" while replies are still simulated. Refreshed in `.task`
+    /// and after every `persist()` (which re-binds providers via `applyAIProvider`).
+    @State private var acpNode: (identityHex: String, name: String)?
 
     /// AI config + API keys are scoped to the unlocked silo, so accounts never
     /// share AI setup or credentials.
@@ -121,6 +128,7 @@ struct AISettingsView: View {
         .task {
             ais = AppSession.loadConfiguredAIs(siloID: siloID)
             contextDomain = AppSession.aiContextDomain(siloID: siloID)
+            await refreshACPNode()
         }
         .alert("Turn off the egress firewall?", isPresented: $showFirewallWarning) {
             Button("Turn off — send raw context", role: .destructive) {
@@ -350,6 +358,16 @@ struct AISettingsView: View {
             }
             return "Active: Apple Private Cloud Compute (\(ai.effectiveReasoning) reasoning)."
         }
+        // ACP ("Mac coding harness"): the static factory hands back a Demo stub and
+        // the runtime only swaps in the live `ACPAgentProvider` once a paired Mac node
+        // is CONSENTED (C-3). Be honest about which one is running — never imply a real
+        // harness when replies are simulated. `acpNode` is that exact runtime signal.
+        if ai.kind == "acp" {
+            if let node = acpNode {
+                return "Connected · \(node.name)"
+            }
+            return "Not connected — pair a Mac node first. Replies are simulated until then."
+        }
         if ConfiguredAI.isRemote(ai.kind) {
             return hasKey(for: ai)
                 ? "Active: \(ConfiguredAI.label(for: ai.kind))"
@@ -370,6 +388,9 @@ struct AISettingsView: View {
             return !(ai.baseURL ?? "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
         }
         if ai.kind == "pcc" { return PCCFoundationModelsProvider.availabilityReason == nil }
+        // ACP is "OK" (green) ONLY when a consented Mac node is actually connected;
+        // otherwise it's the Demo stub, shown with the warning (orange) tint.
+        if ai.kind == "acp" { return acpNode != nil }
         if ConfiguredAI.isRemote(ai.kind) { return hasKey(for: ai) }
         if ai.kind == "demo" { return false }
         return FoundationModelsAgentProvider.availabilityReason == nil
@@ -418,7 +439,21 @@ struct AISettingsView: View {
     /// Persist the configured AIs and re-resolve the live providers.
     private func persist() {
         AppSession.saveConfiguredAIs(ais, siloID: siloID)
-        Task { await session.applyAIProvider() }
+        Task {
+            await session.applyAIProvider()
+            // The apply re-bound providers (the runtime's `rebindRelayACPProviders`);
+            // re-read the ACP connectedness so the status line reflects it without a
+            // manual reload (e.g. right after enabling the ACP backend).
+            await refreshACPNode()
+        }
+    }
+
+    /// Pull the `acp` backend's live connectedness from the runtime — the SAME
+    /// signal it uses to decide between the real `ACPAgentProvider` and the Demo
+    /// stub — so `statusLine`/`statusOK` for "acp" can never claim "connected"
+    /// while replies are simulated.
+    private func refreshACPNode() async {
+        acpNode = await model.consentedCodingAgentNode()
     }
 }
 

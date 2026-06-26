@@ -10,6 +10,9 @@ struct ConversationDetailsView: View {
     @State private var verified = false
     @State private var showReport = false
     @State private var blocked = false
+    /// Gate the destructive Block direction behind a confirm (§2.6); Unblock is
+    /// recoverable and fires immediately, so it is NOT gated.
+    @State private var showBlockConfirm = false
     @State private var nickname = ""
     /// Per-conversation AI context override: "default" (use each AI's own
     /// setting) | "off" | "marked" | "full".
@@ -21,6 +24,13 @@ struct ConversationDetailsView: View {
     /// for this conversation, refreshed when the override changes.
     @State private var summary: (mode: String, isRemote: Bool, firewallOn: Bool) =
         ("active", false, true)
+    /// Whether this contact is a paired Mac coding-agent node — gates the
+    /// autonomous-changes consent section (only meaningful for such a node).
+    @State private var isCodingAgent = false
+    /// Per-node AUTONOMOUS-CHANGES consent (statusreport §2.3): lets the paired Mac
+    /// agent create/modify files and run shell commands without asking each time.
+    /// OFF by default — when off, the phone fails closed on every mutating tool.
+    @State private var autonomousChanges = false
 
     var body: some View {
         NavigationStack {
@@ -107,15 +117,40 @@ struct ConversationDetailsView: View {
                 } footer: {
                     Text("Overrides your AIs' own context setting, just here. \"Off\" keeps every AI from gathering anything from this conversation.")
                 }
+                if isCodingAgent {
+                    Section {
+                        Toggle("Allow autonomous file & shell changes", isOn: $autonomousChanges)
+                            .accessibilityIdentifier("acp-autonomous-changes")
+                            .onChange(of: autonomousChanges) { _, newValue in
+                                // Per-node, per-silo — same store as remote dev-control
+                                // consent; the conversationID IS the node's identity hex.
+                                AppSession.setAutonomousChangesConsent(
+                                    newValue, nodeID: conversationID, siloID: model.siloID)
+                            }
+                        Label(
+                            autonomousChanges
+                                ? "ON — the paired Mac agent can create/modify files and run shell commands on its node without asking each time."
+                                : "OFF — each request to create/modify a file or run a shell command is denied automatically (fails safe). Read-only inspection still works.",
+                            systemImage: autonomousChanges ? "lock.open.trianglebadge.exclamationmark" : "lock.shield")
+                            .font(.caption)
+                            .foregroundStyle(autonomousChanges ? AnyShapeStyle(.orange) : AnyShapeStyle(.secondary))
+                            .accessibilityIdentifier("acp-autonomous-changes-status")
+                    } header: {
+                        Text("Mac coding agent")
+                            .helpInfo("Separate from letting the agent join your conversation. With this OFF, your phone refuses any request from the paired Mac agent to write files or run shell commands — the last brake before a destructive change. Turn it ON only if you trust this node to act on its own; it can then create, modify, and delete files and run commands on that Mac without prompting you.")
+                    } footer: {
+                        Text("Lets the paired Mac agent create/modify files and run shell commands without asking each time. Keep this off unless you trust it to act autonomously — your phone is the last brake before a destructive change runs on that Mac.")
+                    }
+                }
                 Section("Safety") {
                     Button(blocked ? "Unblock" : "Block", role: .destructive) {
-                        blocked.toggle()
-                        Task {
-                            if blocked {
-                                await model.block(conversationID)
-                            } else {
-                                await model.runtime.setBlocked(conversationID, blocked: false)
-                            }
+                        if blocked {
+                            // Unblock is recoverable — apply immediately, no confirm.
+                            blocked = false
+                            Task { await model.runtime.setBlocked(conversationID, blocked: false) }
+                        } else {
+                            // Block drops their messages — confirm first (§2.6).
+                            showBlockConfirm = true
                         }
                     }
                     .accessibilityIdentifier("block-contact")
@@ -137,6 +172,9 @@ struct ConversationDetailsView: View {
                     AppSession.conversationFirewall(conversationID, siloID: model.siloID)
                     .map { $0 ? "on" : "off" } ?? "default"
                 summary = model.primaryAIContextSummary(conversationID)
+                isCodingAgent = await model.runtime.contactType(conversationID) == "coding_agent"
+                autonomousChanges = AppSession.autonomousChangesConsent(
+                    nodeID: conversationID, siloID: model.siloID)
             }
             .toolbar {
                 ToolbarItem(placement: .confirmationAction) {
@@ -145,6 +183,22 @@ struct ConversationDetailsView: View {
             }
             .sheet(isPresented: $showReport) {
                 ReportSheet()
+            }
+            // Confirm the destructive Block direction (§2.6) — same alert shape
+            // as Settings (destructive confirm + Cancel). The button reflects
+            // `blocked` only after this confirms, so a cancelled Block leaves the
+            // toggle reading "Block".
+            .alert(
+                "Block \(model.contactNames[conversationID] ?? "contact")?",
+                isPresented: $showBlockConfirm
+            ) {
+                Button("Block", role: .destructive) {
+                    blocked = true
+                    Task { await model.block(conversationID) }
+                }
+                Button("Cancel", role: .cancel) {}
+            } message: {
+                Text("You'll stop receiving their messages, and their pending messages are dropped on this device — without notifying them. You can unblock them here at any time.")
             }
         }
     }
@@ -215,10 +269,10 @@ struct ReportSheet: View {
                 Label("Reporting in an E2EE app", systemImage: "hand.raised")
                     .font(.headline)
                 Text(
-                    "PQRC messages are end-to-end encrypted: nothing is shared automatically with anyone, including the app maintainer. If you want to report abuse, you can voluntarily export selected messages and email them to the maintainer. Blocking the contact stops their messages immediately, on this device, without notifying them."
+                    "EldrChat messages are end-to-end encrypted: nothing is shared automatically with anyone, including the app maintainer. If you want to report abuse, you can voluntarily export selected messages and email them to the maintainer. Blocking the contact stops their messages immediately, on this device, without notifying them."
                 )
                 .font(.subheadline)
-                ShareLink(item: "PQRC report — attach exported messages here.") {
+                ShareLink(item: "EldrChat report — attach exported messages here.") {
                     Label("Export & report", systemImage: "square.and.arrow.up")
                 }
                 Spacer()

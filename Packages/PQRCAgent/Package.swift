@@ -19,19 +19,23 @@ let package = Package(
         .target(
             name: "PQRCAgent",
             dependencies: ["PQRCCore", "PQRCNostr", "PQRCACP"],
-            // Real Private Cloud Compute path in PCCFoundationModelsProvider.
-            // `ELDR_PCC_SDK` is enabled because the installed Xcode-beta SDK now
-            // vends the PCC symbols (`PrivateCloudComputeLanguageModel`,
-            // `ContextOptions`, `ContextOptions.ReasoningLevel`, the generic
-            // `LanguageModelSession(model: some LanguageModel, instructions:)`,
-            // verified in FoundationModels.swiftinterface).
+            // Real Private Cloud Compute path in PCCFoundationModelsProvider, gated
+            // behind `ELDR_PCC_SDK`. That flag is OFF by default (DEVIATIONS AC36):
+            // the PCC symbols (`PrivateCloudComputeLanguageModel`, `ContextOptions`,
+            // `ContextOptions.ReasoningLevel`, the generic
+            // `LanguageModelSession(model: some LanguageModel, instructions:)`) are
+            // ABSENT from the installed iOS 26.5 / 27.0 SDKs, so defining it
+            // unconditionally breaks the app build ("cannot find type in scope").
+            // It is therefore OPT-IN: add `.define("ELDR_PCC_SDK")` below, and only
+            // on a toolchain whose SDK actually vends those symbols (verify in
+            // FoundationModels.swiftinterface first).
             //
-            // SCOPED TO iOS (DEVIATIONS AC25): Apple Private Cloud Compute is an iOS
-            // capability, and the only macOS consumer of PQRCAgent — the Eldr ACP
-            // Configurator — uses LOCAL LLMs, never PCC. The macOS PCC symbols also
-            // vary by SDK seed (the Xcode 27.0 macOS seed lacks them, which broke the
-            // Configurator build), so defining the flag only for iOS keeps the macOS
-            // build green on any Xcode while leaving the iOS PCC tier untouched.
+            // SCOPE NOTE (DEVIATIONS AC25): if/when re-enabled, the flag is iOS-only.
+            // Apple Private Cloud Compute is an iOS capability, and the only macOS
+            // consumer of PQRCAgent — the Eldr ACP Configurator — uses LOCAL LLMs,
+            // never PCC. The macOS PCC symbols also vary by SDK seed (the Xcode 27.0
+            // macOS seed lacks them, which broke the Configurator build), so scoping
+            // any future opt-in to iOS keeps the macOS build green on any Xcode.
             swiftSettings: [
                 .swiftLanguageMode(.v6),
                 // ELDR_PCC_SDK is OFF by default (DEVIATIONS A40): the Private Cloud

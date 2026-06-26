@@ -2,17 +2,25 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-	<!-- Apple Private Cloud Compute (FoundationModels PrivateCloudComputeLanguageModel,
-	     used by PCCFoundationModelsProvider — see DEVIATIONS A40 / AC36).
-	     DISABLED on purpose: PCC is OFF by default (the ELDR_PCC_SDK build flag is not
-	     defined because the symbols are absent from the installed iOS SDKs), and this is
-	     a MANAGED entitlement Apple only provisions after the PCC access request is
-	     approved. Leaving it ENABLED makes on-device signing/provisioning FAIL with
-	     "provisioning profile doesn't include the com.apple.developer.private-cloud-compute
-	     entitlement" — which blocks testing on a real device. Re-enable the key below
-	     TOGETHER with the ELDR_PCC_SDK flag once PCC is approved and the SDK vends the
-	     symbols (developer.apple.com/private-cloud-compute).
-	-->
+	<!-- Keychain access group. REQUIRED for the data-protection keychain
+	     (kSecUseDataProtectionKeychain) on Mac Catalyst: unlike iOS / "Designed for
+	     iPad", a Catalyst binary is not handed a default access group implicitly, so
+	     SecItemAdd fails with errSecMissingEntitlement (-34018) — which broke account
+	     create/sign-in on Mac (DEVIATIONS AC39/AC40). `$(AppIdentifierPrefix)` resolves
+	     to the team prefix under automatic signing (DEVELOPMENT_TEAM is set), so this is
+	     the same group the application-identifier already implies — existing accounts
+	     stay readable. The Swift is identical to iOS; this is purely an entitlement +
+	     team-signing requirement, not an iOS-specific code path. -->
+	<key>keychain-access-groups</key>
+	<array>
+		<string>$(AppIdentifierPrefix)chat.eldr.app</string>
+	</array>
+
+	<!-- Apple Private Cloud Compute (PCCFoundationModelsProvider — DEVIATIONS A40 / AC36).
+	     DISABLED on purpose: PCC is OFF (ELDR_PCC_SDK undefined; symbols absent from the
+	     installed SDKs), and this MANAGED entitlement makes signing FAIL until Apple
+	     approves the team's PCC request. Re-enable WITH the ELDR_PCC_SDK flag once
+	     approved (developer.apple.com/private-cloud-compute). -->
 	<!--
 	<key>com.apple.developer.private-cloud-compute</key>
 	<true/>

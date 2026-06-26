@@ -27,6 +27,16 @@ import PQRCCore
 ///   so the AEAD key is authenticated by the identity key — an anonymous
 ///   man-in-the-middle on the radio cannot substitute its own sealing key
 ///   without failing the proof. Frames from an unproven/forged peer are dropped.
+/// - **Replay/reorder-protected per connection.** Each sealed frame's plaintext
+///   is prefixed with a per-connection monotonic counter before sealing, so the
+///   ChaChaPoly tag authenticates it (`SealCipher` takes no associated-data
+///   parameter; folding the counter into the sealed plaintext IS the AD binding).
+///   The receiver delivers a frame only if its counter is strictly greater than
+///   the last accepted on that connection — a captured frame re-injected by an
+///   on-link attacker (same counter) or a reordered/earlier frame (lower
+///   counter) is dropped, never handed to the ACP layer. The relay path gets
+///   anti-replay from the Double Ratchet; this local seal has no ratchet under
+///   it, so the counter supplies it.
 ///
 /// Trust model mirrors `MultipeerLinkTransport`: the radio link authenticates
 /// nobody (MultipeerConnectivity encrypts with anonymous keys), so confidentiality
@@ -63,6 +73,22 @@ public actor NearbyACPTransport: ACPTransport {
     /// peer finished proving itself. Flushed, in order, the instant it does —
     /// so a caller need not block on the hello.
     private var pendingOutbound: [String] = []
+
+    /// Per-connection send counter, prefixed into each frame's plaintext before
+    /// sealing so the AEAD tag covers it (replay/reorder protection — see
+    /// `FrameCounter`). The first frame on a connection carries counter 0; it
+    /// increments by one per sealed frame in send order and resets to 0 on
+    /// disconnect (a new connection re-runs the hello, so the receiver resets its
+    /// expected counter in lockstep — see `lastAcceptedCounter`).
+    private var sendCounter: UInt64 = 0
+
+    /// Highest frame counter accepted from the proven peer on THIS connection.
+    /// A frame is delivered only if its (tag-authenticated) counter is strictly
+    /// greater — so a replayed frame (equal counter) or a reordered/earlier one
+    /// (lower counter) is dropped, never handed to the ACP layer. `nil` until the
+    /// first frame is accepted; reset on disconnect so the next connection's
+    /// counter stream starts fresh.
+    private var lastAcceptedCounter: UInt64?
 
     /// The inbound ACP-line stream handed to the ACP client/agent. Sealed frames
     /// are unsealed into here.
@@ -142,15 +168,30 @@ public actor NearbyACPTransport: ACPTransport {
     }
 
     private func sealAndSend(_ line: String, to peer: NearbyPeerID, peerNostrPubkeyHex: String) async {
-        // The ACP line is the plaintext fed through the EXACT mesh seal
-        // (`SealCipher` = pqrc-seal-v1 ChaChaPoly over a secp256k1 ECDH key).
+        // Prefix a per-connection monotonic counter onto the ACP line, then seal
+        // the WHOLE thing. `SealCipher` (pqrc-seal-v1 ChaChaPoly over a secp256k1
+        // ECDH key) takes no associated-data parameter, so folding the counter
+        // into the sealed plaintext is how we bind it into the AEAD: the
+        // ChaChaPoly tag now covers the counter, so a frame whose counter is
+        // tampered, stripped, or rewritten fails the tag and is dropped. (A bare
+        // envelope counter would be unauthenticated — an injector could rewrite
+        // it — so the counter lives ONLY inside the seal, never on the wire in
+        // the clear.) The receiver re-derives replay/reorder trust from this
+        // authenticated copy in `acceptCounter(_:)`.
+        let counter = sendCounter
+        let framed = FrameCounter.prefix(counter, onto: line)
         guard let sealed = try? SealCipher.encrypt(
-            Data(line.utf8), privateKey: nostrKeypair.privateKeyData,
+            framed, privateKey: nostrKeypair.privateKeyData,
             peerPublicKeyHex: peerNostrPubkeyHex, nonceSource: nonceSource)
         else {
             droppedFrameCount += 1
             return
         }
+        // Advance only after a successful seal so a transient seal failure does
+        // not burn a counter value (which the receiver would then see as a gap;
+        // gaps are tolerated — strictly-increasing is the rule — but no reason to
+        // create them).
+        sendCounter = counter + 1
         await sendPayload(ACPLinkPayload(kind: .frame, frame: sealed), to: peer)
     }
 
@@ -183,6 +224,12 @@ public actor NearbyACPTransport: ACPTransport {
             if downed == peer {
                 peer = nil
                 peerNostrPubkeyHex = nil
+                // The frame-counter stream is per-connection: a fresh connection
+                // re-runs the hello and starts its sender counter at 0, so the
+                // receiver MUST forget the old window or it would reject the new
+                // connection's early (lower-numbered) frames as replays.
+                sendCounter = 0
+                lastAcceptedCounter = nil
             }
             issuedChallenge = nil
         case .data(let data, let from):
@@ -256,13 +303,39 @@ public actor NearbyACPTransport: ACPTransport {
                 let peerNostr = peerNostrPubkeyHex,
                 let sealed = payload.frame,
                 let plaintext = try? SealCipher.decrypt(
-                    sealed, privateKey: nostrKeypair.privateKeyData, peerPublicKeyHex: peerNostr)
+                    sealed, privateKey: nostrKeypair.privateKeyData, peerPublicKeyHex: peerNostr),
+                // Split the tag-authenticated counter prefix off the ACP line. A
+                // malformed prefix means the sealed bytes weren't produced by a
+                // counter-prefixing sender → drop (don't deliver raw to ACP).
+                let (counter, line) = FrameCounter.split(plaintext)
             else {
                 droppedFrameCount += 1
                 return
             }
-            inboundContinuation.yield(String(decoding: plaintext, as: UTF8.self))
+            // Replay/reorder gate: the counter is authenticated by the AEAD tag
+            // (it's inside the seal), so a recorded frame an attacker re-injects
+            // carries its original counter — which is now ≤ the last we accepted
+            // and is rejected here. A reordered (earlier) frame is rejected the
+            // same way. Only a strictly-increasing counter advances the window
+            // and reaches the ACP layer.
+            guard acceptCounter(counter) else {
+                droppedFrameCount += 1
+                return
+            }
+            inboundContinuation.yield(line)
         }
+    }
+
+    /// Replay/reorder check for an inbound frame's (tag-authenticated) counter.
+    /// Returns `true` and advances the window only when `counter` is strictly
+    /// greater than the highest accepted on this connection; returns `false`
+    /// (caller drops the frame) for an equal counter (replay) or a lower one
+    /// (reorder / late duplicate). Actor-isolated, so the window is mutated
+    /// race-free under Swift 6 strict concurrency.
+    private func acceptCounter(_ counter: UInt64) -> Bool {
+        if let last = lastAcceptedCounter, counter <= last { return false }
+        lastAcceptedCounter = counter
+        return true
     }
 
     private func sendPayload(_ payload: ACPLinkPayload, to peer: NearbyPeerID) async {
@@ -281,6 +354,8 @@ public actor NearbyACPTransport: ACPTransport {
         issuedChallenge = nil
         peer = nil
         peerNostrPubkeyHex = nil
+        sendCounter = 0
+        lastAcceptedCounter = nil
         pendingOutbound.removeAll()
         inboundContinuation.finish()
     }
@@ -332,5 +407,40 @@ struct ACPLinkPayload: Codable, Sendable {
     /// MITM can't swap in its own AEAD key under a stolen identity claim.
     static func helloProofMessage(identity: Data, nostrPubkey: Data, challenge: Data) -> Data {
         Data("pqrc-acp-hello-v1".utf8) + identity + nostrPubkey + challenge
+    }
+}
+
+// MARK: - Frame counter codec (replay/reorder protection)
+
+/// Encodes/decodes the per-connection monotonic counter that prefixes every
+/// sealed ACP frame's plaintext. Because the counter is sealed WITH the ACP line
+/// (and `SealCipher` exposes no associated-data parameter), the ChaChaPoly tag
+/// authenticates it — so the receiver can trust the decoded counter to reject
+/// replays and reorders (`NearbyACPTransport.acceptCounter`).
+///
+/// Layout: 8-byte big-endian counter || UTF-8 ACP line. A fixed-width binary
+/// prefix is unambiguous (no delimiter the ACP JSON could collide with) and the
+/// ACP line bytes are carried verbatim, so the round trip is byte-exact.
+enum FrameCounter {
+    /// Width of the big-endian counter prefix, in bytes.
+    static let width = 8
+
+    /// Sealed-plaintext bytes for `line` carrying `counter` as an 8-byte
+    /// big-endian prefix.
+    static func prefix(_ counter: UInt64, onto line: String) -> Data {
+        var out = Data(capacity: width + line.utf8.count)
+        withUnsafeBytes(of: counter.bigEndian) { out.append(contentsOf: $0) }
+        out.append(Data(line.utf8))
+        return out
+    }
+
+    /// Splits a decrypted frame back into its counter and ACP line, or `nil` if
+    /// the bytes are too short to carry an 8-byte prefix (a malformed frame the
+    /// caller must drop, not deliver).
+    static func split(_ plaintext: Data) -> (counter: UInt64, line: String)? {
+        guard plaintext.count >= width else { return nil }
+        let counter = plaintext.prefix(width).reduce(UInt64(0)) { ($0 << 8) | UInt64($1) }
+        let line = String(decoding: plaintext.dropFirst(width), as: UTF8.self)
+        return (counter, line)
     }
 }

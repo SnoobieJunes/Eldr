@@ -104,7 +104,7 @@ final class PQRCUITests: XCTestCase {
         XCTAssertTrue(create.waitForExistence(timeout: 10))
         XCTAssertTrue(create.isEnabled)
         create.tap()
-        XCTAssertTrue(app.navigationBars["PQRC"].waitForExistence(timeout: 60))
+        XCTAssertTrue(app.navigationBars["EldrChat"].waitForExistence(timeout: 60))
         tapWhenReady(app, button: "Settings")
         let npub = app.staticTexts["my-npub"]
         XCTAssertTrue(npub.waitForExistence(timeout: 20))

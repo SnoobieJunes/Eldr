@@ -7,12 +7,16 @@ import Foundation
 /// published bundle. Contains live secrets — Keychain or `EncryptedStore`
 /// storage only, never plaintext at rest.
 public struct PrekeyState: Codable, Sendable {
-    public let ikDH: Data
-    public let spk: Data
-    public let pqpkSeed: Data
-    public let otps: [Data: Data]
-    public let otpPQSeeds: [Data: Data]
-    public let lrp: Data
+    // Private-key material is `var` (read-only public surface via `internal(set)`)
+    // so `zeroize()` can wipe the in-memory plaintext after it has been
+    // serialized + encrypted at rest. The dictionary *keys* and `consumed` are
+    // SHA-256-of-public-key hashes — not secret — and stay `let`/untouched.
+    public internal(set) var ikDH: Data
+    public internal(set) var spk: Data
+    public internal(set) var pqpkSeed: Data
+    public internal(set) var otps: [Data: Data]
+    public internal(set) var otpPQSeeds: [Data: Data]
+    public internal(set) var lrp: Data
     public let consumed: Set<Data>
 
     public init(
@@ -26,6 +30,24 @@ public struct PrekeyState: Codable, Sendable {
         self.otpPQSeeds = otpPQSeeds
         self.lrp = lrp
         self.consumed = consumed
+    }
+
+    /// Wipes every private-key byte buffer this state holds: identity DH, signed
+    /// prekey, PQ prekey seed, all one-time prekey private halves (DH + KEM
+    /// seeds), and the last-resort key. Call ONCE the state has been serialized
+    /// and the resulting blob encrypted at rest — never before, or the persisted
+    /// ciphertext would be built from zeroed plaintext. The `otp_used`-style
+    /// hash keys and `consumed` set are public-derived and left intact. After
+    /// this the state is no longer usable for restore.
+    public mutating func zeroize() {
+        ikDH.zeroize()
+        spk.zeroize()
+        pqpkSeed.zeroize()
+        lrp.zeroize()
+        // Snapshot keys before mutating values: mutating a dictionary value can
+        // trigger copy-on-write and invalidate a live `.keys` iterator.
+        for key in Array(otps.keys) { otps[key]?.zeroize() }
+        for key in Array(otpPQSeeds.keys) { otpPQSeeds[key]?.zeroize() }
     }
 }
 

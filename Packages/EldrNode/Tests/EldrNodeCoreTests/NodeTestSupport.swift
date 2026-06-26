@@ -224,6 +224,41 @@ actor NodeSeq {
     func next() -> Int64 { n += 1; return n }
 }
 
+// MARK: - Scriptable NodeMessenger double (for the bootstrap policy unit test)
+
+/// A minimal `NodeMessenger` that scripts `acceptRequest` so the owner-bootstrap policy
+/// (`EldrNodeCore.bootstrapOwnerFromRequest`) can be tested in isolation — no relay, no
+/// crypto. `start`/`sendFramed` are unused by the policy helper (it never streams or
+/// sends), so they return an empty stream / no-op. Records the calls the policy makes.
+actor ScriptedNodeMessenger: NodeMessenger {
+    /// Maps a request's Nostr pubkey → the identity hex `acceptRequest` resolves to.
+    /// A missing key ⇒ `acceptRequest` throws (an unverifiable / unreachable sender).
+    private let acceptIdentityByPubkey: [String: String]
+    private(set) var accepted: [String] = []
+    private(set) var declined: [String] = []
+
+    init(acceptIdentityByPubkey: [String: String]) {
+        self.acceptIdentityByPubkey = acceptIdentityByPubkey
+    }
+
+    nonisolated func start() async throws -> AsyncStream<MessengerEvent> {
+        AsyncStream { $0.finish() }
+    }
+    nonisolated func sendFramed(_ framed: String, to peerIdentityHex: String) async throws {}
+
+    func acceptRequest(senderNostrPubkeyHex: String) async throws -> String {
+        accepted.append(senderNostrPubkeyHex)
+        guard let identity = acceptIdentityByPubkey[senderNostrPubkeyHex] else {
+            throw NodeMessengerError.requestsUnsupported  // stands in for "could not verify"
+        }
+        return identity
+    }
+
+    func declineRequest(senderNostrPubkeyHex: String) async {
+        declined.append(senderNostrPubkeyHex)
+    }
+}
+
 /// A node working directory (the C-2 jail root), canonicalized so the jail's
 /// `resolvingSymlinksInPath` root matches what the tools resolve (macOS /var path).
 func makeNodeWorkdir(_ tag: String) throws -> String {

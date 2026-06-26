@@ -434,6 +434,17 @@ final class AppModel {
         await runtime.tetheredAINames()
     }
 
+    /// The `acp` ("Mac coding harness") backend's live connectedness for the
+    /// Settings status line: the consented `coding_agent` node's identity hex +
+    /// local name, or nil when none is paired AND consented (C-3). This is the
+    /// SAME signal `PersonaRuntime.rebindRelayACPProviders` uses to decide whether
+    /// to swap in the live `ACPAgentProvider`, so the status line agrees exactly
+    /// with what the backend is actually running — never "connected" while it's
+    /// still on the Demo stub.
+    func consentedCodingAgentNode() async -> (identityHex: String, name: String)? {
+        await runtime.consentedCodingAgentNodeInfo()
+    }
+
     /// Read-only summary of the PRIMARY AI's effective gather mode for a
     /// conversation, for the in-chat "AI here" glance chip and the Details echo.
     /// Resolves the per-conversation override over the AI's own policy exactly as
@@ -550,8 +561,17 @@ final class AppModel {
         (messagesByConversation[conversationID] ?? []).filter { $0.threadID == nil }
     }
 
-    func threadMessages(_ threadID: String) -> [StoredMessage] {
-        (messagesByConversation.values.flatMap { $0 }).filter { $0.threadID == threadID }
+    /// A thread's recorded messages, in order. Scoped to the thread's OWN
+    /// conversation: a thread is created under exactly one conversation
+    /// (`threadsByConversation`), and every thread message carries that
+    /// `conversationID` (see `apply(.messageAdded)`), so this yields the same
+    /// set as scanning every conversation — but at O(messages in this one
+    /// conversation) instead of O(all messages across all conversations). The
+    /// single conversation's array preserves insertion/`sentAt` order, so the
+    /// visible ordering is identical. Pass `conversationID` (the caller —
+    /// `ThreadVM` — always has it).
+    func threadMessages(_ threadID: String, conversationID: String) -> [StoredMessage] {
+        (messagesByConversation[conversationID] ?? []).filter { $0.threadID == threadID }
     }
 
     func activeWindowBanner(conversationID: String, now: Int64) -> (name: String, until: Int64)? {

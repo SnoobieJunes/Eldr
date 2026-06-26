@@ -32,6 +32,16 @@ public actor NostrWebSocketTransport: RelayTransport {
     /// an intermediary (Cloudflare proxies close idle WebSockets after ~100 s).
     private var pingLoop: Task<Void, Never>?
     private let keepalivePing: Duration = .seconds(30)
+    /// Mac/Catalyst ONLY: an App Nap assertion held for the life of the socket.
+    /// On a Mac a visible-but-unfocused window gets napped — the OS suspends the
+    /// app's `URLSessionWebSocketTask` (Console: "Suspending task"), so frames
+    /// stop arriving and the relay silently stops syncing until the user clicks
+    /// back. `beginActivity(.userInitiated)` keeps the task running while the
+    /// window is OPEN, not only when frontmost. The token is retained here and
+    /// released on teardown/disconnect; nil while not connected. iPhone never
+    /// takes this path (see `beginVisibilityActivity`), so its battery-preserving
+    /// background suspend (DEVIATIONS D6) is unchanged.
+    private var visibilityActivity: (any NSObjectProtocol)?
     /// Circuit breaker: set after a connection/handshake failure so we stop
     /// redialing on every operation (a down relay otherwise logs a `-1011` per
     /// attempt). Cleared after an ADAPTIVE cooldown; the next operation redials.
@@ -287,6 +297,10 @@ public actor NostrWebSocketTransport: RelayTransport {
         socket = task
         statusState = .connecting
         task.resume()
+        // Mac/Catalyst: assert "user-initiated work in progress" so App Nap
+        // doesn't suspend this socket when the window loses focus but stays
+        // visible. No-op on iPhone (keeps the v1 background-suspend behavior).
+        beginVisibilityActivity()
         receiveLoop = Task { [weak self] in
             while let self {
                 guard await self.receiveOnce(task) else { break }
@@ -300,6 +314,31 @@ public actor NostrWebSocketTransport: RelayTransport {
                 guard let self, await self.pingCurrentSocket() else { break }
             }
         }
+    }
+
+    /// Mac/Catalyst ONLY: take an App Nap assertion so a visible-but-unfocused
+    /// window keeps its relay socket alive instead of being suspended. Gated on
+    /// the "iOS app running on Mac" runtimes — a real iPhone/iPad falls through
+    /// and keeps the v1 behavior (relay drains on foreground only, no background
+    /// fetch — DEVIATIONS D6), so battery and the privacy "no presence beacon"
+    /// posture are untouched. `.userInitiated` (the user has the window open and
+    /// is messaging) rather than `.background`; we do NOT disable system sleep —
+    /// only App Nap of THIS app while it's on screen. Idempotent: holds one
+    /// token at a time for the life of the socket.
+    private func beginVisibilityActivity() {
+        let onMac =
+            ProcessInfo.processInfo.isMacCatalystApp
+            || ProcessInfo.processInfo.isiOSAppOnMac
+        guard onMac, visibilityActivity == nil else { return }
+        visibilityActivity = ProcessInfo.processInfo.beginActivity(
+            options: .userInitiated, reason: "Relay sync while window is open")
+    }
+
+    /// Releases the App Nap assertion (Mac/Catalyst). No-op when none is held.
+    private func endVisibilityActivity() {
+        guard let token = visibilityActivity else { return }
+        ProcessInfo.processInfo.endActivity(token)
+        visibilityActivity = nil
     }
 
     /// Sends a keepalive ping on the live socket; false if there's no socket to
@@ -374,6 +413,9 @@ public actor NostrWebSocketTransport: RelayTransport {
         pingLoop = nil
         socket?.cancel(with: .goingAway, reason: nil)
         socket = nil
+        // Drop the App Nap assertion with the socket it was protecting; a redial
+        // re-takes one. (Mac/Catalyst only; no-op elsewhere.)
+        endVisibilityActivity()
         authChallenge = nil
         if !(error is CancellationError) {
             statusState = .failed(Self.describe(error))

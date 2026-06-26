@@ -1,6 +1,14 @@
 import Foundation
+import OSLog
 import PQRCCore
 import PQRCNostr
+
+/// Engine-scoped diagnostics. Provider-call failures on the autonomous paths are
+/// logged here at `.error` (with the provider's error description) so a thread/window
+/// reply that fails — provider error, timeout, or a reply that stripped to empty — is
+/// never silently swallowed (the "LMStudio responded but we didn't see it" class of
+/// bug). Matches PQRCNostr's `Logger(subsystem: "chat.pqrc", …)` convention.
+private let agentLog = Logger(subsystem: "chat.pqrc", category: "agent")
 
 public enum AgentEngineError: Error, Equatable, Sendable {
     /// Autonomous send attempted outside an active window/invite — fail closed
@@ -30,6 +38,17 @@ public protocol AgentMessageSink: Sendable {
     func postAgentDraft(
         _ body: MessageBody, rawText: String, threadID: String?, agentName: String?
     ) async throws
+
+    /// A non-fatal diagnostic from an autonomous path: the provider CALL failed
+    /// (it threw, e.g. a bad key/timeout/decode error) and so no message could be
+    /// produced. The engine surfaces this so the failure is VISIBLE to the user /
+    /// Agent Inspector instead of vanishing (the "the AI responded but we didn't
+    /// see it" bug). This is NOT a wire/recording path — it carries no agent
+    /// output, only the human-readable reason. `threadID == nil` ⇒ conversation
+    /// scope. The default is a no-op, so a sink that doesn't surface diagnostics
+    /// (e.g. test spies) is unaffected; the engine ALSO logs every such failure
+    /// at `.error` independently of the sink (see `runThreadTurn`/`runWindowReply`).
+    func reportAgentFailure(_ reason: String, threadID: String?, agentName: String?) async
 }
 
 extension AgentMessageSink {
@@ -44,6 +63,11 @@ extension AgentMessageSink {
             try await postAgentReply(body, agentName: agentName)
         }
     }
+
+    /// Default: no-op. The engine still logs the failure at `.error`, so existing
+    /// conformers (and test spies) keep compiling and behaving exactly as before;
+    /// a UI-aware sink overrides this to drive an alert / Agent Inspector entry.
+    public func reportAgentFailure(_ reason: String, threadID: String?, agentName: String?) async {}
 }
 
 /// Enforcement core for AI participation (SPEC §13, APP-SPEC §8–9).
@@ -332,10 +356,28 @@ public actor AgentEngine {
         do {
             try authorizeAutonomousSend(threadID: threadID)
         } catch {
-            return 0  // silent by default; loop-guard pause; expiry — all fail closed
+            // Silent by default: loop-guard pause / window-or-invite expiry are
+            // BY DESIGN (invariant 9, fail closed), not failures to surface.
+            return 0
         }
-        guard let turn = try? await provider.threadTurn(context: context), !turn.messages.isEmpty
-        else { return 0 }
+
+        // Run the provider call WITHOUT `try?` so a real failure (bad key, timeout,
+        // decode error) can no longer vanish. A throw is surfaced (logged at .error
+        // + reported to the sink); an empty/nil turn is a legit "nothing to say" and
+        // stays quiet, but is still logged at a low level so it's diagnosable.
+        let turn: AgentTurn?
+        do {
+            turn = try await provider.threadTurn(context: context)
+        } catch {
+            await surfaceProviderFailure(error, threadID: threadID, agentName: agentName)
+            return 0
+        }
+        guard let turn, !turn.messages.isEmpty else {
+            agentLog.debug(
+                "Agent thread turn produced no message (provider returned empty/nil) for thread \(threadID, privacy: .public)"
+            )
+            return 0
+        }
 
         var posted = 0
         for message in turn.messages {
@@ -370,11 +412,24 @@ public actor AgentEngine {
         do {
             try authorizeAutonomousSend(threadID: nil)
         } catch {
+            // Silent by design: no active window / loop-guard pause — fail closed.
             return false
         }
-        guard let turn = try? await provider.threadTurn(context: context),
-            let message = turn.messages.first
-        else { return false }
+
+        // Surface a provider throw instead of swallowing it with `try?` (same fix
+        // as `runThreadTurn`); an empty/nil turn stays quiet but is logged low.
+        let turn: AgentTurn?
+        do {
+            turn = try await provider.threadTurn(context: context)
+        } catch {
+            await surfaceProviderFailure(error, threadID: nil, agentName: agentName)
+            return false
+        }
+        guard let message = turn?.messages.first else {
+            agentLog.debug(
+                "Agent window reply produced no message (provider returned empty/nil)")
+            return false
+        }
         do {
             try authorizeAutonomousSend(threadID: nil)
             try await sink.postAgentReply(
@@ -383,6 +438,36 @@ public actor AgentEngine {
         } catch {
             return false
         }
+    }
+
+    // MARK: - Provider-failure surfacing (intermittent-failure hardening)
+
+    /// A provider CALL on an autonomous path threw. Make it VISIBLE: log the
+    /// provider's error description at `.error` (the diagnosable signal that was
+    /// missing) and hand a human-readable reason to the sink so the UI / Agent
+    /// Inspector can show it. Does NOT change any return contract — callers still
+    /// return 0 / false; this only stops the silent swallow. Loop-guard pauses and
+    /// window/invite expiry never reach here (they're caught at the gate above), so
+    /// the by-design silent paths stay silent.
+    private func surfaceProviderFailure(
+        _ error: Error, threadID: String?, agentName: String?
+    ) async {
+        let reason = Self.describeProviderError(error)
+        agentLog.error(
+            "Agent autonomous reply failed (thread \(threadID ?? "—", privacy: .public)): \(reason, privacy: .public)"
+        )
+        await sink.reportAgentFailure(reason, threadID: threadID, agentName: agentName)
+    }
+
+    /// Human-readable reason for a provider throw, mirroring the app's
+    /// `describeAgentError`/`runSelfAIReplies` mapping so thread/window failures
+    /// read the same as the draft path the user already sees.
+    private static func describeProviderError(_ error: Error) -> String {
+        if case AgentProviderError.unavailable(let detail) = error { return detail }
+        if case AgentProviderError.notConfigured = error {
+            return "No AI provider configured. Pick one in Settings ▸ AI."
+        }
+        return (error as NSError).localizedDescription
     }
 
     // MARK: - Loop guard (D14)

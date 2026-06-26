@@ -245,19 +245,44 @@ actor PersonaRuntime {
         guard let nodeHex = consentedCodingAgentNode(),
             let transport = ensureRelayACPTransport(nodeHex: nodeHex)
         else { return }  // no consented node yet — leave the Demo stub in place
-        // Permission for a mutating tool call is governed by the per-node remote
-        // dev-control consent the owner already gave (the gate that admitted this
-        // path at all): driving the agent IS authorizing its tool work on the node.
-        // The node still enforces its own C-2 cwd jail.
+        // Phone-side permission decision (statusreport §2.3, P0). The `kind` is the
+        // ACP ToolKind the node attaches to its `session/request_permission`
+        // (`ToolExecutor.kind(for:)`): `read` (read_file/list_dir/search) is the only
+        // NON-mutating kind; `edit` (write_file/edit_file), `execute` (run_shell), and
+        // anything else MUTATE or run code. Only `read` is auto-allowed; EVERY other
+        // kind FAILS CLOSED unless the owner gave the SEPARATE per-node
+        // autonomous-changes consent — an allowlist, not a denylist, so an unknown /
+        // future tool kind defaults to denied (cardinal rule: privacy-/safety-
+        // maximizing). Having merely consented to DRIVE the node (the gate that
+        // admitted this path: `remoteDevControlConsent`, checked in
+        // `isConsentedCodingAgentNode`) does NOT authorize silent file/shell mutation.
+        // The node keeps enforcing its own C-2 cwd jail; this is the last brake the
+        // PHONE owns. Captures only `Sendable` strings (no `self`) so the `@Sendable`
+        // handler stays strict-concurrency clean.
+        let silo = siloID
         let provider = ACPAgentProvider(
             transport: transport,
-            permissionHandler: { _, _ in true })
+            permissionHandler: { _, kind in
+                guard Self.isMutatingACPToolKind(kind) else { return true }
+                return AppSession.autonomousChangesConsent(nodeID: nodeHex, siloID: silo)
+            })
         ais = ais.map { ai in
             guard ai.kind == "acp" else { return ai }
             var live = ai
             live.provider = provider
             return live
         }
+    }
+
+    /// Whether an ACP ToolKind needs autonomous-changes consent before the phone
+    /// will allow it. ALLOWLIST semantics: only `read` (read_file / list_dir /
+    /// search, per `ToolExecutor.kind(for:)`) is non-mutating and auto-allowed;
+    /// `edit`, `execute`, `other`, and any unrecognized/future kind are treated as
+    /// mutating and fail closed without consent (cardinal rule — an unknown tool is
+    /// never silently trusted). `nonisolated static` + pure so the `@Sendable`
+    /// permission handler can call it without capturing the actor.
+    nonisolated static func isMutatingACPToolKind(_ kind: String) -> Bool {
+        kind != "read"
     }
 
     /// The owner's paired `coding_agent` node to drive over the relay, if one is
@@ -268,6 +293,17 @@ actor PersonaRuntime {
             .filter { isConsentedCodingAgentNode($0) }
             .sorted()
             .first
+    }
+
+    /// Read-only view of the `acp` backend's live connectedness for the Settings
+    /// status line — the SAME signal `rebindRelayACPProviders` keys off, so the UI
+    /// can't claim "connected" while the backend is still on its Demo stub. Returns
+    /// the consented `coding_agent` node's identity hex + local display name, or nil
+    /// when none is paired AND consented (C-3) — i.e. when replies are simulated.
+    /// Delegates to the private `consentedCodingAgentNode()` (no duplicated logic).
+    func consentedCodingAgentNodeInfo() -> (identityHex: String, name: String)? {
+        guard let hex = consentedCodingAgentNode() else { return nil }
+        return (hex, contactName(hex))
     }
 
     func setFirewallEnabled(_ enabled: Bool) {
@@ -702,7 +738,13 @@ actor PersonaRuntime {
     }
 
     private func persistPrekeyState() async {
-        if let blob = try? JSONEncoder().encode(await messenger.prekeyManager.snapshot()) {
+        // `snapshot()` returns a fresh copy of the private halves (every field
+        // deep-copied), so wiping it here leaves the live PrekeyManager actor's
+        // state intact. Wipe the transient plaintext only after the encrypted
+        // blob has been produced and handed to the Keychain (AC40).
+        var state = await messenger.prekeyManager.snapshot()
+        defer { state.zeroize() }
+        if let blob = try? JSONEncoder().encode(state) {
             try? saveSecret(blob, account: "prekey-state")
         }
     }

@@ -43,6 +43,50 @@ public protocol NodeMessenger: Sendable {
     /// phone's outbound frames in the proven e2e — chat-authorship rules (invariant 8)
     /// govern CHAT, not this transport line.
     func sendFramed(_ framed: String, to peerIdentityHex: String) async throws
+
+    /// Accept a pending message-request from `senderNostrPubkeyHex`: fetch + fully verify
+    /// the sender's 10420/10421 binding (both directions — invariant 7), add them as a
+    /// verified contact, replay any held envelopes, and return the **identity hex** the
+    /// verified binding resolves to.
+    ///
+    /// `serve` calls this for the FIRST frame of a never-before-seen sender (the owner's
+    /// opening handshake arrives this way, since the headless daemon starts with an empty
+    /// contact table). The returned identity hex is what lets `serve` decide whether the
+    /// sender that just paired is the pinned owner — without it, the owner's very first
+    /// frame is a dropped `.messageRequest` and the node serves no one.
+    ///
+    /// A default implementation throws `NodeMessengerError.requestsUnsupported`: doubles
+    /// that pre-pair the owner out-of-band (e.g. the test harness, which seeds the
+    /// contact via `addContact` before `serve` runs) never surface a `.messageRequest`,
+    /// so they need not implement it.
+    func acceptRequest(senderNostrPubkeyHex: String) async throws -> String
+
+    /// Decline a pending message-request: drop the sender's held envelopes WITHOUT
+    /// establishing a session. `serve` calls this when an `acceptRequest` FAILS (the
+    /// binding could not be verified / the relay was unreachable), so the sender's opening
+    /// frames are discarded rather than left pending — no contact was added in that case.
+    /// No-op by default.
+    func declineRequest(senderNostrPubkeyHex: String) async
+}
+
+extension NodeMessenger {
+    /// Default: a messenger that admits no message-requests (the contact is paired
+    /// out-of-band). `serve`'s `.messageRequest` handling treats a throw here as "could
+    /// not pair this sender" and drops the request — fail-closed, exactly as if the
+    /// sender were a non-owner.
+    public func acceptRequest(senderNostrPubkeyHex: String) async throws -> String {
+        throw NodeMessengerError.requestsUnsupported
+    }
+
+    /// Default: nothing to decline (no request inbox in this double).
+    public func declineRequest(senderNostrPubkeyHex: String) async {}
+}
+
+/// Errors the `NodeMessenger` seam can raise.
+public enum NodeMessengerError: Error, Sendable {
+    /// `acceptRequest` was called on a messenger that does not implement message-request
+    /// acceptance (the default protocol implementation). The request is dropped.
+    case requestsUnsupported
 }
 
 /// The headless serve loop. One instance serves one owner over one messenger; create a
@@ -130,14 +174,30 @@ public actor EldrNodeCore {
         // its sender is the pinned owner.
         for await event in events {
             if Task.isCancelled { break }
-            guard case .message(let received) = event else {
-                continue  // protocolViolation / messageRequest / quarantined / nearby — not served
+            switch event {
+            case .message(let received):
+                await Self.routeInbound(
+                    senderIdentityHex: received.senderIdentityHex,
+                    body: received.body.text,
+                    ownerIdentityHex: ownerIdentityHex,
+                    transport: transport)
+            case .messageRequest(let senderNostrPubkeyHex, _):
+                // The headless daemon starts with an EMPTY contact table (no app/Keychain
+                // contact store to seed it), so the OWNER's opening handshake arrives as an
+                // unknown-sender message-request — held, not decryptable, until the sender
+                // becomes a verified contact. Bootstrap that contact here so the owner's
+                // frames decrypt and attribute as `.message(sender: owner)`, which the C-3
+                // gate (`routeInbound`, above) then admits. Owner-pinned: only the PINNED
+                // owner is reported paired; any other sender stays undrivable behind C-3
+                // (see `bootstrapOwnerFromRequest`). This is the relay-path equivalent of
+                // the bootstrap the test harness performs out-of-band via `addContact`.
+                await Self.bootstrapOwnerFromRequest(
+                    senderNostrPubkeyHex: senderNostrPubkeyHex,
+                    ownerIdentityHex: ownerIdentityHex,
+                    messenger: messenger)
+            default:
+                continue  // protocolViolation / quarantined / nearbyContact — not served
             }
-            await Self.routeInbound(
-                senderIdentityHex: received.senderIdentityHex,
-                body: received.body.text,
-                ownerIdentityHex: ownerIdentityHex,
-                transport: transport)
         }
 
         // The stream finished or we were cancelled: close the transport (finishes the
@@ -178,5 +238,61 @@ public actor EldrNodeCore {
         guard senderIdentityHex == ownerIdentityHex else { return false }
         await transport.deliverInbound(body)
         return true
+    }
+
+    // MARK: - Owner contact bootstrap (makes the daemon actually drivable)
+
+    /// Bootstrap a verified, message-able contact for an unknown sender's first frame —
+    /// but ONLY when that sender is the pinned owner.
+    ///
+    /// The headless daemon has no contact store to seed, so the owner's opening PQXDH
+    /// handshake reaches the messenger as a `.messageRequest` (its sender's binding is not
+    /// yet known), is held, and cannot decrypt — the owner's subsequent ACP frames would
+    /// stay invisible and the C-3 gate would have nothing to admit. Accepting the request
+    /// fetches + fully verifies the sender's binding (both directions — invariant 7), adds
+    /// the contact, and replays the held handshake so the responder session is built; from
+    /// then on the owner's frames arrive as `.message(sender: ownerIdentityHex)` and pass
+    /// `routeInbound`'s C-3 check.
+    ///
+    /// **Owner-pinned, fail-closed (keeps C-3 intact):** the request carries only the
+    /// sender's Nostr pubkey, and the sender's IDENTITY (what the owner is pinned by) is
+    /// known only after verifying their binding — which `acceptRequest` does. So this
+    /// accepts, then compares the *verified identity hex* to the pinned owner:
+    /// - sender == owner → the owner is now a verified contact; return `true`. The owner
+    ///   is drivable, and `routeInbound`'s C-3 check admits their frames.
+    /// - sender ≠ owner → return `false`. C-3 in `routeInbound` already refuses every
+    ///   non-owner ACP frame, so the stranger can NEVER drive the agent — accepting them
+    ///   does not widen who is authorized. (There is no contact-removal seam, so the
+    ///   stranger remains a dormant, undrivable contact — the SAME posture the shipped
+    ///   Configurator relay host has, where all requests are accepted and C-3 is the sole
+    ///   authorizer. This bootstrap is strictly tighter: it only reports the OWNER as
+    ///   paired, and the daemon acts on nothing else.)
+    /// - accept fails (unverifiable binding / relay unreachable) → drop the held frames
+    ///   and return `false`; nothing is paired.
+    ///
+    /// `static` + a pure function of its inputs + the injected messenger, so the
+    /// owner-pinning policy sits next to the C-3 gate and is auditable in one place.
+    ///
+    /// - Returns: `true` iff the accepted sender is the pinned owner (now a verified,
+    ///   message-able contact); `false` for a non-owner or a failed accept.
+    @discardableResult
+    static func bootstrapOwnerFromRequest(
+        senderNostrPubkeyHex: String,
+        ownerIdentityHex: String,
+        messenger: any NodeMessenger
+    ) async -> Bool {
+        // Accept to learn the sender's VERIFIED identity (the request only carries a Nostr
+        // pubkey; the identity hex comes from the verified binding). A failure means the
+        // sender could not be verified/reached — drop the held frames, pair nothing.
+        guard
+            let acceptedIdentityHex = try? await messenger.acceptRequest(
+                senderNostrPubkeyHex: senderNostrPubkeyHex)
+        else {
+            await messenger.declineRequest(senderNostrPubkeyHex: senderNostrPubkeyHex)
+            return false
+        }
+        // Owner-pinned: report ONLY the pinned owner as paired. A non-owner stays
+        // undrivable behind the C-3 gate (see the doc above — no contact-removal seam).
+        return acceptedIdentityHex == ownerIdentityHex
     }
 }

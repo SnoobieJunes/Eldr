@@ -70,11 +70,12 @@ struct TransportOutputSink: OutputSink {
 /// else is a client request/notification the agent handles (its response line, if any, is
 /// written back). Returns when the inbound stream finishes (transport closed).
 ///
-/// Each line is handled on its own `Task` on purpose: a long `session/prompt` turn must
-/// not block the read loop, because the client's permission answer arrives as a LATER
-/// inbound line that the agent's in-flight turn is awaiting (otherwise: deadlock).
-/// Ordering of the client's own requests is preserved because the client awaits each
-/// response before sending the next.
+/// Only a long `session/prompt` turn runs on its own `Task` (it must not block the read
+/// loop — the client's permission answer arrives as a LATER inbound line the in-flight
+/// turn is awaiting; otherwise deadlock). Responses, notifications (`session/cancel`), and
+/// quick requests are handled INLINE in wire order, so a cancel that precedes a permission
+/// answer is applied before the answer resumes the turn — the cancel-vs-permission
+/// fail-open fix (statusreport §2.2 / DEVIATIONS AC39).
 public func runACPAgent(
     transport: any ACPTransport,
     llm: any LLMClient,
@@ -89,11 +90,30 @@ public func runACPAgent(
         connection: connection, llm: llm, toolEnvironment: toolEnvironment,
         config: config, configDir: configDir, streamingEnabled: streamingEnabled)
     for await line in transport.inboundLines() {
-        Task {
-            guard let message = JSONValue.parse(line) else { return }
-            if message["method"] == nil, message["id"] != nil {
-                await connection.deliver(response: message)
-            } else if let response = await agent.handle(line: line) {
+        guard let message = JSONValue.parse(line) else { continue }
+        if message["method"] == nil, message["id"] != nil {
+            // A response to one of the agent's OWN outbound requests (a permission answer,
+            // an fs/* result). Delivered IN WIRE ORDER — synchronously in the read loop —
+            // so a `session/cancel` that arrived on an EARLIER line is already applied
+            // before this answer resumes the waiting turn. (Fixes the cancel-vs-permission
+            // fail-open: ACPAgent.runOneTool re-checks `cancelledSessions` after the grant,
+            // which only works if the cancel is observed first — statusreport §2.2 / AC39.)
+            await connection.deliver(response: message)
+        } else if message["method"]?.stringValue == "session/prompt" {
+            // The ONLY long-running inbound: run the turn on its own Task so the read loop
+            // keeps delivering this turn's permission answers and cancels (otherwise
+            // deadlock — the turn awaits a LATER inbound line). Concurrent sessions each
+            // get their own task.
+            Task {
+                if let response = await agent.handle(line: line) {
+                    await sink.write(line: response)
+                }
+            }
+        } else {
+            // Notifications (session/cancel) + quick requests (initialize, session/new):
+            // handled inline in wire order so a cancel that precedes a permission answer
+            // wins. These never block on a later inbound line, so inline is safe.
+            if let response = await agent.handle(line: line) {
                 await sink.write(line: response)
             }
         }

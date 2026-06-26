@@ -291,6 +291,133 @@ struct EldrNodeServeTests {
             "Mallory's frame still wrote nothing after a successful owner turn")
     }
 
+    // MARK: - (c2) the owner is bootstrapped from a message-request (no manual pairing)
+
+    /// The AC35 follow-up: a freshly-started daemon has an EMPTY contact table, so the
+    /// owner's opening handshake arrives as a `.messageRequest` — which the serve loop must
+    /// bootstrap into a verified contact, or the node serves no one. Here the node does NOT
+    /// pre-add the owner (unlike `makePair`); the owner only `announce`s its keys. Proves
+    /// `serve` accepts the owner's request, builds the session, and the owner then drives a
+    /// full ACP turn through it.
+    @Test func serve_bootstrapsOwnerFromMessageRequest_thenOwnerDrivesAgent() async throws {
+        let relay = LocalRelaySimulator()
+        let owner = try await NodePersona.make(
+            name: "Owner", seedByte: "0a", seed: 7_300, transports: [await relay.connect()])
+        let node = try await NodePersona.make(
+            name: "Node", seedByte: "0b", seed: 7_301, transports: [await relay.connect()])
+        let ownerHex = owner.identityHex, nodeHex = node.identityHex
+
+        // The owner publishes 10420/10421 so the node's accept can fetch + verify it.
+        // CRUCIALLY: the node does NOT addContact(owner) — the daemon never does either.
+        // The node IS added on the owner side so the node's reply frames decrypt there.
+        try await owner.messenger.announce(relayURLs: ["local://relay"])
+        await owner.messenger.addContact(try node.asContact())
+
+        let workdir = try makeNodeWorkdir("bootstrap")
+        defer { try? FileManager.default.removeItem(atPath: workdir) }
+
+        let llm = ScriptedLLM([
+            LLMResponse(content: "Hello from a node the owner never manually paired.")
+        ])
+
+        let seq = NodeSeq()
+        let phoneTransport = RelayACPTransport(maxFrameBytes: maxFrame) { framed in
+            try? await owner.messenger.send(
+                MessageBody(text: framed, sentAt: await seq.next()), to: nodeHex)
+        }
+        let ownerTap = OwnerTap()
+        await ownerTap.attach(try await owner.messenger.start())
+        await ownerTap.wireACPRoute(
+            acceptFrom: { $0 == nodeHex },
+            route: { [phoneTransport] body in await phoneTransport.deliverInbound(body) })
+
+        let serveTask = Task {
+            let core = EldrNodeCore()
+            await core.serve(
+                messenger: PQRCNodeMessenger(messenger: node.messenger),
+                ownerIdentityHex: ownerHex,
+                maxFrameBytes: maxFrame,
+                llm: llm,
+                toolEnvironment: ToolEnvironment(workdir: workdir, baseEnvironment: [:]),
+                config: .default,
+                streamingEnabled: false)
+        }
+        defer {
+            serveTask.cancel()
+            Task { await ownerTap.stop() }
+        }
+
+        // The owner establishes — to the node this is an UNKNOWN sender, so the messenger
+        // emits `.messageRequest`; `serve` bootstraps the owner contact + replays the held
+        // handshake, building the responder session. Poll until that session exists.
+        try await owner.messenger.establishSession(
+            with: try node.asContact(), bundle: try await node.prekeyManager.publicBundle(),
+            firstMessage: MessageBody(text: "handshake", sentAt: 1))
+        var ownerBootstrapped = false
+        for _ in 0..<500 {  // up to ~5s (accept does a relay fetch+verify)
+            if await node.messenger.hasSession(peerIdentityHex: ownerHex) {
+                ownerBootstrapped = true
+                break
+            }
+            try? await Task.sleep(for: .milliseconds(10))
+        }
+        #expect(
+            ownerBootstrapped,
+            "serve must bootstrap the owner from the message-request (no manual addContact)")
+
+        // Now the owner can actually drive the agent over the freshly-bootstrapped session.
+        let client = ACPClient(transport: phoneTransport, permissionHandler: { _, _ in true })
+        defer { Task { await client.shutdown() } }
+        let info = try await withNodeTimeout(30, "client.start (bootstrapped)") {
+            try await client.start(cwd: workdir)
+        }
+        #expect(info.agentName == "eldr-acp", "the auto-bootstrapped node served the owner over the relay")
+        let uiEvents = NodeUIEventCollector()
+        await uiEvents.attach(client.events)
+        defer { Task { await uiEvents.stop() } }
+        let stop = try await withNodeTimeout(30, "owner prompt (bootstrapped)") {
+            try await client.prompt("say hello")
+        }
+        #expect(stop == "end_turn")
+        let text = await uiEvents.assistantTextJoined(containing: "never manually paired")
+        #expect(
+            text.contains("Hello from a node the owner never manually paired."),
+            "the owner drives the agent through the auto-bootstrapped session; got: \(text)")
+    }
+
+    // MARK: - (c3) the owner-bootstrap policy in isolation (pure, scripted messenger)
+
+    @Test func bootstrapOwnerFromRequest_keepsOwner_rejectsNonOwnerAndFailures() async throws {
+        let ownerHex = String(repeating: "11", count: 32)
+        let strangerHex = String(repeating: "22", count: 32)
+        let ownerPub = "owner-nostr-pub"
+        let strangerPub = "stranger-nostr-pub"
+        let unverifiablePub = "ghost-nostr-pub"  // not in the accept map ⇒ accept throws
+
+        let messenger = ScriptedNodeMessenger(acceptIdentityByPubkey: [
+            ownerPub: ownerHex,
+            strangerPub: strangerHex,
+        ])
+
+        // The pinned owner's request → bootstrapped (true).
+        let ownerBootstrapped = await EldrNodeCore.bootstrapOwnerFromRequest(
+            senderNostrPubkeyHex: ownerPub, ownerIdentityHex: ownerHex, messenger: messenger)
+        #expect(ownerBootstrapped, "the pinned owner's request is bootstrapped into a contact")
+
+        // A verified NON-owner's request → not reported paired (C-3 keeps them undrivable).
+        let strangerBootstrapped = await EldrNodeCore.bootstrapOwnerFromRequest(
+            senderNostrPubkeyHex: strangerPub, ownerIdentityHex: ownerHex, messenger: messenger)
+        #expect(!strangerBootstrapped, "a non-owner request is not reported as the owner")
+
+        // An unverifiable/unreachable sender → accept throws → declined, not paired.
+        let ghostBootstrapped = await EldrNodeCore.bootstrapOwnerFromRequest(
+            senderNostrPubkeyHex: unverifiablePub, ownerIdentityHex: ownerHex, messenger: messenger)
+        #expect(!ghostBootstrapped, "an unverifiable sender is dropped (accept failed)")
+        #expect(
+            await messenger.declined == [unverifiablePub],
+            "only the failed-accept sender is declined; verified ones are not re-declined")
+    }
+
     // MARK: - (c) the C-3 gate predicate in isolation (pure, no relay)
 
     @Test func routeInbound_gate_dropsNonOwnerAndNonACP() async throws {

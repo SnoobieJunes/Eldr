@@ -99,6 +99,8 @@ Tests landed alongside the post-v1 features (DEVIATIONS A20–A36). The framewor
 - **MCP server protocol (A35)** — `Packages/PQRCMCP/.../MCPServerTests.swift` (9): `initialize_returnsProtocolCapabilitiesAndServerInfo`, `toolsList_isReadOnly_noWriteTools` (the read-only-by-construction guarantee), `toolsCall_readConversation_returnsCodenamesNotIdentities` (firewall-redacted output), `toolsCall_missingRequiredArg_isInvalidParams`, `resources_listAndRead`, plus a full stdio handshake.
 - **ACP agent (A36)** — `Packages/PQRCACP/Tests/` (~35 across `ACPAgentTests` + `UnitTests`): handshake, streamed `agent_message_chunk` + `stopReason`, a `read_file` tool round-trip to `tool_call_update: completed`, cancel, the bidirectional outbound-request correlation, and the vendored `strippingReasoningTrace`. Network-free via a mock LLM (`ELDR_ACP_FAKE_LLM=1`).
 
+- **Session 2–4 hardening (AC36–AC40)** — `Packages/PQRCNostr/.../NearbyACPTransportTests.swift`: a replayed/reordered sealed frame from the proven peer is dropped and the channel survives. `Packages/EldrNode/.../EldrNodeServeTests.swift`: the node bootstraps the pinned owner from a message-request and the owner then drives a full ACP turn; a non-owner / accept-failure is rejected (C-3 stays the sole authorizer). `Packages/PQRCACP/.../ACPClientRoundTripTests.swift`: the cancel-vs-permission turn is now deterministic (hammered 50/50). The Phase 2–4 scaffold added `ACPProxyTests.swift` + `StdioHarnessTransportTests.swift` (`runACPProxy` bridges both directions + clean shutdown; `StdioHarnessTransport` stdio round-trip / child-exit / spawn-failure; `HarnessRegistry` contents). Live counts after this work: PQRCCore 67, PQRCNostr 83, PQRCAgent 53, PQRCACP 173, PQRCMCP 15, EldrNode 5 (zeroization changed no derived bytes); Configurator + EldrChat iOS + EldrChat Catalyst all build clean.
+
 **Remaining gaps / honest notes:**
 - The MCP **in-app `PersonaRuntime` bridge** (A35 Phase 2) now **ships**: `RuntimeSecureChatBridge` + `LocalMCPServer` (loopback Unix socket, first-line pairing-token gate, OFF-by-default toggle, stops-on-lock). The committed package suite still covers only the demo bridge + protocol layer; the in-app surface should grow tests for (a) `LocalMCPServer` token enforcement — a bad/missing first line is dropped before any method runs, constant-time compare; (b) the redaction accessors (`PersonaRuntime.mcpMessages`/`mcpSearch`/`mcpContextPreview`) emitting **codenames + ≤64 KB** *unconditionally* (not gated on the per-AI firewall toggle); (c) `lockSilo()`/toggle-off tearing the server down and the bridge fail-closing (weak `AppModel` gone ⇒ empty). The ACP **end-to-end run from Xcode 27** is exercised separately; the committed coverage is the headless suite (A36) — worth adding a case that `write_file`/`run_shell` call `session/request_permission` and honor a denial.
 - **Display-only chat color (A-PartyColor)** — `PartyColor` is pure value math (deterministic FNV-1a hue from identity hex, no state, nothing on the wire). A unit test should assert determinism (same hex ⇒ same color across runs) and white-on-solid WCAG contrast; it never affects redaction.
@@ -218,6 +220,11 @@ its identity** (see 14.4) and the relay will not serve it kind-1059.
   done? You can only message a peer after pairing + the 10420/10421 exchange — if you
   unpaired mid-session, re-pair cleanly (the unpair now clears all four identity items;
   before 2026-06-20 it left three behind, so an old re-pair could be half-stale).
+  **(5) Mac receiver suspended?** A Catalyst app that loses focus is App-Napped by the OS —
+  `[app<chat.eldr.app>] Suspending task` in Console — which freezes its relay WebSocket and
+  stops inbound delivery. AC37 added a Mac-only `ProcessInfo.beginActivity` assertion held for
+  the socket's life, so a **visible** EldrChat window keeps receiving even when not frontmost.
+  A **minimized/hidden** window can still be backgrounded by the OS — keep the window visible.
 
 - **Agent makes tool calls but not visible in Xcode's ACP.** That's Path A vs the
   Configurator's *in-app* test chat (which drives the agent directly). The agent working
@@ -245,9 +252,16 @@ its identity** (see 14.4) and the relay will not serve it kind-1059.
 ### 14.5 What to automate next (close the manual gaps)
 - A `make doctor` / diagnostic command that runs 14.1 + the AUTH-line check and prints a
   green/red ladder, so bring-up isn't a manual log hunt.
-- Build the **Agent Inspector** (live ACP session: prompt, `session/update` stream, each
-  tool call + permission decision, `finish_reason`/token counts) and the **Nearby scanner**
-  promised in `docs/ACPRouterplan.md` — they replace most of 14.2.
+- ✅ **SHIPPED (2026-06-20, AC37):** the **Agent Inspector** (Configurator → *Inspector* tab —
+  live LLM round-trips with latency + request summary, tool calls, node/relay events, and an
+  explicit red **"EMPTY answer — reasoning-only"** flag) and the **Nearby scanner**
+  (Configurator → *Nearby* tab, `NWBrowser` Bonjour scan of `_eldr-acp`/`_pqrc-relay`/`_pqrc-local`)
+  — they replace most of 14.2. Also shipped: a Test Chat **"Raw LLM stream"** toggle (a
+  collapsible `DisclosureGroup`, OFF by default) showing the model's **pre-strip** output, so a
+  reasoning model's `<|channel>thought…` is visible when you need it; and a Mac **App-Nap
+  assertion** (`ProcessInfo.beginActivity`, Catalyst-only, held for the relay socket's life) so a
+  visible-but-unfocused EldrChat window keeps receiving (fixes the 14.4 suspend item below for
+  the visible-window case — a *minimized/hidden* window can still be backgrounded by the OS).
 - A headless **relay round-trip** integration test (gated, opt-in like T9): publish a
   gift-wrap to `relay.lerants.com` as identity A, AUTH as B, confirm delivery — catches an
   AUTH/relay regression the in-memory `LocalRelaySimulator` (§7) can't.
