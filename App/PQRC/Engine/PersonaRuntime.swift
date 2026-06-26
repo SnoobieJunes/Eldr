@@ -1649,7 +1649,7 @@ actor PersonaRuntime {
         }
     }
 
-    // MARK: - Context inspector (read-only, per-AI; backs AIContextInspectorView)
+    // MARK: - Context inspector (read-only, per-AI; backs AIInspectionView)
 
     /// One assembled context window for one tethered AI — EXACTLY what it would
     /// receive for a conversation/thread right now: the system prompt (its honest,

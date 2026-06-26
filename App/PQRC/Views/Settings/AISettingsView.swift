@@ -41,7 +41,11 @@ struct AISettingsView: View {
         Form {
             Section {
                 ForEach($ais) { $ai in
-                    aiRow($ai)
+                    NavigationLink {
+                        aiDetail($ai)
+                    } label: {
+                        aiSummaryRow($ai.wrappedValue)
+                    }
                 }
                 .onDelete { offsets in
                     ais.remove(atOffsets: offsets)
@@ -65,7 +69,7 @@ struct AISettingsView: View {
                 Text("Tethered AIs")
                     .helpInfo("Bring your own AI into your chats — openly and on your terms. Pick on-device Core AI (nothing leaves your phone), a cloud provider via your own API key, or a model on your own machine. Add several and they can collaborate. No one ever talks to an AI without seeing it.")
             } footer: {
-                Text("Add several to let them share context with each other in a chat or thread. Each gets a local, private name you can edit; names are never broadcast. Use each AI's “Test” button to check it against a sample.")
+                Text("Tap an AI to set it up and see exactly what it receives. Add several to let them share context in a chat or thread. Each gets a local, private name you can edit; names are never broadcast.")
             }
 
             Section {
@@ -106,19 +110,6 @@ struct AISettingsView: View {
                 Text("A short label of what THIS device brings to a shared AI thread (e.g. \"iOS / Xcode\" or \"backend / staging\"). Each person's AI advertises its domain so two of them divide work without dumping full context. Optional — used by the thread Skills feature.")
             }
 
-            Section {
-                NavigationLink {
-                    AIContextInspectorView(model: model)
-                } label: {
-                    Label("Context inspector", systemImage: "doc.text.magnifyingglass")
-                }
-                .accessibilityIdentifier("ai-context-inspector")
-            } header: {
-                Text("What your AI sees")
-                    .helpInfo("Transparency first, with control. The Context inspector shows EXACTLY what each AI receives for a conversation — its instructions (editable here), how much it gathers, and every message — and lets you adjust them live. A remote AI always sees your private codenames, never real names.")
-            } footer: {
-                Text("The inspector's edits map to real, saved controls (the per-AI instructions + depth and the per-message \"Add to AI Context\" marker) — not a separate copy.")
-            }
         }
         .navigationTitle("AI")
         .navigationBarTitleDisplayMode(.inline)
@@ -163,6 +154,46 @@ struct AISettingsView: View {
 
     private var showConsent: Binding<Bool> {
         Binding(get: { pendingRemote != nil }, set: { if !$0 { pendingRemote = nil } })
+    }
+
+    /// Compact list row — enabled dot, name, backend, and live status. Tapping
+    /// pushes the AI's detail (its full config + a per-AI inspection).
+    @ViewBuilder private func aiSummaryRow(_ ai: ConfiguredAI) -> some View {
+        VStack(alignment: .leading, spacing: 3) {
+            HStack(spacing: 8) {
+                Circle()
+                    .fill(ai.isEnabled ? Color.green : Color.secondary)
+                    .frame(width: 8, height: 8)
+                    .accessibilityHidden(true)
+                Text(ai.name).font(.headline)
+                Spacer()
+                Text(ConfiguredAI.label(for: ai.kind))
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+            Text(statusLine(for: ai))
+                .font(.caption2)
+                .foregroundStyle(statusOK(for: ai) ? .green : .orange)
+        }
+        .padding(.vertical, 2)
+        .accessibilityElement(children: .combine)
+        .accessibilityIdentifier("ai-row")
+    }
+
+    /// One AI's full screen: its configuration (the same controls as the old
+    /// inline row) PLUS a live per-AI inspection (pick a conversation → exactly
+    /// what's sent + the transcript it sees). Reached by a plain destination-based
+    /// NavigationLink — consistent with how Settings pushes the rest of its
+    /// screens — so the destination is always visible to the link.
+    @ViewBuilder private func aiDetail(_ ai: Binding<ConfiguredAI>) -> some View {
+        Form {
+            Section { aiRow(ai) }
+            AIInspectionView(model: model, aiID: ai.wrappedValue.id)
+        }
+        .navigationTitle(ai.wrappedValue.name)
+        .navigationBarTitleDisplayMode(.inline)
+        // Per-keystroke fields (instructions/name/key) save without a provider
+        // re-bind; do it when leaving the detail so the next turn uses them.
+        .onDisappear { Task { await session.applyAIProvider() } }
     }
 
     @ViewBuilder private func aiRow(_ ai: Binding<ConfiguredAI>) -> some View {

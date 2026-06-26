@@ -1,39 +1,34 @@
 import PQRCCore
 import SwiftUI
 
-/// The Context inspector (SPEC §0 transparency): for each tethered AI, show
-/// EXACTLY what context is assembled
-/// and sent for a conversation — the system/instructions prompt, the gather
-/// policy + depth, and the actual transcript entries — and make the safely-editable
-/// parts editable.
+/// Per-AI context inspection (SPEC §0 transparency), embedded in a tethered AI's
+/// detail screen (Settings ▸ AI ▸ tap an AI). For the chosen conversation it shows
+/// EXACTLY what THIS AI receives — the assembled system/instructions prompt that
+/// actually goes out, and every transcript entry in its window — and lets you
+/// include or exclude individual messages live.
 ///
-/// What's editable, and how it maps to REAL persisted controls (no parallel store):
-///  - **Depth** writes the AI's `ConfiguredAI.contextDepth` and re-applies the
-///    live providers (`AppSession.applyAIProvider`), so the next turn uses it.
-///  - **Include/exclude a message** flips its `aiContext` marker via the same
-///    `markAsAIContext` path the long-press menu uses (persisted, and mirrored to
-///    the peer for my own messages). In "Marked only" mode that directly controls
-///    inclusion; in "Live" mode it pins a message so it survives the depth cutoff.
+/// Instructions, gather policy, and depth are edited just ABOVE this on the same
+/// screen (the config section), so they're not repeated here; this is the "what
+/// actually leaves the device" mirror.
 ///
 /// Privacy posture is preserved: a REMOTE AI's transcript is shown codename-
 /// redacted (real names → "you" / a contact's local codename), exactly as it
-/// leaves the device; on-device AIs show real names. The effect is live — every
-/// edit re-runs the same assembly the engine runs.
-struct AIContextInspectorView: View {
+/// leaves the device; on-device AIs show real names. Returns Sections (no `List`
+/// wrapper) so it drops straight into the detail `Form`.
+struct AIInspectionView: View {
     @Bindable var model: AppModel
-    @Environment(AppSession.self) private var session
+    /// The tethered AI this inspection is scoped to (`ConfiguredAI.id`).
+    let aiID: String
 
     @State private var selectedConversation: String?
-    @State private var inspections: [PersonaRuntime.AIContextInspection] = []
+    @State private var inspection: PersonaRuntime.AIContextInspection?
     @State private var loading = false
 
-    private var siloID: String { model.siloID }
-
     var body: some View {
-        List {
+        Group {
             Section {
                 if model.conversations.isEmpty {
-                    Text("Start a conversation to inspect its AI context.")
+                    Text("Start a conversation to inspect what this AI receives.")
                         .foregroundStyle(.secondary)
                 } else {
                     Picker("Conversation", selection: $selectedConversation) {
@@ -46,100 +41,47 @@ struct AIContextInspectorView: View {
                     .onChange(of: selectedConversation) { _, _ in Task { await reload() } }
                 }
             } header: {
-                Text("Conversation")
-                    .helpInfo("Pick a conversation to see precisely what each of your tethered AIs would receive for it right now — the instructions, how much it gathers, and every message in the window. Edits take effect immediately.")
+                Text("What this AI sees")
+                    .helpInfo("Pick a conversation to see precisely what THIS AI would receive for it right now — the exact prompt that goes out and every message in its window. Toggling a message is saved and takes effect on the next turn.")
             }
 
             if loading {
                 Section { ProgressView().frame(maxWidth: .infinity) }
-            }
-
-            ForEach(inspections) { inspection in
-                inspectorSections(inspection)
-            }
-
-            if !inspections.isEmpty {
-                Section {
-                    EmptyView()
-                } footer: {
-                    Text("This is the exact context assembled on-device. For a remote AI the egress firewall replaces real names with your private codenames and bounds the size before anything leaves your device; on-device AI sees real names and never leaves your phone. AI messages always stay labeled as AI.")
-                }
+            } else if let inspection {
+                inspectionBody(inspection)
             }
         }
-        .navigationTitle("Context inspector")
-        .navigationBarTitleDisplayMode(.inline)
         .task {
             if selectedConversation == nil { selectedConversation = model.conversations.first?.id }
             await reload()
         }
-        // Instruction edits save per keystroke but defer the heavy provider re-bind
-        // to here (same as Settings ▸ AI) — so the next turn uses the new prompt
-        // without the field fighting you mid-type.
-        .onDisappear {
-            Task { await session.applyAIProvider() }
-        }
     }
 
-    @ViewBuilder private func inspectorSections(
+    @ViewBuilder private func inspectionBody(
         _ inspection: PersonaRuntime.AIContextInspection
     ) -> some View {
-        // Header: which AI, remote/firewall posture, the effective policy.
+        // Posture + the exact prompt that goes out for this conversation.
         Section {
             HStack {
-                Label(inspection.aiName, systemImage: "sparkles")
-                    .font(.headline)
-                Spacer()
                 if inspection.isRemote {
                     Label(
                         inspection.firewallOn ? "Remote · firewall on" : "Remote · firewall OFF",
                         systemImage: inspection.firewallOn ? "lock.shield" : "lock.open")
-                        .font(.caption2)
-                        .foregroundStyle(inspection.firewallOn ? AnyShapeStyle(.secondary) : AnyShapeStyle(.orange))
-                        .labelStyle(.titleAndIcon)
+                        .foregroundStyle(
+                            inspection.firewallOn ? AnyShapeStyle(.secondary) : AnyShapeStyle(.orange))
                 } else {
-                    Label("On-device", systemImage: "iphone")
-                        .font(.caption2)
-                        .foregroundStyle(.secondary)
+                    Label("On-device", systemImage: "iphone").foregroundStyle(.secondary)
                 }
+                Spacer()
             }
+            .font(.caption2)
+            .labelStyle(.titleAndIcon)
             Text(policyExplanation(inspection.effectivePolicy))
                 .font(.caption)
                 .foregroundStyle(.secondary)
-            if inspection.effectivePolicy != "off" {
-                Stepper(
-                    "Context depth: \(inspection.depth) messages",
-                    value: depthBinding(for: inspection), in: 1...100)
-                    .accessibilityIdentifier("inspector-depth-\(inspection.id)")
-            }
-        } header: {
-            Text(inspection.aiName)
-        }
-
-        // The system / instructions prompt — now EDITABLE right here, bound to the
-        // SAME persisted `ConfiguredAI.instructions` Settings ▸ AI writes (no
-        // parallel store), so you can adjust what's sent where you inspect it.
-        Section {
-            TextField(
-                "Instructions — empty = pure conduit (only the transcript is sent)",
-                text: instructionsBinding(for: inspection), axis: .vertical)
-                .lineLimit(2...8)
-                .font(.callout)
-                .accessibilityIdentifier("inspector-system-prompt-\(inspection.id)")
-            HStack {
-                Text("This is the entire system prompt — empty by default; EldrChat adds nothing.")
-                    .font(.caption2).foregroundStyle(.secondary)
-                Spacer()
-                Button("Use EldrChat's default") {
-                    setInstructions(ConfiguredAI.defaultInstructions, for: inspection)
-                }
-                .font(.caption2)
-                .buttonStyle(.borderless)
-                .accessibilityIdentifier("inspector-instructions-default-\(inspection.id)")
-            }
             // The verbatim prompt the model receives this turn — your instructions
-            // plus any engine additions (a summarize note here; coordination
-            // guardrails + pinned skills in a shared thread). Read-only, collapsed:
-            // the SPEC §0 exact-transparency guarantee without crowding the editor.
+            // (set above) plus any engine additions (a summarize note here;
+            // coordination guardrails + pinned skills in a shared thread).
             DisclosureGroup {
                 let prompt = inspection.systemPrompt.trimmingCharacters(in: .whitespacesAndNewlines)
                 Text(prompt.isEmpty
@@ -151,15 +93,11 @@ struct AIContextInspectorView: View {
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .padding(.vertical, 2)
             } label: {
-                Label("Exactly what's sent", systemImage: "text.alignleft")
-                    .font(.caption)
+                Label("Exactly what's sent", systemImage: "text.alignleft").font(.callout)
             }
             .accessibilityIdentifier("inspector-assembled-prompt-\(inspection.id)")
         } header: {
-            Text("Instructions sent")
-                .helpInfo("The exact system prompt this AI receives — the instructions YOU set, EMPTY by default (EldrChat adds nothing on your behalf). Editable right here. In a shared thread it also includes the EldrChat coordination guardrails + any pinned skills.")
-        } footer: {
-            Text("Editable — the same instructions as Settings ▸ AI, saved to this AI (no separate copy). Takes effect on the next turn.")
+            Text("Prompt")
         }
 
         // The transcript — every entry, each with a real include/exclude toggle.
@@ -174,9 +112,9 @@ struct AIContextInspectorView: View {
             }
         } header: {
             Text("Transcript (\(inspection.entries.count))")
-                .helpInfo("Every message in the window this AI sees. Toggle a message off to exclude it: in \"Marked only\" mode the toggle is what includes a message; in \"Live\" mode it pins a message so it isn't dropped by the depth limit. Changes are saved and take effect on the next turn.")
+                .helpInfo("Every message in the window this AI sees. Toggle a message off to exclude it: in \"Marked only\" mode the toggle is what includes a message; in \"Live\" mode it pins a message so it isn't dropped by the depth limit. Saved; effective next turn.")
         } footer: {
-            Text("Toggling reuses the same \"Add to AI Context\" marker as the chat's long-press menu — it's a real, saved control, mirrored to the other person for your own messages.")
+            Text("For a remote AI the egress firewall replaces real names with your private codenames and bounds the size before anything leaves your device; on-device AI sees real names and never leaves your phone. AI messages always stay labeled as AI.")
         }
     }
 
@@ -221,64 +159,6 @@ struct AIContextInspectorView: View {
 
     // MARK: - Bindings to real, persisted controls
 
-    /// Instructions → the AI's `ConfiguredAI.instructions`, persisted via the SAME
-    /// store Settings ▸ AI writes (no parallel copy). Saved per keystroke, but we do
-    /// NOT re-bind providers or reload here: doing either per character makes the
-    /// field fight the user (it reads as "not editable"). The provider re-bind runs
-    /// on `.onDisappear`; the read-only "Exactly what's sent" echo refreshes on the
-    /// next reload (a discrete edit like "Use default" reloads immediately).
-    private func instructionsBinding(
-        for inspection: PersonaRuntime.AIContextInspection
-    ) -> Binding<String> {
-        Binding(
-            get: { currentInstructions(for: inspection) },
-            set: { newValue in
-                var list = AppSession.loadConfiguredAIs(siloID: siloID)
-                guard let idx = list.firstIndex(where: { $0.id == inspection.id }) else { return }
-                list[idx].instructions = newValue.isEmpty ? nil : newValue
-                AppSession.saveConfiguredAIs(list, siloID: siloID)
-            })
-    }
-
-    private func currentInstructions(
-        for inspection: PersonaRuntime.AIContextInspection
-    ) -> String {
-        AppSession.loadConfiguredAIs(siloID: siloID)
-            .first(where: { $0.id == inspection.id })?.instructions ?? ""
-    }
-
-    /// Discrete action ("Use EldrChat's default"): set, save, re-bind providers, and
-    /// reload so the assembled "Exactly what's sent" echo updates immediately.
-    private func setInstructions(
-        _ value: String, for inspection: PersonaRuntime.AIContextInspection
-    ) {
-        var list = AppSession.loadConfiguredAIs(siloID: siloID)
-        guard let idx = list.firstIndex(where: { $0.id == inspection.id }) else { return }
-        list[idx].instructions = value.isEmpty ? nil : value
-        AppSession.saveConfiguredAIs(list, siloID: siloID)
-        Task {
-            await session.applyAIProvider()
-            await reload()
-        }
-    }
-
-    /// Depth → the AI's `ConfiguredAI.contextDepth`, then re-apply providers so the
-    /// runtime's `TetheredAI.contextDepth` updates, then re-assemble live.
-    private func depthBinding(for inspection: PersonaRuntime.AIContextInspection) -> Binding<Int> {
-        Binding(
-            get: { inspection.depth },
-            set: { newValue in
-                var list = AppSession.loadConfiguredAIs(siloID: siloID)
-                guard let idx = list.firstIndex(where: { $0.id == inspection.id }) else { return }
-                list[idx].contextDepth = max(1, newValue)
-                AppSession.saveConfiguredAIs(list, siloID: siloID)
-                Task {
-                    await session.applyAIProvider()
-                    await reload()
-                }
-            })
-    }
-
     /// Include/exclude → the message's `aiContext` marker via the same
     /// `markAsAIContext` path the long-press menu uses (persisted + mirrored).
     private func includeBinding(
@@ -292,10 +172,6 @@ struct AIContextInspectorView: View {
             },
             set: { newValue in
                 guard let conversationID = selectedConversation else { return }
-                // Flipping the toggle sets the marker. In live mode un-marking a
-                // policy-included message won't drop it from the live window (the
-                // policy still includes it) — but it's the only safe, real control,
-                // so we keep the marker authoritative and re-assemble to show truth.
                 Task {
                     await model.markAIContext(
                         messageIDs: [entry.id], value: newValue, conversationID: conversationID)
@@ -321,9 +197,10 @@ struct AIContextInspectorView: View {
     }
 
     private func reload() async {
-        guard let id = selectedConversation else { inspections = []; return }
+        guard let id = selectedConversation else { inspection = nil; return }
         loading = true
-        inspections = await model.contextInspections(conversationID: id)
+        inspection = await model.contextInspections(conversationID: id)
+            .first(where: { $0.id == aiID })
         loading = false
     }
 }
