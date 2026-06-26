@@ -45,9 +45,12 @@ struct InfoButton: View {
                 // secondary cue, never a focal point.
                 .font(.footnote)
                 .foregroundStyle(.secondary)
-                // Comfortable hit target without enlarging the glyph.
+                // 44×44 hit target — the HIG / accessibility-audit minimum
+                // (`.hitRegion`). The glyph stays small and centered; the
+                // tappable + audited frame is the full 44pt. (Was `.padding(2)`,
+                // which left a 19×19 element the audit hard-fails as "too small".)
+                .frame(width: 44, height: 44)
                 .contentShape(Rectangle())
-                .padding(2)
         }
         .buttonStyle(.plain)
         // Mac: native hover tooltip with the SAME text (no-op on touch iOS).

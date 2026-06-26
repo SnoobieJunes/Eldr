@@ -99,6 +99,10 @@ struct MainView: View {
             // to this subtree so it isn't visible app-wide.
             SettingsView(model: model)
                 .environment(settingsNav)
+                // Settings is a full page you navigate, not a quick action: fill
+                // the window on Mac/Catalyst & iPad (and stay full-height on
+                // iPhone) instead of a tiny centered sheet.
+                .presentationSizing(.page)
         }
         // A "Message" tap in Contacts set the target: close Settings and select
         // that conversation in the split view (the same `selection` the sidebar
@@ -133,6 +137,23 @@ struct MainView: View {
         .onChange(of: commands.findTick) { _, _ in searchFocused = true }
         .onChange(of: commands.toggleSidebarTick) { _, _ in
             withAnimation { columnVisibility = columnVisibility == .all ? .detailOnly : .all }
+        }
+        // Phase 3 item 3 — interactive per-tool approval. When a paired Mac coding agent
+        // wants a mutating action (write/edit/run) and autonomous-changes consent is OFF,
+        // it surfaces here for an explicit Allow once / Always / Deny. Global so it appears
+        // over any screen; the node's own 120s C-1 timeout denies if this is ignored
+        // (fail-closed — the prompt is the affordance, not the brake).
+        .alert(
+            "Allow this action?",
+            isPresented: Binding(
+                get: { model.acpPermissions.pending.first != nil }, set: { _ in }),
+            presenting: model.acpPermissions.pending.first
+        ) { request in
+            Button("Allow once") { model.acpPermissions.resolve(id: request.id, .allowOnce) }
+            Button("Always allow") { model.acpPermissions.resolve(id: request.id, .allowAlways) }
+            Button("Deny", role: .cancel) { model.acpPermissions.resolve(id: request.id, .deny) }
+        } message: { request in
+            Text("\(model.contactNames[request.nodeHex] ?? "Your Mac agent") wants to:\n\(request.title)")
         }
     }
 
@@ -581,6 +602,13 @@ struct NewChatView: View {
     /// owner's coding agent — required for the §13.5 watch-along draft path to fire.
     var prefilledContactType: String? = nil
     @Environment(\.dismiss) private var dismiss
+    /// Optional — present whenever this sheet is hosted inside the split view (the
+    /// "+" New Chat, a `pqrc:add` deep link, or Settings ▸ "Connect your Mac coding
+    /// agent"). Setting it makes `MainView` close any open sheet/Settings and OPEN the
+    /// just-created conversation, instead of dropping the user back where they were
+    /// with the new chat stranded in the list — the coding-agent "it doesn't do
+    /// anything / opens nothing" bug.
+    @Environment(SettingsNavigation.self) private var settingsNav: SettingsNavigation?
     @State private var npub = ""
     @State private var firstMessage = ""
     @State private var error: String?
@@ -627,6 +655,11 @@ struct NewChatView: View {
                             if let type = prefilledContactType, !type.isEmpty {
                                 await model.runtime.setContactType(identityHex, type: type)
                             }
+                            // Open the new conversation in the split view — closes this
+                            // sheet AND Settings if it was hosting us. Without this the
+                            // coding-agent pairing created the chat but left the user in
+                            // Settings with nothing visible ("it doesn't do anything").
+                            settingsNav?.openConversationID = identityHex
                             dismiss()
                         } catch PQRCError.relayUnreachable {
                             self.error = "Can't reach your relay right now. Check your connection or your relay in Settings — or use Nearby below to connect in person, no server needed."

@@ -9,6 +9,7 @@ import SwiftUI
 /// a HIDDEN silo, so a wrong passphrase and a non-existent account look the same.
 struct AccountGateView: View {
     @Environment(AppSession.self) private var session
+    @Environment(TourCoordinator.self) private var tour
 
     @State private var passphrase = ""
     @State private var confirm = ""
@@ -116,6 +117,29 @@ struct AccountGateView: View {
                     creating = true
                 }
                 .accessibilityIdentifier("show-create-account")
+            }
+            // New-here affordances: lead with what EldrChat is and a live,
+            // on-device demo, so a first-time viewer isn't met by only a
+            // passphrase form. Both are account-free and never hit the network.
+            Section {
+                Button {
+                    session.unlockError = nil
+                    tour.relaunch()
+                } label: {
+                    Label("Take the tour", systemImage: "sparkles")
+                }
+                .accessibilityIdentifier("gate-take-tour")
+                Button {
+                    session.unlockError = nil
+                    Task { await session.bootUniverse(runScript: true) }
+                } label: {
+                    Label("See the live demo", systemImage: "play.circle")
+                }
+                .accessibilityIdentifier("gate-see-demo")
+            } header: {
+                Text("New to EldrChat?")
+            } footer: {
+                Text("Take a quick guided tour, or watch a self-contained demo — two people and their AIs — run entirely on this device. Neither creates an account or sends anything off your device.")
             }
         }
     }

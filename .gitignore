@@ -8,10 +8,23 @@ DerivedData/
 build/
 **/build/
 
-# Eldr ACP Configurator DMG build artifacts (signed/notarized DMGs aren't committed)
+# DMG / app build artifacts (signed/notarized builds aren't committed). Huginn is
+# the renamed Eldr ACP Configurator; cover the current path, the old one, and any dist/.
+Apps/Huginn/dist/
 Apps/EldrACPConfigurator/dist/
+**/dist/
+# DMG build scratch + distribution/log output
+**/.dmgbuild/
+Logs/
+logs/
 
 # Merge/editor backup artifacts (e.g. *.swift~<branch> from a botched merge/checkout)
 *.orig
 *~
 *.swift~*
+
+# Claude Code background-agent worktrees
+.claude/worktrees/
+
+# Xcode distribution / export logs (build artifacts)
+*.xcdistributionlogs/

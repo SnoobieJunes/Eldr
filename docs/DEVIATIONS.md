@@ -144,7 +144,7 @@ and affects interop; `[app-only]` — client behavior, no wire impact;
   `ai_window`/`ai_invite` family, authorizing the *consume* axis only (the
   other party's agent may ingest the granter's `ai_context`-marked messages,
   and reciprocally). Human-identity-signed, bounded duration
-  {15m,30m,1h,2h} ≤ 2h, scope = `conversation`|`thread` (+id). Uses a DISTINCT
+  {15m,30m,1h,2h,8h,24h} ≤ 24h (grants included), scope = `conversation`|`thread` (+id). Uses a DISTINCT
   domain string `pqrc-ai-context-grant-v1` with the scope bound in, so a grant
   signature can never be replayed as a window/invite or across scopes.
   Invariant 9 preserved: consume-authorization carries its own human signature,
@@ -282,8 +282,9 @@ and affects interop; `[app-only]` — client behavior, no wire impact;
   payload blobs.
 - **A3 — Window replies route to the conversation the window was started in**
   (one active window scope per user in v1).
-- **A4 — Bounded AI durations** {15, 30, 60, 120 min}; incoming announcements
-  beyond 2 h are rejected as unbounded.
+- **A4 — Bounded AI durations** {15m, 30m, 1h, 2h, 8h, 24h} (the conversation
+  "My AI responds" window offers 1/8/24 h; thread invites stay 15/30/60/120 min);
+  incoming windows, invites, and grants beyond 24 h are rejected as unbounded.
 - **A5 — Local Universe** ships five personas including Eve (unknown sender)
   to exercise the message-request gate; demo agents are scripted
   MockAgentProviders so the demo is deterministic.
@@ -905,30 +906,25 @@ and affects interop; `[app-only]` — client behavior, no wire impact;
   Eligibility (App Store Small Business Program, < 2M lifetime downloads, PCC
   entitlement) and rate-limits surface as actionable `availabilityReason` strings →
   Demo fallback, never a silent confidentiality downgrade.
-- **A40-tech-debt — PCC APIs are build-gated behind `ELDR_PCC_SDK`** `[tech-debt]`
-  (2026-06-18): the WWDC26 PCC symbols (`PrivateCloudComputeLanguageModel`,
-  `ContextOptions`, the `respond(to:options:contextOptions:)` overload) are absent from
-  the 2025 on-device-only SDK currently installed, so the provider's PCC path compiles
-  only when the target defines `ELDR_PCC_SDK` (set
-  `SWIFT_ACTIVE_COMPILATION_CONDITIONS` once building with the Xcode-26 SDK + PCC
-  entitlement). Without the flag the file still compiles and reports "not built with the
-  PCC SDK" → Demo. The structured-output / tool-calling / vision / adapter seams from the
-  "everything" scope are deferred to that same flagged path; **adapters are
-  specifically NOT pursued** (the training toolkit is EOL at v26.0.0, incompatible with
-  OS 27+) — prompt engineering is the supported path. Exact symbol spellings must be
-  verified in Xcode Quick Help when flipping the flag on. **Update (2026-06-18):**
-  confirmed the symbols are STILL absent even with the **Xcode 27.0** SDK installed
-  (`SDKROOT=iphoneos27.0`) — `PrivateCloudComputeLanguageModel` / `ContextOptions` /
-  reasoning appear in zero FoundationModels `.swiftinterface` files (iPhoneOS,
-  Simulator, macOS, Catalyst all checked); Apple's online docs are ahead of this seed.
-  Defining `ELDR_PCC_SDK` therefore breaks the build, so the gate stays OFF until a
-  later seed ships the symbols. Two prep changes landed meanwhile: (1) the
+- **A40-tech-debt — PCC is ON; the `ELDR_PCC_SDK` gate is enabled, and the build
+  REQUIRES Xcode 27** `[tech-debt]` (updated; supersedes the earlier "symbols absent"
+  reading): the WWDC26 PCC symbols (`PrivateCloudComputeLanguageModel`, `ContextOptions`,
+  the `respond(to:options:contextOptions:)` overload) **are present in the Xcode 27 SDK** —
+  verified in the iPhoneOS, iPhoneSimulator, and macOS SDKs. `Packages/PQRCAgent/Package.swift`
+  therefore **re-enables `.define("ELDR_PCC_SDK")`** (PCC ON by default), so the provider's
+  PCC path compiles and the `pcc` backend is live. **Hard toolchain requirement:** the app
+  MUST be built with **Xcode 27 (Xcode-beta)** — the 26.x SDK lacks these symbols, so a 26.x
+  build fails with "cannot find type … in scope" (this is what the earlier note mistook for
+  the symbols being absent everywhere). The structured-output / tool-calling / vision /
+  adapter seams from the "everything" scope are still deferred; **adapters are specifically
+  NOT pursued** (the training toolkit is EOL at v26.0.0, incompatible with OS 27+) — prompt
+  engineering is the supported path. Two supporting pieces: (1) the
   `com.apple.developer.private-cloud-compute` **managed** entitlement is wired
   (`App/EldrChat.entitlements` + `CODE_SIGN_ENTITLEMENTS`; Apple must still grant it via
-  the PCC access request before device signing succeeds); (2) the gated PCC code paths
-  now carry `@available(iOS 27, macOS 27, *)` guards (the package deploys to 26, the PCC
-  symbols are 27-only) and `availabilityReason` reports the OS-version gap. The flag
-  belongs in `Package.swift` (`swiftSettings: [.define("ELDR_PCC_SDK")]`), not the app's
+  the PCC access request before device signing succeeds); (2) the gated PCC code paths carry
+  `@available(iOS 27, macOS 27, *)` guards (the package deploys to 26, the PCC symbols are
+  27-only) and `availabilityReason` reports the OS-version gap. The define lives in
+  `Package.swift` (`swiftSettings: [.define("ELDR_PCC_SDK")]`), not the app's
   `SWIFT_ACTIVE_COMPILATION_CONDITIONS` — the provider lives in the PQRCAgent package.
 - **A41 — Mac Catalyst for a freely-resizable desktop window** `[app-only]`
   (2026-06-18): EldrChat on Mac ran as "Designed for iPad" (`TARGETED_DEVICE_FAMILY
@@ -1093,6 +1089,7 @@ wrap stack are preserved unchanged (invariants 6, 8 intact).
 | AC40 | **All remaining P1/P2 closed + Catalyst keychain completion (2026-06-20 session 4).** Seven parallel fixes, verified integrated: PQRCCore 67/67, PQRCNostr 83/83, PQRCAgent 53/53, PQRCACP 160/160, PQRCMCP 15/15, EldrNode 5/5; Configurator + EldrChat iOS + EldrChat Catalyst all BUILD SUCCEEDED. **G4 (statusreport §2.4):** `OpenAICompatibleLLMClient` (PQRCACP) now scrubs each outgoing message's content with the vendored `ACPLogRedactor` when the LLM endpoint is **non-loopback** (cloud); loopback (LM Studio/Ollama) is byte-identical/unscrubbed; covers `complete`+`stream` (single choke point in `makeRequest`). **Daemon owner-bootstrap (§3):** `eldr-node` was undrivable — the owner's first frame arrived as an unknown-sender `messageRequest` and was dropped; `EldrNodeCore.serve` now bootstraps the pinned owner from that request (extended `NodeMessenger` with `acceptRequest`/`declineRequest`); only the owner is reported paired, C-3 `routeInbound` identity pin unchanged; +2 tests. **Replay protection (§3):** `NearbyACPTransport` prefixes a per-connection monotonic counter onto the plaintext before sealing (the ChaChaPoly tag covers it — no `SealCipher` change) and rejects non-increasing counters (replay/reorder dropped); +2 tests. **`acp` honest status (§2.5):** AISettings shows orange "Not connected — pair a Mac node first. Replies are simulated until then." until `consentedCodingAgentNode()` returns a node (the same signal that swaps the Demo stub for the live provider) — can't claim connected on the stub. **Perf (§3):** the 1 Hz countdown ticker is isolated into child views in `ConversationView`/`ThreadView` (message `ForEach` no longer re-evaluates each tick); `AppModel.threadMessages` filters only the thread's own conversation (was O(all messages)). **Branding/layout/nav (§3):** user-facing "PQRC"→"EldrChat" (incl. the `navigationBars` UI test; code symbols / `pqrc:` scheme / keys untouched); reading-width cap moved from the whole `VStack` onto the message list only (composer/banners span the pane); Contacts "Message" now dismisses Settings + selects the chat in the split view (was a dead-end push inside the sheet). **Crypto hygiene (§3):** secret `Data` copies (ratchet IKM/KDF buffers, snapshot/prekey byte arrays) zeroized after use via a `Data.zeroize()` helper — **no derived bytes change** (PQRCCore 67/67 unchanged incl. frozen vectors); `RatchetSnapshot.zeroize()`/`PrekeyState.zeroize()` hooks exposed for the app to scrub post-encryption (app-layer wiring is a follow-up; `PQXDH.deriveSK` IKM also noted as a follow-up); SPEC.md §8.3 AD corrected `sender_role`→`participant_type`. **Catalyst keychain completion (AC39 follow-up):** the data-protection-keychain flag alone wasn't enough on Catalyst — added `keychain-access-groups = $(AppIdentifierPrefix)chat.eldr.app` to `App/EldrChat.entitlements` (Catalyst doesn't auto-inject the access group ⇒ `errSecMissingEntitlement`). REQUIRES team signing (not ad-hoc); runtime-confirm pending on the user's Mac; fallback = revert Catalyst. **MCP (§5):** decided KEEP — read-only, working, green; revisit removal once the ACP router reaches parity. | app-only |
 | AC41 | **Post-fix regression audit + Phase 2–4 scaffold (2026-06-21).** Ran a 4-pass read-only audit after the session's ~15 fixes: crypto core regression-free (zeroization provably changes no derived bytes, 67/67), ACP trust boundary intact, no CRITICAL/HIGH in app/build. Fixed the actionable findings: **(1) zeroization was DEAD CODE** — `RatchetSnapshot.zeroize()`/`PrekeyState.zeroize()` existed but were never called; now invoked (via `defer`, after the encrypted blob is written) in `SwiftDataStore.saveSession`, `PersonaRuntime.persistPrekeyState`, and `eldr-node` — wiping the transient COPY, never live state; `makeSnapshot()` now deep-copies the pending-fold arrays (`.map { Data($0) }`) to kill a latent COW-aliasing trap; `PQXDH.deriveSK` handshake IKM wiped; dead `Data.withRawKeyBytes` removed. **(2) G4 widened** — `tool_calls[].arguments` now scrubbed on non-loopback LLM egress (was content-only); `ContextGraphClient` loopback-gated; shared `isLoopbackHost` helper. **(3) Build/config/doc cleanup** — removed a duplicate `INFOPLIST_KEY_NSLocalNetworkUsageDescription` that was overriding the correct Info.plist string with stale "PQRC" wording (so the Local-Network prompt now shows the right EldrChat/self-hosted-AI copy); deleted the stale `PQRC.xcscheme`; `TARGETED_DEVICE_FAMILY` `1,2,6`→`1,2` (bogus visionOS family); corrected the PQRCAgent PCC lead comment, APP-SPEC §2 `RelaySync` caveat (it was never implemented — AC38/AC40), CLAUDE.md `PQRC.xcodeproj`→`EldrChat.xcodeproj`, and the stale CI iOS-27 header comment. **Phase 2–4 scaffold:** new PQRCACP seam — `HarnessDescriptor` + data-driven `HarnessRegistry` (built-in eldr-acp + Xcode/OpenClaw launchers + PROVISIONAL Phase-2 descriptors Claude Code/Codex/Gemini CLI/OpenCode/Cursor — launch commands unconfirmed, tools not installed), `StdioHarnessTransport` (spawn an external ACP harness over stdio, macOS-gated), and `runACPProxy`/`runHarness` (transport-agnostic bidirectional pipe UNDER the existing C-3 owner gate; `.builtIn`→`runACPAgent`, `.stdioSpawn`→spawn+proxy). +13 tests (PQRCACP 160→173). NOT wired into live UI — deliberate; Phase-2 integration = pick a `HarnessDescriptor` + call `runHarness`. **iOS-availability catch:** the scaffold registry used `FileManager.homeDirectoryForCurrentUser` (macOS-only) → broke the iOS app build (verified via `swift test`/macOS, missed iOS — the SAME gap as AC36); fixed to `NSHomeDirectory()`. **Final: all green** — PQRCCore 67, PQRCNostr 83, PQRCAgent 53, PQRCACP 173, PQRCMCP 15, EldrNode 5; Configurator + EldrChat iOS + EldrChat Catalyst all BUILD SUCCEEDED. **Carry-over:** add the iOS app build to CI (twice now `swift test`-on-macOS hid an iOS-only break). Deferred LOWs (accepted): phone permission allowlist trusts the node-supplied `kind` (advisory under C-3); `EXTERNAL_CROSSCHECK_REVIEW.md` stale path; `.claude/settings.local.json` stale PQRC entries. | app-only |
 | AC42 | **Final UX/CI polish (2026-06-21).** **"My AI" label:** `MessageBubble.agentLabel` shows "My AI" for the local user's own agent (gated on the real `isMine` = `senderIdentity == myIdentityHex`), "<name>'s AI" for others; explicit tethered-AI `agentName` still wins (was the ungrammatical "Me's AI"). **⟡⟡ envelope stripped from display:** agent thread messages wrapped in the AgentSkills envelope render BODY-ONLY in the bubble via a defensive display-time stripper (`MessageBubble.strippedEnvelopeBody` — non-envelope/partial text returned unchanged, never crashes); RAW text stays in the stored record (§23 intact) and Copy still yields raw bytes. Behind a default-OFF per-silo **"Show agent protocol envelope"** toggle (Settings ▸ Privacy; `AppSession.showAgentEnvelope`). **CI iOS-build gate:** new `app-build` job builds the EldrChat target for iOS Simulator + Mac Catalyst (no signing); the `app` test job now `needs: [packages, app-build]` — closes the "`swift test` only builds packages for macOS" gap that hid an iOS-only break TWICE (AC36, AC41). **Already shipped in commit `4e3afb6`:** Mac window resize (Catalyst `UIWindowScene.sizeRestrictions`, `WindowSizeConfigurator`) + surfacing swallowed `runThreadTurn`/`runWindowReply` provider errors ("LMStudio responded but we didn't see it"). Remaining AI-stop causes are by-design: loop guard (A39) pauses after N consecutive agent messages; the AI runs only while the app is foreground (D6). **Accepted LOWs (no churn):** phone permission allowlist trusts node-supplied tool `kind` (advisory under C-3, node C-1 authoritative); stale `App/PQRC.xcodeproj` refs in the dated `EXTERNAL_CROSSCHECK_REVIEW.md` + stale `-scheme PQRC` in `.claude/settings.local.json` left as harmless. All green: PQRCCore 67, PQRCNostr 83, PQRCAgent 53, PQRCACP 173, PQRCMCP 15, EldrNode 5; EldrChat iOS + Catalyst build. | app-only |
+| AC43 | **Pre-funding-demo hardening pass (2026-06-22) — judgment calls.** A 3-discipline pre-demo audit (Swift/iOS-Mac · UX · security/privacy) found the build strong with no invariant violations; the judgment calls made while fixing the findings: **(1) Demo ships in Release** — the "Try the demo (Local Universe)" entry left `#if DEBUG` (unreachable in TestFlight); now compiled into Release AND surfaced on the lock screen ("See the live demo") so a reviewer reaches the scripted narrative without creating an account (chaos/persona surfaces stay Debug-only; TESTFLIGHT-GUIDE §F is now accurate). **(2) `run_shell` timeout** — `ToolExecutor.runShellViaProcess` (non-terminal clients: Huginn Test Chat + relay-ACP host) had no deadline → a non-terminating command hung the agent turn forever; added a 120s Sendable-`pid` watchdog (SIGTERM→SIGKILL closes the pipe, returns a timeout result). Kills the direct child (single exec'd command = the common hang; deliberately-backgrounded grandchildren stay the client-terminal path's job, as one-shot `run_shell` always was). **(3) Inspector previews** — `InspectingLLMClient` posted prompt/answer previews to the UI-visible `DiagnosticsLog`; now `CredentialRedactor`-scrubbed always and content-gated to `#if DEBUG`, so Release (incl. the build serving the owner's phone) shows shape only. **(4) Evicted ML-KEM keys not zeroized — DOCUMENTED, not changed** — `DoubleRatchet` history-evicts superseded KEM keypairs without wiping the private half because `MLKEM768.PrivateKey` is opaque (CryptoKit owns the buffer; the 64-byte seed is consumed by the initializer, never retained); these are already-rotated-PAST halves, not active secrets, so an explanatory comment was chosen over storing+wiping a redundant seed copy. **(5) Firewall "Off" kept** (not restricted to paired nodes) — the per-chat egress-firewall "Off — send raw" (AC32) stays reachable for any chat incl. a cloud-vendor one: OFF by default, explicit warned per-conversation action, persistent indicator — user agency with a fail-safe default. **(6) Coding-agent consent toggles** collapsed behind a default-closed "Mac agent control" disclosure (the destructive autonomous-changes switch off the happy path). **(7) Lower SPM floors** (`PQRCMCP` tools-6.0 / .macOS v14·.iOS v17; `PQRCACP` macOS v14) kept + commented as deliberate (headless, dependency-free, no v26-SDK need) rather than bumped. **(8) Accessibility** keeps one documented exception — the platform XCUITest "indeterminate background" false-positive on composer-adjacent bubbles (`PartyColor`), filtered, not a real contrast deficit. **Hygiene:** `Apps/Huginn/dist/` gitignored; two stray `THREAT_MODEL.md~…` redirect artifacts `git rm`'d; Huginn raw-hex "beta" pin tucked behind Advanced; setup-wizard Xcode/OpenClaw steps marked optional/for-developers. | app-only |
 
 ---
 
@@ -1149,3 +1146,82 @@ The **silo separation** (A23) is KEPT — it's how the work/personal accounts st
 - **Model.** `AppSession.conversationFirewall(convID)` → `nil` (inherit the account default `firewallEnabled`, which defaults ON) | `true` (redact) | `false` (raw). Resolved at the single egress site (`PersonaRuntime.contextFor`). Default stays ON (privacy-first); an override only ever *relaxes* a chat the user explicitly trusts. Only affects a REMOTE AI (`appliesEgressFirewall`); on-device AI never egresses.
 - **Distinct from C-6 (AC28, ACP at-rest log redaction).** Two separate controls, never conflated: C-6 always scrubs secrets from the Mac node's on-disk diagnostic logs and NEVER touches the data channel; the egress firewall is the per-chat-togglable control on what a remote AI *sees*. Both scope to the user-set trust boundary; neither blanket-redacts the owner / private-paired delivery path.
 - **Surfaced a silently-red test.** The firewall unit tests set `isRemote:true` but not `appliesEgressFirewall:true`; since the PCC split of those fields the redaction guard short-circuited, so `firewall_redactsRealNamesForRemoteAI` had been **silently failing** — undetected because CI pointed at the renamed project and never ran the app suite. Fixed (set the flag); the CI repoint closes the detection gap.
+
+## Interactive PTY terminal (AC40, Phase D4) — `[app-only]`
+
+**Decision (2026-06-22).** Beyond one-shot `run_shell`, the ACP agent can open a
+**persistent interactive terminal** — a real shell on a pseudo-terminal (`PTYProcess`,
+macOS-only, `posix_spawn` + `openpty`) for REPLs / debuggers / long-running processes —
+streaming stdin in and stdout/stderr out incrementally, killable at any time. This is the
+project's **highest-risk surface** (an open-ended interactive shell on the user's Mac,
+driven from the phone), so the safeguards are the deliverable, not the feature.
+
+- **Gate = the STANDING autonomous-changes consent, NO allow-once.** An open-ended shell
+  can't be meaningfully approved per-keystroke, so PTY creation requires the same per-node
+  `autonomousChangesConsent` the user explicitly opted into — it is NOT a per-action
+  prompt. Enforced phone-side in `PersonaRuntime` (`decideInteractivePTY` →
+  `AppSession.autonomousChangesConsent`, reached from the relay-ACP `permissionHandler`
+  when the request's title matches `ACPTerminal.interactiveTerminalTitlePrefix`). With the
+  consent OFF it **FAILS CLOSED** — no terminal, and the per-action permission UI is never
+  even consulted (proven by `interactiveTerminal_deniedWithoutStandingConsent_evenWithUI`).
+  The node independently re-checks its own C-1 (deny-on-timeout) and keeps its C-2 cwd jail;
+  the PTY adds no capability `run_shell` didn't already have (the same C-1-gated, C-2-jail-
+  EXEMPT escape hatch) — it just keeps the shell alive for streaming. The `open_terminal`
+  tool carries the ACP `execute` ToolKind, so the existing mutating-tool allowlist
+  (`isMutatingACPToolKind`) already treats it as mutating; the title prefix is the finer
+  signal that routes it to the stronger gate (the ToolKind vocabulary is too coarse).
+- **Always-killable.** The phone's prominent Stop control → `terminal/release` →
+  `PTYProcess.terminate()`, which SIGTERM+SIGKILLs the child's whole process group and
+  closes the master fd, idempotently, synchronously, from any task. **Job control is
+  disabled in the spawned shell (`zsh +m`)** so a backgrounded `cmd &` stays in the killable
+  group — otherwise it would get its own process group and survive the kill (an orphaned
+  shell, the #1 risk). Proven by `terminate_killsLongRunningChild_noOrphan` (a backgrounded
+  `sleep 600` is reliably reaped) and the ACP-level `terminateAllTerminals_killsLiveShell_noOrphan`.
+- **Fail-closed teardown.** A relay drop / app background→shutdown / silo lock (`lockSilo`
+  → `PersonaRuntime.shutdown`) / `teardownRelayACPTransport` shuts the node's ACP provider
+  down, which closes the transport, which ends the node's `runACPAgent` inbound loop →
+  `ACPAgent.terminateAllTerminals()` kills every live PTY. A `session/cancel` also kills
+  that session's terminals. No interactive shell ever outlives the session that authorized
+  it. (Node-side `terminateAllTerminals` was added to `runACPAgent`'s post-loop;
+  phone-side teardown additionally shuts the provider in `shutdown`/`teardownRelayACPTransport`.)
+- **C-6 (CLAUDE.md inv. 12).** The LIVE PTY stream is NEVER written to the node's at-rest
+  logs — it goes only to the owner's paired device (the data channel, raw, like
+  `run_shell`'s output). The only at-rest write for an interactive terminal is the close
+  EVENT, which records solely the exit code (no output). Proven by
+  `interactiveTerminalOutput_isNeverWrittenAtRest` (a secret-shaped marker in the PTY output
+  reaches the device but never the events log — not even as a redaction marker, because
+  nothing about the stream is logged). The on-screen scrollback is bounded
+  (`LiveACPTerminal.maxOutputBytes`, head-trimmed) and never persisted.
+- **`@unchecked Sendable` justification.** `PTYProcess` is a final class (not an actor) so
+  `terminate()` is synchronous and callable from a fail-closed teardown without an actor
+  hop that cancellation could skip (the orphan risk). Its only mutable state (`state`) is
+  guarded by an `NSLock`; the fds/pid are immutable post-spawn. Written justification is in
+  the source (precedent: `LineSplitter`).
+- **Wire.** An Eldr extension on the ACP `session/update` channel (`terminal_opened` /
+  `terminal_output` / `terminal_closed`) plus a `terminal/input` notification, ALONGSIDE the
+  unchanged request-based `terminal/*` that one-shot `run_shell` still uses. A persistent
+  terminal needs a push channel the request/response shape can't give. Queued for the NIP if
+  ACP terminal-streaming is ever standardized.
+- **App-test-host link caveat (pre-existing, NOT introduced here).** `xcodebuild
+  build-for-testing`/`test` for `EldrChatTests` fails to link the host app against the
+  PQRCACP package framework (`Undefined symbol … ACPPlanEntry`, an existing type) — confirmed
+  by reproducing it on clean HEAD with all D4 changes stashed. The package suites
+  (`swift test`) and the plain app `xcodebuild build` are green; the App-side gate suite
+  (`ACPInteractiveTerminalGateTests`) compiles but can't be RUN until that environmental
+  test-host link issue is resolved separately. `[tech-debt]`
+
+## sybilclaw demo + ACP config UX pass (2026-06-24) — `[app-only]`
+
+This push wires Eldr toward a **sybilclaw**-hosted funder demo and smooths the ACP
+configuration UX. Judgment calls:
+
+| # | Decision | Tag |
+|---|---|---|
+| AC44 | **Crash-safe harness registration.** `OpenClawRegistration` → `HarnessRegistration`. The hazard: a running OpenClaw/sybilclaw gateway *watches* its config and **restarts** on a change it can't hot-apply, killing the live session (the reported "crash"). New strategy: the agent **command** always goes to acpx's own `~/.acpx/config.json` (NOT gateway-watched → safe anytime); the gateway config (`~/.sybilclaw/sybilclaw.json` / OpenClaw) gets the `acpx` plugin enable + `acp.allowedAgents` **only when the gateway is down** — otherwise `apply` returns `.deferredGatewayRunning` and the wizard shows the exact JSON to paste when idle. Every write backs up once + is atomic. Fixes two latent bugs in the old code: it wrote ONLY OpenClaw's path (`~/.config/openclaw/config.json`, which stock sybilclaw never reads) and omitted `acp.allowedAgents` (so the gateway silently rejected the agent). | app-only |
+| AC45 | **Connections panel + configurable gateway port** (`ConfigurationView` ▸ "Connections"; new `ConnectionStatusProbe`). Answers the two questions the wizard left open, honestly: `eldr-acp` is labeled **"spawned on demand — not a daemon"** (+ last-run time from the log mtime), since it has no port and runs only while a harness drives it; the long-running daemon is **sybilclaw's gateway**, shown with a live status dot (a plain HTTP-GET liveness probe — never speaks the WS protocol) and an editable port (default 18789, persisted to UserDefaults as a Huginn-only pref, not the eldr-acp env). Post-wizard "Registered in acpx / sybilclaw" rows surface registration state. | app-only |
+| AC46 | **Enterprise "Why Eldr for teams" tour** (`TourScript.enterpriseSteps`, App/PQRC). A second variant on the shipped onboarding tour engine (reused unchanged): a 7-card funder/enterprise pitch (zero-trust collaboration → sovereign self-hosted AI → post-quantum / decentralized resilience), launched on demand from Settings ▸ About via a new `TourCoordinator.Variant`. Separate from the first-run welcome tour (does not consume its "seen" flag). Source of truth: `docs/ENTERPRISE-PITCH.md`. Shipped capabilities are stated as present; the team / self-hosted bridges are labeled "rolling out" (honesty rule). | app-only |
+| AC47 | **Stage 2 — chat to sybilclaw's OWN assistant (the Gateway bridge).** `SybilclawGatewayClient` (WebSocket JSON-RPC to sybilclaw's local Gateway, default :18789, OpenClaw protocol v4) + `SybilclawAgentRunner: BridgeAgentRunner`. When **Mac-side responder = sybilclaw** (new BridgeView picker), the owner's inbound chat — already C-3-owner-gated, redaction-wrapped, and timeout-bounded by `handleInboundPrompt` — is answered by sybilclaw's OWN assistant (its model/persona/memory/tools) instead of `eldr-acp`; eldr-acp's LLM is not in the path. The runner is re-wired live on switch (`applyProductionRunner`); the port is the same Huginn pref the Connections panel sets (`ConfigurationStore.gatewayPortKey`), optional Keychain token. The Gateway's exact agent-turn **method/params + reply-frame shape could NOT be verified headlessly** (no running sybilclaw): isolated in `requestMethod`/`makeParams`/`extractText` with a robust multi-shape reply parser + a documented "verify on the running sybilclaw" note, so a protocol mismatch is a one-spot fix. Compile-verified (Huginn build green); the live run on his gateway is the manual test. | app-only / tech-debt |
+
+Stage 1 (phone→eldr-acp relay) and Stage 2 (phone→sybilclaw Gateway bridge) are now built;
+the notarized DMG, a 2-device run, and confirming sybilclaw's Gateway protocol on the
+cofounder's machine remain open — see the plan and `docs/DEMO-SYBILCLAW.md`.

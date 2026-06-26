@@ -73,6 +73,17 @@ Ephemeral receiving keys (SPEC §9.3) would mitigate this; in v1 the setting is
 present but disabled and marked experimental. Senders are hidden even from
 this observer (one-time outer keys).
 
+**This "non-recipients can't query your wraps" guarantee is a relay-operator
+obligation, not something the client can enforce.** It holds only where the
+production relay actually AUTH-gates kind-1059 serving (NIP-42) — exactly as the
+bundled reference relay (`pqrc-relay` / `LocalRelaySimulator`) does, asserted by
+the acceptance test `auth_kind1059ServedOnlyToPTaggedAuthedRecipient`. The default
+deployment relay `relay.lerants.com` (khatru, AUTH-gated) is configured to enforce
+it; a misconfigured or hostile public relay that served kind-1059 to any subscriber
+would silently weaken this to the global-passive-observer case above, and the
+client cannot detect that. Verifying the relay's NIP-42 config is part of standing
+up any anchor relay (see SETUP-GUIDE §4).
+
 ### 2.3 No *message* deniability
 v1 signs messages (PQ3 pattern): the seal is signed by your Nostr key and
 agent messages by your agent key. A recipient can cryptographically prove to a
@@ -330,7 +341,7 @@ otherwise; see below):
 |---|---|
 | Agent impersonating its human | distinct derived key; `participant_type` bound into AEAD AD; `agent_sig` required; human-label-with-agent-evidence rejected and surfaced as a red protocol-violation row |
 | Agent self-activating | windows/invites valid only with the HUMAN identity-key signature; engine rejects agent-signed announcements |
-| Stale windows | bounded durations (≤ 2 h), expiry enforced fail-closed at send time |
+| Stale windows | bounded durations (conversation-window cap ≤ 24 h; thread invites stay ≤ 2 h), expiry enforced fail-closed at send time |
 | Agent loops | hard cap: 6 consecutive agent messages per thread, then pause until a human speaks |
 | Covert agent-to-agent channel | none exists: the engine's only output path posts signed, labeled thread messages (the recording guarantee); verified by the spy-sink suite. Thread "skills" (A32) are prompt composition only — no new channel |
 | Agent key exposure | derivation is one-way from the identity key; exposure of the agent key does not expose the identity key |

@@ -1,7 +1,9 @@
 import Crypto
 import Foundation
+import PQRCACP
 import PQRCAgent
 import PQRCCore
+import PQRCMCP
 import PQRCNostr
 import SwiftData
 
@@ -30,6 +32,20 @@ enum RuntimeEvent: Sendable {
     /// My own key publish (10420/10421/10050) succeeded or failed — the
     /// relay-liveness signal the UI shows.
     case keyPublishChanged(KeyPublishStatus)
+    /// A paired coding-agent node reported its plan/TODO checklist for the turn it
+    /// is running (Phase D1). Display-only — the entries are agent output, shown as
+    /// a checklist in that node's conversation; never trusted beyond a bubble. The
+    /// node re-sends the whole plan on each change, so this carries the full state.
+    case acpPlan(conversationID: String, entries: [ACPPlanEntry])
+    /// Phase D4 — a live INTERACTIVE terminal (PTY) opened on the node for this
+    /// conversation. The UI shows a terminal view + a prominent Stop control.
+    case acpTerminalOpened(conversationID: String, terminalID: String, title: String)
+    /// Phase D4 — a streamed chunk of an interactive terminal's output (incremental).
+    /// Display-only agent output (like an agent bubble). NEVER logged at rest.
+    case acpTerminalOutput(conversationID: String, terminalID: String, chunk: String)
+    /// Phase D4 — an interactive terminal ended (child exited or killed via Stop /
+    /// fail-closed teardown). The UI removes the terminal view.
+    case acpTerminalClosed(conversationID: String, terminalID: String, exitCode: Int?)
 }
 
 /// One configured relay's URL paired with its current connection health.
@@ -98,6 +114,23 @@ actor PersonaRuntime {
     /// even after the wrap overhead; `RelayACPTransport` chunks longer ACP lines to
     /// fit. Conservative on purpose (correctness over throughput).
     private let relayACPMaxFrameBytes = 16 * 1024
+
+    /// Phase D3 — relay-carried MCP hosts, one per CONSENTED `coding_agent` node,
+    /// keyed by the node's PQRC identity hex. Each serves the phone's redacting +
+    /// window-gating `MCPServer` to that node's coding agent over the SAME mesh: the
+    /// node's `MCP1|` chat-tool requests arrive on the message stream, are fed to the
+    /// host (which answers from `RuntimeSecureChatBridge` — redaction enforced HERE,
+    /// phone-side), and the responses are framed back. Created lazily by
+    /// `ensureRelayMCPHost(nodeHex:)` ONLY when the node is a consented coding agent
+    /// AND `shareChatContextConsent` is on; torn down on revoke / `shutdown()`. nil
+    /// `secureChatBridge` (the bridge not yet injected by `AppModel`) ⇒ no host is
+    /// ever created, so the path is inert until the app wires the redacting source.
+    private var relayMCPHosts: [String: RelayMCPHost] = [:]
+    /// The firewall-redacted data source the relay MCP hosts serve. Injected by
+    /// `AppModel` once it exists (`setSecureChatBridge`); the SAME bridge the local
+    /// loopback MCP server uses, so the relay path's redaction/window-gating is
+    /// byte-identical. `Sendable`; holds `AppModel` weakly.
+    private var secureChatBridge: (any SecureChatBridge)?
 
     private var store: SwiftDataMessageStore!
     private var crypter: EncryptedStore!
@@ -229,6 +262,7 @@ actor PersonaRuntime {
             ? [TetheredAI(id: "demo", name: "demo-otter-naps-000", provider: DemoAgentProvider())]
             : newAIs
         rebindRelayACPProviders()
+        refreshRoutingPolicy()
     }
 
     /// Make any enabled "acp" backend LIVE over the relay (ACPRouterplan Phase 3).
@@ -244,7 +278,28 @@ actor PersonaRuntime {
         guard ais.contains(where: { $0.kind == "acp" }) else { return }
         guard let nodeHex = consentedCodingAgentNode(),
             let transport = ensureRelayACPTransport(nodeHex: nodeHex)
-        else { return }  // no consented node yet — leave the Demo stub in place
+        else {
+            // No consented node (e.g. remote dev-control revoked): revert any live `acp`
+            // provider to the inert stub so the relay path goes fully inert again
+            // (privacy-first — revoking consent must actually disconnect, not linger).
+            ais = ais.map { ai in
+                guard ai.kind == "acp" else { return ai }
+                var inert = ai
+                inert.provider = DemoAgentProvider()
+                return inert
+            }
+            // Phase D4 — fail-closed: shut down any now-detached ACP providers (fire-and-
+            // forget; this method is sync). Shutting a provider closes its transport →
+            // the node terminates any live PTY. The Settings revoke path also calls
+            // `teardownRelayACPTransport` (which awaits this), so this is a backstop for
+            // any other route into the revert branch.
+            let detached = relayACPProviders
+            relayACPProviders.removeAll()
+            for (_, provider) in detached {
+                Task { await provider.shutdown() }
+            }
+            return
+        }
         // Phone-side permission decision (statusreport §2.3, P0). The `kind` is the
         // ACP ToolKind the node attaches to its `session/request_permission`
         // (`ToolExecutor.kind(for:)`): `read` (read_file/list_dir/search) is the only
@@ -260,18 +315,168 @@ actor PersonaRuntime {
         // PHONE owns. Captures only `Sendable` strings (no `self`) so the `@Sendable`
         // handler stays strict-concurrency clean.
         let silo = siloID
+        // Capture the event continuation (it's `Sendable`) so the live-event observer
+        // can forward a node's plan straight into the runtime's stream WITHOUT hopping
+        // back onto the actor — the observer is a synchronous `@Sendable` closure. The
+        // node's conversationID is its identity hex (1:1 conversation id == peer hex).
+        let plansContinuation = eventContinuation
+        // Phase D3: advertise the phone's MCP chat tools to THIS node only when the
+        // owner gave the per-node "share chat context" consent. The phone then serves
+        // those tool calls back over the relay from its redacting `RelayMCPHost` (set
+        // up lazily on the first inbound MCP frame). Off ⇒ no `mcpServers` advertised,
+        // so the node never even discovers the chat tools exist.
+        let shareChat = AppSession.shareChatContextConsent(nodeID: nodeHex, siloID: silo)
+        // Idempotent: if this node already has a live provider, REUSE it rather than
+        // rebuilding — rebuilding would orphan a provider that may be streaming a live
+        // interactive terminal (Phase D4), detaching the PTY from its Stop control. A
+        // benign refresh (setAIs/refreshACPBindings) just re-installs the existing
+        // provider into `ais`. A genuine consent change goes through
+        // `teardownRelayACPTransport` first, which drops the entry, so this won't mask one.
+        if let existing = relayACPProviders[nodeHex] {
+            ais = ais.map { ai in
+                guard ai.kind == "acp" else { return ai }
+                var live = ai
+                live.provider = existing
+                return live
+            }
+            return
+        }
         let provider = ACPAgentProvider(
             transport: transport,
-            permissionHandler: { _, kind in
+            permissionHandler: { [weak self] title, kind in
                 guard Self.isMutatingACPToolKind(kind) else { return true }
-                return AppSession.autonomousChangesConsent(nodeID: nodeHex, siloID: silo)
-            })
+                guard let self else { return false }  // runtime gone → fail closed
+                // Phase D4 — an INTERACTIVE PTY (open_terminal) is a SPECIAL, higher gate:
+                // an open-ended shell can't be meaningfully approved per-keystroke, so it
+                // requires the STANDING autonomous-changes consent and FAILS CLOSED
+                // otherwise — NO per-action allow-once prompt. Recognized purely from the
+                // tool title (the ACP `execute` kind is too coarse to tell it from
+                // run_shell). Cardinal rule: the dangerous escape hatch needs the explicit,
+                // standing opt-in, never a one-tap allow.
+                if Self.isInteractiveTerminalTitle(title) {
+                    return Self.decideInteractivePTY(nodeHex: nodeHex, silo: silo)
+                }
+                return await self.decidePermission(
+                    nodeHex: nodeHex, silo: silo, title: title, kind: kind)
+            },
+            eventObserver: { event in
+                switch event {
+                case .plan(let entries):
+                    // Phase D1: surface the plan checklist. Other folded events
+                    // (assistant text, tool lifecycle) already arrive as the reply
+                    // message, so re-forwarding them would double them.
+                    plansContinuation?.yield(.acpPlan(conversationID: nodeHex, entries: entries))
+                // Phase D4 — the live INTERACTIVE-terminal stream. These are NOT folded
+                // into the reply (the PTY is its own surface), so the observer is the only
+                // path the UI gets them by. The output chunk is display-only and never
+                // logged at rest (CLAUDE.md inv. 12).
+                case .terminalOpened(let terminalId, let title):
+                    plansContinuation?.yield(
+                        .acpTerminalOpened(
+                            conversationID: nodeHex, terminalID: terminalId, title: title))
+                case .terminalOutput(let terminalId, let chunk):
+                    plansContinuation?.yield(
+                        .acpTerminalOutput(
+                            conversationID: nodeHex, terminalID: terminalId, chunk: chunk))
+                case .terminalClosed(let terminalId, let exitCode):
+                    plansContinuation?.yield(
+                        .acpTerminalClosed(
+                            conversationID: nodeHex, terminalID: terminalId, exitCode: exitCode))
+                case .assistantText, .toolCall, .toolCallUpdate, .availableCommands:
+                    break  // folded into the reply message; not a live UI signal here
+                }
+            },
+            advertiseChatTools: shareChat)
+        relayACPProviders[nodeHex] = provider
         ais = ais.map { ai in
             guard ai.kind == "acp" else { return ai }
             var live = ai
             live.provider = provider
             return live
         }
+    }
+
+    /// Phase D4 — the live `ACPAgentProvider` per consented node, so the UI can drive an
+    /// interactive terminal's stdin/Stop back to the node. Reset alongside the relay-ACP
+    /// transport. Kept separate from `ais[].provider` (typed as `any AgentProvider`) so
+    /// the terminal-control methods are reachable without a downcast.
+    private var relayACPProviders: [String: ACPAgentProvider] = [:]
+
+    /// Write stdin to a live interactive terminal on `nodeHex` (the user typing into the
+    /// PTY view). No-op if the node has no live ACP provider.
+    func sendACPTerminalInput(nodeHex: String, terminalID: String, data: String) async {
+        await relayACPProviders[nodeHex]?.sendTerminalInput(terminalId: terminalID, data: data)
+    }
+
+    /// KILL a live interactive terminal on `nodeHex` (the phone's Stop control). The node
+    /// terminates the PTY's child process group + closes its fds. Always available.
+    func killACPTerminal(nodeHex: String, terminalID: String) async {
+        await relayACPProviders[nodeHex]?.killTerminal(terminalId: terminalID)
+    }
+
+    /// Decide one mutating ACP tool call (Phase 3 item 3 — "ask each time"). Allowlist
+    /// ladder (cardinal rule): blanket per-node autonomous-changes consent → allow without
+    /// prompting; else ASK the human (allow once / always / deny); if no asker is wired
+    /// (headless / tests) → FAIL CLOSED. "Allow always" flips the autonomous-changes
+    /// consent (the SAME store the Settings toggle writes) so the node stops prompting.
+    /// Read-only kinds never reach here (the handler short-circuits them). The node also
+    /// independently denies on its own C-1 timeout, so an unanswered prompt never runs.
+    private func decidePermission(
+        nodeHex: String, silo: String, title: String, kind: String
+    ) async -> Bool {
+        if AppSession.autonomousChangesConsent(nodeID: nodeHex, siloID: silo) { return true }
+        guard let asker = permissionAsker else { return false }  // no UI → fail closed
+        let decision = await asker.request(
+            PermissionRequest(id: UUID().uuidString, nodeHex: nodeHex, title: title, kind: kind))
+        if decision == .allowAlways {
+            AppSession.setAutonomousChangesConsent(true, nodeID: nodeHex, siloID: silo)
+        }
+        return decision != .deny
+    }
+
+    /// Phase D4 — the GATE for opening an interactive PTY terminal on the node (the
+    /// project's highest-risk surface: a persistent interactive shell on the user's Mac,
+    /// driven from the phone). Unlike `decidePermission` for one-shot mutating tools,
+    /// there is NO per-action allow-once path: an open-ended shell can't be meaningfully
+    /// approved one keystroke at a time, so it requires the SAME standing
+    /// `autonomousChangesConsent` the user explicitly opted into (Settings ▸ the node's
+    /// "autonomous changes" toggle). With that consent OFF, PTY creation FAILS CLOSED — no
+    /// terminal is ever opened. `nonisolated static` + pure so the `@Sendable` permission
+    /// handler can call it without hopping the actor (matching `isMutatingACPToolKind`).
+    /// The node independently re-checks C-1 (deny-on-timeout) and keeps its own cwd jail,
+    /// so this is the phone-owned last brake on the escape hatch, not the only one.
+    nonisolated static func decideInteractivePTY(nodeHex: String, silo: String) -> Bool {
+        AppSession.autonomousChangesConsent(nodeID: nodeHex, siloID: silo)
+    }
+
+    /// Whether an ACP permission request's `title` is an interactive-PTY (`open_terminal`)
+    /// request — matched against `ACPTerminal.interactiveTerminalTitlePrefix` (iOS-available,
+    /// the same prefix the node attaches to every such request). The ACP ToolKind
+    /// (`execute`) can't distinguish it from `run_shell`, so the title is the signal that
+    /// routes it to the stronger `decideInteractivePTY` gate. `nonisolated static` + pure.
+    nonisolated static func isInteractiveTerminalTitle(_ title: String) -> Bool {
+        title.hasPrefix(ACPTerminal.interactiveTerminalTitlePrefix)
+    }
+
+    /// (Phase 3 — intelligent task routing.) Keep the AI-selection policy in sync with the
+    /// consented coding nodes: ≥1 remote-dev-control-consented `coding_agent` node AND an
+    /// `acp` AI tethered → route that node's conversation's drafts/turns to the
+    /// code-capable engine (`CapabilityRoutingPolicy`); otherwise the default policy.
+    /// Auto-managed (no toggle) — drafting in your Mac-agent chat uses the Mac, every other
+    /// chat unchanged. Called from setAIs, bootstrap, and setContactType.
+    private func refreshRoutingPolicy() {
+        let codingNodes = verifiedContacts.keys.filter { isConsentedCodingAgentNode($0) }
+        guard !codingNodes.isEmpty, ais.contains(where: { $0.kind == "acp" }) else {
+            // No consented coding node: if WE installed a capability policy, revert to the
+            // default; never clobber a policy someone else set (a test / future feature
+            // via setAISelectionPolicy).
+            if aiSelection is CapabilityRoutingPolicy<TetheredAI> {
+                aiSelection = DefaultAISelectionPolicy<TetheredAI>()
+            }
+            return
+        }
+        let map = Dictionary(uniqueKeysWithValues: codingNodes.map { ($0, Set(["code"])) })
+        aiSelection = CapabilityRoutingPolicy<TetheredAI>(byConversation: map)
     }
 
     /// Whether an ACP ToolKind needs autonomous-changes consent before the phone
@@ -316,6 +521,25 @@ actor PersonaRuntime {
         aiSelection = policy
     }
 
+    /// The phone-side interactive permission asker (Phase 3 item 3 — "ask each time").
+    /// Wired at app bootstrap to the `@MainActor ACPPermissionCoordinator`; nil in
+    /// headless/tests, where `decidePermission` then fails closed on any mutating tool the
+    /// owner hasn't pre-consented to.
+    private var permissionAsker: (any ACPPermissionAsking)?
+
+    func setPermissionAsker(_ asker: any ACPPermissionAsking) {
+        permissionAsker = asker
+    }
+
+    /// Re-bind the relay-ACP provider + refresh routing for the CURRENT AI set, without
+    /// rebuilding every AI. Call after a per-node consent flip (remote dev-control on/off)
+    /// so the `acp` backend binds live (ON) or reverts to the inert stub (OFF) with no
+    /// reboot. Idempotent.
+    func refreshACPBindings() {
+        rebindRelayACPProviders()
+        refreshRoutingPolicy()
+    }
+
     // MARK: - Nearby AUTH allowlist (C-5)
 
     /// The PAIRED peers' NOSTR pubkeys (hex) — the key space a kind-22242 AUTH is
@@ -347,18 +571,26 @@ actor PersonaRuntime {
     /// on-device AI, or the firewalled (name-redacted) context for a remote AI
     /// when the firewall is on. This is the single boundary every byte crosses
     /// before reaching an off-device model.
+    /// The AI's resolved context policy for this conversation: the AI's own gather
+    /// policy with a per-conversation override (Settings → conversation details)
+    /// layered on top. "off" is the SILENCE contract — the AI must neither gather
+    /// context nor post. `contextFor` AND every autonomous turn consult this, so the
+    /// in-chat "AI off here" chip and the actual behavior can never disagree.
+    private func resolvedPolicy(_ ai: TetheredAI, conversationID: String) -> String {
+        switch AppSession.conversationContextMode(conversationID, siloID: siloID) {
+        case "off": return "off"
+        case "marked": return "strict"
+        case "full": return "active"
+        default: return ai.contextPolicy
+        }
+    }
+
     private func contextFor(
         _ ai: TetheredAI, conversationID: String, threadID: String?
     ) async -> AgentContext {
         // A per-conversation override (Settings → conversation details) wins over
         // the AI's own gather policy.
-        var policy = ai.contextPolicy
-        switch AppSession.conversationContextMode(conversationID, siloID: siloID) {
-        case "off": policy = "off"
-        case "marked": policy = "strict"
-        case "full": policy = "active"
-        default: break
-        }
+        let policy = resolvedPolicy(ai, conversationID: conversationID)
         guard policy != "off" else {
             // Gathers nothing here — an empty transcript (still carrying the AI's
             // instructions so a manual draft can respond generically).
@@ -385,7 +617,8 @@ actor PersonaRuntime {
             redactNames
             ? (contactRecords[conversationID]?.autoName ?? "a contact")
             : (groupRosters[conversationID]?.name ?? contactName(conversationID))
-        let override: String? = threadID.map { tid in
+        let override: String?
+        if let tid = threadID {
             let base = AgentSkills.threadSystemPrompt(
                 displayName: promptDisplayName,
                 contextDomain: AppSession.aiContextDomain(siloID: siloID),
@@ -398,7 +631,18 @@ actor PersonaRuntime {
             // catalog stays the built-in source of truth; these are merged in only
             // for the prompt. Still just message text — no wire/privacy exception.
             let custom = customSkillFragments(threadID: tid)
-            return custom.isEmpty ? base : base + "\n\n" + custom
+            override = custom.isEmpty ? base : base + "\n\n" + custom
+        } else {
+            // Conversation-scope WINDOW reply prompt (BUG-6 fix). Without this, an
+            // `ai_window` turn fell through to the generic `turnSystemPrompt()` — "you
+            // are X's AI in a shared thread with ANOTHER person's AI … reply exactly
+            // PASS to stay silent" — which is wrong here (the latest message is a HUMAN
+            // guest's; there is no other AI), so real providers PASSed and the owner's
+            // AI silently never answered. The Mock/Demo providers are eager and ignore
+            // the prompt, which is why the engine tests stayed green while live failed.
+            override = windowReplySystemPrompt(
+                displayName: promptDisplayName, peerName: promptPeerName,
+                instructions: ai.instructions, summarize: ai.summarizes)
         }
         let ctx = await agentContext(
             conversationID: conversationID, threadID: threadID, depth: ai.contextDepth,
@@ -406,6 +650,33 @@ actor PersonaRuntime {
             systemPromptOverride: override)
         guard ai.appliesEgressFirewall, firewallOn else { return ctx }
         return redactedForRemote(ctx)
+    }
+
+    /// System prompt for a conversation-scope `ai_window` reply (BUG-6 fix). The owner
+    /// has explicitly turned their AI ON for everyone in this conversation for a bounded
+    /// time, so the AI SHOULD answer the latest message rather than default to silence.
+    /// PASS stays available, but only for a message that genuinely warrants no reply.
+    /// `peerName` is already firewall-safe (a codename when redacting for a remote AI);
+    /// mirrors the summarize + user-instructions augmentation of `turnSystemPrompt()`.
+    private func windowReplySystemPrompt(
+        displayName: String, peerName: String, instructions: String?, summarize: Bool
+    ) -> String {
+        var p = """
+            You are \(displayName)'s AI assistant, and \(displayName) has turned you ON \
+            for this conversation with \(peerName) — everyone here knows you're an AI \
+            taking part. Read the recent messages and reply helpfully to the most recent \
+            one, in one short, natural message, as \(displayName)'s assistant. Reply \
+            exactly PASS (nothing else) ONLY if the latest message clearly needs no \
+            response — a bare acknowledgement like "ok" or "thanks", or something plainly \
+            not meant for a reply. Otherwise, answer.
+            """
+        if summarize {
+            p += " Prefer a brief summary of the relevant context over verbatim quoting."
+        }
+        if let instructions, !instructions.isEmpty {
+            p += "\n\nYour user's instructions: \(instructions)"
+        }
+        return p
     }
 
     /// Replaces real display names with each identity's LOCAL codename (and self
@@ -629,6 +900,7 @@ actor PersonaRuntime {
         // Now that contacts (incl. any consented `coding_agent` node) and the
         // messenger are up, make any enabled "acp" backend live over the relay.
         rebindRelayACPProviders()
+        refreshRoutingPolicy()
         return stream
     }
 
@@ -642,10 +914,22 @@ actor PersonaRuntime {
             await persistPrekeyState()
         }
         pumpTask?.cancel()
+        // Phase D4 — FAIL-CLOSED teardown: shut every live ACP provider down FIRST. Each
+        // provider's shutdown finishes its client, which closes the transport, which ends
+        // the node's runACPAgent inbound loop → the node terminates every live interactive
+        // PTY. So locking the silo / backgrounding-into-shutdown kills any shell the node
+        // is running — nothing interactive outlives the session (the #1 safeguard).
+        for provider in relayACPProviders.values { await provider.shutdown() }
+        relayACPProviders.removeAll()
         // Close every relay-ACP transport so its inbound stream finishes and any
         // ACP client/consumer awaiting it unwinds (no orphaned reassembly state).
         for transport in relayACPTransports.values { transport.close() }
         relayACPTransports.removeAll()
+        // Phase D3: stop every relay-MCP host (closes its transport + pump) so the
+        // node's chat-tool channel goes dark with the silo — nothing MCP-serving may
+        // outlive the unlocked, redacting state it depends on.
+        for host in relayMCPHosts.values { await host.stop() }
+        relayMCPHosts.removeAll()
         await localLink?.stop()
         await messenger?.stop()
         eventContinuation?.finish()
@@ -682,6 +966,22 @@ actor PersonaRuntime {
         persistContact(contact.identityHex)
     }
 
+    /// Every locally-generated name already in use — across all contacts'
+    /// person/AI codenames, user renames, and my own display name/alias — so a
+    /// freshly generated name can REGENERATE until it's unique (the fix for
+    /// look-alike names). `excluding` drops one identity's own current names so
+    /// re-applying an upgrade for that contact isn't counted as a self-collision.
+    private func takenAutoNames(excluding identityHex: String? = nil) -> Set<String> {
+        var taken: Set<String> = [displayName]
+        if let alias = myAlias { taken.insert(alias) }
+        for (hex, record) in contactRecords where hex != identityHex {
+            if let name = record.autoName { taken.insert(name) }
+            if let aiName = record.autoAIName { taken.insert(aiName) }
+            if let nickname = record.localNickname { taken.insert(nickname) }
+        }
+        return taken
+    }
+
     /// Assigns local, never-broadcast friendly codenames to a contact and their
     /// AI if they don't have any yet. The deterministic local name is set
     /// instantly (so the UI never shows a raw key), then an on-device Core AI
@@ -690,23 +990,31 @@ actor PersonaRuntime {
     private func ensureFriendlyNames(_ identityHex: String) {
         guard var record = contactRecords[identityHex] else { return }
         var changed = false
+        // Build the taken set once and grow it as we assign, so this contact's
+        // own person- and AI-name can't collide with each other either.
+        var taken = takenAutoNames(excluding: identityHex)
         if record.autoName == nil {
-            record.autoName = FriendlyName.local(seed: identityHex)
+            let name = FriendlyName.unique(seed: identityHex, taken: taken)
+            record.autoName = name
+            taken.insert(name)
             changed = true
         }
         if record.autoAIName == nil {
-            record.autoAIName = FriendlyName.local(seed: identityHex + ":ai")
+            record.autoAIName = FriendlyName.unique(seed: identityHex + ":ai", taken: taken)
             changed = true
         }
         guard changed else { return }
         contactRecords[identityHex] = record
         persistContact(identityHex)
         // Upgrade to on-device AI codenames when the model is available. Stays
-        // on device (FriendlyName.generate never calls a remote API).
+        // on device (FriendlyName.generate never calls a remote API). The upgraded
+        // names are re-rolled for uniqueness against everyone else's.
         Task { [weak self] in
             guard let self else { return }
-            let person = await FriendlyName.generate(seed: identityHex)
-            let ai = await FriendlyName.generate(seed: identityHex + ":ai")
+            let taken = await self.takenAutoNames(excluding: identityHex)
+            let person = await FriendlyName.generate(seed: identityHex, taken: taken)
+            let ai = await FriendlyName.generate(
+                seed: identityHex + ":ai", taken: taken.union([person]))
             await self.applyAutoNames(identityHex, person: person, ai: ai)
         }
     }
@@ -844,6 +1152,7 @@ actor PersonaRuntime {
         contactRecords[identityHex]?.contactType = (type?.isEmpty ?? true) ? nil : type
         persistContact(identityHex)
         eventContinuation?.yield(.conversationChanged(identityHex))
+        refreshRoutingPolicy()
     }
 
     // MARK: - Relay-carried ACP (ACPRouterplan Phase 3 — drive a paired Mac node)
@@ -893,8 +1202,71 @@ actor PersonaRuntime {
     /// Tear down a node's relay-ACP transport (and drop it), e.g. when consent is
     /// revoked or the node is unpaired. Safe when none exists.
     func teardownRelayACPTransport(nodeHex: String) async {
+        // Resolve any prompts awaiting the human for this node with .deny — never strand a
+        // continuation when the path goes away (item 3 fail-closed hygiene).
+        await permissionAsker?.cancelAll(nodeHex: nodeHex)
+        // Phase D4 — FAIL-CLOSED: shut the node's ACP provider down (finishes its client
+        // → closes the transport → the node's runACPAgent terminates every live PTY). This
+        // is the phone-side trigger for "no orphaned interactive shell on the Mac" on
+        // consent-revoke / unpair. Belt-and-suspenders with the transport.close() below.
+        if let provider = relayACPProviders.removeValue(forKey: nodeHex) {
+            await provider.shutdown()
+        }
         guard let transport = relayACPTransports.removeValue(forKey: nodeHex) else { return }
         transport.close()
+    }
+
+    // MARK: - Relay-carried MCP (Phase D3 — serve the phone's chat tools to a node)
+
+    /// Inject the firewall-redacted MCP data source (the SAME `RuntimeSecureChatBridge`
+    /// the loopback MCP server uses). Called once by `AppModel` after it exists. Until
+    /// this is set, `ensureRelayMCPHost` returns nil and NO node's MCP frames are ever
+    /// serviced (fail-closed: no redacting source ⇒ no service).
+    func setSecureChatBridge(_ bridge: any SecureChatBridge) {
+        secureChatBridge = bridge
+    }
+
+    /// C-3 + Phase-D3 gate: an identity may have the phone's MCP chat tools served to
+    /// it ONLY when it is the owner's paired `coding_agent` node (so it can be driven
+    /// at all — `isConsentedCodingAgentNode`) AND the SEPARATE "share chat context"
+    /// consent is on for it. Chat context ≠ dev-control: BOTH must be granted. The
+    /// single predicate every relay-MCP path checks, so the path stays inert until the
+    /// owner opts in.
+    private func isMCPSharingNode(_ identityHex: String) -> Bool {
+        isConsentedCodingAgentNode(identityHex)
+            && AppSession.shareChatContextConsent(nodeID: identityHex, siloID: siloID)
+    }
+
+    /// The live relay-MCP host bound to a node sharing chat context, creating it on
+    /// first use. Returns nil (fails closed) when the node is NOT an MCP-sharing node
+    /// (C-3 + share-chat-context) OR no redacting bridge has been injected — so a host
+    /// is never wired for a node the owner hasn't opted into, and never without a
+    /// redacting source. The host's `send` publishes each framed `MCP1|` chunk to the
+    /// node over the relay as an ordinary (agent-typed) message; inbound frames are
+    /// delivered by `handleReceived`. Idempotent: the same host is reused so the MCP
+    /// session/reassembly stay coherent.
+    func ensureRelayMCPHost(nodeHex: String) async -> RelayMCPHost? {
+        guard isMCPSharingNode(nodeHex), let bridge = secureChatBridge else { return nil }
+        if let existing = relayMCPHosts[nodeHex] { return existing }
+        let host = RelayMCPHost(
+            bridge: bridge,
+            maxFrameBytes: relayACPMaxFrameBytes,
+            publish: { [weak self] framedBody in
+                guard let self else { return }
+                // Publish the framed MCP chunk to the node, exactly like an ACP frame:
+                // an agent-typed ratcheted message (transport, not chat). Best-effort.
+                try? await self.sendRelayACPFrame(framedBody, to: nodeHex)
+            })
+        await host.start()
+        relayMCPHosts[nodeHex] = host
+        return host
+    }
+
+    /// Tear down a node's relay-MCP host (and drop it), e.g. when the share-chat-context
+    /// consent is revoked or the node is unpaired. Safe when none exists.
+    func teardownRelayMCPHost(nodeHex: String) async {
+        guard let host = relayMCPHosts.removeValue(forKey: nodeHex) else { return }
+        await host.stop()
     }
 
     /// Sets my alias and broadcasts it to every connected contact over the
@@ -1184,6 +1556,9 @@ actor PersonaRuntime {
         for ai in aiSelection.participants(
             from: ais, conversationID: conversationID, threadID: nil)
         {
+            // "off" is the silence contract: never invoke a provider whose resolved
+            // policy is off here, even if a future selection policy lets it through.
+            guard resolvedPolicy(ai, conversationID: conversationID) != "off" else { continue }
             let context = await contextFor(ai, conversationID: conversationID, threadID: nil)
             do {
                 // Race generation against a timeout so a wedged/slow on-device
@@ -1194,6 +1569,13 @@ actor PersonaRuntime {
                 }
                 let text = draft.text.trimmingCharacters(in: .whitespacesAndNewlines)
                 guard !text.isEmpty else { continue }
+                // TOCTOU guard (H-2): the "solo chat" decision was made BEFORE this 30 s
+                // await, during which a human may have been added to the conversation
+                // (addMembers → reviseRoster mutates groupRosters, read live by
+                // isSoloConversation). An autonomous agent send to a peer with no
+                // human-opened ai_window MUST fail closed (invariant #9) — so if this is
+                // no longer a solo chat, drop the in-flight reply rather than publish it.
+                guard isSoloConversation(conversationID) else { break }
                 try await sendMessage(
                     text, conversationID: conversationID, participantType: .agent, agentName: ai.name)
                 posted += 1
@@ -1638,11 +2020,33 @@ actor PersonaRuntime {
         return threadID
     }
 
-    func draftReply(conversationID: String, threadID: String? = nil) async throws -> Draft {
+    func draftReply(
+        conversationID: String, threadID: String? = nil, focus: String? = nil
+    ) async throws -> Draft {
         let primary = primaryAI(conversationID: conversationID, threadID: threadID)
-        return try await engine.draft(
-            provider: primary.provider,
-            context: await contextFor(primary, conversationID: conversationID, threadID: threadID))
+        var context = await contextFor(
+            primary, conversationID: conversationID, threadID: threadID)
+        if let focus, !focus.isEmpty {
+            // "Have my AI answer this" — focus the draft on the specific message the user
+            // long-pressed. It's already in `context.transcript` (redacted there for a
+            // remote AI); a directive points the model at THAT one. Scrub it for a remote
+            // AI with the firewall on so a secret in the message can't ride along raw.
+            let firewallOn =
+                AppSession.conversationFirewall(conversationID, siloID: siloID) ?? firewallEnabled
+            let safe =
+                (primary.appliesEgressFirewall && firewallOn)
+                ? CredentialRedactor.scrub(focus) : focus
+            let directive =
+                "Answer THIS specific message from the conversation, directly and helpfully: \"\(safe)\""
+            let merged = [context.instructions, directive].compactMap { $0 }
+                .joined(separator: "\n\n")
+            context = AgentContext(
+                myIdentityHex: context.myIdentityHex, myDisplayName: context.myDisplayName,
+                transcript: context.transcript, threadID: context.threadID,
+                threadTitle: context.threadTitle, instructions: merged,
+                summarize: context.summarize, systemPromptOverride: context.systemPromptOverride)
+        }
+        return try await engine.draft(provider: primary.provider, context: context)
     }
 
     /// Diagnostic for Settings "Test AI now": run the active provider against a
@@ -1809,6 +2213,8 @@ actor PersonaRuntime {
         for ai in aiSelection.participants(
             from: ais, conversationID: conversationID, threadID: threadID)
         {
+            // "off" is the silence contract — never let a provider run here.
+            guard resolvedPolicy(ai, conversationID: conversationID) != "off" else { continue }
             _ = await engine.runThreadTurn(
                 provider: ai.provider,
                 context: await contextFor(ai, conversationID: conversationID, threadID: threadID),
@@ -2036,6 +2442,23 @@ actor PersonaRuntime {
             body = whole
         }
 
+        // Relay-carried MCP frame (Phase D3): an MCP chat-tool REQUEST from the
+        // owner's chat-context-sharing `coding_agent` node, riding the message mesh.
+        // The C-3 + share-chat-context gate (`isMCPSharingNode`, via
+        // `ensureRelayMCPHost`) is what makes this safe: ONLY the paired node the owner
+        // explicitly opted into is serviced, and the host answers from the redacting +
+        // ai_window-gating `MCPServer` (redaction enforced phone-side, here). A
+        // recognized `MCP1|` frame is ALWAYS swallowed (returned), never rendered as
+        // chat: if no host exists (consent off / not a coding agent / wrong sender) the
+        // phone REFUSES to service it AND drops it — it never reaches the chat path and
+        // the node gets no answer. So an un-opted-in or non-owner node learns nothing.
+        if RelayMCPTransport.isMCPFrame(body.text) {
+            if let host = await ensureRelayMCPHost(nodeHex: senderHex) {
+                await host.deliverInbound(body.text)
+            }
+            return
+        }
+
         // Relay-carried ACP frame (ACPRouterplan Phase 3): an ACP line from the
         // owner's consented `coding_agent` node, riding the message mesh. Route it to
         // that node's transport and RETURN — it is the ACP control channel, NEVER a
@@ -2195,6 +2618,8 @@ actor PersonaRuntime {
             for ai in aiSelection.participants(
                 from: ais, conversationID: conversationID, threadID: nil)
             {
+                // "off" is the silence contract — never let a provider run here.
+                guard resolvedPolicy(ai, conversationID: conversationID) != "off" else { continue }
                 _ = await engine.runWindowReply(
                     provider: ai.provider,
                     context: await contextFor(ai, conversationID: conversationID, threadID: nil),
@@ -2313,9 +2738,24 @@ private struct RuntimeSink: AgentMessageSink {
             body.text, conversationID: conversationID, participantType: .agent,
             threadID: threadID, agentName: agentName, localTextOverride: rawText)
     }
+
+    /// Surface an autonomous-reply provider failure (window/thread) to the conversation
+    /// UI. The engine already logs it and calls this, but the protocol's default impl is
+    /// a no-op, so a window reply that failed (unavailable model / bad key) left the user
+    /// staring at silence with a running countdown — the "the timer doesn't work" symptom
+    /// (BUG-5). The solo path already yields `.agentError`; this gives the window/thread
+    /// paths the same visible feedback.
+    func reportAgentFailure(_ reason: String, threadID: String?, agentName: String?) async {
+        await runtime.surfaceAgentFailure(reason)
+    }
 }
 
 extension PersonaRuntime {
+    /// Bridge `RuntimeSink.reportAgentFailure` to the UI event stream (BUG-5).
+    func surfaceAgentFailure(_ reason: String) {
+        eventContinuation?.yield(.agentError(reason))
+    }
+
     func windowConversation() -> String? {
         myWindowConversationID
     }

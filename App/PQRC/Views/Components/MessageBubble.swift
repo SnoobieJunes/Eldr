@@ -28,6 +28,9 @@ struct MessageBubble: View {
     var onFullScreen: ((String) -> Void)? = nil
     /// Re-sends a message that failed to publish ("Not sent"). nil hides retry.
     var onRetry: (() -> Void)? = nil
+    /// Asks the owner's AI to draft a reply to THIS specific message (guest messages
+    /// only) → a preview / "Send as my AI" sheet. nil hides the action.
+    var onAnswerWithAI: (() -> Void)? = nil
     /// Whether to show the RAW AgentSkills `⟡⟡ … ⟡⟡ end` protocol envelope in
     /// agent bubbles (per-silo "Show agent protocol envelope" toggle). Default
     /// `false` strips the header/footer at DISPLAY time and shows only the inner
@@ -74,6 +77,7 @@ struct MessageBubble: View {
         copyMenuItem
         fullScreenMenuItem
         aiContextMenuItem
+        answerWithAIMenuItem
     }
 
     /// Copy the message text to the pasteboard — the right-click → Copy desktop
@@ -216,6 +220,18 @@ struct MessageBubble: View {
                 Label(
                     message.aiContext ? "Remove from AI Context" : "Add to AI Context",
                     systemImage: message.aiContext ? "brain.head.profile" : "brain")
+            }
+        }
+    }
+
+    /// Long-press entry to have the owner's AI draft a reply to THIS message — a
+    /// user-initiated answer (no `ai_window` needed) shown in a preview/send sheet.
+    @ViewBuilder private var answerWithAIMenuItem: some View {
+        if let onAnswerWithAI {
+            Button {
+                onAnswerWithAI()
+            } label: {
+                Label("Have my AI answer this", systemImage: "sparkles")
             }
         }
     }

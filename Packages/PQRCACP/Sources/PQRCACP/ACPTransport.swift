@@ -82,13 +82,17 @@ public func runACPAgent(
     toolEnvironment: ToolEnvironment = .fromEnvironment(),
     config: AgentConfig = .fromEnvironment(),
     configDir: String? = nil,
-    streamingEnabled: Bool = true
+    streamingEnabled: Bool = true,
+    extraTools: (any ExtraToolProvider)? = nil
 ) async {
     let sink = TransportOutputSink(transport: transport)
     let connection = ClientConnection(sink: sink)
     let agent = ACPAgent(
         connection: connection, llm: llm, toolEnvironment: toolEnvironment,
-        config: config, configDir: configDir, streamingEnabled: streamingEnabled)
+        config: config, configDir: configDir,
+        maxIterations: config.maxIterations,
+        streamingEnabled: streamingEnabled,
+        extraTools: extraTools)
     for await line in transport.inboundLines() {
         guard let message = JSONValue.parse(line) else { continue }
         if message["method"] == nil, message["id"] != nil {
@@ -118,5 +122,12 @@ public func runACPAgent(
             }
         }
     }
+    // Phase D4 — FAIL-CLOSED TEARDOWN at the node: the inbound stream finished (the
+    // transport closed — a relay drop, the phone backgrounding/locking, or an explicit
+    // teardown). KILL every live interactive terminal so no orphaned PTY shell is left
+    // running on the Mac. This is the node-side counterpart to the phone-side teardown
+    // (`PersonaRuntime.teardownRelayACPTransport`/`shutdown`, which closes the transport
+    // and so triggers exactly this).
+    await agent.terminateAllTerminals()
 }
 #endif  // os(macOS) — runACPAgent + TransportOutputSink (node-side: hosts ACPAgent)

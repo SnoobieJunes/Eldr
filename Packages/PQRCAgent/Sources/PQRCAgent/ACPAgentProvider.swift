@@ -29,6 +29,18 @@ public actor ACPAgentProvider: AgentProvider {
     /// Self-bounding: a wedged node (or a bug in our event correlation) surfaces
     /// as a thrown error instead of an `await` that never returns.
     private let turnTimeout: Double
+    /// Optional live-event observer (Phase D1 — plan/TODO visibility). When set, the
+    /// consumer forwards EVERY `ACPUIEvent` to it as it arrives (so the runtime can
+    /// surface a plan checklist, tool activity, etc. live), in ADDITION to folding it
+    /// into the turn result. Default no-op: existing callers/tests see zero behavior
+    /// change. `@Sendable` so it crosses the consumer task boundary cleanly.
+    private let eventObserver: @Sendable (ACPUIEvent) -> Void
+    /// Phase D3 — advertise the phone's MCP chat tools to the node at `session/new`
+    /// (so its coding agent can read/draft/search the owner's chat over the relay).
+    /// Default false; set true only when the owner gave the per-node "share chat
+    /// context" consent. The phone serves those tool calls back from its redacting,
+    /// window-gating MCP server (`RelayMCPHost`).
+    private let advertiseChatTools: Bool
 
     /// The single long-lived client + its event-consumer task, created lazily on
     /// the first call and reused thereafter. `nil` until started; torn down by
@@ -56,18 +68,25 @@ public actor ACPAgentProvider: AgentProvider {
     ///   - permissionHandler: decides a mutating tool's permission request.
     ///     Default denies — autonomous file/shell mutation must be opted into,
     ///     never the silent default (privacy #1).
+    ///   - eventObserver: optional live-event sink (Phase D1). Default no-op, so
+    ///     every existing caller is byte-for-byte unchanged; the app sets it to
+    ///     forward plan/tool events to the UI.
     public init(
         transport: any ACPTransport,
         cwd: String? = nil,
         turnTimeout: Double = 120,
         permissionHandler: @escaping @Sendable (_ title: String, _ kind: String) async -> Bool = {
             _, _ in false
-        }
+        },
+        eventObserver: @escaping @Sendable (_ event: ACPUIEvent) -> Void = { _ in },
+        advertiseChatTools: Bool = false
     ) {
         self.transport = transport
         self.cwd = cwd
         self.turnTimeout = turnTimeout > 0 ? turnTimeout : 120
         self.permissionHandler = permissionHandler
+        self.eventObserver = eventObserver
+        self.advertiseChatTools = advertiseChatTools
     }
 
     /// Tear down the live session + consumer. Safe to call when never started.
@@ -76,6 +95,21 @@ public actor ACPAgentProvider: AgentProvider {
         self.live = nil
         await live.client.shutdown()  // finishes `events` → the consumer loop ends
         live.consumer.cancel()
+    }
+
+    // MARK: Phase D4 — interactive terminal control (phone → node)
+
+    /// Write stdin to a live interactive terminal on the node (the user typing into the
+    /// PTY view). No-op if the session isn't started.
+    public func sendTerminalInput(terminalId: String, data: String) async {
+        await live?.client.terminalInput(terminalId: terminalId, data: data)
+    }
+
+    /// KILL a live interactive terminal (the phone's Stop control). Always available —
+    /// the node terminates the PTY's child process group and closes its fds. No-op if the
+    /// session isn't started (then there's nothing live to kill).
+    public func killTerminal(terminalId: String) async {
+        await live?.client.terminalKill(terminalId: terminalId)
     }
 
     // MARK: AgentProvider
@@ -139,14 +173,20 @@ public actor ACPAgentProvider: AgentProvider {
     /// Start the client + consumer once; reuse on every later call.
     private func ensureStarted() async throws -> Live {
         if let live { return live }
-        let client = ACPClient(transport: transport, permissionHandler: permissionHandler)
+        let client = ACPClient(
+            transport: transport, permissionHandler: permissionHandler,
+            advertiseChatTools: advertiseChatTools)
         let accumulator = TurnAccumulator()
         // ONE continuous consumer for the SINGLE event stream: it folds each
         // event into whatever turn is currently in flight (correlation lives in
-        // the accumulator's generation, reset by `beginTurn`). It ends when
-        // `shutdown()` finishes the stream.
+        // the accumulator's generation, reset by `beginTurn`) AND forwards it to the
+        // live observer (Phase D1) so the UI can show a plan checklist as it streams.
+        // The observer is a plain `@Sendable` closure (no `await`), so forwarding can
+        // never stall the fold. It ends when `shutdown()` finishes the stream.
+        let observer = eventObserver
         let consumer = Task {
             for await event in client.events {
+                observer(event)
                 await accumulator.ingest(event)
             }
         }
@@ -239,6 +279,15 @@ actor TurnAccumulator {
             activity.append(line)
         case .availableCommands:
             // Session metadata, not turn output — nothing to fold.
+            break
+        case .plan:
+            // Live UI signal (forwarded to the observer), not turn-fold output — the
+            // plan is shown as its own checklist, never inlined into the reply text.
+            break
+        case .terminalOpened, .terminalOutput, .terminalClosed:
+            // Phase D4 — live INTERACTIVE-terminal signals. Forwarded to the observer (the
+            // app renders a terminal view + Stop control); NEVER folded into the turn's
+            // reply text — the live PTY stream is its own surface, not a chat message.
             break
         }
     }

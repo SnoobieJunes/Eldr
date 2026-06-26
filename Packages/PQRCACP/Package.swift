@@ -19,6 +19,9 @@ import PackageDescription
 // swift-secp256k1 in through PQRCAgent.
 let package = Package(
     name: "PQRCACP",
+    // macOS floor is intentionally lower than the v26 app fleet: the `eldr-acp`
+    // agent/CLI is dependency-free with no v26-SDK needs, so it stays runnable on a
+    // wider range of macOS node hosts. (iOS is .v26 to match the app — its only iOS consumer.)
     platforms: [.iOS(.v26), .macOS(.v14)],
     products: [
         .library(name: "PQRCACP", targets: ["PQRCACP"]),

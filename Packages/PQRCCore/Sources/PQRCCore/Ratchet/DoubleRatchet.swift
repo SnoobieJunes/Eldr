@@ -250,6 +250,13 @@ public struct DoubleRatchet: Sendable {
         myKEMs.append(
             KEMKey(pubkeyHash: sha256(fresh.publicKey.rawRepresentation), key: fresh))
         if myKEMs.count > Self.maxKEMHistory {
+            // We do NOT zeroize the evicted KEM keypairs' private halves the way the
+            // symmetric secrets above are wiped: `MLKEM768.PrivateKey` is opaque —
+            // CryptoKit owns the backing buffer and exposes no mutable storage to
+            // scrub, and the 64-byte seed is consumed by the initializer (never
+            // retained). These are already-rotated-PAST KEM halves, not active-session
+            // secrets; their lifetime ends when CryptoKit deallocates them here.
+            // (Deliberate exception to this file's zeroize-everything rule — DEVIATIONS AC43.)
             myKEMs.removeFirst(myKEMs.count - Self.maxKEMHistory)
         }
         return PQRekeyHeader(

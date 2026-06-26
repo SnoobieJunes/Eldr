@@ -191,6 +191,76 @@ struct ACPAgentProviderTests {
         }
     }
 
+    // (d) Phase D1: the injected event observer receives the node's plan as it
+    // arrives. A write-file turn makes the agent emit a `plan` session/update; the
+    // observer must see ≥1 `.plan` with the step marked completed by turn's end —
+    // proving live events reach the runtime WHILE the turn folds text as before.
+    @Test func eventObserverReceivesForwardedPlan() async throws {
+        try await withTimeout(20) {
+            let dir = (NSTemporaryDirectory() as NSString).appendingPathComponent(
+                "eldr-acp-plan-\(UUID().uuidString)")
+            try FileManager.default.createDirectory(
+                atPath: dir, withIntermediateDirectories: true)
+            defer { try? FileManager.default.removeItem(atPath: dir) }
+            let target = (dir as NSString).appendingPathComponent("out.txt")
+
+            let llm = ScriptedLLM([
+                LLMResponse(
+                    content: "",
+                    toolCalls: [
+                        LLMToolCall(
+                            id: "w1", name: "write_file",
+                            arguments: "{\"path\":\"\(target)\",\"content\":\"hello\"}")
+                    ]),
+                LLMResponse(content: "Wrote it."),
+            ])
+
+            // Collect every forwarded plan snapshot in a Sendable box.
+            let plans = PlanCollector()
+            let (clientSide, agentSide) = InMemoryACPTransport.makePair()
+            let agentTask = Task {
+                await runACPAgent(
+                    transport: agentSide, llm: llm,
+                    toolEnvironment: ToolEnvironment(workdir: dir, baseEnvironment: [:]),
+                    config: .default, configDir: nil, streamingEnabled: false)
+            }
+            defer { agentTask.cancel() }
+            let provider = ACPAgentProvider(
+                transport: clientSide, cwd: dir, turnTimeout: 8,
+                permissionHandler: { _, _ in true },
+                eventObserver: { event in
+                    if case .plan(let entries) = event { plans.append(entries) }
+                })
+
+            let turn = try await provider.threadTurn(context: self.context("write it"))
+            await provider.shutdown()
+
+            // The reply still folds the prose (unchanged behavior) …
+            let combined = turn?.messages.map(\.text).joined(separator: "\n") ?? ""
+            #expect(combined.contains("Wrote it."))
+            // … AND the observer saw the plan, ending completed.
+            let snapshots = plans.value
+            #expect(!snapshots.isEmpty)
+            let last = try #require(snapshots.last)
+            #expect(last.contains { $0.content.contains("Write") })
+            #expect(last.allSatisfy { $0.status == "completed" })
+        }
+    }
+
+    // (e) Default (no observer) ⇒ zero behavior change: a plain reply still returns,
+    // and nothing about the existing path depends on the observer being set.
+    @Test func defaultProviderHasNoObserverAndStillReplies() async throws {
+        try await withTimeout(20) {
+            let llm = ScriptedLLM([LLMResponse(content: "Hi.")])
+            let (provider, agentTask) = self.makeProvider(
+                llm: llm, workdir: NSTemporaryDirectory())
+            defer { agentTask.cancel() }
+            let draft = try await provider.draftReply(context: self.context("hello"))
+            await provider.shutdown()
+            #expect(draft.text.contains("Hi."))
+        }
+    }
+
     // The prompt rendering REUSES the shared transcript renderer + the context's
     // own system prompts — same context every other provider sends, one wire blob.
     @Test func composePromptReusesSharedRendererAndSystemPrompt() {
@@ -213,5 +283,21 @@ struct ACPAgentProviderTests {
         // The agent entry is labeled "Bob's AI" by the shared renderer.
         #expect(prompt.contains("Bob's AI: auto-reply"))
         #expect(prompt.contains("Bob: ping"))
+    }
+}
+
+/// A lock-guarded, Sendable sink for plan snapshots the `@Sendable` event observer
+/// pushes from the provider's consumer task. `@unchecked Sendable` is justified: all
+/// access goes through `lock`, so there is no data race on `snapshots`.
+private final class PlanCollector: @unchecked Sendable {
+    private let lock = NSLock()
+    private var snapshots: [[ACPPlanEntry]] = []
+    func append(_ entries: [ACPPlanEntry]) {
+        lock.lock(); defer { lock.unlock() }
+        snapshots.append(entries)
+    }
+    var value: [[ACPPlanEntry]] {
+        lock.lock(); defer { lock.unlock() }
+        return snapshots
     }
 }

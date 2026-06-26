@@ -31,6 +31,30 @@ struct ConversationDetailsView: View {
     /// agent create/modify files and run shell commands without asking each time.
     /// OFF by default — when off, the phone fails closed on every mutating tool.
     @State private var autonomousChanges = false
+    /// Per-node REMOTE DEV-CONTROL consent (ACPRouterplan Phase 3): whether the phone may
+    /// drive this paired Mac node's ACP agent over the relay at all. OFF by default — the
+    /// relay path is inert until this is on.
+    @State private var remoteDevControl = false
+    /// Per-node SHARE-CHAT-CONTEXT consent (Phase D3): whether this paired Mac's coding
+    /// agent may USE the phone's MCP chat tools (read REDACTED conversations, draft,
+    /// search; `send_as_my_ai` only inside a live AI window). OFF by default — separate
+    /// from dev-control (chat context ≠ dev-control). Off ⇒ the phone refuses to serve
+    /// MCP frames AND refuses to advertise the tools to the node.
+    @State private var shareChatContext = false
+    /// Collapses the coding-agent consent switches behind a single "Mac agent
+    /// control" disclosure (closed by default), so Details opens on a calm
+    /// summary rather than a wall of switches.
+    @State private var showAgentControls = false
+
+    /// One-line summary shown on the collapsed "Mac agent control" disclosure so
+    /// the current consent posture is legible without expanding it.
+    private var agentControlSummary: String {
+        guard remoteDevControl else { return "Off — not driving this Mac agent" }
+        var parts = ["Driving this Mac agent"]
+        parts.append(autonomousChanges ? "autonomous changes ON" : "asks before each change")
+        if shareChatContext { parts.append("chat context shared") }
+        return parts.joined(separator: " · ")
+    }
 
     var body: some View {
         NavigationStack {
@@ -73,11 +97,11 @@ struct ConversationDetailsView: View {
                 }
                 Section {
                     // Unified vocabulary (matches the per-AI "Gathers" picker and
-                    // the in-chat "AI here" chip): Use default · Off · Marked only
-                    // · Live. Tags stay the engine's "default"/"off"/"marked"/
-                    // "full" — only the labels are unified.
+                    // the in-chat "AI here" chip): Follow each AI's own setting · Off ·
+                    // Marked only · Live. Tags stay the engine's "default"/"off"/
+                    // "marked"/"full" — only the labels are unified.
                     Picker("AI context here", selection: $aiContextMode) {
-                        Text("Use default").tag("default")
+                        Text("Follow each AI's own setting").tag("default")
                         Text("Off in this conversation").tag("off")
                         Text("Marked only — messages I add to context").tag("marked")
                         Text("Live — full conversation while active").tag("full")
@@ -119,27 +143,101 @@ struct ConversationDetailsView: View {
                 }
                 if isCodingAgent {
                     Section {
-                        Toggle("Allow autonomous file & shell changes", isOn: $autonomousChanges)
-                            .accessibilityIdentifier("acp-autonomous-changes")
-                            .onChange(of: autonomousChanges) { _, newValue in
-                                // Per-node, per-silo — same store as remote dev-control
-                                // consent; the conversationID IS the node's identity hex.
-                                AppSession.setAutonomousChangesConsent(
-                                    newValue, nodeID: conversationID, siloID: model.siloID)
+                        // Progressive disclosure: a coding-agent node's consent
+                        // switches (including the destructive autonomous-changes
+                        // toggle) live behind a collapsed "Mac agent control" row,
+                        // so opening Details lands on a calm summary, not a wall of
+                        // switches one tap from granting file/shell autonomy.
+                        DisclosureGroup(isExpanded: $showAgentControls) {
+                            Toggle("Drive this agent from here", isOn: $remoteDevControl)
+                                .accessibilityIdentifier("acp-remote-dev-control")
+                                .onChange(of: remoteDevControl) { _, newValue in
+                                    AppSession.setRemoteDevControlConsent(
+                                        newValue, nodeID: conversationID, siloID: model.siloID)
+                                    // Bind the live relay-ACP provider (ON) / revert to the inert
+                                    // stub (OFF) with no reboot.
+                                    let nodeHex = conversationID
+                                    Task { await model.runtime.refreshACPBindings() }
+                                    if !newValue {
+                                        // Revoking dev-control also drops the transport + denies
+                                        // any pending prompts for this node (fail-closed). Phase D3:
+                                        // chat-context sharing presupposes dev-control, so also tear
+                                        // down any live relay-MCP host (the gate `isMCPSharingNode`
+                                        // now fails, but stop the running host immediately too).
+                                        Task { await model.runtime.teardownRelayACPTransport(nodeHex: nodeHex) }
+                                        Task { await model.runtime.teardownRelayMCPHost(nodeHex: nodeHex) }
+                                    }
+                                }
+                            Label(
+                                remoteDevControl
+                                    ? "ON — your phone can drive this Mac's coding agent over the relay. Read-only by default; mutating actions are governed below."
+                                    : "OFF — this paired Mac agent is fully inert; nothing here can drive it.",
+                                systemImage: remoteDevControl
+                                    ? "antenna.radiowaves.left.and.right" : "antenna.radiowaves.left.and.right.slash")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                                .accessibilityIdentifier("acp-remote-dev-control-status")
+
+                            Toggle("Allow autonomous file & shell changes", isOn: $autonomousChanges)
+                                .accessibilityIdentifier("acp-autonomous-changes")
+                                .disabled(!remoteDevControl)
+                                .onChange(of: autonomousChanges) { _, newValue in
+                                    // Per-node, per-silo — the conversationID IS the node's hex.
+                                    AppSession.setAutonomousChangesConsent(
+                                        newValue, nodeID: conversationID, siloID: model.siloID)
+                                }
+                            Label(
+                                autonomousChanges
+                                    ? "ON — the paired Mac agent can create/modify files and run shell commands on its node without asking each time."
+                                    : "OFF — each create/modify/run request prompts you here (Allow once / Allow always / Deny). Read-only inspection still works.",
+                                systemImage: autonomousChanges ? "lock.open.trianglebadge.exclamationmark" : "lock.shield")
+                                .font(.caption)
+                                .foregroundStyle(autonomousChanges ? AnyShapeStyle(.orange) : AnyShapeStyle(.secondary))
+                                .accessibilityIdentifier("acp-autonomous-changes-status")
+
+                            Toggle("Share my chat context with this agent", isOn: $shareChatContext)
+                                .accessibilityIdentifier("acp-share-chat-context")
+                                .disabled(!remoteDevControl)
+                                .onChange(of: shareChatContext) { _, newValue in
+                                    // Per-node, per-silo — the conversationID IS the node's hex.
+                                    AppSession.setShareChatContextConsent(
+                                        newValue, nodeID: conversationID, siloID: model.siloID)
+                                    let nodeHex = conversationID
+                                    // Re-bind the ACP provider so the next session advertises (or
+                                    // stops advertising) the chat tools to the node…
+                                    Task { await model.runtime.refreshACPBindings() }
+                                    // …and, when turning OFF, tear down any live relay-MCP host so
+                                    // the node's chat-tool channel goes dark immediately.
+                                    if !newValue {
+                                        Task { await model.runtime.teardownRelayMCPHost(nodeHex: nodeHex) }
+                                    }
+                                }
+                            Label(
+                                shareChatContext
+                                    ? "ON — this agent can read your REDACTED conversations (codenames only), draft replies, and search. It can post as your AI ONLY while you have an AI window open."
+                                    : "OFF — this agent cannot see or search any of your chats. (Your real names are never shared either way — reads are always redacted.)",
+                                systemImage: shareChatContext ? "bubble.left.and.text.bubble.right" : "bubble.left.and.bubble.right")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                                .accessibilityIdentifier("acp-share-chat-context-status")
+                        } label: {
+                            Label {
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text("Mac agent control")
+                                    Text(agentControlSummary)
+                                        .font(.caption)
+                                        .foregroundStyle(autonomousChanges ? AnyShapeStyle(.orange) : AnyShapeStyle(.secondary))
+                                }
+                            } icon: {
+                                Image(systemName: "desktopcomputer")
                             }
-                        Label(
-                            autonomousChanges
-                                ? "ON — the paired Mac agent can create/modify files and run shell commands on its node without asking each time."
-                                : "OFF — each request to create/modify a file or run a shell command is denied automatically (fails safe). Read-only inspection still works.",
-                            systemImage: autonomousChanges ? "lock.open.trianglebadge.exclamationmark" : "lock.shield")
-                            .font(.caption)
-                            .foregroundStyle(autonomousChanges ? AnyShapeStyle(.orange) : AnyShapeStyle(.secondary))
-                            .accessibilityIdentifier("acp-autonomous-changes-status")
+                        }
+                        .accessibilityIdentifier("acp-advanced-disclosure")
                     } header: {
                         Text("Mac coding agent")
-                            .helpInfo("Separate from letting the agent join your conversation. With this OFF, your phone refuses any request from the paired Mac agent to write files or run shell commands — the last brake before a destructive change. Turn it ON only if you trust this node to act on its own; it can then create, modify, and delete files and run commands on that Mac without prompting you.")
+                            .helpInfo("Two switches, both off by default. The first lets your phone drive this paired Mac's coding agent over the relay at all. The second lets it create/modify files and run shell commands WITHOUT prompting — with it off, every mutating action asks you here, and your phone is the last brake before a destructive change runs on that Mac.")
                     } footer: {
-                        Text("Lets the paired Mac agent create/modify files and run shell commands without asking each time. Keep this off unless you trust it to act autonomously — your phone is the last brake before a destructive change runs on that Mac.")
+                        Text("Off by default (privacy-first). Open “Mac agent control” to drive the agent; leave autonomous changes off to be asked before each file/shell change.")
                     }
                 }
                 Section("Safety") {
@@ -175,6 +273,10 @@ struct ConversationDetailsView: View {
                 isCodingAgent = await model.runtime.contactType(conversationID) == "coding_agent"
                 autonomousChanges = AppSession.autonomousChangesConsent(
                     nodeID: conversationID, siloID: model.siloID)
+                remoteDevControl = AppSession.remoteDevControlConsent(
+                    nodeID: conversationID, siloID: model.siloID)
+                shareChatContext = AppSession.shareChatContextConsent(
+                    nodeID: conversationID, siloID: model.siloID)
             }
             .toolbar {
                 ToolbarItem(placement: .confirmationAction) {
@@ -201,6 +303,11 @@ struct ConversationDetailsView: View {
                 Text("You'll stop receiving their messages, and their pending messages are dropped on this device — without notifying them. You can unblock them here at any time.")
             }
         }
+        // Details is a "page you navigate", not a quick action: let it fill the
+        // window on Mac/iPad (and stay full-height on iPhone). This view is
+        // presented as a plain `.sheet`, so it already defaults to full-height on
+        // iPhone; `.page` is what makes it large on Mac/Catalyst.
+        .presentationSizing(.page)
     }
 }
 

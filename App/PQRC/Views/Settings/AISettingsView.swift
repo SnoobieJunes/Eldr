@@ -48,10 +48,13 @@ struct AISettingsView: View {
                     persist()
                 }
                 Button {
+                    let newID = UUID().uuidString
                     ais.append(
                         ConfiguredAI(
-                            id: UUID().uuidString,
-                            name: FriendlyName.local(seed: UUID().uuidString),
+                            id: newID,
+                            // Unique among the AIs already configured, so two
+                            // tethered AIs never share a name (the look-alike fix).
+                            name: FriendlyName.unique(seed: newID, taken: Set(ais.map(\.name))),
                             kind: "ondevice"))
                     persist()
                 } label: {
@@ -129,6 +132,11 @@ struct AISettingsView: View {
             ais = AppSession.loadConfiguredAIs(siloID: siloID)
             contextDomain = AppSession.aiContextDomain(siloID: siloID)
             await refreshACPNode()
+        }
+        .onDisappear {
+            // Apply edits when leaving Settings — esp. Instructions, which now saves
+            // per keystroke without the heavy per-character provider re-bind.
+            Task { await session.applyAIProvider() }
         }
         .alert("Turn off the egress firewall?", isPresented: $showFirewallWarning) {
             Button("Turn off — send raw context", role: .destructive) {
@@ -316,7 +324,15 @@ struct AISettingsView: View {
     private func optionalBinding(_ source: Binding<String?>) -> Binding<String> {
         Binding(
             get: { source.wrappedValue ?? "" },
-            set: { source.wrappedValue = $0.isEmpty ? nil : $0; persist() })
+            set: {
+                source.wrappedValue = $0.isEmpty ? nil : $0
+                // Save per keystroke (cheap), but do NOT re-bind providers here:
+                // `persist()` runs `applyAIProvider()`, and doing that on every character
+                // made the multi-line Instructions field fight you / reset mid-type (it
+                // read as "not editable"). The provider re-bind happens on exit
+                // (`.onDisappear`) and on any discrete picker change instead.
+                AppSession.saveConfiguredAIs(ais, siloID: siloID)
+            })
     }
     private func policyBinding(_ ai: Binding<ConfiguredAI>) -> Binding<String> {
         Binding(

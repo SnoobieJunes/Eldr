@@ -15,9 +15,6 @@ struct ConversationView: View {
     @State private var fullScreenContent: FullScreenContent?
     /// Set while the AI is drafting a response into the composer.
     @State private var aiDrafting = false
-    @State private var aiDraft: String?
-    @State private var showDraftSheet = false
-    @State private var showWindowPicker = false
     @State private var showThreadSheet = false
     @State private var showDetails = false
     /// Multi-select mode for batch "Add to AI Context" (Feature 3).
@@ -25,6 +22,12 @@ struct ConversationView: View {
     @State private var selection: Set<String> = []
     /// The "AI here" toolbar chip's sheet.
     @State private var showAIHere = false
+    /// In-chat contact rename (1:1 only) — tap the title.
+    @State private var showRename = false
+    @State private var renameText = ""
+    /// "Have my AI answer this" → the drafted reply, shown in a DraftSheet. nil = no sheet.
+    @State private var answerDraft: String?
+    @State private var answerDrafting = false
     /// Read-only summary of the primary AI's effective mode for THIS conversation,
     /// driving the glance chip. Re-read on appear and whenever the override sheet
     /// changes it (it lives in UserDefaults, not @Observable state).
@@ -32,6 +35,19 @@ struct ConversationView: View {
         ("active", false, true)
 
     private var conversationScope: AIContextGrant.Scope { .conversation(conversationID) }
+
+    /// Whether this conversation is a paired coding-agent node (drives the plan
+    /// checklist's visibility). Reads the same local tag the wrench icon uses.
+    private var isCodingAgent: Bool {
+        model.conversations.first { $0.id == conversationID }?.isCodingAgent ?? false
+    }
+
+    private var isGroup: Bool {
+        model.conversations.first { $0.id == conversationID }?.isGroup ?? false
+    }
+    private var currentContactName: String {
+        model.contactNames[conversationID] ?? "Conversation"
+    }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -55,6 +71,26 @@ struct ConversationView: View {
             // updates on banner/grant changes exactly as before.
             ConversationStatusHeader(
                 model: model, conversationID: conversationID, scope: conversationScope)
+            // The paired coding agent's live plan/TODO checklist (Phase D1), shown
+            // only for a coding-agent conversation that currently has a plan. It's
+            // node→phone status (not a message), so it sits above the transcript and
+            // gets the bubbles' reading-width cap so it doesn't sprawl on iPad/Mac.
+            if isCodingAgent, let plan = model.acpPlansByConversation[conversationID], !plan.isEmpty {
+                ACPPlanView(entries: plan)
+                    .padding(.horizontal)
+                    .padding(.top, 6)
+                    .frame(maxWidth: 760)
+            }
+            // Phase D4 — a live INTERACTIVE terminal (PTY) the node is running, with its
+            // prominent Stop/Kill control. Shown only for a coding-agent conversation while
+            // a terminal is live; same reading-width cap so it doesn't sprawl on iPad/Mac.
+            if isCodingAgent, let terminal = model.acpTerminalByConversation[conversationID] {
+                ACPTerminalView(
+                    model: model, conversationID: conversationID, terminal: terminal)
+                    .padding(.horizontal)
+                    .padding(.top, 6)
+                    .frame(maxWidth: 760)
+            }
             threadChips
             messageList
             if selecting { selectionBar } else { composer }
@@ -70,6 +106,19 @@ struct ConversationView: View {
         .navigationBarTitleDisplayMode(.inline)
         // Opaque bar: the title fails the contrast audit over scrolled content.
         .toolbarBackground(.visible, for: .navigationBar)
+        .alert("Rename contact", isPresented: $showRename) {
+            TextField("Name", text: $renameText)
+            Button("Save") {
+                let trimmed = renameText.trimmingCharacters(in: .whitespacesAndNewlines)
+                Task {
+                    await model.renameContact(
+                        conversationID, nickname: trimmed.isEmpty ? nil : trimmed)
+                }
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("This name is local to your device and never shared.")
+        }
         .onAppear {
             if ProcessInfo.processInfo.arguments.contains("--uitest-bigpaste"), largePaste == nil {
                 largePaste = String(repeating: "PQRC large paste demo line.\n", count: 8000)
@@ -81,73 +130,52 @@ struct ConversationView: View {
                 aiHereChip
             }
             ToolbarItemGroup(placement: .topBarTrailing) {
-                Button {
-                    selecting.toggle()
-                    selection = []
-                } label: {
-                    Image(systemName: selecting ? "checkmark.circle" : "checklist")
-                }
-                .accessibilityLabel(selecting ? "Done selecting" : "Select messages")
-                .accessibilityIdentifier("select-messages-button")
-                .help("Select several messages at once to add them to your AI's context.")
-                Button {
-                    showThreadSheet = true
-                } label: {
-                    Image(systemName: "text.bubble")
-                }
-                .accessibilityLabel("Start AI thread")
-                .accessibilityIdentifier("thread-create-button")
-                .help("Start a thread where each person's AI can join and collaborate — everything they say is recorded right there.")
-                Button {
-                    showWindowPicker = true
-                } label: {
-                    Image(systemName: "sparkles")
-                }
-                .accessibilityLabel("AI options")
-                .accessibilityIdentifier("ai-window-button")
-                .help("AI options: draft a reply privately, turn your AI on for everyone for a set time, or share AI context.")
-                Button {
-                    showDetails = true
-                } label: {
-                    Image(systemName: "info.circle")
-                }
-                .accessibilityLabel("Conversation details")
-                .help("Verify this contact's safety code, set a local name, control AI here, or block.")
-            }
-        }
-        .confirmationDialog("Always-on AI", isPresented: $showWindowPicker) {
-            ForEach([15, 30, 60, 120], id: \.self) { minutes in
-                Button("My AI responds for \(minutes) min") {
-                    Task { await model.startWindow(conversationID: conversationID, minutes: minutes) }
-                }
-            }
-            Button("Draft a reply privately") {
-                Task {
-                    aiDraft = await model.draft(conversationID: conversationID)
-                    showDraftSheet = aiDraft != nil
-                }
-            }
-            // One-shot read at presentation time (no per-second tick needed in
-            // this body): the grant's live/expired state when the sheet opens.
-            if model.iGrantedContext(
-                scope: conversationScope, now: Int64(Date().timeIntervalSince1970))
-            {
-                Button("Stop sharing AI context", role: .destructive) {
-                    Task { await model.withdrawContextSharing(scope: conversationScope) }
-                }
-            } else {
-                Button("Share AI context (30 min)") {
-                    Task {
-                        await model.grantContextSharing(
-                            scope: conversationScope, minutes: 30, conversationID: conversationID)
+                if selecting {
+                    // In multi-select, a single explicit Done — no crowded bar.
+                    Button("Done") {
+                        selecting = false
+                        selection = []
                     }
+                    .accessibilityIdentifier("select-messages-button")
+                } else {
+                    // One real "•••" menu (the auto-overflow one didn't respond) holding
+                    // every conversation action — including the in-chat rename — so the
+                    // nav bar stays just the AI:live chip + this menu, not cramped.
+                    Menu {
+                        if !isGroup {
+                            Button {
+                                renameText = currentContactName
+                                showRename = true
+                            } label: {
+                                Label("Rename contact", systemImage: "pencil")
+                            }
+                        }
+                        Button {
+                            selecting = true
+                            selection = []
+                        } label: {
+                            Label("Select messages", systemImage: "checklist")
+                        }
+                        .accessibilityIdentifier("select-messages-menu-item")
+                        Button {
+                            showThreadSheet = true
+                        } label: {
+                            Label("Start AI thread", systemImage: "text.bubble")
+                        }
+                        .accessibilityIdentifier("thread-create-button")
+                        Button {
+                            showDetails = true
+                        } label: {
+                            Label("Conversation details", systemImage: "info.circle")
+                        }
+                        .accessibilityIdentifier("conversation-details-item")
+                    } label: {
+                        Image(systemName: "ellipsis.circle")
+                    }
+                    .accessibilityLabel("More")
+                    .accessibilityIdentifier("conversation-more-menu")
                 }
             }
-        } message: {
-            Text("Everyone in the conversation will see that your AI is active.")
-        }
-        .sheet(isPresented: $showDraftSheet) {
-            DraftSheet(model: model, conversationID: conversationID, draft: aiDraft ?? "")
         }
         .sheet(isPresented: $showThreadSheet) {
             ThreadCreateSheet(model: model, conversationID: conversationID)
@@ -160,6 +188,15 @@ struct ConversationView: View {
             aiSummary = model.primaryAIContextSummary(conversationID)
         }) {
             AIHereSheet(model: model, conversationID: conversationID)
+        }
+        // "Have my AI answer this" (long-press a guest message) → preview the drafted
+        // reply, then "Send as my AI" or "Edit & send as me" — the same DraftSheet the
+        // private-draft path uses.
+        .sheet(
+            isPresented: Binding(
+                get: { answerDraft != nil }, set: { if !$0 { answerDraft = nil } })
+        ) {
+            DraftSheet(model: model, conversationID: conversationID, draft: answerDraft ?? "")
         }
         .fullScreenCover(item: $fullScreenContent) { content in
             FullScreenReaderView(text: content.text)
@@ -189,10 +226,13 @@ struct ConversationView: View {
                 Text(AIContextVocab.glance(aiSummary))
                 // Remote AI: the egress-firewall state is always visible (privacy
                 // cardinal rule) — shielded when on, an orange open lock when off.
-                if aiSummary.mode != "off" && aiSummary.isRemote {
-                    Image(systemName: aiSummary.firewallOn ? "lock.shield" : "lock.open")
-                        .foregroundStyle(aiSummary.firewallOn ? AnyShapeStyle(.secondary) : AnyShapeStyle(.orange))
-                }
+                // Every chat is E2EE, so the lock is ALWAYS shown (it used to vanish
+                // whenever no remote AI was active — the "lost lock"). It sharpens to a
+                // shield when a remote AI's egress firewall is on, or an orange OPEN
+                // lock when a remote AI is active with the firewall OFF — that downgrade
+                // must stay visible (privacy cardinal rule).
+                Image(systemName: lockGlyph)
+                    .foregroundStyle(lockTint)
             }
             .font(.caption.weight(.medium))
             .foregroundStyle(.primary)
@@ -212,6 +252,18 @@ struct ConversationView: View {
         // iOS). The shield/open-lock glyph reflects the egress firewall for a
         // remote AI — shielded when on, an orange open lock when off.
         .help("What your AI sees in this chat, at a glance. Tap to change it just here. The shield shows the egress firewall is on for a remote AI; an orange open lock means it's off.")
+    }
+
+    /// The AI:live lock, ALWAYS present (every chat is E2EE): a plain closed lock by
+    /// default, a shield when a remote AI's egress firewall is on, an open lock when a
+    /// remote AI is active with the firewall off.
+    private var lockGlyph: String {
+        guard aiSummary.mode != "off", aiSummary.isRemote else { return "lock" }
+        return aiSummary.firewallOn ? "lock.shield" : "lock.open"
+    }
+    private var lockTint: AnyShapeStyle {
+        (aiSummary.mode != "off" && aiSummary.isRemote && !aiSummary.firewallOn)
+            ? AnyShapeStyle(.orange) : AnyShapeStyle(.secondary)
     }
 
     private var threadChips: some View {
@@ -301,6 +353,21 @@ struct ConversationView: View {
                 },
             onFullScreen: selecting ? nil : { fullScreenContent = FullScreenContent(text: $0) },
             onRetry: selecting ? nil : { Task { await model.retry(message) } },
+            // Guest messages only: have my AI draft a reply to THIS message → a preview
+            // sheet (Send as my AI / Edit & send as me). User-initiated, so no ai_window
+            // is needed (the §13 gate stops UNBIDDEN agent sends; this is bidden).
+            onAnswerWithAI: (selecting || isMine || message.participantType == .agent)
+                ? nil
+                : {
+                    guard !answerDrafting else { return }
+                    answerDrafting = true
+                    Task {
+                        let text = await model.draft(
+                            conversationID: conversationID, focus: message.text)
+                        answerDrafting = false
+                        if let text { answerDraft = text }
+                    }
+                },
             // Strip the AgentSkills ⟡⟡ envelope from agent bubbles unless the
             // per-silo "Show agent protocol envelope" toggle is on (default off).
             // Display-only — the stored record keeps the raw bytes (§23).
@@ -346,6 +413,16 @@ struct ConversationView: View {
         .padding(.horizontal)
         .padding(.vertical, 8)
         .background(.bar)
+    }
+
+    /// Send whatever's in the composer (a large paste or the typed text), then clear it.
+    /// Factored out so the Send button and the macOS Return key share one path.
+    private func sendCurrent() {
+        let outgoing = largePaste ?? draftText
+        guard !outgoing.isEmpty else { return }
+        largePaste = nil
+        draftText = ""
+        Task { await model.send(outgoing, conversationID: conversationID) }
     }
 
     private var composer: some View {
@@ -427,11 +504,19 @@ struct ConversationView: View {
                         }
                         .disabled(aiDrafting)
                     }
+                    #if os(macOS) || targetEnvironment(macCatalyst)
+                        // Mac: Return sends, Shift+Return inserts a newline for multi-line
+                        // blocks. (The all-keys overload — `.onKeyPress(.return)` doesn't
+                        // surface the press for a TextField.) iOS/iPadOS are untouched.
+                        .onKeyPress { press in
+                            guard press.key == .return, !press.modifiers.contains(.shift)
+                            else { return .ignored }
+                            sendCurrent()
+                            return .handled
+                        }
+                    #endif
                 Button {
-                    let outgoing = largePaste ?? draftText
-                    largePaste = nil
-                    draftText = ""
-                    Task { await model.send(outgoing, conversationID: conversationID) }
+                    sendCurrent()
                 } label: {
                     Image(systemName: "arrow.up.circle.fill")
                         .font(.title)
@@ -510,6 +595,7 @@ private struct ConversationStatusHeader: View {
     private let ticker = Timer.publish(every: 1, on: .main, in: .common).autoconnect()
 
     var body: some View {
+        let summary = model.primaryAIContextSummary(conversationID)
         VStack(spacing: 0) {
             if let banner = model.activeWindowBanner(conversationID: conversationID, now: now) {
                 AIWindowBanner(name: banner.name, until: banner.until, now: now)
@@ -519,8 +605,39 @@ private struct ConversationStatusHeader: View {
                     .font(.caption.weight(.medium))
                     .frame(maxWidth: .infinity)
                     .padding(.vertical, 6)
-                    .background(Color.purple.opacity(0.12))
+                    // OPAQUE tint, not `Color.purple.opacity(0.12)`: the accessibility
+                    // contrast auditor hard-fails a full-width label over a translucent
+                    // fill because it can't determine the effective background. The mix is
+                    // the same 12%-purple look but opaque, so contrast is computable and
+                    // it adapts to light/dark (DEVIATIONS A7 / build-conventions).
+                    .background(Color.purple.mix(with: Color(.systemBackground), by: 0.88))
                     .accessibilityIdentifier("context-sharing-banner")
+            }
+            // Egress-firewall state for this chat. Shown only when a REMOTE AI is here —
+            // the only time the firewall does anything (on-device AI never leaves the
+            // device). ON is the calm, protected state; OFF is a LOUD warning that real
+            // names + full context leave the device unredacted (privacy cardinal rule:
+            // the downgrade must stay visible). Opaque tint so the contrast auditor can
+            // resolve it (A7).
+            if summary.mode != "off", summary.isRemote {
+                Label(
+                    summary.firewallOn
+                        ? "Egress firewall on — names & secrets redacted before this chat reaches your cloud AI"
+                        : "Egress firewall OFF — real names & full context leave your device",
+                    systemImage: summary.firewallOn ? "lock.shield" : "lock.open")
+                    .font(.caption.weight(.medium))
+                    .foregroundStyle(.primary)
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 6)
+                    .background(
+                        summary.firewallOn
+                            ? Color.green.mix(with: Color(.systemBackground), by: 0.86)
+                            : Color.orange.mix(with: Color(.systemBackground), by: 0.78))
+                    .accessibilityIdentifier("conversation-firewall-status")
+                    .accessibilityLabel(
+                        summary.firewallOn
+                            ? "Egress firewall on for this conversation"
+                            : "Warning: egress firewall off — full context leaves your device")
             }
         }
         .onReceive(ticker) { _ in
@@ -639,11 +756,18 @@ struct ThreadCreateSheet: View {
     }
 }
 
+/// Mode for the "My AI responds" control: drafts privately (default,
+/// privacy-first — nothing posted, no context shared) vs responds in chat as the
+/// signed agent for a bounded window (announces an active window + shares context).
+enum AIRespondsMode: Hashable { case draftsPrivately, respondsInChat }
+
 /// Tap-target of the in-chat "AI here" chip: the per-conversation AI context
 /// override, surfaced in the chat itself (the SAME control as
 /// ConversationDetailsView's "AI context here"). Writes/reads the SAME
 /// `AppSession.conversationContextMode`, so chip · this sheet · Details stay in
-/// sync, and the engine reads it every turn (changes apply in real time).
+/// sync, and the engine reads it every turn (changes apply in real time). Also
+/// hosts the "My AI responds" control (moved here from Details) so it sits beside
+/// the AI-context picker + egress-firewall indicator.
 struct AIHereSheet: View {
     @Bindable var model: AppModel
     let conversationID: String
@@ -652,13 +776,30 @@ struct AIHereSheet: View {
     @State private var aiContextMode = "default"
     @State private var summary: (mode: String, isRemote: Bool, firewallOn: Bool) =
         ("active", false, true)
+    /// "My AI responds" control (moved here from Details): how this AI acts in
+    /// THIS conversation — drafts privately (default, privacy-first) vs responds
+    /// in chat as the signed agent. The duration is the AI window's life AND the
+    /// context-sharing grant when in "responds in chat" mode.
+    @State private var aiRespondsMode: AIRespondsMode = .draftsPrivately
+    /// Window/grant duration in HOURS (stored as 1 / 8 / 24; sent as ×60 minutes).
+    @State private var aiRespondsHours = 1
+    /// Last on-demand private draft, presented in the DraftSheet.
+    @State private var aiRespondsDraft: String?
+    @State private var showAIRespondsDraft = false
+
+    /// Context-sharing scope for the "My AI responds" control — this conversation.
+    private var aiRespondsScope: AIContextGrant.Scope { .conversation(conversationID) }
+    /// Human-readable window/grant duration ("1 hour" / "8 hours" / "24 hours").
+    private var aiRespondsDurationLabel: String {
+        aiRespondsHours == 1 ? "1 hour" : "\(aiRespondsHours) hours"
+    }
 
     var body: some View {
         NavigationStack {
             Form {
                 Section {
                     Picker("AI context here", selection: $aiContextMode) {
-                        Text("Use default").tag("default")
+                        Text("Follow each AI's own setting").tag("default")
                         Text("Off in this conversation").tag("off")
                         Text("Marked only — messages I add to context").tag("marked")
                         Text("Live — full conversation while active").tag("full")
@@ -677,7 +818,69 @@ struct AIHereSheet: View {
                 } header: {
                     Text("AI in this conversation — overrides your AI's default (now: \(AIContextVocab.glance(summary)))")
                 } footer: {
-                    Text("Overrides your AIs' own context setting, just here. \"Off\" keeps every AI from gathering anything from this conversation. Applies in real time. Set per-AI defaults and the egress firewall in Settings ▸ AI.")
+                    Text("Overrides your AIs' own context setting, just here. \"Off\" keeps every AI from gathering anything OR replying in this conversation. Each conversation is separate — your AI never carries context from one chat into another. Applies in real time. Set per-AI defaults and the egress firewall in Settings ▸ AI.")
+                }
+                Section {
+                    // "My AI responds" — folds the AI window (responds-in-chat) and
+                    // private drafting into one control, styled like the AI-context
+                    // picker above. The chosen duration is the window's life;
+                    // context-sharing is implied by the mode — only "responds in chat"
+                    // shares and only it announces an active window. Privacy-first
+                    // default: drafts privately (nothing posted, no context shared).
+                    Picker("Mode", selection: $aiRespondsMode) {
+                        Text("Drafts privately").tag(AIRespondsMode.draftsPrivately)
+                        Text("Responds in chat").tag(AIRespondsMode.respondsInChat)
+                    }
+                    .accessibilityIdentifier("ai-responds-mode")
+                    Picker("For", selection: $aiRespondsHours) {
+                        Text("1 hour").tag(1)
+                        Text("8 hours").tag(8)
+                        Text("24 hours").tag(24)
+                    }
+                    .accessibilityIdentifier("ai-responds-duration")
+                    if aiRespondsMode == .respondsInChat {
+                        Button {
+                            // Identical privacy semantics to the former AIRespondsSheet:
+                            // open the signed AI window for the chosen time, THEN grant
+                            // context-sharing for the same scope/duration.
+                            Task {
+                                await model.startWindow(
+                                    conversationID: conversationID, minutes: aiRespondsHours * 60)
+                                await model.grantContextSharing(
+                                    scope: aiRespondsScope, minutes: aiRespondsHours * 60,
+                                    conversationID: conversationID)
+                            }
+                        } label: {
+                            Label(
+                                "Turn on for \(aiRespondsDurationLabel)", systemImage: "sparkles")
+                        }
+                        .accessibilityIdentifier("ai-responds-turn-on")
+                    } else {
+                        Button {
+                            // On-demand private draft — nothing posted, no context shared.
+                            Task {
+                                aiRespondsDraft = await model.draft(conversationID: conversationID)
+                                showAIRespondsDraft = aiRespondsDraft != nil
+                            }
+                        } label: {
+                            Label("Draft a reply now", systemImage: "square.and.pencil")
+                        }
+                        .accessibilityIdentifier("ai-responds-draft-now")
+                    }
+                    if model.iGrantedContext(
+                        scope: aiRespondsScope, now: Int64(Date().timeIntervalSince1970))
+                    {
+                        Button("Stop sharing AI context", role: .destructive) {
+                            Task { await model.withdrawContextSharing(scope: aiRespondsScope) }
+                        }
+                        .accessibilityIdentifier("ai-responds-stop-sharing")
+                    }
+                } header: {
+                    Text("My AI responds")
+                } footer: {
+                    Text(aiRespondsMode == .respondsInChat
+                        ? "Your AI replies in this conversation as your signed agent for the chosen time and shares your AI context with the others present. Everyone in the conversation will see that your AI is active."
+                        : "Your AI only drafts replies for you to review and send — nothing is posted to the conversation and no AI context is shared. Drafting is on demand; tap below whenever you want one.")
                 }
             }
             .navigationTitle("AI here")
@@ -692,7 +895,15 @@ struct AIHereSheet: View {
                     Button("Done") { dismiss() }
                 }
             }
+            // On-demand private draft from "My AI responds" → reuses the same
+            // DraftSheet so the preview / "Send as my AI" / "Edit & send as me"
+            // flow is identical.
+            .sheet(isPresented: $showAIRespondsDraft) {
+                DraftSheet(
+                    model: model, conversationID: conversationID, draft: aiRespondsDraft ?? "")
+            }
         }
-        .presentationDetents([.medium])
+        .presentationDetents([.large])
+        .presentationSizing(.page)
     }
 }

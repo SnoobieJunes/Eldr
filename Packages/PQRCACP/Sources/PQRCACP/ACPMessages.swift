@@ -82,6 +82,91 @@ enum ACPWire {
         ])
     }
 
+    /// `{ sessionId, update: { sessionUpdate:"plan", entries:[{content,priority,status}] } }`
+    /// The agent's plan for the turn — a checklist the client renders so the user sees
+    /// the agent's approach (ACP `PlanEntry`: `content`, `priority` ∈ low|medium|high,
+    /// `status` ∈ pending|in_progress|completed). The whole plan is re-sent on each
+    /// change (the spec models it as a full snapshot, not a delta), so re-emitting with
+    /// updated statuses is how a step flips to `completed`.
+    static func plan(sessionId: String, entries: [(content: String, status: String)]) -> JSONValue {
+        let entryObjects = entries.map { entry -> JSONValue in
+            .object([
+                "content": .string(entry.content),
+                // We don't infer per-step priority from the heuristic, so every entry
+                // is `medium` (a valid spec value the client may ignore).
+                "priority": .string("medium"),
+                "status": .string(entry.status),
+            ])
+        }
+        return .object([
+            "sessionId": .string(sessionId),
+            "update": .object([
+                "sessionUpdate": .string("plan"),
+                "entries": .array(entryObjects),
+            ]),
+        ])
+    }
+
+    // MARK: Phase D4 — interactive PTY terminal (Eldr extension)
+
+    // These ride the SAME session/update channel as agent_message_chunk/plan, with Eldr
+    // `sessionUpdate` variants. They are SEPARATE from the request-based `terminal/*`
+    // (`terminal/create` → `wait_for_exit` → `output` → `release`) that one-shot
+    // `run_shell` uses (ToolExecutor.runShellViaClient) — that path is untouched. A
+    // PERSISTENT interactive terminal streams its output incrementally instead of
+    // buffering to EOF, so it needs a push channel the request/response shape can't give.
+
+    /// `{ sessionId, update: { sessionUpdate:"terminal_opened", terminalId, title } }`
+    /// Announces a newly-spawned interactive PTY so the phone shows a terminal view.
+    static func terminalOpened(sessionId: String, terminalId: String, title: String) -> JSONValue {
+        .object([
+            "sessionId": .string(sessionId),
+            "update": .object([
+                "sessionUpdate": .string("terminal_opened"),
+                "terminalId": .string(terminalId),
+                "title": .string(title),
+            ]),
+        ])
+    }
+
+    /// `{ sessionId, update: { sessionUpdate:"terminal_output", terminalId, chunk } }`
+    /// One incremental slice of the PTY's combined stdout+stderr.
+    static func terminalOutput(sessionId: String, terminalId: String, chunk: String) -> JSONValue {
+        .object([
+            "sessionId": .string(sessionId),
+            "update": .object([
+                "sessionUpdate": .string("terminal_output"),
+                "terminalId": .string(terminalId),
+                "chunk": .string(chunk),
+            ]),
+        ])
+    }
+
+    /// `{ sessionId, update: { sessionUpdate:"terminal_closed", terminalId, exitCode? } }`
+    /// The PTY ended (child exited or it was killed). `exitCode` is omitted when unknown
+    /// (e.g. killed by signal).
+    static func terminalClosed(sessionId: String, terminalId: String, exitCode: Int?) -> JSONValue {
+        var update: [String: JSONValue] = [
+            "sessionUpdate": .string("terminal_closed"),
+            "terminalId": .string(terminalId),
+        ]
+        if let exitCode { update["exitCode"] = .int(exitCode) }
+        return .object([
+            "sessionId": .string(sessionId),
+            "update": .object(update),
+        ])
+    }
+
+    /// `{ sessionId, terminalId, data }` — the `terminal/input` notification params
+    /// (write stdin to a live PTY).
+    static func terminalInput(sessionId: String, terminalId: String, data: String) -> JSONValue {
+        .object([
+            "sessionId": .string(sessionId),
+            "terminalId": .string(terminalId),
+            "data": .string(data),
+        ])
+    }
+
     // MARK: session/request_permission
 
     /// `{ sessionId, toolCall: { toolCallId, title, kind, status }, options:[…] }`.

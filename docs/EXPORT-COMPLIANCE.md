@@ -21,10 +21,11 @@ re-asking "Does your app use encryption?" on every upload.
 
 ## Why `YES`, and why we still qualify to ship
 
-PQRC composes only **standard, published** primitives — AES-256-GCM,
-ChaCha20-Poly1305, SHA-2, HKDF, X25519, Ed25519, secp256k1, ML-KEM-768
-(FIPS 203) — via Apple CryptoKit / swift-crypto and libsecp256k1. No
-proprietary or custom cryptography (SPEC §2; THREAT_MODEL §5). That makes it
+PQRC uses **standard, published primitives composed into a custom protocol
+(pqrc-v1)** — AES-256-GCM, ChaCha20-Poly1305, SHA-2, HKDF, X25519, Ed25519,
+secp256k1, ML-KEM-768 (FIPS 203) — via Apple CryptoKit / swift-crypto and
+libsecp256k1. **No invented primitives**: the novelty is in the composition, not
+the cryptography (SPEC §2; THREAT_MODEL §5). That makes it
 **mass-market software** under EAR Category 5, Part 2, eligible for the
 self-classification exemption at **§740.17(b)(1)**. `YES` + claiming this
 exemption is the correct, honest path. Do **not** flip the flag to `NO` to skip

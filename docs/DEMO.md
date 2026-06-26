@@ -7,8 +7,10 @@ No bytes leave the device.
 
 ## Running it
 
-**From the app:** Settings → *Try the demo (Local Universe)* (Debug builds;
-the reviewer-facing entry per TESTFLIGHT-GUIDE §F).
+**From the app (Release & Debug):** on the lock screen tap *See the live demo*,
+or — after creating an account — Settings → *Try the demo (Local Universe)*. The
+demo is self-contained and on-device; it never touches your real account
+(TESTFLIGHT-GUIDE §F).
 
 **From Xcode / CLI:** launch the `EldrChat` scheme (renamed from `PQRC`; the old
 scheme is stale) with arguments:

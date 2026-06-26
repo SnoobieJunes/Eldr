@@ -148,13 +148,30 @@ public actor EldrNodeCore {
             try? await messenger.sendFramed(framed, to: ownerIdentityHex)
         }
 
+        // Phase D3 — MCP passthrough over the relay. A SECOND relay line transport
+        // (magic `MCP1|`, un-confusable with the ACP one) carries the node's MCP chat
+        // requests to the OWNER's phone and the phone's REDACTED responses back. The
+        // `MCPOverRelayClient` over it is injected as the agent's `extraTools`, so the
+        // coding agent can read/draft/search the owner's chat — every call answered by
+        // the phone's redacting + ai_window-gating MCP server (the node never sees raw
+        // chat). It is only ACTIVE for a session where the phone advertised
+        // `mcpServers` (its "share chat context" consent), so when the phone hasn't
+        // opted in this whole channel is dormant: the agent advertises nothing extra
+        // and the phone services no MCP frames.
+        let mcpTransport = RelayMCPTransport(maxFrameBytes: maxFrameBytes) {
+            [messenger] framed in
+            try? await messenger.sendFramed(framed, to: ownerIdentityHex)
+        }
+        let mcpClient = MCPOverRelayClient(seam: mcpTransport)
+
         // Serve the AGENT half over the transport, in a child task — a long
         // `session/prompt` turn must not block the inbound read loop below (the owner's
         // permission answer arrives as a LATER inbound frame the in-flight turn awaits).
         let agentTask = Task {
             await runACPAgent(
                 transport: transport, llm: llm, toolEnvironment: toolEnvironment,
-                config: config, configDir: nil, streamingEnabled: streamingEnabled)
+                config: config, configDir: nil, streamingEnabled: streamingEnabled,
+                extraTools: mcpClient)
         }
 
         // Begin the messenger's single event stream and consume it as the SOLE consumer.
@@ -176,11 +193,21 @@ public actor EldrNodeCore {
             if Task.isCancelled { break }
             switch event {
             case .message(let received):
-                await Self.routeInbound(
+                // Route ACP control frames AND MCP chat-tool frames, each gated by the
+                // SAME C-3 owner check. A body is at most one of the two (distinct
+                // magics) or neither (ordinary chat the headless node ignores).
+                let admittedACP = await Self.routeInbound(
                     senderIdentityHex: received.senderIdentityHex,
                     body: received.body.text,
                     ownerIdentityHex: ownerIdentityHex,
                     transport: transport)
+                if !admittedACP {
+                    await Self.routeInboundMCP(
+                        senderIdentityHex: received.senderIdentityHex,
+                        body: received.body.text,
+                        ownerIdentityHex: ownerIdentityHex,
+                        transport: mcpTransport)
+                }
             case .messageRequest(let senderNostrPubkeyHex, _):
                 // The headless daemon starts with an EMPTY contact table (no app/Keychain
                 // contact store to seed it), so the OWNER's opening handshake arrives as an
@@ -200,9 +227,12 @@ public actor EldrNodeCore {
             }
         }
 
-        // The stream finished or we were cancelled: close the transport (finishes the
-        // agent's inbound stream → `runACPAgent` returns) and cancel the agent task.
+        // The stream finished or we were cancelled: close both transports (the ACP one
+        // finishes the agent's inbound stream → `runACPAgent` returns) + the MCP client,
+        // and cancel the agent task.
         transport.close()
+        mcpTransport.close()
+        await mcpClient.shutdown()
         agentTask.cancel()
     }
 
@@ -236,6 +266,28 @@ public actor EldrNodeCore {
         // C-3: only the pinned owner may drive the agent. A non-owner ACP frame is
         // dropped silently — do not even surface that an agent is attached.
         guard senderIdentityHex == ownerIdentityHex else { return false }
+        await transport.deliverInbound(body)
+        return true
+    }
+
+    /// Phase D3 — route one inbound MCP chat-tool frame. **Same C-3 gate as ACP:**
+    /// deliver to the node's MCP client transport ONLY when the body is an `MCP1|`
+    /// frame AND `senderIdentityHex` is the pinned owner. These are the phone's
+    /// REDACTED responses to the node's chat-tool requests (the phone is the MCP
+    /// server here); a non-owner's MCP frame is dropped, so a stranger can neither
+    /// answer the node's chat queries nor inject a forged transcript.
+    ///
+    /// - Returns: `true` iff the frame was admitted (owner-signed MCP) and forwarded;
+    ///   `false` for a non-MCP line or a non-owner MCP frame (both dropped).
+    @discardableResult
+    static func routeInboundMCP(
+        senderIdentityHex: String,
+        body: String,
+        ownerIdentityHex: String,
+        transport: RelayMCPTransport
+    ) async -> Bool {
+        guard RelayMCPTransport.isMCPFrame(body) else { return false }  // not MCP → ignore
+        guard senderIdentityHex == ownerIdentityHex else { return false }  // C-3
         await transport.deliverInbound(body)
         return true
     }

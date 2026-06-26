@@ -104,11 +104,15 @@ public struct ToolExecutor: Sendable {
     /// backpressure (`maxResultBytes` only trims after the whole file is in memory).
     /// Over-cap files are read as a bounded prefix via `FileHandle`. `Int.max` → no cap.
     let maxReadFileBytes: Int
+    /// Wall-clock cap (seconds) for a single `run_shell` / search child process.
+    /// 0 = unlimited (no watchdog) — a real build/test legitimately runs for minutes.
+    let shellTimeoutSeconds: TimeInterval
 
     public init(
         capabilities: ClientCapabilities, environment: ToolEnvironment,
         connection: ClientConnection?, sessionId: String, outputByteLimit: Int = 64 * 1024,
-        maxResultBytes: Int = Int.max, maxReadFileBytes: Int = Int.max
+        maxResultBytes: Int = Int.max, maxReadFileBytes: Int = Int.max,
+        shellTimeoutSeconds: TimeInterval = 0
     ) {
         self.capabilities = capabilities
         self.environment = environment
@@ -117,13 +121,22 @@ public struct ToolExecutor: Sendable {
         self.outputByteLimit = outputByteLimit
         self.maxResultBytes = maxResultBytes
         self.maxReadFileBytes = maxReadFileBytes
+        self.shellTimeoutSeconds = max(0, shellTimeoutSeconds)
     }
 
     /// The built-in tools' names, in advertise order. The single source of truth for
     /// "what tools exist" (used to validate an allowlist).
     public static let allToolNames = [
         "read_file", "write_file", "edit_file", "list_dir", "search", "run_shell",
+        "open_terminal",
     ]
+
+    /// Phase D4 — the interactive-PTY tool name. A PERSISTENT streaming terminal (REPLs,
+    /// debuggers, long-running processes), as opposed to one-shot `run_shell`. NOT run by
+    /// `ToolExecutor` (a value type can't own a long-lived process); `ACPAgent` intercepts
+    /// it and manages the `PTYProcess` lifecycle. Defined here so it shares the tool
+    /// allowlist + the `execute` ToolKind (and therefore the phone's mutating-tool gate).
+    public static let openTerminalTool = "open_terminal"
 
     /// The OpenAI tool/function definitions the agent advertises to its LLM,
     /// optionally filtered to an allowlist (empty → all). Descriptions are written
@@ -216,6 +229,14 @@ public struct ToolExecutor: Sendable {
                     "Run one shell command with /bin/zsh -lc in the working directory; returns combined stdout+stderr and the exit code. Use for builds and tests, e.g. run_shell(command: \"xcodebuild -scheme App test\") or xcrun simctl / swift build. DEVELOPER_DIR is preset to the configured Xcode. Long output is truncated.",
                 parameters: stringArgSchema(
                     name: "command", desc: "the single shell command line to run", required: true)),
+            LLMTool(
+                name: "open_terminal",
+                description:
+                    "Open a PERSISTENT interactive terminal (a live shell on a pseudo-terminal) for REPLs, debuggers, or long-running processes that need streamed input/output over time — NOT for one-off commands (use run_shell for those). Returns a terminalId; output streams live to the user's device and you cannot read it back, so only use this when the USER needs an interactive session. An optional command runs immediately in the shell. Example: open_terminal(command: \"python3\").",
+                parameters: stringArgSchema(
+                    name: "command",
+                    desc: "an optional command to run immediately in the new shell (may be empty)",
+                    required: false)),
         ]
         guard !allowlist.isEmpty else { return all }
         let wanted = Set(allowlist)
@@ -243,7 +264,14 @@ public struct ToolExecutor: Sendable {
         switch tool {
         case "read_file", "list_dir", "search": return "read"
         case "write_file", "edit_file": return "edit"
-        case "run_shell": return "execute"
+        // run_shell and open_terminal both EXECUTE on the node → the `execute` ToolKind,
+        // which the phone's allowlist (`PersonaRuntime.isMutatingACPToolKind`) treats as
+        // mutating. open_terminal carries the stronger phone-side gate (the standing
+        // autonomous-changes consent, no allow-once) because an open-ended interactive
+        // shell can't be meaningfully approved per-keystroke — that distinction is made
+        // phone-side off the tool TITLE (`isInteractiveTerminalTitle`), since the ACP
+        // ToolKind vocabulary has no finer-grained value.
+        case "run_shell", "open_terminal": return "execute"
         default: return "other"
         }
     }
@@ -252,6 +280,7 @@ public struct ToolExecutor: Sendable {
     /// prompt (when the client supports it) before they run.
     static func needsPermission(_ tool: String) -> Bool {
         tool == "write_file" || tool == "edit_file" || tool == "run_shell"
+            || tool == "open_terminal"
     }
 
     /// A short human title for a tool call (shown in the editor's tool UI).
@@ -263,9 +292,22 @@ public struct ToolExecutor: Sendable {
         case "list_dir": return "List \(args["path"]?.stringValue ?? ".")"
         case "search": return "Search \"\(args["query"]?.stringValue ?? "")\""
         case "run_shell": return "Run: \(args["command"]?.stringValue ?? "")"
+        case "open_terminal":
+            // The phone keys its STRONGER gate (standing autonomous-changes consent, no
+            // allow-once) off this exact prefix — `ACPTerminal.interactiveTerminalTitlePrefix`
+            // (iOS-available, the single source of truth) / `PersonaRuntime.isInteractiveTerminalTitle`.
+            let cmd = args["command"]?.stringValue ?? ""
+            return cmd.isEmpty
+                ? interactiveTerminalTitlePrefix
+                : "\(interactiveTerminalTitlePrefix): \(cmd)"
         default: return tool
         }
     }
+
+    /// Phase D4 — the stable title prefix every `open_terminal` permission request
+    /// carries. Re-exported from the iOS-available `ACPTerminal` (the single source of
+    /// truth shared with the phone's gate) so node-side call sites stay terse.
+    public static let interactiveTerminalTitlePrefix = ACPTerminal.interactiveTerminalTitlePrefix
 
     // MARK: Dispatch
 
@@ -315,7 +357,26 @@ public struct ToolExecutor: Sendable {
         }
         var root = canonical(environment.effectiveWorkdir)
         if root.count > 1, root.hasSuffix("/") { root.removeLast() }
-        let resolved = canonical(absolutePath(path))
+        // `resolvingSymlinksInPath` only resolves a symlinked component when the FULL
+        // path exists on disk. For a NEW file (the normal `write_file` case) the leaf
+        // doesn't exist, so a symlinked PARENT dir is left unresolved — `write_file(
+        // "link/newfile")` through `link -> ~/.ssh` then passed the prefix check while
+        // the actual write followed the link OUT of the jail (CR-2, PoC-confirmed). Fix:
+        // canonicalize the deepest EXISTING ancestor (whose symlinks DO resolve), then
+        // re-append the not-yet-existing leaf components and re-check.
+        let fm = FileManager.default
+        let absURL = URL(fileURLWithPath: absolutePath(path)).standardizedFileURL
+        var existing = absURL
+        var tail: [String] = []
+        while !fm.fileExists(atPath: existing.path) {
+            let parent = existing.deletingLastPathComponent()
+            if parent.path == existing.path { break }  // reached "/"
+            tail.insert(existing.lastPathComponent, at: 0)
+            existing = parent
+        }
+        var resolved = canonical(existing.path)
+        for component in tail { resolved += "/" + component }
+        resolved = canonical(resolved)  // also resolve a leaf that is itself a symlink
         return resolved == root || resolved.hasPrefix(root + "/") ? resolved : nil
     }
 
@@ -553,6 +614,15 @@ public struct ToolExecutor: Sendable {
         } catch {
             return nil  // ripgrep not installed → Foundation fallback
         }
+        // Bound the search the same way as run_shell so a pathological tree can't
+        // wedge the turn. rg is normally fast and self-terminating (`--max-count`);
+        // this is belt-and-suspenders.
+        // 0 = unlimited: no watchdog. A positive shellTimeoutSeconds reclaims a
+        // non-terminating command; a real build/test may legitimately run minutes.
+        let watchdog: Task<Void, Never>? = shellTimeoutSeconds > 0
+            ? Self.processWatchdog(pid: process.processIdentifier, seconds: shellTimeoutSeconds)
+            : nil
+        defer { watchdog?.cancel() }
         let data = pipe.fileHandleForReading.readDataToEndOfFile()
         process.waitUntilExit()
         // rg exit 1 = no matches (still a valid empty result); 2+ = usage/IO error.
@@ -648,6 +718,35 @@ public struct ToolExecutor: Sendable {
 
     // MARK: run_shell
 
+    /// Wall-clock ceiling for a node-spawned child on the Foundation fallback
+    /// path. The preferred client-terminal route delegates lifetime to the
+    /// editor; this fallback owns it, so a non-terminating command can never hang
+    /// the agent turn. A tool-execution safety bound — not a key-schedule timer.
+    static let childProcessTimeout: TimeInterval = 120
+
+    /// Fire-and-forget watchdog: after `seconds`, SIGTERM then (after a 0.5s
+    /// grace) SIGKILL `pid`. Captures only the Sendable `pid_t` + Doubles, so it
+    /// is safe to spawn from this `Sendable` value type without touching the
+    /// non-Sendable `Process`. Cancel it once the child exits so a normally
+    /// finishing command is never signalled. Kills the direct child — the common
+    /// hang (`sleep` / `tail -f` / a wedged build / a `read` prompt) is a single
+    /// exec'd process; deliberately backgrounded grandchildren are out of scope
+    /// for this fallback (the client-terminal path is the supported long-lived route).
+    static func processWatchdog(pid: pid_t, seconds: TimeInterval) -> Task<Void, Never> {
+        Task {
+            do {
+                try await Task.sleep(nanoseconds: UInt64(seconds * 1_000_000_000))
+                if Task.isCancelled { return }
+                kill(pid, SIGTERM)
+                try await Task.sleep(nanoseconds: 500_000_000)
+                if Task.isCancelled { return }
+                kill(pid, SIGKILL)
+            } catch {
+                // Cancelled — the child exited in time; nothing to reclaim.
+            }
+        }
+    }
+
     private func runShell(_ args: JSONValue) async -> ToolResult {
         guard let command = args["command"]?.stringValue, !command.isEmpty else {
             return ToolResult(text: "run_shell: missing 'command'", isError: true)
@@ -737,6 +836,18 @@ public struct ToolExecutor: Sendable {
                 isError: true)
         }
 
+        // A non-terminating command must never hang the agent turn. The watchdog
+        // captures only the Sendable pid (never the non-Sendable `Process`) and,
+        // on overrun, SIGTERM→SIGKILLs the child — which closes the pipe, ending
+        // the drain below and letting `waitUntilExit()` return. Cancelled the
+        // instant the child exits normally, so a fast command is never signalled.
+        // 0 = unlimited: no watchdog. A positive shellTimeoutSeconds reclaims a
+        // non-terminating command; a real build/test may legitimately run minutes.
+        let watchdog: Task<Void, Never>? = shellTimeoutSeconds > 0
+            ? Self.processWatchdog(pid: process.processIdentifier, seconds: shellTimeoutSeconds)
+            : nil
+        defer { watchdog?.cancel() }
+
         let handle = pipe.fileHandleForReading
         let limit = outputByteLimit
         // Drain to EOF on a background queue; resume with the captured bytes.
@@ -745,7 +856,7 @@ public struct ToolExecutor: Sendable {
                 var buffer = Data()
                 while true {
                     let chunk = handle.availableData
-                    if chunk.isEmpty { break }  // EOF (pipe closed when child exits)
+                    if chunk.isEmpty { break }  // EOF (pipe closed when child exits/killed)
                     if buffer.count < limit {
                         buffer.append(chunk.prefix(limit - buffer.count))
                     }
@@ -758,14 +869,25 @@ public struct ToolExecutor: Sendable {
         let truncated = collected.count >= limit
         let output = String(data: collected, encoding: .utf8) ?? ""
         let exitCode = Int(process.terminationStatus)
+        // A SIGTERM/SIGKILL exit on this path is the watchdog reclaiming a runaway
+        // (a command that self-signals is a rare, acceptable false-positive label).
+        let timedOut = process.terminationReason == .uncaughtSignal
+            && (process.terminationStatus == SIGKILL || process.terminationStatus == SIGTERM)
         return ToolResult(
-            text: formatShellResult(output: output, truncated: truncated, exitCode: exitCode),
-            isError: exitCode != 0)
+            text: formatShellResult(
+                output: output, truncated: truncated, exitCode: exitCode, timedOut: timedOut),
+            isError: exitCode != 0 || timedOut)
     }
 
-    private func formatShellResult(output: String, truncated: Bool, exitCode: Int?) -> String {
+    private func formatShellResult(
+        output: String, truncated: Bool, exitCode: Int?, timedOut: Bool = false
+    ) -> String {
         var text = output
         if truncated { text += "\n…[output truncated at \(outputByteLimit) bytes]" }
+        if timedOut {
+            text +=
+                "\n…[run_shell: timed out after \(Int(shellTimeoutSeconds))s and was killed — the command did not exit. Use open_terminal for long-lived processes, or background it and poll.]"
+        }
         text += "\n[exit code: \(exitCode.map(String.init) ?? "unknown")]"
         return text
     }

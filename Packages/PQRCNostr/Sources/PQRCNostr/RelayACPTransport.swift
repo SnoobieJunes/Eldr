@@ -92,7 +92,7 @@ public actor RelayACPTransport: ACPTransport {
     private let lineSeqCounter = Atomic<UInt64>(0)
 
     /// In-flight inbound lines being reassembled, keyed by `lineId`.
-    private var reassembly: [String: Reassembly] = [:]
+    private var reassembly: [String: RelayFraming.Reassembly] = [:]
 
     /// Inbound line ordering, per sender `salt`: the next line index to emit, and
     /// the lines that completed reassembly AHEAD of a gap (held until the gap
@@ -118,9 +118,9 @@ public actor RelayACPTransport: ACPTransport {
         // A frame must hold the header plus at least one payload byte; guard the
         // budget up so chunking always terminates even if the caller passes a
         // pathologically small value.
-        self.maxFrameBytes = max(maxFrameBytes, Self.minViableFrameBytes)
+        self.maxFrameBytes = max(maxFrameBytes, RelayFraming.minViableFrameBytes)
         self.sendChunk = send
-        self.instanceSalt = instanceSalt ?? Self.randomSalt()
+        self.instanceSalt = instanceSalt ?? RelayFraming.randomSalt()
         (self.inbound, self.inboundContinuation) = AsyncStream.makeStream(of: String.self)
     }
 
@@ -154,7 +154,9 @@ public actor RelayACPTransport: ACPTransport {
 
     private func frameAndSend(_ line: String, seq: UInt64) async {
         let lineId = "\(instanceSalt)-\(String(seq, radix: 36))"
-        for chunk in Self.frameChunks(line: line, lineId: lineId, maxFrameBytes: maxFrameBytes) {
+        for chunk in RelayFraming.frameChunks(
+            line: line, lineId: lineId, maxFrameBytes: maxFrameBytes, magic: Self.magicToken)
+        {
             await sendChunk(chunk)
         }
     }
@@ -167,11 +169,11 @@ public actor RelayACPTransport: ACPTransport {
     /// ACP line on `inboundLines`. Tolerant of out-of-order and interleaved
     /// chunks; a line missing any chunk never emits.
     public func deliverInbound(_ framedBody: String) {
-        guard let chunk = FrameChunk(parsing: framedBody) else {
+        guard let chunk = RelayFraming.FrameChunk(parsing: framedBody, magic: Self.magicToken) else {
             droppedFrameCount += 1
             return
         }
-        var entry = reassembly[chunk.lineId] ?? Reassembly(total: chunk.total)
+        var entry = reassembly[chunk.lineId] ?? RelayFraming.Reassembly(total: chunk.total)
         // A conflicting `total` for the same id is a corrupt/forged frame stream;
         // drop the offending chunk rather than reassemble garbage.
         guard entry.total == chunk.total, chunk.seq >= 1, chunk.seq <= chunk.total else {
@@ -212,7 +214,7 @@ public actor RelayACPTransport: ACPTransport {
     /// A line whose id has no parsable index (a hand-crafted or legacy frame) is
     /// emitted immediately — never buffered — so foreign/test frames still flow.
     private func emitInOrder(lineId: String, line: String) {
-        guard let (salt, seq) = Self.splitLineId(lineId) else {
+        guard let (salt, seq) = RelayFraming.splitLineId(lineId) else {
             inboundContinuation.yield(line)
             return
         }
@@ -237,7 +239,7 @@ public actor RelayACPTransport: ACPTransport {
             inboundContinuation.yield(line)
             expected &+= 1
         }
-        if buffer.count > Self.maxReorderBuffer, let lowest = buffer.keys.min() {
+        if buffer.count > RelayFraming.maxReorderBuffer, let lowest = buffer.keys.min() {
             expected = lowest
             while let line = buffer.removeValue(forKey: expected) {
                 inboundContinuation.yield(line)
@@ -246,21 +248,6 @@ public actor RelayACPTransport: ACPTransport {
         }
         nextEmit[salt] = expected
         pendingLines[salt] = buffer.isEmpty ? nil : buffer
-    }
-
-    /// Split a `lineId` of the form `<salt>-<base36 seq>` into its parts. The seq
-    /// is base36 (no `-`); the salt is hex by default but may be caller-supplied,
-    /// so we split on the LAST `-` to tolerate a salt that itself contains one.
-    /// Returns nil when there is no `-` or the tail is not base36 — the caller then
-    /// emits the line immediately (legacy/crafted frames keep working).
-    static func splitLineId(_ lineId: String) -> (salt: String, seq: UInt64)? {
-        guard let dash = lineId.lastIndex(of: "-") else { return nil }
-        let salt = String(lineId[lineId.startIndex..<dash])
-        let seqPart = String(lineId[lineId.index(after: dash)...])
-        guard !salt.isEmpty, !seqPart.isEmpty, let seq = UInt64(seqPart, radix: 36) else {
-            return nil
-        }
-        return (salt, seq)
     }
 
     private func shutdown() {
@@ -275,147 +262,23 @@ public actor RelayACPTransport: ACPTransport {
     /// True iff `body` is an ACP frame this transport produced, false for any
     /// plausible chat text. The magic prefix `ACP1|` cannot begin a JSON-RPC line
     /// (those start with `{`); it is a pure, allocation-light prefix check so the
-    /// integration can route ACP→`deliverInbound`, chat→the normal path.
+    /// integration can route ACP→`deliverInbound`, chat→the normal path. It is also
+    /// un-confusable with `RelayMCPTransport`'s `MCP1|` magic, so the two relay
+    /// transports can share one inbound message stream (route ACP frames here, MCP
+    /// frames to `RelayMCPTransport.deliverInbound`, everything else to chat).
     public nonisolated static func isACPFrame(_ body: String) -> Bool {
         body.hasPrefix(Self.magic)
     }
 
     // MARK: - Envelope constants
 
+    /// The bare magic TOKEN (no delimiter) used inside the shared framing core.
+    static let magicToken = "ACP1"
     /// Fixed magic prefix (includes the trailing delimiter so a chat line that is
     /// literally "ACP1" without the pipe is NOT mistaken for a frame).
-    static let magic = "ACP1|"
-    /// Header is `ACP1|<lineId>|<seq>|<total>|`; with a payload of ≥1 base64url
-    /// char this is the floor on a viable frame. The salt+seq id and small seq/
-    /// total numbers stay well under this in practice; the guard just keeps a
-    /// caller-supplied tiny budget from making chunking diverge.
-    static let minViableFrameBytes = 64
-    /// Cap on inbound lines buffered ahead of a missing index before we give up on
-    /// it and skip forward — bounds memory + guarantees liveness under genuine line
-    /// loss or a peer that withholds a low index to wedge the stream.
-    static let maxReorderBuffer = 1000
-
-    // MARK: - Framing internals
-
-    /// Per-line reassembly state: the expected chunk count and the payload bytes
-    /// received so far, keyed by 1-based seq (so duplicates overwrite, gaps show).
-    private struct Reassembly {
-        let total: UInt32
-        var chunks: [UInt32: Data] = [:]
-    }
-
-    /// A decoded inbound frame chunk.
-    private struct FrameChunk {
-        let lineId: String
-        let seq: UInt32
-        let total: UInt32
-        let payload: Data
-
-        /// Parse `ACP1|<lineId>|<seq>|<total>|<payloadB64Url>`. The payload may
-        /// itself be empty (an empty ACP line is legal) but the four header
-        /// fields and all four delimiters must be present and well-formed.
-        init?(parsing body: String) {
-            guard body.hasPrefix(RelayACPTransport.magic) else { return nil }
-            // Split into exactly 5 fields. `omittingEmptySubsequences: false`
-            // keeps an empty trailing payload field; capping at 5 keeps any `=`/
-            // base64url payload intact (base64url has no `|` so 5 is exact, but
-            // the cap is belt-and-suspenders against a malformed payload).
-            let parts = body.split(
-                separator: "|", maxSplits: 4, omittingEmptySubsequences: false)
-            guard parts.count == 5, parts[0] == "ACP1" else { return nil }
-            let lineId = String(parts[1])
-            guard !lineId.isEmpty,
-                let seq = UInt32(parts[2]), let total = UInt32(parts[3]),
-                total >= 1, seq >= 1, seq <= total,
-                let payload = RelayACPTransport.base64URLDecode(String(parts[4]))
-            else { return nil }
-            self.lineId = lineId
-            self.seq = seq
-            self.total = total
-            self.payload = payload
-        }
-    }
-
-    /// Frame `line` into one-or-more chunks, each ≤ `maxFrameBytes` UTF-8 bytes
-    /// INCLUDING the header. The line's **raw UTF-8 bytes** are sliced, and EACH
-    /// slice is base64url-encoded independently as that chunk's payload. This is
-    /// the key to correct reassembly: every chunk's payload is a self-contained
-    /// base64url unit (4-char aligned by construction), so the receiver can decode
-    /// each chunk on its own and concatenate the raw bytes — concatenating
-    /// per-chunk-DECODED bytes round-trips, whereas slicing one big encoded string
-    /// at non-4-aligned boundaries would corrupt every chunk seam. Slicing the raw
-    /// bytes never splits a multibyte scalar in a way that breaks the round-trip
-    /// (the bytes are reassembled before being interpreted as UTF-8). Always
-    /// yields ≥1 chunk (an empty line → one empty-payload chunk).
-    static func frameChunks(line: String, lineId: String, maxFrameBytes: Int) -> [String] {
-        let rawBytes = [UInt8](Data(line.utf8))
-
-        // The header (sans payload) for a chunk is "ACP1|<lineId>|<seq>|<total>|".
-        // `total`'s digit width affects header size, and seq ≤ total, so size the
-        // budget with the worst-case (widest) seq width so EVERY chunk fits.
-        func headerOverhead(totalDigits: Int) -> Int {
-            magic.utf8.count + lineId.utf8.count + 1 + totalDigits + 1 + totalDigits + 1
-        }
-        // Max RAW bytes per chunk for a given payload-char budget `pb`: every 4
-        // base64 chars encode 3 raw bytes, so `(pb / 4) * 3` raw bytes encode to
-        // ≤ `pb` chars (unpadded ≤ padded). This under-uses the budget by ≤3 raw
-        // bytes per chunk — a deliberate, obviously-correct margin.
-        func rawBudget(payloadChars: Int) -> Int { max(1, (payloadChars / 4) * 3) }
-
-        // Settle the `total` digit width to a fixed point (it grows at most a
-        // couple of times as more chunks ⇒ wider total ⇒ smaller payload).
-        var totalDigits = 1
-        var raw = rawBudget(payloadChars: max(1, maxFrameBytes - headerOverhead(totalDigits: totalDigits)))
-        var chunkCount = max(1, (rawBytes.count + raw - 1) / raw)
-        while String(chunkCount).count != totalDigits {
-            totalDigits = String(chunkCount).count
-            raw = rawBudget(payloadChars: max(1, maxFrameBytes - headerOverhead(totalDigits: totalDigits)))
-            chunkCount = max(1, (rawBytes.count + raw - 1) / raw)
-        }
-
-        var frames: [String] = []
-        frames.reserveCapacity(chunkCount)
-        var index = 0
-        var seq = 1
-        // Emit exactly `chunkCount` frames; the empty-line case (rawBytes empty)
-        // still produces one chunk with an empty (base64url of "") payload.
-        repeat {
-            let end = min(index + raw, rawBytes.count)
-            let slice = base64URLEncode(Data(rawBytes[index..<end]))
-            frames.append("\(magic)\(lineId)|\(seq)|\(chunkCount)|\(slice)")
-            index = end
-            seq += 1
-        } while index < rawBytes.count
-        return frames
-    }
-
-    // MARK: - base64url (RFC 4648 §5, unpadded)
-
-    static func base64URLEncode(_ data: Data) -> String {
-        var s = data.base64EncodedString()
-        s = s.replacingOccurrences(of: "+", with: "-")
-        s = s.replacingOccurrences(of: "/", with: "_")
-        s = s.replacingOccurrences(of: "=", with: "")
-        return s
-    }
-
-    static func base64URLDecode(_ string: String) -> Data? {
-        if string.isEmpty { return Data() }
-        var s = string.replacingOccurrences(of: "-", with: "+")
-        s = s.replacingOccurrences(of: "_", with: "/")
-        // Restore `=` padding to a multiple of 4.
-        let remainder = s.utf8.count % 4
-        if remainder != 0 {
-            s += String(repeating: "=", count: 4 - remainder)
-        }
-        return Data(base64Encoded: s)
-    }
-
-    private static func randomSalt() -> String {
-        // 6 random bytes → 12 hex chars: ample to avoid cross-sender id
-        // collisions, no `|`, no crypto significance (collision-avoidance only).
-        var bytes = [UInt8](repeating: 0, count: 6)
-        for i in bytes.indices { bytes[i] = UInt8.random(in: 0...255) }
-        return bytes.map { String(format: "%02x", $0) }.joined()
-    }
+    static let magic = magicToken + "|"
+    /// The shared framing floor, re-exported so existing tests that reference
+    /// `RelayACPTransport.minViableFrameBytes` keep working (the value lives once in
+    /// `RelayFraming`).
+    static let minViableFrameBytes = RelayFraming.minViableFrameBytes
 }

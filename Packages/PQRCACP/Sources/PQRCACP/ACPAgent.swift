@@ -52,6 +52,14 @@ public actor ACPAgent {
     private let contextGraph: (any ContextGraphAssembling)?
     /// Cached `contextGraph.health()` result (checked once, before first use).
     private var contextGraphHealthy: Bool?
+    /// Phase D3 — optional EXTRA tool source (the phone's MCP chat tools, served over
+    /// the relay). nil → the agent advertises/runs only its built-in tools, exactly
+    /// as before. When present, its tools are merged into the advertised set AND a
+    /// tool the model calls that this provider owns is routed to it — but ONLY for
+    /// sessions where the CLIENT advertised `mcpServers` (the phone's "share chat
+    /// context" opt-in; see `sessionsWithMCP`). PQRCACP stays MCP-knowledge-free: the
+    /// provider is the seam, and the MCP/relay wiring lives in its implementation.
+    private let extraTools: (any ExtraToolProvider)?
 
     /// Negotiated at `initialize`. Defaults to "everything off" until then (so a
     /// stray prompt before initialize still works via Foundation fallbacks).
@@ -69,6 +77,26 @@ public actor ACPAgent {
     /// Per-session last observed build result ("green" | "red" | "unknown"), updated
     /// whenever a run_shell command looks like a build/test (for `session_end.build`).
     private var sessionBuildStatus: [String: String] = [:]
+    /// Phase D3 — sessions where the CLIENT advertised a non-empty `mcpServers` at
+    /// `session/new`. ONLY these sessions get `extraTools` merged in / routed: the
+    /// phone advertises `mcpServers` exactly when its owner consented to share chat
+    /// context, so this gate keeps the MCP-passthrough path inert otherwise (and
+    /// inert entirely when `extraTools` is nil).
+    private var sessionsWithMCP: Set<String> = []
+    /// Phase D4 — live INTERACTIVE terminals (PTYs), by `terminalId`. The persistent
+    /// interactive shell `open_terminal` spawns lives HERE (on the actor), not in the
+    /// per-turn `ToolExecutor` value. Each entry carries the process and the task
+    /// streaming its output as `terminal_output` session/updates. Terminating a PTY
+    /// (the phone's Stop, a session/cancel, or full teardown) kills the child + closes
+    /// fds and removes it here — the always-killable / no-orphan / fail-closed guarantee.
+    private var terminals: [String: LiveTerminal] = [:]
+    private var terminalCounter = 0
+
+    private struct LiveTerminal {
+        let sessionId: String
+        let process: PTYProcess
+        let pump: Task<Void, Never>
+    }
 
     public init(
         connection: ClientConnection,
@@ -76,19 +104,21 @@ public actor ACPAgent {
         toolEnvironment: ToolEnvironment = .fromEnvironment(),
         config: AgentConfig = .fromEnvironment(),
         configDir: String? = AgentConfig.defaultConfigDir(ProcessInfo.processInfo.environment),
-        maxIterations: Int = 20,
+        maxIterations: Int = 0,
         streamingEnabled: Bool = true,
-        requestTimeoutSeconds: Double = 120,
-        contextGraph: (any ContextGraphAssembling)? = nil
+        requestTimeoutSeconds: Double = 0,
+        contextGraph: (any ContextGraphAssembling)? = nil,
+        extraTools: (any ExtraToolProvider)? = nil
     ) {
         self.connection = connection
         self.llm = llm
         self.toolEnvironment = toolEnvironment
         self.config = config
         self.configDir = configDir
-        self.maxIterations = maxIterations
+        self.maxIterations = max(0, maxIterations)
         self.streamingEnabled = streamingEnabled
-        self.requestTimeoutSeconds = requestTimeoutSeconds > 0 ? requestTimeoutSeconds : 120
+        self.requestTimeoutSeconds = max(0, requestTimeoutSeconds)
+        self.extraTools = extraTools
         self.skills = AgentSkillSet.from(config: config)
         // Build the real client from config when enabled and not injected (tests
         // inject a stub so they stay network-free).
@@ -152,7 +182,26 @@ public actor ACPAgent {
     private func handleNotification(method: String, params: JSONValue) async {
         switch method {
         case "session/cancel":
-            if let sid = params["sessionId"]?.stringValue { cancelledSessions.insert(sid) }
+            if let sid = params["sessionId"]?.stringValue {
+                cancelledSessions.insert(sid)
+                // Fail-closed: a cancel also KILLS every interactive terminal owned by
+                // this session — an open-ended shell must never outlive the turn that was
+                // cancelled (no orphaned interactive shell on the Mac).
+                terminateTerminals(forSession: sid)
+            }
+        case "terminal/input":
+            // Phase D4 — write stdin to a live PTY. Best-effort; a write to a terminal
+            // that already closed is a silent no-op.
+            guard let terminalId = params["terminalId"]?.stringValue,
+                let data = params["data"]?.stringValue
+            else { return }
+            terminals[terminalId]?.process.write(data)
+        case "terminal/release":
+            // Phase D4 — the phone's Stop control. Kill the PTY at the caller's request,
+            // from ANY state. Always available (the always-killable guarantee).
+            if let terminalId = params["terminalId"]?.stringValue {
+                await killTerminal(terminalId, exitCode: nil)
+            }
         default:
             break  // unknown notifications are ignored (forward-compat)
         }
@@ -170,9 +219,12 @@ public actor ACPAgent {
             "loadSession": .bool(false),
             // Text + embedded context (Xcode 27 sends selected code / build errors
             // as embedded blocks; `extractPromptText` folds them into the prompt).
-            // Still no image/audio.
+            // D2: `image` tracks `config.visionEnabled` — advertised true ONLY when the
+            // operator has confirmed the configured model can read images (env
+            // `ELDR_LLM_VISION`). Default OFF, so a text-only model is never offered —
+            // and so never sent — images it can't read. Audio stays unsupported.
             "promptCapabilities": .object([
-                "image": .bool(false),
+                "image": .bool(config.visionEnabled),
                 "audio": .bool(false),
                 "embeddedContext": .bool(true),
             ]),
@@ -204,6 +256,14 @@ public actor ACPAgent {
         // Per-session cwd: the client's `cwd`, else the agent's configured workdir.
         let cwd = params["cwd"]?.stringValue ?? toolEnvironment.effectiveWorkdir
         sessions[sessionId] = cwd
+        // Phase D3: did the CLIENT advertise any `mcpServers`? ACP carries them as a
+        // native `session/new` slot. A non-empty list is the phone's signal that its
+        // owner consented to share chat context, so this session may use the
+        // `extraTools` (MCP-over-relay) provider. An empty/absent list (or a nil
+        // provider) keeps the passthrough path fully inert.
+        if Self.advertisesMCPServers(params["mcpServers"]) {
+            sessionsWithMCP.insert(sessionId)
+        }
         // Resolve this project's persistent context (explicit ELDR_ACP_CONTEXT_FILE,
         // else the auto-discovered per-project eldr.md). Stored once; prepended to
         // the system prompt on every turn of this session.
@@ -239,13 +299,20 @@ public actor ACPAgent {
         cancelledSessions.remove(sessionId)
 
         let rawText = Self.extractPromptText(params["prompt"])
+        // D2 (node-side image input): parse any `image` content blocks ONLY when vision
+        // is enabled. With vision off (the default) we never even look at them, so an
+        // image block is dropped exactly as before — and we never feed a text-only model
+        // input it can't read. (We also advertise image:false in that case, so a
+        // well-behaved client won't send one; this is belt-and-suspenders.)
+        let imageParts = config.visionEnabled ? Self.extractImageParts(params["prompt"]) : []
         // A leading `/skill …` invokes a skill: the rest is the user's text and the
         // skill contributes a focused system instruction for this turn only. Plain
         // prompts (and unknown /commands) run with the default system prompt.
         let invocation = skills.invocation(for: rawText)
         let userText = invocation?.argument ?? rawText
         let stopReason = await runTurn(
-            sessionId: sessionId, userText: userText, skill: invocation?.skill)
+            sessionId: sessionId, userText: userText, skill: invocation?.skill,
+            imageParts: imageParts)
         return .object(["stopReason": .string(stopReason.rawValue)])
     }
 
@@ -284,12 +351,31 @@ public actor ACPAgent {
         }
     }
 
+    /// D2 (node-side image input): pull the `image` content blocks out of a prompt as
+    /// `LLMImagePart`s. An ACP image block is `{type:"image", data:<base64>,
+    /// mimeType:<mime>}` (agentclientprotocol.com /protocol/content); a block missing
+    /// either field is skipped (forward-compatible, never fatal). Returns [] when the
+    /// prompt is plain text — the overwhelmingly-common case — so the caller can keep
+    /// today's text-only path. The CALLER (runTurn) decides whether to use these: with
+    /// vision disabled they are ignored and the image is dropped exactly as before.
+    static func extractImageParts(_ prompt: JSONValue?) -> [LLMImagePart] {
+        guard let blocks = prompt?.arrayValue else { return [] }
+        return blocks.compactMap { block in
+            guard block["type"]?.stringValue == "image",
+                let data = block["data"]?.stringValue, !data.isEmpty,
+                let mimeType = block["mimeType"]?.stringValue, !mimeType.isEmpty
+            else { return nil }
+            return LLMImagePart(mimeType: mimeType, base64Data: data)
+        }
+    }
+
     /// The tool-calling loop. Builds the message list, calls the LLM with tool defs;
     /// on tool_calls, streams + executes each (permission-gated for mutating tools),
     /// feeds results back, and loops (≤ maxIterations). On a final assistant message,
     /// streams it as agent_message_chunk and returns end_turn.
     private func runTurn(
-        sessionId: String, userText: String, skill: AgentSkill? = nil
+        sessionId: String, userText: String, skill: AgentSkill? = nil,
+        imageParts: [LLMImagePart] = []
     ) async -> StopReason {
         let cwd = sessions[sessionId] ?? toolEnvironment.effectiveWorkdir
         var perTurnEnvironment = toolEnvironment
@@ -298,8 +384,18 @@ public actor ACPAgent {
             capabilities: clientCapabilities, environment: perTurnEnvironment,
             connection: connection, sessionId: sessionId,
             maxResultBytes: config.maxToolResultBytes,
-            maxReadFileBytes: config.maxReadFileBytes)
-        let tools = ToolExecutor.toolDefinitions(allowlist: config.toolAllowlist)
+            maxReadFileBytes: config.maxReadFileBytes,
+            shellTimeoutSeconds: config.shellTimeoutSeconds)
+        var tools = ToolExecutor.toolDefinitions(allowlist: config.toolAllowlist)
+        // Phase D3: merge the phone's MCP chat tools into the advertised set, but
+        // ONLY when this session opted in (`mcpServers` advertised) AND a provider is
+        // wired. The provider's `toolDefinitions()` lazily handshakes over the relay;
+        // if the phone is unreachable it returns [] and nothing extra is advertised
+        // (the turn proceeds with just the built-in tools). Names are `mcp_`-prefixed
+        // by the provider, so they can never shadow a built-in tool.
+        if let extraTools, sessionsWithMCP.contains(sessionId) {
+            tools.append(contentsOf: await extraTools.toolDefinitions())
+        }
 
         // Leading system run: optional project-context block FIRST (so the model
         // reads the project's accumulated facts/corrections before its operating
@@ -320,10 +416,29 @@ public actor ACPAgent {
         if let assembled = await assembledContext(for: userText), !assembled.isEmpty {
             messages.append(LLMMessage(role: .system, content: assembled))
         }
-        messages.append(LLMMessage(role: .user, content: userText))
+        // D2: attach any node-side images to the user turn (empty unless vision is on).
+        // The OpenAI client emits the multimodal content-array shape iff `imageParts`
+        // is non-empty; with none it's the plain text turn, unchanged. This user
+        // message is the anchored "first task" in ContextBudget.trim, so it's never
+        // elided — the image survives every loop iteration.
+        messages.append(LLMMessage(role: .user, content: userText, imageParts: imageParts))
 
         var toolCallSeq = 0
-        for _ in 0..<maxIterations {
+        // Plan/TODO visibility (Phase D1): a heuristic checklist the client surfaces
+        // so the user sees the agent's approach, not just raw tool calls. We can't
+        // ask the model for an explicit plan without a model-protocol dependency, so
+        // we DERIVE it from the tool calls the model actually makes: each tool call
+        // in a turn becomes one plan entry, accumulating across iterations, and an
+        // entry flips pending → in_progress → completed as that step runs. The whole
+        // plan is re-emitted on each change (ACP models a plan as a full snapshot).
+        // This rides alongside the existing tool_call/tool_call_update flow without
+        // altering it — purely additive session/updates.
+        var plan = TurnPlan()
+        // maxIterations == 0 ⇒ unlimited (a capable model may need many rounds for a
+        // real multi-step build); a positive value caps the loop.
+        var iteration = 0
+        while maxIterations <= 0 || iteration < maxIterations {
+            iteration += 1
             if cancelledSessions.contains(sessionId) { return .cancelled }
 
             // Context budgeting: bound the history sent to the model each turn so a
@@ -380,15 +495,35 @@ public actor ACPAgent {
             messages.append(
                 LLMMessage(role: .assistant, content: response.content, toolCalls: response.toolCalls))
 
-            // Execute each requested tool, streaming ACP tool_call lifecycle.
-            for call in response.toolCalls {
+            // Extend the plan with this batch's steps (one entry per tool call,
+            // titled like the editor's tool UI) and emit the updated snapshot before
+            // running them, so the user sees the upcoming steps as `pending`.
+            let newIndices = plan.addSteps(
+                response.toolCalls.map { call in
+                    ToolExecutor.title(for: call.name, args: call.argumentsJSON)
+                })
+            await emitPlan(sessionId: sessionId, plan: plan)
+
+            // Execute each requested tool, streaming ACP tool_call lifecycle, and
+            // advance the matching plan entry (in_progress while it runs, then
+            // completed/failed) so the checklist tracks real progress.
+            for (offset, call) in response.toolCalls.enumerated() {
                 if cancelledSessions.contains(sessionId) { return .cancelled }
                 toolCallSeq += 1
                 let toolCallId = "\(sessionId)-tc-\(toolCallSeq)"
                 let args = call.argumentsJSON
+                let planIndex = newIndices[offset]
+                plan.setStatus(planIndex, to: "in_progress")
+                await emitPlan(sessionId: sessionId, plan: plan)
                 let result = await runOneTool(
                     sessionId: sessionId, toolCallId: toolCallId, executor: executor,
                     name: call.name, args: args, cwd: cwd)
+                // A step is "completed" either way — the tool_call_update already
+                // carries the failed/error detail; ACP's PlanEntry status has no
+                // "failed" value, so the checklist marks the step done and the user
+                // reads the failure in the tool result.
+                plan.setStatus(planIndex, to: "completed")
+                await emitPlan(sessionId: sessionId, plan: plan)
                 messages.append(
                     LLMMessage(role: .tool, content: result.text, toolCallId: call.id))
             }
@@ -482,7 +617,28 @@ public actor ACPAgent {
             params: ACPWire.toolCallUpdate(
                 sessionId: sessionId, toolCallId: toolCallId, status: "in_progress"))
 
-        let result = await executor.run(tool: name, args: args)
+        // Phase D4: `open_terminal` is NOT run by the per-turn `ToolExecutor` (a value
+        // type can't own a long-lived process). The agent intercepts it and spawns a
+        // persistent `PTYProcess` whose output streams to the phone as `terminal_output`
+        // session/updates. The phone has ALREADY gated this through its standing
+        // autonomous-changes consent (the `open_terminal` tool_call carried the `execute`
+        // kind + the interactive-terminal title, and `requestPermission` above returned
+        // true only if the owner consented). The node STILL re-checked C-1 there, so by
+        // the time we reach this line the open-ended shell was explicitly authorized.
+        let result: ToolResult
+        if name == ToolExecutor.openTerminalTool {
+            result = await openInteractiveTerminal(
+                sessionId: sessionId, args: args, cwd: cwd)
+        } else if let extraTools, Self.isExtraTool(name), sessionsWithMCP.contains(sessionId) {
+            // Phase D3: a tool the `extraTools` provider owns (the phone's MCP chat tools,
+            // `mcp_`-prefixed) is run by the PROVIDER — a round-trip to the phone over the
+            // relay — not by the local file/shell `ToolExecutor`. Redaction + the
+            // ai_window write-gate are enforced PHONE-SIDE inside its `MCPServer`; this
+            // path only carries the request and the already-redacted result.
+            result = await extraTools.call(name: name, arguments: args)
+        } else {
+            result = await executor.run(tool: name, args: args)
+        }
 
         // tool_call_update (completed | failed) with the result text.
         await connection.notify(
@@ -495,6 +651,138 @@ public actor ACPAgent {
         logToolEvent(name: name, args: args, result: result, sessionId: sessionId, cwd: cwd)
         return result
     }
+
+    // MARK: - Phase D4: interactive PTY terminal
+
+    /// Spawn a persistent interactive `/bin/zsh` on a PTY and stream its output to the
+    /// phone as `terminal_output` session/updates. Returns a tool result naming the
+    /// `terminalId` (the model can't read the live stream — it goes to the user's device
+    /// — so the result just tells the model the terminal is open). The PTY is registered
+    /// in `terminals` and lives until the child exits, the phone kills it (Stop), the
+    /// session is cancelled, or the agent tears down — all of which terminate the child.
+    ///
+    /// GATING NOTE (the whole point): by the time this runs, the phone has approved the
+    /// open-ended shell via its STANDING autonomous-changes consent (the permission
+    /// round-trip in `runOneTool` denied it otherwise, and a non-responding/timed-out
+    /// phone fails closed in `requestPermission`). The node owns its environment; this is
+    /// the C-1/escape-hatch surface and adds no NEW capability beyond what `run_shell`
+    /// already had — it just keeps the shell alive for streaming.
+    private func openInteractiveTerminal(
+        sessionId: String, args: JSONValue, cwd: String
+    ) async -> ToolResult {
+        let initialCommand = args["command"]?.stringValue ?? ""
+        terminalCounter += 1
+        let terminalId = "\(sessionId)-pty-\(terminalCounter)"
+
+        var env = toolEnvironment.shellEnvironment
+        let process: PTYProcess
+        do {
+            process = try PTYProcess(executable: "/bin/zsh", cwd: cwd, environment: env)
+        } catch {
+            return ToolResult(
+                text: "open_terminal: failed to spawn a PTY: \(Self.describe(error))",
+                isError: true)
+        }
+        // Don't keep a reference to the mutated env beyond the spawn.
+        env.removeAll()
+
+        // Announce the terminal so the phone shows a view + Stop control.
+        await connection.notify(
+            method: "session/update",
+            params: ACPWire.terminalOpened(
+                sessionId: sessionId, terminalId: terminalId,
+                title: ToolExecutor.interactiveTerminalTitlePrefix))
+
+        // Stream the PTY's output to the phone, chunk by chunk, until EOF (child exit /
+        // kill). The connection is the SAME push channel agent_message_chunk uses.
+        //
+        // C-6 (CLAUDE.md invariant 12): the LIVE stream is NEVER written to an at-rest
+        // log — it goes only to the owner's paired device (the data channel, which by
+        // policy carries raw bytes, like run_shell's output). The ONLY at-rest write here
+        // is the terminal_closed EVENT, and that records solely the exit code (no
+        // output). So there is no PTY output to scrub at rest. (If a future change logged
+        // any output byte, it MUST go through `config.logRedactor` first — see the
+        // session_end/shellResult sites — but today nothing does.)
+        let connection = self.connection
+        let pump = Task { [weak self] in
+            for await chunk in process.output {
+                let text = String(decoding: chunk, as: UTF8.self)
+                await connection.notify(
+                    method: "session/update",
+                    params: ACPWire.terminalOutput(
+                        sessionId: sessionId, terminalId: terminalId, chunk: text))
+            }
+            // The stream finished → the child exited (or was killed). Clean up + announce
+            // closure exactly once (guarded inside the actor).
+            await self?.terminalDidEnd(terminalId)
+        }
+
+        terminals[terminalId] = LiveTerminal(
+            sessionId: sessionId, process: process, pump: pump)
+
+        // Optionally run a starting command in the new shell.
+        if !initialCommand.isEmpty {
+            process.write(initialCommand + "\n")
+        }
+
+        return ToolResult(
+            text:
+                "Opened interactive terminal \(terminalId). Its output is streaming live to "
+                + "the user's device; you cannot read it back. The user can type into it and "
+                + "stop it at any time.")
+    }
+
+    /// The output stream ended on its own (child exited). Announce closure + drop it.
+    /// Distinct from `killTerminal` (which we initiate); both converge on `finalize`.
+    private func terminalDidEnd(_ terminalId: String) async {
+        await finalizeTerminal(terminalId, exitCode: nil)
+    }
+
+    /// KILL a live terminal at our request (phone Stop, cancel, teardown). Terminates the
+    /// child + closes fds (idempotent), then finalizes. Safe to call when it's already
+    /// gone.
+    private func killTerminal(_ terminalId: String, exitCode: Int?) async {
+        terminals[terminalId]?.process.terminate()
+        await finalizeTerminal(terminalId, exitCode: exitCode)
+    }
+
+    /// Remove the terminal, cancel its pump, and emit `terminal_closed` exactly once
+    /// (keyed on still being present in `terminals`). The actor serializes this, so a
+    /// child-exit and a concurrent Stop can't double-announce.
+    private func finalizeTerminal(_ terminalId: String, exitCode: Int?) async {
+        guard let live = terminals.removeValue(forKey: terminalId) else { return }
+        live.process.terminate()  // idempotent; ensures fds closed even on the EOF path
+        live.pump.cancel()
+        await connection.notify(
+            method: "session/update",
+            params: ACPWire.terminalClosed(
+                sessionId: live.sessionId, terminalId: terminalId, exitCode: exitCode))
+    }
+
+    /// Fail-closed: kill every interactive terminal owned by `sessionId` (a session/cancel
+    /// landed). No PTY may outlive a cancelled turn.
+    private func terminateTerminals(forSession sessionId: String) {
+        for (id, live) in terminals where live.sessionId == sessionId {
+            live.process.terminate()
+            live.pump.cancel()
+            terminals.removeValue(forKey: id)
+        }
+    }
+
+    /// Fail-closed teardown: terminate EVERY live interactive terminal (the agent is
+    /// shutting down / the transport dropped). Public so the node host can call it when
+    /// the owner-verified stream closes — an interactive shell must never survive the
+    /// session that authorized it. Idempotent.
+    public func terminateAllTerminals() {
+        for (_, live) in terminals {
+            live.process.terminate()
+            live.pump.cancel()
+        }
+        terminals.removeAll()
+    }
+
+    /// Test-only: how many interactive terminals are currently live.
+    func liveTerminalCount() -> Int { terminals.count }
 
     /// Append a JSONL event for a significant tool call (write_file / run_shell) and
     /// update per-session counters that feed the session_end event. No-op unless
@@ -570,6 +858,15 @@ public actor ACPAgent {
             params: ACPWire.agentMessageChunk(sessionId: sessionId, text: text))
     }
 
+    /// Send the current plan snapshot as a `plan` session/update. No-op for an
+    /// empty plan (a turn with no tool calls never has steps, so it never emits one).
+    private func emitPlan(sessionId: String, plan: TurnPlan) async {
+        guard !plan.isEmpty else { return }
+        await connection.notify(
+            method: "session/update",
+            params: ACPWire.plan(sessionId: sessionId, entries: plan.entries))
+    }
+
     // MARK: - Model call (timeout + cancel race + streaming)
 
     /// The outcome of one raced model call.
@@ -622,10 +919,13 @@ public actor ACPAgent {
                     return .failed(error)
                 }
             }
-            // 2. Timeout backstop.
-            group.addTask {
-                try? await Task.sleep(nanoseconds: timeoutNanos)
-                return .timedOut
+            // 2. Timeout backstop — skipped when the request timeout is disabled (≤0),
+            //    so a slow local model generating a long answer is never cut off.
+            if requestTimeoutSeconds > 0 {
+                group.addTask {
+                    try? await Task.sleep(nanoseconds: timeoutNanos)
+                    return .timedOut
+                }
             }
             // 3. Cancel poll (session/cancel can land on the actor while we await).
             group.addTask { [weak self] in
@@ -735,6 +1035,22 @@ public actor ACPAgent {
         return c.contains("xcodebuild") || c.contains("swift build") || c.contains("swift test")
     }
 
+    /// Phase D3: did the client's `session/new` carry a non-empty `mcpServers`? ACP's
+    /// `mcpServers` is an ARRAY of server descriptors; a non-empty array means the
+    /// client wants the agent to use those servers. We don't connect to them
+    /// ourselves (the phone serves chat over the relay-backed `extraTools` provider) —
+    /// we use the presence of the slot purely as the consent gate for that provider.
+    static func advertisesMCPServers(_ value: JSONValue?) -> Bool {
+        (value?.arrayValue?.isEmpty == false)
+    }
+
+    /// Whether a tool name belongs to the `extraTools` provider (the phone's MCP chat
+    /// tools, namespaced by `mcp_`). Pure + static so `runOneTool` routes without an
+    /// async query into the provider on the hot path.
+    static func isExtraTool(_ name: String) -> Bool {
+        name.hasPrefix(MCPOverRelayClient.toolNamePrefix)
+    }
+
     static func describe(_ error: Error) -> String {
         switch error {
         case let e as LLMError:
@@ -768,5 +1084,33 @@ public actor ACPAgent {
 private actor StreamedTextBox {
     private(set) var value = ""
     func append(_ s: String) { value += s }
+}
+
+/// The heuristic plan for a turn (Phase D1): an ordered checklist derived from the
+/// tool calls the model makes, with a per-step status. Not actor state — it lives on
+/// `runTurn`'s stack (the actor already serializes the turn), so a plain struct keeps
+/// it simple and value-typed. Each entry's status is one of ACP's PlanEntry values
+/// (pending|in_progress|completed); the wire builder fills in `priority`.
+private struct TurnPlan {
+    private(set) var entries: [(content: String, status: String)] = []
+
+    var isEmpty: Bool { entries.isEmpty }
+
+    /// Append one entry per title (all `pending`) and return their indices, so the
+    /// caller can flip the right entry as each corresponding tool runs.
+    mutating func addSteps(_ titles: [String]) -> [Int] {
+        var indices: [Int] = []
+        for title in titles {
+            indices.append(entries.count)
+            entries.append((content: title, status: "pending"))
+        }
+        return indices
+    }
+
+    /// Set one entry's status (no-op for an out-of-range index — defensive).
+    mutating func setStatus(_ index: Int, to status: String) {
+        guard entries.indices.contains(index) else { return }
+        entries[index].status = status
+    }
 }
 #endif  // os(macOS) — ACPAgent (node-side: tool-calling loop + ToolExecutor/Process)

@@ -1,11 +1,11 @@
-# SIGNING-AND-DISTRIBUTION.md — shipping the Eldr ACP Configurator
+# SIGNING-AND-DISTRIBUTION.md — shipping the Huginn
 
-How to sign, notarize, and package the **Eldr ACP Configurator** macOS app
-(`Apps/EldrACPConfigurator/`) as a DMG others can run.
+How to sign, notarize, and package the **Huginn** macOS app
+(`Apps/Huginn/`) as a DMG others can run.
 
 This is the **distribution** story only. The app builds and runs from Xcode with no
 certificates at all — see
-[`Apps/EldrACPConfigurator/README.md`](../Apps/EldrACPConfigurator/README.md) for
+[`Apps/Huginn/README.md`](../Apps/Huginn/README.md) for
 build/run. You need the steps below only when you want to hand the DMG to someone
 else's Mac (DEVIATIONS AC12).
 
@@ -31,10 +31,10 @@ macOS code-signing certificates come in different flavors. For a Mac app distrib
   else's Mac — that's expected.
 - Sending the DMG to a teammate or beta tester? You need a **Developer ID
   Application** certificate **and** notarization. That is exactly what
-  `Apps/EldrACPConfigurator/build-dmg.sh` automates.
+  `Apps/Huginn/build-dmg.sh` automates.
 
 > The Mac App Store path (a *Mac App Store* distribution certificate + App Store
-> Connect submission) is **not** used here: the Configurator ships unsandboxed
+> Connect submission) is **not** used here: Huginn ships unsandboxed
 > (DEVIATIONS AC6), and an unsandboxed app cannot go through the Mac App Store.
 > Developer ID + notarization is the correct and only fit.
 
@@ -107,13 +107,13 @@ This becomes `TEAM_ID`.
 
 ## Step 4 — Build the DMG
 
-`Apps/EldrACPConfigurator/build-dmg.sh` does the whole pipeline:
+`Apps/Huginn/build-dmg.sh` does the whole pipeline:
 **archive → export the `.app` → notarize (submit + wait) → staple → build a
 compressed DMG → sign the DMG.** It needs the three values from above (plus the
 optional signing-identity override):
 
 ```bash
-cd Apps/EldrACPConfigurator
+cd Apps/Huginn
 
 export APPLE_ID="you@example.com"          # your Apple ID email
 export APP_PASSWORD="abcd-efgh-ijkl-mnop"  # the app-specific password from Step 2
@@ -124,7 +124,7 @@ export TEAM_ID="TEAMID1234"                # the 10-char Team ID from Step 3
 ./build-dmg.sh
 ```
 
-Output: **`dist/EldrACP-<version>.dmg`** (signed, notarized, stapled). The version is
+Output: **`dist/Huginn-<version>.dmg`** (signed, notarized, stapled). The version is
 read from the project's `MARKETING_VERSION` (currently `0.1.0`).
 
 Notes:
@@ -139,10 +139,10 @@ Notes:
 
 ---
 
-## The current DMG: signed, not notarized
+## The current DMG: stale + signed-only
 
-`Apps/EldrACPConfigurator/dist/EldrACP-0.1.0.dmg` exists today but is **signed only,
-not notarized** — so it opens on the machine that built it and **Gatekeeper will
-block it on any other Mac**. To produce a distributable build, run `build-dmg.sh`
-with the credentials above. The `dist/` directory is git-ignored; DMGs are build
-artifacts and are not committed.
+Any leftover `Apps/Huginn/dist/EldrACP-0.1.0.dmg` predates the Huginn rename and is
+**signed only, not notarized** — it opens on the machine that built it and **Gatekeeper
+blocks it on any other Mac**. Delete it and run `build-dmg.sh` with the credentials
+above to produce the distributable **`dist/Huginn-<version>.dmg`**. The `dist/`
+directory is git-ignored; DMGs are build artifacts and are not committed.

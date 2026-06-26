@@ -89,12 +89,31 @@ public struct AgentConfig: Sendable, Equatable {
     /// silence as a DENIAL (deny-on-timeout), so a non-responding client can neither
     /// hang the turn nor auto-allow a mutating tool. Env: `ELDR_ACP_PERMISSION_TIMEOUT`.
     public var permissionTimeoutSeconds: Double
+    /// Max agent loop iterations (model round-trips) per turn. **0 (default) =
+    /// unlimited** — a capable model doing a real multi-step build can need many
+    /// rounds; the per-call context budget still bounds each request, so an open loop
+    /// doesn't blow the window. Set a positive value to cap. Env: `ELDR_ACP_MAX_ITERATIONS`.
+    public var maxIterations: Int
+    /// Wall-clock cap for a single `run_shell` / search child process, in seconds.
+    /// **0 (default) = unlimited** — real builds/tests legitimately run for minutes.
+    /// Set a positive value to bound a non-terminating command. Env: `ELDR_ACP_SHELL_TIMEOUT`.
+    public var shellTimeoutSeconds: Double
     /// C-1 escape hatch: when true, mutating tools are NOT permission-gated at all —
     /// restoring allow-by-default for a trusted local client that can't prompt (e.g.
     /// one with no session/request_permission support). An EXPLICIT operator risk
     /// acceptance; default false (fail closed: a mutating tool runs only on an explicit
     /// grant; a timeout/error is a denial). Env: `ELDR_ACP_ALLOW_UNGATED_TOOLS`.
     public var allowUngatedTools: Bool
+    /// D2 (node-side image input): whether the configured LLM can read images. When
+    /// true, the agent advertises `promptCapabilities.image=true` at `initialize` and
+    /// forwards a node-side ACP `image` content block to the model as a multimodal
+    /// user message; when false (the DEFAULT), `image` is advertised false and any
+    /// image block is dropped (today's behavior). Default OFF because most self-hosted
+    /// models are text-only and would choke on — or silently ignore — image input, so
+    /// vision is opt-in: only a model the operator knows is vision-capable should get
+    /// images. NODE-SIDE ONLY; the phone product is text-only and never sends images
+    /// (CLAUDE.md). Env: `ELDR_LLM_VISION` (boolean).
+    public var visionEnabled: Bool
     /// C-6: redaction seam applied to the FREE-TEXT strings written to the AT-REST log
     /// sinks (a `run_shell` cmd + its captured output → `events.jsonl`; the agent's
     /// stderr diagnostics). Defaults to the built-in `ACPLogRedactor.scrub` so the
@@ -127,7 +146,10 @@ public struct AgentConfig: Sendable, Equatable {
         contextGraphURL: "http://localhost:8302",
         contextGraphAgentName: nil,
         permissionTimeoutSeconds: 120,
-        allowUngatedTools: false)
+        maxIterations: 0,
+        shellTimeoutSeconds: 0,
+        allowUngatedTools: false,
+        visionEnabled: false)
 
     public init(
         maxToolResultBytes: Int = 8 * 1024,
@@ -145,7 +167,10 @@ public struct AgentConfig: Sendable, Equatable {
         contextGraphURL: String = "http://localhost:8302",
         contextGraphAgentName: String? = nil,
         permissionTimeoutSeconds: Double = 120,
+        maxIterations: Int = 0,
+        shellTimeoutSeconds: Double = 0,
         allowUngatedTools: Bool = false,
+        visionEnabled: Bool = false,
         logRedactor: @escaping ACPLogScrubber = ACPLogRedactor.scrub
     ) {
         // Clamp to sane floors: a non-positive byte cap would truncate everything to
@@ -166,7 +191,10 @@ public struct AgentConfig: Sendable, Equatable {
         self.contextGraphAgentName = contextGraphAgentName
         // ≤0 ⇒ no wait (deny immediately on no answer); otherwise the given seconds.
         self.permissionTimeoutSeconds = max(0, permissionTimeoutSeconds)
+        self.maxIterations = max(0, maxIterations)
+        self.shellTimeoutSeconds = max(0, shellTimeoutSeconds)
         self.allowUngatedTools = allowUngatedTools
+        self.visionEnabled = visionEnabled
         self.logRedactor = logRedactor
     }
 
@@ -189,6 +217,7 @@ public struct AgentConfig: Sendable, Equatable {
             && lhs.contextGraphAgentName == rhs.contextGraphAgentName
             && lhs.permissionTimeoutSeconds == rhs.permissionTimeoutSeconds
             && lhs.allowUngatedTools == rhs.allowUngatedTools
+            && lhs.visionEnabled == rhs.visionEnabled
     }
 
     /// Build from the process environment, falling back to an optional config
@@ -262,7 +291,10 @@ public struct AgentConfig: Sendable, Equatable {
             contextGraphURL: stringEnv("ELDR_ACP_CONTEXTGRAPH_URL") ?? d.contextGraphURL,
             contextGraphAgentName: stringEnv("ELDR_ACP_CONTEXTGRAPH_AGENT"),
             permissionTimeoutSeconds: doubleEnv("ELDR_ACP_PERMISSION_TIMEOUT", default: d.permissionTimeoutSeconds),
-            allowUngatedTools: boolEnv("ELDR_ACP_ALLOW_UNGATED_TOOLS", default: d.allowUngatedTools))
+            maxIterations: intEnv("ELDR_ACP_MAX_ITERATIONS", default: d.maxIterations),
+            shellTimeoutSeconds: doubleEnv("ELDR_ACP_SHELL_TIMEOUT", default: d.shellTimeoutSeconds),
+            allowUngatedTools: boolEnv("ELDR_ACP_ALLOW_UNGATED_TOOLS", default: d.allowUngatedTools),
+            visionEnabled: boolEnv("ELDR_LLM_VISION", default: d.visionEnabled))
     }
 
     /// Interpret the overloaded `ELDR_ACP_SKILLS` value.

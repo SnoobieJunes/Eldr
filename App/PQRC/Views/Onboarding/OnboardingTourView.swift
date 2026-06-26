@@ -8,13 +8,16 @@ import SwiftUI
 /// Accessibility: every page is one VoiceOver element (`TourStepCard`); the
 /// controls are labeled; the progress rail announces "step N of M".
 struct OnboardingTourView: View {
+    /// The cards to show — the first-run welcome script.
+    var steps: [TourStep] = TourScript.steps
+    /// Label for the final-page primary button (themed per variant).
+    var finishLabel: String = "Set sail"
     /// Marks the tour seen + dismisses (Skip or finishing).
     let onFinish: () -> Void
 
     @State private var index = 0
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
-    private var steps: [TourStep] { TourScript.steps }
     private var isLast: Bool { index >= steps.count - 1 }
     private var current: TourStep { steps[index] }
 
@@ -110,7 +113,7 @@ struct OnboardingTourView: View {
                 Button {
                     if isLast { onFinish() } else { advance(to: index + 1) }
                 } label: {
-                    Text(isLast ? "Set sail" : "Next")
+                    Text(isLast ? finishLabel : "Next")
                         .font(.body.weight(.semibold))
                         .frame(maxWidth: .infinity)
                         .padding(.vertical, 6)
@@ -177,7 +180,10 @@ extension View {
     /// touches nothing inside MainView/ConversationView.
     func onboardingTour(_ coordinator: TourCoordinator, activeSiloID: String?) -> some View {
         fullScreenCover(isPresented: Bindable(coordinator).isPresenting) {
-            OnboardingTourView(onFinish: { coordinator.finish(siloID: activeSiloID) })
+            OnboardingTourView(
+                steps: coordinator.steps,
+                finishLabel: "Set sail",
+                onFinish: { coordinator.finish(siloID: activeSiloID) })
         }
         // Dev/QA-only: `--show-tour` forces the welcome tour up over whatever mode
         // the app booted into (e.g. the demo universe) so it can be reviewed and
@@ -185,7 +191,8 @@ extension View {
         // Release; never reachable in a shipped build.
         #if DEBUG
             .task {
-                if ProcessInfo.processInfo.arguments.contains("--show-tour") {
+                let args = ProcessInfo.processInfo.arguments
+                if args.contains("--show-tour") {
                     coordinator.presentIfFirstRun(siloID: activeSiloID)
                 }
             }

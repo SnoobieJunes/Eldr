@@ -17,13 +17,13 @@
 	</array>
 
 	<!-- Apple Private Cloud Compute (PCCFoundationModelsProvider — DEVIATIONS A40 / AC36).
-	     DISABLED on purpose: PCC is OFF (ELDR_PCC_SDK undefined; symbols absent from the
-	     installed SDKs), and this MANAGED entitlement makes signing FAIL until Apple
-	     approves the team's PCC request. Re-enable WITH the ELDR_PCC_SDK flag once
-	     approved (developer.apple.com/private-cloud-compute). -->
-	<!--
+	     ENABLED for iOS 27 at the owner's request. Pairs with `.define("ELDR_PCC_SDK")` in
+	     Packages/PQRCAgent/Package.swift; the PCC symbols ship in the Xcode 27 / iOS 27 SDK
+	     (verified 2026-06), so the app MUST be built with Xcode 27. NOTE: this is a MANAGED
+	     entitlement — device / TestFlight signing needs Apple to approve the team's PCC
+	     request (developer.apple.com/private-cloud-compute); a Simulator build ad-hoc signs
+	     and does not surface that. -->
 	<key>com.apple.developer.private-cloud-compute</key>
 	<true/>
-	-->
 </dict>
 </plist>

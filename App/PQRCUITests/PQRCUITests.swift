@@ -127,8 +127,17 @@ final class PQRCUITests: XCTestCase {
     func test_aiDraft_previewThenSendAsAI_rendersAgentBubble() throws {
         let app = launchUniverse()
         openConversation(app, "Bob")
-        tapWhenReady(app, button: "ai-window-button")
-        tapWhenReady(app, button: "Draft a reply privately")
+        // The "My AI responds" control lives inline in the in-chat "AI here" sheet;
+        // the leading AI:live chip (ai-here-chip) opens that sheet.
+        tapWhenReady(app, button: "ai-here-chip")
+        // The control defaults to "Drafts privately", so the on-demand draft
+        // action is shown immediately in the "My AI responds" section. It sits
+        // below the AI-context section, so make sure it's on screen
+        // (tap auto-scrolls, but swipe up first in case it's below the fold).
+        let draftNow = app.buttons["ai-responds-draft-now"]
+        XCTAssertTrue(draftNow.waitForExistence(timeout: 15), "ai-responds-draft-now missing")
+        if !draftNow.isHittable { app.swipeUp() }
+        draftNow.tap()
         XCTAssertTrue(app.textViews["draft-editor"].waitForExistence(timeout: 20))
         tapWhenReady(app, button: "send-as-ai")
         XCTAssertTrue(
@@ -247,6 +256,22 @@ final class PQRCUITests: XCTestCase {
                     if bar.exists, bar.frame.intersects(element.frame) {
                         return true
                     }
+                }
+                // A row scrolled up under the TOP navigation bar's translucent
+                // scroll-edge material — the first message in a short conversation
+                // lands right beneath it. The auditor samples the bar's blur as the
+                // cell's background and hard-fails it, though the text's own colors
+                // pass where it's fully clear (the same rows read "nearly passed"
+                // lower down). Same occlusion artifact the bottom bars get, for the
+                // top edge (A7). Excuse anything whose TOP sits in the nav bar + its
+                // soft blur band (~44pt below the bar); fall back to a fixed top band
+                // when the nav-bar element can't be resolved inside this closure.
+                let navBar = app.navigationBars.firstMatch
+                let topBlurMaxY: CGFloat =
+                    navBar.exists && navBar.frame.height > 1
+                    ? navBar.frame.maxY + 44 : 165
+                if element.frame.minY < topBlurMaxY {
+                    return true
                 }
             }
             return false

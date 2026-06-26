@@ -14,7 +14,7 @@ two transports added by the S1/S2 stretch goals:
 
 | Requirement | Notes |
 |---|---|
-| macOS with Xcode 26.x | Swift 6.2 toolchain; the packages build with `swift test` on macOS directly |
+| macOS with Xcode 27 (Xcode-beta) | Required per CLAUDE.md's toolchain rule and §9 (export `DEVELOPER_DIR=…/Xcode-beta.app`); the 26.x SDK is missing iOS-27 symbols this app uses. Swift 6.2 toolchain; the packages build with `swift test` on macOS directly |
 | iOS 26.5 simulator runtime | Pin `OS=26.5` in destinations — machines with a beta runtime installed can silently resolve an ambiguous name to the beta |
 | Two iPhones or iPhone+iPad (optional) | Only needed for real-radio Multipeer testing (§6) |
 | An Apple Development team | The project uses automatic signing (`DEVELOPMENT_TEAM` is set in the pbxproj; change it to yours if needed) |
@@ -75,9 +75,15 @@ the anchor-relay rule (kind-1059 gift wraps are served ONLY to the
 authenticated, p-tagged recipient — SPEC §9.1), and can inject deterministic
 chaos for resilience demos.
 
+> **Production-relay obligation.** The "non-recipients can't read your wraps"
+> privacy property (THREAT_MODEL §2.2) is enforced by the RELAY, not the client.
+> Any production relay you point at — the default `relay.lerants.com` (khatru,
+> AUTH-gated) included — MUST keep NIP-42 kind-1059 gating on; verify it before
+> relying on that property. `pqrc-relay` here is the reference behavior.
+
 ```bash
 # Build + run (default port 7777):
-1
+swift run --package-path Packages/PQRCNostr pqrc-relay
 
 # Custom port and chaos injection:
 swift run --package-path Packages/PQRCNostr pqrc-relay \
@@ -302,15 +308,15 @@ Xcode 27 (write code, build, run on simulators). Xcode 27 is the ACP *client*;
 
 > **GUI alternative — the Eldr ACP Configurator.** If you'd rather not do the manual
 > steps below, the **Eldr ACP Configurator** macOS app
-> (`Apps/EldrACPConfigurator/`) wraps all of this in a 5-step setup wizard: connect
+> (`Apps/Huginn/`) wraps all of this in a 5-step setup wizard: connect
 > your LLM, test it, install the binary + launcher, register it in Xcode, and start
 > using it — plus a live config panel, a log viewer, an in-app test chat, and
 > self-learning per-project memory. Build it with
-> `xcodebuild -scheme EldrACPConfigurator -destination 'platform=macOS' build` (or
-> open `Apps/EldrACPConfigurator/EldrACPConfigurator.xcodeproj` and Run). It writes
+> `xcodebuild -scheme Huginn -destination 'platform=macOS' build` (or
+> open `Apps/Huginn/Huginn.xcodeproj` and Run). It writes
 > the same `~/.config/eldr-acp/env` and `~/.local/bin/eldr-acp-xcode` documented
 > here, so the two approaches are interchangeable. See
-> [`Apps/EldrACPConfigurator/README.md`](../Apps/EldrACPConfigurator/README.md), and
+> [`Apps/Huginn/README.md`](../Apps/Huginn/README.md), and
 > [`docs/SIGNING-AND-DISTRIBUTION.md`](SIGNING-AND-DISTRIBUTION.md) for packaging it
 > as a DMG. The manual command-line setup follows.
 

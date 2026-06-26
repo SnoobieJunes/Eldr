@@ -62,6 +62,31 @@ struct ToolExecutorPathJailTests {
         #expect(!FileManager.default.fileExists(atPath: target))  // never written
     }
 
+    @Test func writeThroughSymlinkedDirToNewFileIsRejected() async throws {
+        // CR-2: write_file to a NEW path THROUGH a symlinked directory. The leaf doesn't
+        // exist yet, so `resolvingSymlinksInPath` used to leave the symlinked PARENT
+        // unresolved → the prefix check passed while `Data.write` followed the link OUT.
+        let dir = try tempDir("write-link-new")
+        defer { try? FileManager.default.removeItem(atPath: dir) }
+        let secretDir = try tempDir("write-link-secret")
+        defer { try? FileManager.default.removeItem(atPath: secretDir) }
+        // A symlinked DIR inside the workdir pointing at the outside secret dir.
+        let link = (dir as NSString).appendingPathComponent("dotlink")
+        try FileManager.default.createSymbolicLink(atPath: link, withDestinationPath: secretDir)
+
+        let w = await executor(workdir: dir).run(
+            tool: "write_file",
+            args: .object([
+                "path": .string("dotlink/authorized_keys"), "content": .string("pwned"),
+            ]))
+        #expect(w.isError)
+        #expect(w.text.contains("outside the working directory"))
+        // The byte never landed in the symlink's target dir.
+        #expect(
+            !FileManager.default.fileExists(
+                atPath: (secretDir as NSString).appendingPathComponent("authorized_keys")))
+    }
+
     @Test func allowsPathsInsideWorkdir() async throws {
         let dir = try tempDir("inside")
         defer { try? FileManager.default.removeItem(atPath: dir) }

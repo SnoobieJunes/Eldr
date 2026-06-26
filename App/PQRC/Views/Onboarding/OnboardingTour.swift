@@ -88,13 +88,13 @@ enum TourScript {
             accentSymbol: "hourglass",
             gradient: [Color.purple, Color.blue],
             title: "Ready for tomorrow's storms",
-            subtitle: "Post-quantum, in plain language.",
+            subtitle: "Post-quantum encryption, in plain language.",
             body:
                 "Today's encryption could one day be broken by powerful quantum computers still being built. Eldr already uses encryption designed to resist them, so a message you send now stays private even years from now — long after the seas have changed.",
             fieldNote:
-                "Post-quantum cryptography is on for every conversation — no toggle, no extra steps.",
+                "Post-quantum encryption is on for every conversation — no toggle, no extra steps.",
             voiceOver:
-                "Ready for tomorrow's storms. Post-quantum, in plain language. Today's encryption could one day be broken by powerful quantum computers still being built. Eldr already uses encryption designed to resist them, so a message you send now stays private even years from now, long after the seas have changed. Post-quantum cryptography is on for every conversation, with no toggle and no extra steps."
+                "Ready for tomorrow's storms. Post-quantum encryption, in plain language. Today's encryption could one day be broken by powerful quantum computers still being built. Eldr already uses encryption designed to resist them, so a message you send now stays private even years from now, long after the seas have changed. Post-quantum encryption is on for every conversation, with no toggle and no extra steps."
         ),
         TourStep(
             id: 4,
@@ -134,9 +134,9 @@ enum TourScript {
             body:
                 "Bring in a powerful model like Claude, or one you run yourself, and let assistants collaborate in a shared thread — comparing notes, drafting a plan, dividing a task, on the record. You stay in command of what the AI sees, who sees it, where it goes, and when it must leave the device — and an egress firewall obfuscates contacts and caps how much can ever leave when it does.",
             fieldNote:
-                "The firewall is on by default for every off-device AI; the on-device model never leaves the phone at all.",
+                "On by default for every off-device AI — each chat shows whether it's on, and secrets like API keys are scrubbed before anything reaches a cloud model. Your AI follows only your settings; no one else in a chat can switch it on or off.",
             voiceOver:
-                "Tether AI on a leash. Collaborate, alone or in a crew. Bring in a powerful model like Claude, or one you run yourself, and let assistants collaborate in a shared thread — comparing notes, drafting a plan, dividing a task, on the record. You stay in command of what the AI sees, who sees it, where it goes, and when it must leave the device — and an egress firewall obfuscates contacts and caps how much can ever leave when it does. The firewall is on by default for every off-device AI."
+                "Tether AI on a leash. Collaborate, alone or in a crew. Bring in a powerful model like Claude, or one you run yourself, and let assistants collaborate in a shared thread — comparing notes, drafting a plan, dividing a task, on the record. You stay in command of what the AI sees, who sees it, where it goes, and when it must leave the device — and an egress firewall obfuscates contacts and caps how much can ever leave when it does. It's on by default for every off-device AI, each chat shows whether it's on, and secrets like A.P.I. keys are scrubbed before anything reaches a cloud model. Your A.I. follows only your settings; no one else in a chat can switch it on or off."
         ),
         TourStep(
             id: 7,
@@ -174,10 +174,10 @@ enum TourScript {
             title: "Set sail",
             subtitle: "\u{201C}A mind forever voyaging through strange seas of thought.\u{201D}",
             body:
-                "That's the lay of the water: private by right, transparent about AI, post-quantum, and decentralized — a boat that lets people and their robots communicate and collaborate safely. Add a contact, tether an assistant, and chart your course. Curious to see it all in motion? Try the live demo from Settings.",
+                "That's the lay of the water: private by right, transparent about AI, post-quantum encrypted, and decentralized — a boat that lets people and their robots communicate and collaborate safely. Add a contact, tether an assistant, and chart your course. Curious to see it all in motion? Try the live demo from Settings.",
             fieldNote: "Replay this tour anytime from Settings ▸ About ▸ Take the tour.",
             voiceOver:
-                "Set sail. A mind forever voyaging through strange seas of thought. That's the lay of the water: private by right, transparent about AI, post-quantum, and decentralized — a boat that lets people and their robots communicate and collaborate safely. Add a contact, tether an assistant, and chart your course. You can replay this tour anytime from Settings, About, Take the tour."
+                "Set sail. A mind forever voyaging through strange seas of thought. That's the lay of the water: private by right, transparent about AI, post-quantum encrypted, and decentralized — a boat that lets people and their robots communicate and collaborate safely. Add a contact, tether an assistant, and chart your course. You can replay this tour anytime from Settings, About, Take the tour."
         ),
     ]
 }
@@ -190,6 +190,10 @@ enum TourScript {
 final class TourCoordinator {
     /// Currently presenting the tour.
     var isPresenting = false
+
+    /// Cards for the first-run welcome tour. (The enterprise / funder "Why Eldr for
+    /// teams" pitch moved to the Huginn app — Apps/Huginn ▸ EnterpriseTourView.swift.)
+    var steps: [TourStep] { TourScript.steps }
 
     private static let baseKey = "hasSeenOnboardingTour"
 

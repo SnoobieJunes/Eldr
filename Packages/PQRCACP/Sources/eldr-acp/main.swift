@@ -93,6 +93,7 @@ struct EldrACPMain {
             toolEnvironment: .fromEnvironment(environment),
             config: config,
             configDir: AgentConfig.defaultConfigDir(environment),
+            maxIterations: config.maxIterations,
             streamingEnabled: streamingEnabled,
             requestTimeoutSeconds: timeoutSeconds)
         let inFlight = InFlight()

@@ -1,5 +1,6 @@
 import Foundation
 import Observation
+import PQRCACP
 import PQRCAgent
 import PQRCCore
 import PQRCNostr
@@ -33,12 +34,37 @@ struct NearbyVM: Identifiable, Hashable {
     let name: String
 }
 
+/// Phase D4 — the live INTERACTIVE terminal (PTY) a paired coding-agent node is running.
+/// Append-only `output` (the streamed combined stdout+stderr), display-only — agent text,
+/// trusted no further than a bubble, and NEVER persisted (the live stream isn't written
+/// at rest, CLAUDE.md inv. 12). The view renders `output` monospace and offers a Stop
+/// control wired to `terminalID`.
+struct LiveACPTerminal: Identifiable, Equatable {
+    var id: String { terminalID }
+    let terminalID: String
+    let title: String
+    var output: String = ""
+    /// Set once the node reports the terminal closed (child exited / killed). The view
+    /// shows it as ended; the row is cleared shortly after.
+    var closed: Bool = false
+    var exitCode: Int?
+    /// Cap on retained output so a chatty process can't grow the string unbounded in the
+    /// view (the live stream is unbounded; the on-screen scrollback is not). Head-trimmed.
+    static let maxOutputBytes = 256 * 1024
+}
+
 /// Main-actor view state for one persona, fed by its `PersonaRuntime`.
 @MainActor
 @Observable
 final class AppModel {
     let runtime: PersonaRuntime
     let personaName: String
+
+    /// The interactive ACP tool-permission queue (Phase 3 item 3 — "ask each time"). A
+    /// SwiftUI alert drives off `acpPermissions.pending.first`; the runtime's permission
+    /// handler awaits it. Owned here so it lives for the whole app session and is reachable
+    /// from any view via the model.
+    let acpPermissions = ACPPermissionCoordinator()
 
     var onboarded = false
     var myNpub = ""
@@ -69,6 +95,17 @@ final class AppModel {
     /// used to label their assistant's bubbles. My own AIs label via the
     /// message's stored `agentName`.
     var aiNames: [String: String] = [:]
+    /// conversationID -> the latest plan/TODO checklist a paired coding-agent node
+    /// reported for the turn it's running (Phase D1). Display-only; the node re-sends
+    /// the whole plan on each change, so this is replaced wholesale, never merged.
+    var acpPlansByConversation: [String: [ACPPlanEntry]] = [:]
+    /// conversationID -> the live INTERACTIVE terminal (PTY) a paired coding-agent node is
+    /// running for this conversation (Phase D4), or nil when none is live. The UI shows a
+    /// monospace output view + a prominent Stop control while present. At most one live
+    /// terminal per conversation is surfaced (a coding chat drives one node). The output
+    /// is display-only agent text and is NEVER persisted (CLAUDE.md inv. 12 — the live
+    /// stream is not written at rest).
+    var acpTerminalByConversation: [String: LiveACPTerminal] = [:]
     /// Nearby peers discovered over the local link (SPEC §10) — startable with
     /// no relay. Populated only when the Nearby setting is on.
     var nearbyContacts: [NearbyVM] = []
@@ -93,6 +130,9 @@ final class AppModel {
         inMemoryStore: Bool, storeURL: URL? = nil,
         relayURLs: [String] = ["local://relay"]
     ) async throws {
+        // Wire the interactive permission asker BEFORE bootstrap, so the first relay-ACP
+        // rebind (inside bootstrap) builds a handler that can prompt the human.
+        await runtime.setPermissionAsker(acpPermissions)
         let events = try await runtime.bootstrap(
             inMemoryStore: inMemoryStore, storeURL: storeURL, relayURLs: relayURLs)
         myNpub = await runtime.npub
@@ -208,6 +248,38 @@ final class AppModel {
             }
         case .keyPublishChanged(let status):
             keyPublish = status
+        case .acpPlan(let conversationID, let entries):
+            // Full snapshot from the node — replace, don't merge. An empty plan
+            // (turn produced no steps) clears the checklist.
+            if entries.isEmpty {
+                acpPlansByConversation[conversationID] = nil
+            } else {
+                acpPlansByConversation[conversationID] = entries
+            }
+        case .acpTerminalOpened(let conversationID, let terminalID, let title):
+            // A live interactive terminal opened — show its view + Stop control.
+            acpTerminalByConversation[conversationID] = LiveACPTerminal(
+                terminalID: terminalID, title: title)
+        case .acpTerminalOutput(let conversationID, let terminalID, let chunk):
+            // Append streamed output to the matching live terminal (display-only; never
+            // persisted). Ignore a chunk for a terminal we aren't showing (a stale id).
+            guard var term = acpTerminalByConversation[conversationID],
+                term.terminalID == terminalID
+            else { break }
+            term.output += chunk
+            // Bound the on-screen scrollback (head-trim) so a chatty process can't grow
+            // the retained string without limit.
+            if term.output.utf8.count > LiveACPTerminal.maxOutputBytes {
+                term.output = String(term.output.suffix(LiveACPTerminal.maxOutputBytes / 2))
+            }
+            acpTerminalByConversation[conversationID] = term
+        case .acpTerminalClosed(let conversationID, let terminalID, let exitCode):
+            guard var term = acpTerminalByConversation[conversationID],
+                term.terminalID == terminalID
+            else { break }
+            term.closed = true
+            term.exitCode = exitCode
+            acpTerminalByConversation[conversationID] = term
         }
     }
 
@@ -308,10 +380,10 @@ final class AppModel {
     /// so the user sees *why* instead of silently getting nothing.
     var agentError: String?
 
-    func draft(conversationID: String, threadID: String? = nil) async -> String? {
+    func draft(conversationID: String, threadID: String? = nil, focus: String? = nil) async -> String? {
         do {
             let text = try await runtime.draftReply(
-                conversationID: conversationID, threadID: threadID).text
+                conversationID: conversationID, threadID: threadID, focus: focus).text
                 .trimmingCharacters(in: .whitespacesAndNewlines)
             // A blank draft (some providers return "" instead of erroring) would
             // insert nothing and read as "the AI silently did nothing". Treat it
@@ -350,6 +422,32 @@ final class AppModel {
 
     func withdrawAI(threadID: String) async {
         await runtime.withdrawMyAI(threadID: threadID)
+    }
+
+    // MARK: - Interactive terminal (Phase D4)
+
+    /// Send a line of stdin to the live interactive terminal in `conversationID` (the user
+    /// typed into the PTY view). Appends a newline. No-op if no terminal is live.
+    func sendACPTerminalInput(_ text: String, conversationID: String) async {
+        guard let term = acpTerminalByConversation[conversationID], !term.closed else { return }
+        await runtime.sendACPTerminalInput(
+            nodeHex: conversationID, terminalID: term.terminalID, data: text + "\n")
+    }
+
+    /// STOP/KILL the live interactive terminal in `conversationID` (the prominent Stop
+    /// control). Tells the node to terminate the PTY's child process group + close its
+    /// fds. Always available while a terminal is live.
+    func stopACPTerminal(conversationID: String) async {
+        guard let term = acpTerminalByConversation[conversationID] else { return }
+        await runtime.killACPTerminal(nodeHex: conversationID, terminalID: term.terminalID)
+    }
+
+    /// Dismiss a CLOSED terminal's view (clears the row). Only meaningful once closed —
+    /// while live, the Stop control is the way out.
+    func dismissACPTerminal(conversationID: String) {
+        if acpTerminalByConversation[conversationID]?.closed == true {
+            acpTerminalByConversation[conversationID] = nil
+        }
     }
 
     // MARK: - AI context (Features 3–4)
@@ -464,14 +562,26 @@ final class AppModel {
         // `makeRuntimeAIs(...).filter(\.isEnabled)` → `ais[0]`.
         let enabled = AppSession.loadConfiguredAIs(siloID: siloID).filter(\.isEnabled)
         let primary = enabled.first
-        var mode = primary?.effectivePolicy ?? "off"
+        // Honest at-a-glance state: "off" must mean NO enabled AI gathers or responds
+        // here — not merely that the FIRST AI is off. With two AIs (primary "off", a
+        // second "active") the chip used to read "AI off here" while the second AI still
+        // replied — the user's "the off in this chat is still going to the AI". Resolve
+        // from the STRONGEST policy across ALL enabled AIs (active > strict > off) so the
+        // chip never under-reports a participating AI. A per-conversation override below
+        // still wins (it forces every AI to the same mode in `resolvedPolicy`).
+        func policyRank(_ p: String) -> Int { p == "active" ? 2 : (p == "strict" ? 1 : 0) }
+        var mode = enabled.map(\.effectivePolicy).max(by: { policyRank($0) < policyRank($1) }) ?? "off"
         switch AppSession.conversationContextMode(conversationID, siloID: siloID) {
         case "off": mode = "off"
         case "marked": mode = "strict"
         case "full": mode = "active"
         default: break
         }
-        let isRemote = primary.map { ConfiguredAI.isRemote($0.kind) } ?? false
+        // ANY enabled remote AI means context can leave the device — the chip + the
+        // egress-firewall row must reflect that, not just the PRIMARY AI's kind. With
+        // an on-device #1 and a cloud #2, the old primary-only check wrongly read
+        // "stays on device" while #2 egressed (H-3).
+        let isRemote = enabled.contains { ConfiguredAI.isRemote($0.kind) }
         let firewallOn =
             AppSession.conversationFirewall(conversationID, siloID: siloID) ?? AppSession.firewallEnabled
         return (mode, isRemote, firewallOn)

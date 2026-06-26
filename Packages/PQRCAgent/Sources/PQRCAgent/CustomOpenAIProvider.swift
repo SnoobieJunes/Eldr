@@ -72,10 +72,13 @@ public struct CustomOpenAIProvider: AgentProvider {
         request.setValue("application/json", forHTTPHeaderField: "content-type")
         let payload: [String: Any] = [
             "model": model,
-            // Self-hosted reasoning models (qwen3, DeepSeek-R1) spend tokens on a
-            // `<think>` scratchpad before answering, so give them more room than
-            // the hosted (paid) providers — then strip the trace below.
-            "max_tokens": 1024,
+            // Self-hosted reasoning models (qwen3, DeepSeek-R1, gemma-QAT) spend tokens
+            // on a private `<think>`/channel scratchpad BEFORE answering, so give them
+            // generous room. A tight cap means the model burns the whole budget
+            // reasoning and is truncated (finish_reason "length") before writing a
+            // single token of answer — which used to vanish silently (now surfaced
+            // below). 1024 was hitting exactly that on chatty reasoning models.
+            "max_tokens": 4096,
             "messages": [
                 ["role": "system", "content": system],
                 ["role": "user", "content": user],
@@ -93,11 +96,24 @@ public struct CustomOpenAIProvider: AgentProvider {
         guard
             let json = try JSONSerialization.jsonObject(with: data) as? [String: Any],
             let choices = json["choices"] as? [[String: Any]],
-            let message = choices.first?["message"] as? [String: Any],
+            let first = choices.first,
+            let message = first["message"] as? [String: Any],
             let text = message["content"] as? String
         else {
             throw AgentProviderError.unavailable("unexpected response shape from the server")
         }
-        return text.strippingReasoningTrace()
+        let answer = text.strippingReasoningTrace()
+        // The reported silent failure: a reasoning model spends its ENTIRE budget
+        // thinking and is cut off (finish_reason "length") before writing an answer,
+        // so the stripped text is empty. Treating that the same as "had nothing to
+        // say" left the chat mysteriously silent. Surface it instead so the user knows
+        // WHY — and can fix it (the cause is the model, not the chat).
+        if answer.isEmpty, (first["finish_reason"] as? String) == "length" {
+            throw AgentProviderError.unavailable(
+                "Your AI ran out of room while reasoning and was cut off before it "
+                    + "answered. Use a model that reasons less, raise its max output "
+                    + "tokens, or shorten the conversation it has to read.")
+        }
+        return answer
     }
 }

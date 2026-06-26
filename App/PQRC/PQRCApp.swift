@@ -482,6 +482,32 @@ final class AppSession {
         else { UserDefaults.standard.removeObject(forKey: key) }
     }
 
+    /// Per-node SHARE-CHAT-CONTEXT consent (Phase D3 — MCP passthrough over the
+    /// relay): whether the owner has consented to let a paired `coding_agent` node's
+    /// coding agent USE this phone's MCP chat tools (read REDACTED conversations,
+    /// draft replies, search, and — only inside a live ai_window — `send_as_my_ai`).
+    /// OFF by default — the cardinal rule. This is SEPARATE from, and ORTHOGONAL to,
+    /// `remoteDevControlConsent` (drive the agent at all) and `autonomousChangesConsent`
+    /// (let it change files/run shell): chat context ≠ dev-control. With this OFF, the
+    /// phone REFUSES to service that node's `MCP1|` frames AND refuses to advertise
+    /// `mcpServers` to it when driving it — so the whole MCP-over-relay channel stays
+    /// inert (the node can't even discover the tools exist). The node NEVER receives
+    /// unredacted chat regardless: redaction happens phone-side in `RuntimeSecureChatBridge`
+    /// before anything is framed onto the relay. `nodeID` is the node contact's PQRC
+    /// identity hex (the only ACP/MCP peer — C-3). Per-silo (deniability — A33).
+    /// `nonisolated` so the (actor) `PersonaRuntime` reads it without an await.
+    nonisolated static func shareChatContextConsent(nodeID: String, siloID: String = "") -> Bool {
+        UserDefaults.standard.bool(
+            forKey: siloDefaultsKey("acpShareChatContext.\(nodeID)", siloID))
+    }
+    nonisolated static func setShareChatContextConsent(
+        _ value: Bool, nodeID: String, siloID: String = ""
+    ) {
+        let key = siloDefaultsKey("acpShareChatContext.\(nodeID)", siloID)
+        if value { UserDefaults.standard.set(true, forKey: key) }
+        else { UserDefaults.standard.removeObject(forKey: key) }
+    }
+
     /// Agent-skills asymmetry knob: a short label of THIS workstation's context
     /// domain (e.g. "iOS / Xcode"), injected into shared-thread prompts so each
     /// tether advertises what it has without dumping its full context.
@@ -779,6 +805,13 @@ final class AppSession {
             await runtime.setPairedPubkeysPublisher { [pairedSnapshot] set in
                 pairedSnapshot.replace(with: set)
             }
+            // Phase D3: inject the firewall-redacted MCP data source so the runtime can
+            // serve the phone's chat tools to a CONSENTED coding-agent node over the
+            // relay (`RelayMCPHost`). The SAME `RuntimeSecureChatBridge` the loopback
+            // MCP server uses — redaction + ai_window-gating identical. Without this the
+            // relay-MCP path stays inert (`ensureRelayMCPHost` returns nil); the
+            // per-node "share chat context" consent is the user-facing opt-in on top.
+            await runtime.setSecureChatBridge(RuntimeSecureChatBridge(model: model))
         } catch {
             bootError = String(describing: error)
         }
@@ -1133,7 +1166,16 @@ struct RootView: View {
                 if single { tour.presentIfFirstRun(siloID: session.activeSiloID) }
             }
             .task {
-                if isSingleMode { tour.presentIfFirstRun(siloID: session.activeSiloID) }
+                if isSingleMode {
+                    tour.presentIfFirstRun(siloID: session.activeSiloID)
+                } else if isFreshGate {
+                    // Fresh install sitting on the gate: lead with the welcome
+                    // tour before the passphrase form. Same once-per-device "seen"
+                    // gate as the in-account path, so it shows at most once and
+                    // never for a returning user. (UI-test / `--reset` launches are
+                    // already excluded inside `presentIfFirstRun`.)
+                    tour.presentIfFirstRun(siloID: nil)
+                }
             }
     }
 
@@ -1141,6 +1183,15 @@ struct RootView: View {
     private var isSingleMode: Bool {
         if case .single = session.mode { return true }
         return false
+    }
+
+    /// A first-ever launch on the account gate with no account yet — the cue to
+    /// lead with the welcome tour on a fresh install.
+    private var isFreshGate: Bool {
+        switch session.mode {
+        case .locked, .onboarding: return !session.hasDefaultAccount
+        case .single, .universe: return false
+        }
     }
 
     @ViewBuilder private var content: some View {
