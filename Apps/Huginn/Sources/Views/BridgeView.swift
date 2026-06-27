@@ -132,22 +132,33 @@ struct BridgeView: View {
                     Divider()
                     Text("Choose from paired devices:").font(.caption).foregroundStyle(.secondary)
                     ForEach(bridge.activeConversations) { convo in
-                        Button {
-                            bridge.setOwnerIdentity(convo.id)
-                        } label: {
-                            HStack(spacing: 8) {
-                                Image(
-                                    systemName: bridge.ownerIdentityHex == convo.id
-                                        ? "largecircle.fill.circle" : "circle"
-                                )
-                                .foregroundStyle(bridge.ownerIdentityHex == convo.id ? .green : .secondary)
-                                Text(convo.name)
-                                Text(Self.shortHex(convo.id))
-                                    .font(.caption.monospaced()).foregroundStyle(.secondary)
-                                Spacer()
+                        HStack(spacing: 8) {
+                            Button {
+                                bridge.setOwnerIdentity(convo.id)
+                            } label: {
+                                HStack(spacing: 8) {
+                                    Image(
+                                        systemName: bridge.ownerIdentityHex == convo.id
+                                            ? "largecircle.fill.circle" : "circle"
+                                    )
+                                    .foregroundStyle(bridge.ownerIdentityHex == convo.id ? .green : .secondary)
+                                    Text(convo.name)
+                                    Text(Self.shortHex(convo.id))
+                                        .font(.caption.monospaced()).foregroundStyle(.secondary)
+                                    Spacer()
+                                }
                             }
+                            .buttonStyle(.plain)
+                            // Delete a paired device (clears the owner if it was pinned —
+                            // fail-closed). It can re-pair later.
+                            Button(role: .destructive) {
+                                bridge.removePairedConversation(identityHex: convo.id)
+                            } label: {
+                                Image(systemName: "trash").foregroundStyle(.secondary)
+                            }
+                            .buttonStyle(.plain)
+                            .help("Remove this paired device")
                         }
-                        .buttonStyle(.plain)
                     }
                 }
 

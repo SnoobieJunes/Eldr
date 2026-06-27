@@ -747,6 +747,24 @@ final class ACPBridgeService: ObservableObject {
             BridgeConversation(
                 id: identityHex, name: shortHex(identityHex), enabled: true,
                 members: [identityHex]))
+        // Auto-select the owner: the FIRST device to pair becomes the owner so the
+        // Mac-Tethered-AI is usable immediately, with no manual pin. Fail-safe — only
+        // ever auto-pins when NO owner is set, so it can never silently steal an
+        // existing owner binding (a human can re-assign/remove below). Pairing already
+        // required QR/verification, so a paired device is one the Mac operator trusts.
+        if ownerIdentityHex == nil {
+            setOwnerIdentity(identityHex)
+        }
+    }
+
+    /// Remove a paired device. If it was the pinned owner, clear the owner too —
+    /// fail-closed: the agent goes silent (no autonomous sends) until a new owner is
+    /// pinned. The device can re-pair later (and would auto-select if no owner is set).
+    func removePairedConversation(identityHex: String) {
+        activeConversations.removeAll { $0.id == identityHex }
+        if ownerIdentityHex == identityHex {
+            setOwnerIdentity(nil)
+        }
     }
 
     private func shortHex(_ hex: String) -> String {
