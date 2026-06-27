@@ -16,6 +16,12 @@ struct ConversationView: View {
     /// Set while the AI is drafting a response into the composer.
     @State private var aiDrafting = false
     @State private var showThreadSheet = false
+    /// When starting a thread from a specific message (long-press), the source
+    /// message id to anchor it to; nil for a thread started from the top menu.
+    @State private var threadSourceMessageID: String?
+    /// Per-message AI-context visibility for the eye badge (C5), recomputed from
+    /// the runtime's inspections. Keyed by message id.
+    @State private var aiVisibilityByMessage: [String: AIMessageVisibility] = [:]
     @State private var showDetails = false
     /// Multi-select mode for batch "Add to AI Context" (Feature 3).
     @State private var selecting = false
@@ -135,6 +141,10 @@ struct ConversationView: View {
             aiSummary = model.primaryAIContextSummary(conversationID)
             // Refresh the agent-bubble type badges in case the AI config changed.
             model.refreshAITypes()
+            Task { await refreshAIVisibility() }
+        }
+        .onChange(of: model.messages(for: conversationID).count) { _, _ in
+            Task { await refreshAIVisibility() }
         }
         .toolbar {
             // Group header: name + participant count, tappable to open the
@@ -191,6 +201,7 @@ struct ConversationView: View {
                         }
                         .accessibilityIdentifier("select-messages-menu-item")
                         Button {
+                            threadSourceMessageID = nil
                             showThreadSheet = true
                         } label: {
                             Label("Start AI thread", systemImage: "text.bubble")
@@ -211,7 +222,9 @@ struct ConversationView: View {
             }
         }
         .sheet(isPresented: $showThreadSheet) {
-            ThreadCreateSheet(model: model, conversationID: conversationID)
+            ThreadCreateSheet(
+                model: model, conversationID: conversationID,
+                sourceMessageID: threadSourceMessageID)
         }
         .sheet(isPresented: $showDetails) {
             ConversationDetailsView(model: model, conversationID: conversationID)
@@ -219,6 +232,7 @@ struct ConversationView: View {
         .sheet(isPresented: $showAIHere, onDismiss: {
             // The override lives in UserDefaults; refresh the glance chip on close.
             aiSummary = model.primaryAIContextSummary(conversationID)
+            Task { await refreshAIVisibility() }
         }) {
             AIHereSheet(model: model, conversationID: conversationID)
         }
@@ -387,6 +401,7 @@ struct ConversationView: View {
                         await model.markAIContext(
                             messageIDs: [message.id], value: !message.aiContext,
                             conversationID: conversationID)
+                        await refreshAIVisibility()
                     }
                 },
             onFullScreen: selecting ? nil : { fullScreenContent = FullScreenContent(text: $0) },
@@ -406,6 +421,14 @@ struct ConversationView: View {
                         if let text { answerDraft = text }
                     }
                 },
+            // Start a focused AI thread anchored to this message (long-press).
+            onStartThread: selecting
+                ? nil
+                : {
+                    threadSourceMessageID = message.id
+                    showThreadSheet = true
+                },
+            aiVisibility: aiVisibilityByMessage[message.id],
             // Strip the AgentSkills ⟡⟡ envelope from agent bubbles unless the
             // per-silo "Show agent protocol envelope" toggle is on (default off).
             // Display-only — the stored record keeps the raw bytes (§23).
@@ -425,6 +448,25 @@ struct ConversationView: View {
         } else {
             bubble
         }
+    }
+
+    /// Recompute per-message AI-context visibility (C5) from the runtime's
+    /// inspections — once per call (expensive), cached in `aiVisibilityByMessage`.
+    /// A message is "seen" by an AI when that AI's inspection includes its id; a
+    /// firewalled remote AI marks the entry redacted.
+    private func refreshAIVisibility() async {
+        let inspections = await model.contextInspections(conversationID: conversationID)
+        var map: [String: AIMessageVisibility] = [:]
+        for insp in inspections {
+            let redactedHere = insp.isRemote && insp.firewallOn
+            for entry in insp.entries {
+                let prev = map[entry.id]
+                map[entry.id] = AIMessageVisibility(
+                    count: (prev?.count ?? 0) + 1,
+                    redacted: (prev?.redacted ?? false) || redactedHere)
+            }
+        }
+        aiVisibilityByMessage = map
     }
 
     /// Bottom action bar shown while multi-selecting.
@@ -715,8 +757,13 @@ struct DraftSheet: View {
     var body: some View {
         NavigationStack {
             VStack(alignment: .leading, spacing: 16) {
-                Label("Draft from your AI", systemImage: "sparkles")
-                    .font(.headline)
+                VStack(alignment: .leading, spacing: 4) {
+                    Label("Made with you and your AI", systemImage: "sparkles")
+                        .font(.headline)
+                    Text("Your AI drafted this from your conversation. Review or edit it, then send as your AI — it'll show as made with you and your AI for everyone in the chat.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
                 TextEditor(text: $draft)
                     .frame(minHeight: 120)
                     .padding(4)
@@ -762,6 +809,9 @@ struct DraftSheet: View {
 struct ThreadCreateSheet: View {
     @Bindable var model: AppModel
     let conversationID: String
+    /// Optional source message to anchor the thread to (long-press "Start a thread
+    /// from here"); nil when started from the conversation menu.
+    var sourceMessageID: String? = nil
     @State private var title = ""
     @Environment(\.dismiss) private var dismiss
 
@@ -773,7 +823,9 @@ struct ThreadCreateSheet: View {
                         .accessibilityIdentifier("thread-title")
                     Button("Create AI thread") {
                         Task {
-                            _ = await model.createThread(conversationID: conversationID, title: title)
+                            _ = await model.createThread(
+                                conversationID: conversationID, title: title,
+                                anchorMessageID: sourceMessageID)
                             dismiss()
                         }
                     }

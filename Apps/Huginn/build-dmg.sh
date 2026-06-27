@@ -93,15 +93,32 @@ xcodebuild -exportArchive \
 APP="$EXPORT_DIR/$APP_NAME.app"
 [ -d "$APP" ] || { echo "error: exported app not found at $APP" >&2; exit 1; }
 
-echo "==> [2.5/7] Signing the bundled eldr-acp CLI + re-sealing the app"
+echo "==> [2.25/7] Building + bundling the eldr-node headless daemon"
+# The conduit installer (eldrctl) ships THIS binary to remote Macs. Bundle it inside
+# Huginn.app so the signed/notarized DMG is the single source of the node binary;
+# eldrctl extracts it from the installed app. Built release with the same beta toolchain.
+ELDR_NODE_PKG="$(cd ../../Packages/EldrNode && pwd)"
+swift build -c release --package-path "$ELDR_NODE_PKG" --product eldr-node
+ELDR_NODE_SRC="$(swift build -c release --package-path "$ELDR_NODE_PKG" --show-bin-path)/eldr-node"
+[ -f "$ELDR_NODE_SRC" ] || { echo "error: eldr-node not built at $ELDR_NODE_SRC" >&2; exit 1; }
+cp "$ELDR_NODE_SRC" "$APP/Contents/Resources/eldr-node"
+
+echo "==> [2.5/7] Signing the bundled eldr-acp + eldr-node CLIs + re-sealing the app"
 # The "Build and bundle eldr-acp" Xcode phase copies the CLI in ad-hoc/linker-signed
 # (Signature=adhoc, no team, no hardened runtime). Notarization rejects ANY nested
 # Mach-O that isn't Developer-ID + hardened-runtime signed, so sign it, then re-seal
 # the app around it (inside-out) preserving the unsandboxed entitlement. The verify
 # fails the build loudly here rather than wasting a notarization round-trip.
 ELDR_ACP_BIN="$APP/Contents/Resources/eldr-acp"
+ELDR_NODE_BIN="$APP/Contents/Resources/eldr-node"
 if [ -f "$ELDR_ACP_BIN" ]; then
   codesign --force --options runtime --timestamp --sign "$DEVELOPER_ID" "$ELDR_ACP_BIN"
+  # eldr-node carries its own keychain-access-groups entitlement so the headless node's
+  # secrets use the data-protection keychain (shared team-scoped group with Huginn).
+  if [ -f "$ELDR_NODE_BIN" ]; then
+    codesign --force --options runtime --timestamp --sign "$DEVELOPER_ID" \
+      --entitlements "eldr-node.entitlements" "$ELDR_NODE_BIN"
+  fi
   codesign --force --options runtime --timestamp --sign "$DEVELOPER_ID" \
     --entitlements "Huginn.entitlements" "$APP"
   codesign --verify --deep --strict --verbose=2 "$APP"

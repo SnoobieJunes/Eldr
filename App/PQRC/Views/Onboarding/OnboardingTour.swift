@@ -314,6 +314,19 @@ enum EnterpriseTourScript {
         ),
         TourStep(
             id: 9,
+            symbol: "terminal.fill", accentSymbol: "bird.fill",
+            gradient: [.cyan, .blue],
+            title: "Rig a new ship in one command",
+            subtitle: "Provision a conduit Mac over SSH — no wizard, no clicks.",
+            body:
+                "Standing up a new vessel used to mean dragging an app across and clicking through a setup by hand. Now one command rigs it from afar — it sails the install over SSH, sets your raven to run, and hands back the link your phone scans. Your AI can even do the rigging for you, following a runbook step by step.",
+            fieldNote:
+                "\u{2018}eldrctl install --target you@mac --owner <id>\u{2019} installs Huginn + the headless node and loads it as a LaunchAgent. The Mac must be logged in; your token is piped in over SSH, never written to disk; and the egress firewall stays ON until you grant a node \u{201C}Drive this agent\u{201D} in Settings \u{25B8} AI.",
+            voiceOver:
+                "Rig a new ship in one command. Provision a conduit Mac over S.S.H., no wizard, no clicks. Standing up a new vessel used to mean dragging an app across and clicking through a setup by hand. Now one command rigs it from afar: it sails the install over S.S.H., sets your raven to run, and hands back the link your phone scans. Your A.I. can even do the rigging for you, following a runbook step by step. The Mac must be logged in; your token is piped in over S.S.H., never written to disk; and the egress firewall stays on until you grant a node Drive this agent in Settings, A.I."
+        ),
+        TourStep(
+            id: 10,
             symbol: "atom", accentSymbol: "point.3.connected.trianglepath.dotted",
             gradient: [.purple, .indigo],
             title: "Built for the hardest seas",
@@ -326,7 +339,7 @@ enum EnterpriseTourScript {
                 "Built for the hardest seas. Post-quantum encryption that holds when the net doesn't. Encryption forged to outlast tomorrow's storms, the quantum machines still being built, that holds its bearing when the internet goes dark, falling back to local radio or a phone that hosts the harbor itself. The qualities that ride out a squall are the ones thought will need at the edge of the map, and one day beyond it. Post-quantum encryption on every crossing; it rows on over Bluetooth and Wi-Fi with no router or carrier."
         ),
         TourStep(
-            id: 10,
+            id: 11,
             symbol: "sailboat.fill", accentSymbol: "sparkles",
             gradient: [.pink, .purple],
             title: "A fleet that rows as one",

@@ -90,6 +90,22 @@ public actor PQRCMessenger {
     private var nearbyBundles: [String: (contact: VerifiedContact, bundle: PrekeyBundle)] = [:]
     private var pumpTasks: [Task<Void, Never>] = []
 
+    // Ephemeral receiving keys (SPEC §9.3, kind 10422). All nil/empty by default
+    // → the messenger uses the identity p-tag exactly as before until the app
+    // opts in via `enableEphemeralReceivingKeys`.
+    private var ephemeralKeys: EphemeralKeyManager?
+    /// p-tags we accept on INBOUND wraps (our own current+previous receiving
+    /// sub-keys). Kept as a plain set for the synchronous `unwrap` predicate.
+    private var acceptedReceivingPTags: Set<String> = []
+    /// Ephemeral p-tags an additive receive pump is already subscribed to (so a
+    /// post-`start()` rotation doesn't double-subscribe).
+    private var subscribedReceivingPTags: Set<String> = []
+    /// Cache of each PEER's current receiving p-tag (peer identity hex → p-tag
+    /// hex), populated by `fetchEphemeralReceivingKey`; the send path uses it for
+    /// the outbound `p` tag, falling back to the identity npub when absent.
+    private var peerReceivingPTag: [String: String] = [:]
+    private var pumpStarted = false
+
     // Output
     private var eventContinuation: AsyncStream<MessengerEvent>.Continuation?
     public private(set) var outboundRetryBaseMillis: Int
@@ -177,6 +193,27 @@ public actor PQRCMessenger {
             return (contact, bundle)
         }
         // Nothing came back from any relay. Be honest about why.
+        throw await anyTransportConnected()
+            ? PQRCError.peerKeysNotPublished : PQRCError.relayUnreachable
+    }
+
+    /// Re-fetch + verify a peer's published binding WITHOUT adopting it (no write to
+    /// `contactsByNostrPub`) — for safety-code-change detection (T3). Unlike
+    /// `fetchVerifiedPeer`, a rotated or forged binding must NOT silently become
+    /// trusted: the caller compares it to the stored binding and WARNS the user.
+    /// Throws on relay-unreachable / keys-not-published / verification failure; the
+    /// caller treats a throw as "couldn't check" and skips (no false alarm).
+    public func peekBinding(
+        nostrPubkeyHex: String, timeout: Duration = .seconds(8)
+    ) async throws -> VerifiedBinding {
+        for transport in transports {
+            guard
+                let (bindingEvent, _) = try? await collectKeyEvents(
+                    from: transport, author: nostrPubkeyHex, timeout: timeout)
+            else { continue }
+            let (verified, _) = try PQRCEvents.verifyBindingEventWithRaw(bindingEvent)
+            return verified
+        }
         throw await anyTransportConnected()
             ? PQRCError.peerKeysNotPublished : PQRCError.relayUnreachable
     }
@@ -412,7 +449,8 @@ public actor PQRCMessenger {
                     rumor: outgoing.rumor, sender: nostrKeypair,
                     recipientNostrPubkey: contact.nostrPubkeyHex,
                     fuzzedTimestamp: outgoing.fuzzedTimestamp,
-                    randomSource: randomSource, nonceSource: nonceSource))
+                    randomSource: randomSource, nonceSource: nonceSource,
+                    recipientReceivingKey: outboundReceivingPTag(for: contact)))
         }
         try await publishBatch(relayWraps)
     }
@@ -511,7 +549,8 @@ public actor PQRCMessenger {
             recipientNostrPubkey: contact.nostrPubkeyHex,
             fuzzedTimestamp: outgoing.fuzzedTimestamp,
             randomSource: randomSource,
-            nonceSource: nonceSource)
+            nonceSource: nonceSource,
+            recipientReceivingKey: outboundReceivingPTag(for: contact))
         try await publishWithRetry(wrap)
     }
 
@@ -547,11 +586,57 @@ public actor PQRCMessenger {
         // it just sent and re-subscribe. The loop also re-establishes the read
         // after a socket drop (e.g. a Cloudflare idle-timeout), so receiving
         // doesn't go permanently silent the way the old eager-auth path did.
+        pumpStarted = true
+        // Dual-subscribe (SPEC §9.3 rollout): always the identity p-tag (so an
+        // old sender using the identity npub still reaches us), PLUS every
+        // ephemeral receiving sub-key we've published (so a new sender using the
+        // rotating p-tag reaches us too). When ephemeral keys are off,
+        // `acceptedReceivingPTags` is empty and this is the original
+        // identity-only filter, byte-identical to before.
+        subscribedReceivingPTags = acceptedReceivingPTags
+        let receivingPTags = [nostrKeypair.publicKeyHex] + Array(acceptedReceivingPTags)
+        startReceivePump(filters: [
+            NostrFilter(kinds: [PQRCConstants.giftWrapEventKind], pTags: receivingPTags)
+        ])
+        if let localLink {
+            // Advertise our signed binding + prekey bundle so co-present peers
+            // can verify and add us with no relay (SPEC §10, Nearby setting).
+            if let bindingEvent = try? buildBindingEvent(),
+                let ownBundle = try? await prekeyManager.publicBundle()
+            {
+                await localLink.advertiseOwnBundle(
+                    bindingEvent: bindingEvent, prekeyBundle: ownBundle)
+            }
+            // Discovered nearby peers (binding-verified) → surface to the app.
+            let discovered = await localLink.discoveredContacts()
+            let discoveredTask = Task { [weak self] in
+                for await peer in discovered {
+                    await self?.handleDiscovered(peer)
+                }
+            }
+            pumpTasks.append(discoveredTask)
+            // Local link pump: seals arrive without a wrap (SPEC §10) but join
+            // the exact same pipeline right after the unwrap step, so dedupe,
+            // blocklist, agent-integrity and retry behavior are identical on
+            // both paths.
+            let seals = await localLink.incoming()
+            let task = Task { [weak self] in
+                for await seal in seals {
+                    await self?.handleIncomingSeal(seal)
+                }
+            }
+            pumpTasks.append(task)
+        }
+        return stream
+    }
+
+    /// Spins one receive-pump task per transport for the given filters and tracks
+    /// them in `pumpTasks`. Reactive NIP-42 + delayed-retry behavior is identical
+    /// to the original inline pump (factored out so additive ephemeral-p-tag
+    /// subscriptions reuse it without disturbing the identity subscription).
+    private func startReceivePump(filters: [NostrFilter]) {
         let keypair = nostrKeypair
         let random = randomSource
-        let filters = [
-            NostrFilter(kinds: [PQRCConstants.giftWrapEventKind], pTags: [keypair.publicKeyHex])
-        ]
         for transport in transports {
             let task = Task { [weak self] in
                 var authFailures = 0
@@ -589,49 +674,165 @@ public actor PQRCMessenger {
             }
             pumpTasks.append(task)
         }
-        if let localLink {
-            // Advertise our signed binding + prekey bundle so co-present peers
-            // can verify and add us with no relay (SPEC §10, Nearby setting).
-            if let bindingEvent = try? buildBindingEvent(),
-                let ownBundle = try? await prekeyManager.publicBundle()
-            {
-                await localLink.advertiseOwnBundle(
-                    bindingEvent: bindingEvent, prekeyBundle: ownBundle)
-            }
-            // Discovered nearby peers (binding-verified) → surface to the app.
-            let discovered = await localLink.discoveredContacts()
-            let discoveredTask = Task { [weak self] in
-                for await peer in discovered {
-                    await self?.handleDiscovered(peer)
-                }
-            }
-            pumpTasks.append(discoveredTask)
-            // Local link pump: seals arrive without a wrap (SPEC §10) but join
-            // the exact same pipeline right after the unwrap step, so dedupe,
-            // blocklist, agent-integrity and retry behavior are identical on
-            // both paths.
-            let seals = await localLink.incoming()
-            let task = Task { [weak self] in
-                for await seal in seals {
-                    await self?.handleIncomingSeal(seal)
-                }
-            }
-            pumpTasks.append(task)
-        }
-        return stream
     }
 
     public func stop() {
         for task in pumpTasks { task.cancel() }
         pumpTasks.removeAll()
+        pumpStarted = false
+        subscribedReceivingPTags.removeAll()
         eventContinuation?.finish()
+    }
+
+    // MARK: - Ephemeral receiving keys (SPEC §9.3, kind 10422)
+
+    /// Enables relay-metadata mitigation via ephemeral receiving keys. OFF by
+    /// default — until this is called the messenger uses the identity p-tag
+    /// exactly as before (backward-compatible). `restoredEpochs` re-seeds the
+    /// published public values from persistence so re-subscribe survives a
+    /// relaunch. Call BEFORE `start()` so the dual-subscribe filter covers the
+    /// restored p-tags from the first subscription.
+    public func enableEphemeralReceivingKeys(
+        _ manager: EphemeralKeyManager,
+        restoredEpochs: [String: EphemeralKeyEpoch] = [:]
+    ) async throws {
+        if !restoredEpochs.isEmpty { try await manager.restore(restoredEpochs) }
+        ephemeralKeys = manager
+        acceptedReceivingPTags = await manager.allAcceptedPTags()
+    }
+
+    /// True once `enableEphemeralReceivingKeys` has installed a manager.
+    public var ephemeralReceivingKeysEnabled: Bool { ephemeralKeys != nil }
+
+    /// Snapshot of our published ephemeral epochs (public values only) for
+    /// persistence. Empty when the feature is off.
+    public func ephemeralKeySnapshot() async -> [String: EphemeralKeyEpoch] {
+        await ephemeralKeys?.snapshot() ?? [:]
+    }
+
+    /// Builds, publishes (kind 10422), and starts accepting + subscribing to a
+    /// fresh receiving key for `conversation`. Returns the published key so the
+    /// app can persist the new epoch. No-op-throws if the feature is off.
+    @discardableResult
+    public func publishReceivingKey(for conversation: String) async throws -> EphemeralReceivingKey {
+        guard let ephemeralKeys else { throw PQRCError.sessionNotEstablished }
+        let bundle = try await ephemeralKeys.getPublicBundle(for: conversation)
+        try await publishReceivingKeyEvent(bundle)
+        await refreshAcceptedReceivingPTags(for: conversation)
+        return bundle
+    }
+
+    /// Message-driven rotation (invariant 1, NO wall-clock): if the conversation's
+    /// `messageCount` has reached the current epoch's randomized threshold, rotate,
+    /// publish the new kind-10422, subscribe to it, and return it; otherwise nil.
+    @discardableResult
+    public func rotateReceivingKeyIfNeeded(
+        for conversation: String, messageCount: Int
+    ) async throws -> EphemeralReceivingKey? {
+        guard let ephemeralKeys else { return nil }
+        guard try await ephemeralKeys.shouldPublishNewKey(
+            messageCount: messageCount, for: conversation)
+        else { return nil }
+        let bundle = try await ephemeralKeys.rotate(for: conversation)
+        try await publishReceivingKeyEvent(bundle)
+        await refreshAcceptedReceivingPTags(for: conversation)
+        return bundle
+    }
+
+    private func publishReceivingKeyEvent(_ bundle: EphemeralReceivingKey) async throws {
+        let event = try PQRCEvents.ephemeralReceivingKeyEvent(
+            key: bundle, signer: nostrKeypair, createdAt: clock.now(), randomSource: randomSource)
+        try await publishWithRetry(event)
+    }
+
+    /// Folds a conversation's accepted p-tags into the inbound-acceptance set and,
+    /// if the pump is already running, spins an additive subscription for any
+    /// p-tag not yet covered (so a mid-session rotation is received promptly
+    /// without disrupting the identity subscription).
+    private func refreshAcceptedReceivingPTags(for conversation: String) async {
+        guard let ephemeralKeys else { return }
+        let accepted = await ephemeralKeys.acceptedPTags(for: conversation)
+        acceptedReceivingPTags.formUnion(accepted)
+        guard pumpStarted else { return }
+        let newPTags = accepted.subtracting(subscribedReceivingPTags)
+        guard !newPTags.isEmpty else { return }
+        subscribedReceivingPTags.formUnion(newPTags)
+        startReceivePump(filters: [
+            NostrFilter(kinds: [PQRCConstants.giftWrapEventKind], pTags: Array(newPTags))
+        ])
+    }
+
+    /// Sender side: fetch a peer's current kind-10422 receiving key from any
+    /// relay, verify it in both directions, cache its p-tag for the send path, and
+    /// return the p-tag hex — or nil on miss/timeout/forgery. The caller (and the
+    /// send path) then transparently fall back to the identity p-tag; nothing is
+    /// surfaced as an error and nothing hangs (the read is bounded to `timeout`).
+    @discardableResult
+    public func fetchEphemeralReceivingKey(
+        peerNostrPubkeyHex: String, peerIdentityPubkey: Data, timeout: Duration = .seconds(3)
+    ) async -> String? {
+        for transport in transports {
+            guard
+                let event = try? await collectEphemeralKeyEvent(
+                    from: transport, author: peerNostrPubkeyHex, timeout: timeout),
+                let key = try? PQRCEvents.verifyEphemeralReceivingKeyEvent(
+                    event, expectedIdentityPubkey: peerIdentityPubkey)
+            else { continue }
+            peerReceivingPTag[peerIdentityPubkey.hexString] = key.pTag
+            return key.pTag
+        }
+        return nil
+    }
+
+    /// Collects one peer's kind-10422 from a transport, racing the subscription
+    /// against `timeout` (mirrors `collectKeyEvents`). The read is dropped either
+    /// way, bounding how long the relay sees our interest in this pubkey.
+    private func collectEphemeralKeyEvent(
+        from transport: any RelayTransport, author: String, timeout: Duration
+    ) async throws -> NostrEvent {
+        try await withThrowingTaskGroup(of: NostrEvent.self) { group in
+            group.addTask {
+                let stream = await transport.subscribe([
+                    NostrFilter(
+                        kinds: [PQRCConstants.ephemeralReceivingKeyEventKind], authors: [author])
+                ])
+                for try await event in stream
+                where event.kind == PQRCConstants.ephemeralReceivingKeyEventKind {
+                    return event
+                }
+                throw NostrError.invalidEvent  // stream ended without the key
+            }
+            group.addTask {
+                try await Task.sleep(for: timeout)
+                throw NostrError.publishDropped  // timeout sentinel
+            }
+            defer { group.cancelAll() }
+            guard let result = try await group.next() else { throw NostrError.invalidEvent }
+            return result
+        }
+    }
+
+    /// The outbound `p`-tag for a contact: the peer's cached ephemeral receiving
+    /// sub-key when we have fetched one, else nil → the identity p-tag (the
+    /// backward-compatible default). The cache is only populated by
+    /// `fetchEphemeralReceivingKey`, which the app calls when the feature is on, so
+    /// a sender that never opts in always uses the identity p-tag.
+    private func outboundReceivingPTag(for contact: VerifiedContact) -> String? {
+        peerReceivingPTag[contact.identityHex]
     }
 
     private func handleIncoming(_ event: NostrEvent) async {
         // Dedupe by event id: duplicate envelopes processed once; replays of
         // already-consumed envelopes rejected here.
         guard !processedWrapIDs.contains(event.id) else { return }
-        guard let unwrapped = try? GiftWrap.unwrap(event, recipient: nostrKeypair) else {
+        // Accept a wrap addressed to our identity p-tag OR to any of our own
+        // ephemeral receiving sub-keys (SPEC §9.3). Decryption below still uses
+        // our identity Nostr key — the sub-key is only a routing pseudonym.
+        let accepted = acceptedReceivingPTags
+        guard let unwrapped = try? GiftWrap.unwrap(
+            event, recipient: nostrKeypair,
+            acceptsReceivingPTag: { accepted.contains($0) })
+        else {
             return  // not for us / malformed: ignore silently (opaque to relays anyway)
         }
         processedWrapIDs.insert(event.id)

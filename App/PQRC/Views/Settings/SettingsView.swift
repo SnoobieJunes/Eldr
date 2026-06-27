@@ -33,7 +33,7 @@ struct SettingsView: View {
     @State private var relayError: String?
     @State private var needsReconnect = false
     @State private var myAlias = ""
-    @State private var openInboxUntil: Int64?
+    @State private var reachabilityOpen = false
     @State private var checkingRelays = false
     @State private var republishingPrekeys = false
     /// Mirrors `session.hasBiometricUnlock` (a Keychain read, which @Observable
@@ -47,10 +47,6 @@ struct SettingsView: View {
     /// enabling it shares decrypted (codename-redacted) chat with a local agent that
     /// can read and — with writes — draft, mark, and send-as-your-AI in active windows.
     @State private var showLocalMCPConsent = false
-    /// Per-silo loop-guard threshold (DEVIATIONS D14): pause a thread's AIs after
-    /// this many consecutive agent messages with no human. `0` = guard OFF
-    /// (unbounded). Loaded in `.onAppear`, written through `model.setLoopGuardLimit`.
-    @State private var loopGuardLimit = PQRCConstants.agentLoopGuardLimit
     /// Pairing-token reveal state: masked by default, shown once on "Reveal",
     /// then re-masked (the platform-standard view-once pattern). Reset whenever
     /// the connection (and thus the token) changes.
@@ -58,13 +54,10 @@ struct SettingsView: View {
     /// Gates the "Regenerate" action behind a confirm alert (it breaks any paired
     /// shim, which must re-pair with the new token).
     @State private var showRegenerateTokenConfirm = false
-    @State private var now = Int64(Date().timeIntervalSince1970)
     /// Presents the "connect your Mac coding agent" pairing sheet (the agent contact
     /// is a persistent device relationship, so it lives here in Settings rather than
     /// in New Chat). Tagged `coding_agent` on pair so its watch-along drafts are voiced.
     @State private var showConnectAgent = false
-
-    private let ticker = Timer.publish(every: 1, on: .main, in: .common).autoconnect()
 
     var body: some View {
         NavigationStack {
@@ -75,7 +68,6 @@ struct SettingsView: View {
                 nearbySection
                 reachabilitySection
                 aiSection
-                aiLoopGuardSection
                 codingAgentSection
                 prekeysSection
                 privacySection
@@ -106,10 +98,9 @@ struct SettingsView: View {
                     UserDefaults.standard.string(forKey: AppSession.displayNameKey(model.siloID)) ?? ""
                 biometricOn = session.hasBiometricUnlock
                 localMCPOn = session.isLocalMCPRunning
-                loopGuardLimit = AppSession.agentLoopGuardLimit(siloID: model.siloID)
                 showAgentEnvelope = AppSession.showAgentEnvelope(siloID: model.siloID)
                 Task {
-                    openInboxUntil = await model.runtime.openInboxActiveUntil()
+                    reachabilityOpen = await model.runtime.reachabilityIsOpen()
                     // Refresh the live prekey count so the Prekeys section isn't
                     // showing a stale number from launch.
                     model.prekeyCount = await model.runtime.oneTimePrekeyCount()
@@ -118,9 +109,6 @@ struct SettingsView: View {
             // Server status is checked once at app launch and only re-checked
             // when the user taps "Check connection" — re-pinging on every
             // Settings open was getting the client throttled by the relay.
-            .onReceive(ticker) { _ in
-                now = Int64(Date().timeIntervalSince1970)
-            }
             // The funder / "Why Eldr for teams" pitch (the ported Huginn cards),
             // presented over Settings as a full-screen cover. Anchored to the Form
             // ROOT (a stable container), never to the `aboutSection` Section — a
@@ -367,38 +355,30 @@ struct SettingsView: View {
 
     private var reachabilitySection: some View {
         Section {
-            if let until = openInboxUntil, until > now {
+            Toggle(isOn: Binding(
+                get: { reachabilityOpen },
+                set: { newValue in
+                    reachabilityOpen = newValue
+                    Task { await model.runtime.setReachability(newValue) }
+                }
+            )) {
                 Label(
-                    "Open to anyone · \(formatRemaining(until - now)) left",
-                    systemImage: "envelope.open")
+                    "Receive from anyone",
+                    systemImage: reachabilityOpen ? "envelope.open" : "envelope")
+            }
+            .accessibilityIdentifier("open-inbox-toggle")
+            if reachabilityOpen {
+                Label(
+                    "Inbox open — anyone with your address connects instantly",
+                    systemImage: "exclamationmark.triangle")
+                .font(.footnote)
                 .foregroundStyle(.orange)
-                Button("Close inbox now") {
-                    openInboxUntil = nil
-                    Task { await model.runtime.setOpenInbox(until: nil) }
-                }
-            } else {
-                Menu {
-                    ForEach([15, 60, 480], id: \.self) { minutes in
-                        Button(minutes < 60 ? "\(minutes) minutes" : "\(minutes / 60) hours") {
-                            let until = now + Int64(minutes * 60)
-                            openInboxUntil = until
-                            Task { await model.runtime.setOpenInbox(until: until) }
-                        }
-                    }
-                } label: {
-                    Label("Receive from anyone…", systemImage: "envelope.open")
-                }
-                .accessibilityIdentifier("open-inbox-menu")
             }
         } header: {
             Text("Reachability")
         } footer: {
-            Text("Normally, first messages from strangers wait in Message Requests. While the inbox is open, anyone who has your address connects instantly — useful when meeting new people. Closes automatically.")
+            Text("Normally, first messages from strangers wait in Message Requests. While this is on, anyone who has your address connects instantly — useful when meeting new people. It stays on until you turn it off.")
         }
-    }
-
-    private func formatRemaining(_ seconds: Int64) -> String {
-        seconds >= 3600 ? "\(seconds / 3600)h \(seconds % 3600 / 60)m" : "\(seconds / 60)m \(seconds % 60)s"
     }
 
     // MARK: AI
@@ -415,55 +395,6 @@ struct SettingsView: View {
                 .font(.caption)
                 .foregroundStyle(.secondary)
         }
-    }
-
-    // MARK: AI loop guard (DEVIATIONS D14)
-
-    /// The loop guard pauses a shared thread's AIs once they've sent N messages in
-    /// a row with no human, keeping a person in the loop. Per-silo (deniability),
-    /// applied live to the running engine. `0` = OFF (unbounded — AIs may loop).
-    private var aiLoopGuardSection: some View {
-        Section {
-            Toggle("Pause AIs after a run of messages", isOn: Binding(
-                get: { loopGuardLimit > 0 },
-                set: { on in
-                    // Turning it back on restores the spec default; OFF stores 0.
-                    setLoopGuard(on ? PQRCConstants.agentLoopGuardLimit : 0)
-                }))
-                .accessibilityIdentifier("loop-guard-toggle")
-            if loopGuardLimit > 0 {
-                Stepper(value: Binding(
-                    get: { loopGuardLimit },
-                    set: { setLoopGuard($0) }
-                ), in: AppSession.agentLoopGuardMin...AppSession.agentLoopGuardMax) {
-                    LabeledContent("Pause after") {
-                        Text("\(loopGuardLimit) messages")
-                            .monospacedDigit()
-                            .accessibilityIdentifier("loop-guard-value")
-                    }
-                }
-                .accessibilityIdentifier("loop-guard-stepper")
-                .accessibilityValue("\(loopGuardLimit) consecutive AI messages")
-            }
-        } header: {
-            Text("AI loop guard")
-        } footer: {
-            if loopGuardLimit > 0 {
-                Text("In a shared AI thread, your assistants pause automatically after \(loopGuardLimit) message\(loopGuardLimit == 1 ? "" : "s") in a row with no human, so a person always stays in the loop. Anyone typing in the thread resumes them. Lower keeps you more in control; higher lets the AIs go further on their own.")
-            } else {
-                Text("OFF — your assistants will NOT auto-pause in a shared AI thread. Two AIs left talking to each other can loop indefinitely (and, with a remote provider, keep spending tokens) until you step in. Recommended: keep this on.")
-                    .foregroundStyle(.orange)
-            }
-        }
-    }
-
-    /// Persist + apply the loop-guard threshold and reflect it in the UI. `0` =
-    /// OFF; positive values are clamped to the supported range by AppSession.
-    private func setLoopGuard(_ value: Int) {
-        let clamped = value <= 0 ? 0
-            : min(max(value, AppSession.agentLoopGuardMin), AppSession.agentLoopGuardMax)
-        loopGuardLimit = clamped
-        Task { await model.setLoopGuardLimit(clamped) }
     }
 
     // MARK: Mac coding agent (watch-along pairing, §13.5)

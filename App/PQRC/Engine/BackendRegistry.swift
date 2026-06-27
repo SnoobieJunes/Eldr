@@ -144,7 +144,8 @@ enum BackendRegistry {
                 let base = (config.baseURL ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
                 guard !base.isEmpty else { return DemoAgentProvider() }
                 return CustomOpenAIProvider(
-                    baseURL: base, apiKey: key("custom") ?? "", model: config.model ?? "")
+                    baseURL: base, apiKey: key("custom") ?? "", model: config.model ?? "",
+                    requestTimeoutSeconds: config.requestTimeoutSeconds)
             }),
         BackendDescriptor(
             tag: "hub", label: "Nearby host's AI (Multipeer)",
@@ -158,7 +159,9 @@ enum BackendRegistry {
         BackendDescriptor(
             tag: "acp", label: "Mac-Tethered-AI",
             isRemote: true, appliesEgressFirewall: true, requiresConsent: true,
-            keyAccount: nil, usesPerAIKey: true,
+            // The Mac node drives its OWN LLM (configured on the node) — there is no
+            // per-AI API key here, so the key field must not show (was a stray slot).
+            keyAccount: nil, usesPerAIKey: false,
             makeProvider: { _, _, _ in
                 // Drive a paired Mac node's coding harness over the sealed
                 // NearbyACPTransport via ACPAgentProvider (PQRCAgent). The provider +

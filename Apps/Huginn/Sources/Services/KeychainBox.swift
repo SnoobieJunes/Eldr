@@ -1,21 +1,50 @@
 import Foundation
 import Security
 
-/// Minimal Keychain wrapper for the Configurator's long-term secret (its Nostr
-/// identity). Mirrors the app's SPEC §3.1 rules exactly: every item is
-/// `kSecAttrAccessibleWhenUnlockedThisDeviceOnly` and `kSecAttrSynchronizable:false`
-/// — never iCloud-synced, never leaves the device. (The app's `KeychainStore` lives
-/// in the app target, so the Configurator carries its own copy of the same policy.)
+/// Minimal Keychain wrapper for the Configurator's long-term secrets (its Nostr
+/// identity, the bridge PQRC identity, and the LLM token). Mirrors the app's SPEC §3.1
+/// rules exactly: every item is `kSecAttrAccessibleWhenUnlockedThisDeviceOnly` and
+/// `kSecAttrSynchronizable:false` — never iCloud-synced, never leaves the device. (The
+/// app's `KeychainStore` lives in the app target, so the Configurator carries its own
+/// copy of the same policy.)
+///
+/// `useDataProtection` (default ON) routes items into the **data-protection keychain**
+/// instead of the legacy FILE keychain. The file keychain attaches a per-application
+/// ACL to each item; because a re-signed build (every Xcode rebuild) presents a
+/// different code signature, macOS no longer recognizes it as the item's owner and
+/// re-prompts ("…wants to use your confidential information — Always Allow") — and the
+/// grant never sticks, so the Configurator's ~5 items each prompt again on the next
+/// build. The data-protection keychain has NO such ACL dialog: access is gated by the
+/// app's `keychain-access-groups` entitlement (team-scoped, signature-independent), so
+/// the same-team build reads silently every time. Requires the entitlement (see
+/// `Huginn.entitlements`); we pass no explicit `kSecAttrAccessGroup`, so items land in
+/// the entitlement's single group by default (the pattern the iOS `KeychainStore` uses).
+///
+/// The one item still kept in the FILE keychain is the LLM token's launcher-read mirror
+/// (`ConfigurationStore`), because the `eldr-acp` launcher reads it with `/usr/bin/security`,
+/// which cannot see data-protection items. That mirror prompts at most once and the grant
+/// DOES stick there, because `/usr/bin/security` is Apple-signed and its signature never
+/// changes between Huginn rebuilds.
 struct KeychainBox: Sendable {
     let service: String
-    init(service: String = "chat.eldr.huginn") { self.service = service }
+    let useDataProtection: Bool
+
+    init(service: String = "chat.eldr.huginn", useDataProtection: Bool = true) {
+        self.service = service
+        self.useDataProtection = useDataProtection
+    }
+
+    /// The keychain-selection key merged into every query. Empty when using the legacy
+    /// file keychain (the launcher-readable mirror).
+    private var keychainSelector: [String: Any] {
+        useDataProtection ? [kSecUseDataProtectionKeychain as String: true] : [:]
+    }
 
     func save(_ data: Data, account: String) throws {
-        let base: [String: Any] = [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: service,
-            kSecAttrAccount as String: account,
-        ]
+        var base: [String: Any] = keychainSelector
+        base[kSecClass as String] = kSecClassGenericPassword
+        base[kSecAttrService as String] = service
+        base[kSecAttrAccount as String] = account
         SecItemDelete(base as CFDictionary)
         var attributes = base
         attributes[kSecValueData as String] = data
@@ -26,13 +55,12 @@ struct KeychainBox: Sendable {
     }
 
     func load(account: String) -> Data? {
-        let query: [String: Any] = [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: service,
-            kSecAttrAccount as String: account,
-            kSecReturnData as String: true,
-            kSecMatchLimit as String: kSecMatchLimitOne,
-        ]
+        var query: [String: Any] = keychainSelector
+        query[kSecClass as String] = kSecClassGenericPassword
+        query[kSecAttrService as String] = service
+        query[kSecAttrAccount as String] = account
+        query[kSecReturnData as String] = true
+        query[kSecMatchLimit as String] = kSecMatchLimitOne
         var result: CFTypeRef?
         guard SecItemCopyMatching(query as CFDictionary, &result) == errSecSuccess else {
             return nil
@@ -41,23 +69,21 @@ struct KeychainBox: Sendable {
     }
 
     func delete(account: String) {
-        let query: [String: Any] = [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: service,
-            kSecAttrAccount as String: account,
-        ]
+        var query: [String: Any] = keychainSelector
+        query[kSecClass as String] = kSecClassGenericPassword
+        query[kSecAttrService as String] = service
+        query[kSecAttrAccount as String] = account
         SecItemDelete(query as CFDictionary)
     }
 
     /// Test/audit hook: raw attributes of an item, for asserting the access flags.
     func attributes(account: String) -> [String: Any]? {
-        let query: [String: Any] = [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: service,
-            kSecAttrAccount as String: account,
-            kSecReturnAttributes as String: true,
-            kSecMatchLimit as String: kSecMatchLimitOne,
-        ]
+        var query: [String: Any] = keychainSelector
+        query[kSecClass as String] = kSecClassGenericPassword
+        query[kSecAttrService as String] = service
+        query[kSecAttrAccount as String] = account
+        query[kSecReturnAttributes as String] = true
+        query[kSecMatchLimit as String] = kSecMatchLimitOne
         var result: CFTypeRef?
         guard SecItemCopyMatching(query as CFDictionary, &result) == errSecSuccess else {
             return nil

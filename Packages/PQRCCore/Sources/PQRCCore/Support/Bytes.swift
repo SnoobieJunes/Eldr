@@ -47,6 +47,21 @@ extension Data {
         ])
     }
 
+    /// Big-endian 8-byte encoding of a UInt64 (used for the ephemeral-key epoch
+    /// in the kind-10422 signed material).
+    public init(uint64BE value: UInt64) {
+        self.init([
+            UInt8(truncatingIfNeeded: value >> 56),
+            UInt8(truncatingIfNeeded: value >> 48),
+            UInt8(truncatingIfNeeded: value >> 40),
+            UInt8(truncatingIfNeeded: value >> 32),
+            UInt8(truncatingIfNeeded: value >> 24),
+            UInt8(truncatingIfNeeded: value >> 16),
+            UInt8(truncatingIfNeeded: value >> 8),
+            UInt8(truncatingIfNeeded: value),
+        ])
+    }
+
     /// Big-endian 8-byte encoding of an Int64 (used for fuzzed timestamps in AD).
     public init(int64BE value: Int64) {
         let v = UInt64(bitPattern: value)

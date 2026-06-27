@@ -6,6 +6,14 @@ import UIKit
 /// — tinted outline + sparkles badge + caption — and the styling survives
 /// grayscale (shape + badge, never color alone). A protocol violation renders
 /// as a red system row, never as a message.
+/// Per-message AI-context visibility for the eye badge (C5): how many tethered
+/// AIs currently include this message in their context, and whether any of them
+/// is a firewalled remote AI (so the bubble can show the redaction boundary).
+struct AIMessageVisibility: Equatable {
+    let count: Int
+    let redacted: Bool
+}
+
 struct MessageBubble: View {
     let message: StoredMessage
     let isMine: Bool
@@ -37,6 +45,13 @@ struct MessageBubble: View {
     /// Asks the owner's AI to draft a reply to THIS specific message (guest messages
     /// only) → a preview / "Send as my AI" sheet. nil hides the action.
     var onAnswerWithAI: (() -> Void)? = nil
+
+    /// Long-press entry to start a new AI thread anchored to THIS message.
+    var onStartThread: (() -> Void)? = nil
+
+    /// How many tethered AIs currently include THIS message in their context
+    /// (and whether any is a firewalled remote AI). nil = not computed. (C5)
+    var aiVisibility: AIMessageVisibility? = nil
     /// Whether to show the RAW AgentSkills `⟡⟡ … ⟡⟡ end` protocol envelope in
     /// agent bubbles (per-silo "Show agent protocol envelope" toggle). Default
     /// `false` strips the header/footer at DISPLAY time and shows only the inner
@@ -84,6 +99,7 @@ struct MessageBubble: View {
         fullScreenMenuItem
         aiContextMenuItem
         answerWithAIMenuItem
+        startThreadMenuItem
     }
 
     /// Copy the message text to the pasteboard — the right-click → Copy desktop
@@ -242,6 +258,17 @@ struct MessageBubble: View {
         }
     }
 
+    /// Long-press entry to start a focused AI thread anchored to this message.
+    @ViewBuilder private var startThreadMenuItem: some View {
+        if let onStartThread {
+            Button {
+                onStartThread()
+            } label: {
+                Label("Start a thread from here", systemImage: "text.bubble")
+            }
+        }
+    }
+
     /// Small marker shown on messages flagged for AI context.
     @ViewBuilder private var aiContextBadge: some View {
         if message.aiContext {
@@ -249,6 +276,26 @@ struct MessageBubble: View {
                 .font(.caption2)
                 .foregroundStyle(.purple)
                 .accessibilityLabel("Marked as AI context")
+        }
+    }
+
+    /// Eye badge (C5): how many tethered AIs currently see this message as
+    /// context. Shown only when ≥1 AI includes it (avoids clutter per the
+    /// UI-overload feedback); a firewalled remote AI flips the glyph so the
+    /// redaction boundary stays visible.
+    @ViewBuilder private var aiVisibilityBadge: some View {
+        if let v = aiVisibility, v.count > 0 {
+            HStack(spacing: 2) {
+                Image(systemName: v.redacted ? "eye.trianglebadge.exclamationmark" : "eye")
+                Text("\(v.count)")
+            }
+            .font(.caption2)
+            .foregroundStyle(.secondary)
+            .accessibilityLabel(
+                v.redacted
+                    ? "Seen by \(v.count) AI\(v.count == 1 ? "" : "s"), redacted for a cloud AI"
+                    : "Seen by \(v.count) AI\(v.count == 1 ? "" : "s")")
+            .accessibilityIdentifier("ai-visibility-badge")
         }
     }
 
@@ -294,6 +341,7 @@ struct MessageBubble: View {
                     .foregroundStyle(isFilled ? .white : .primary)
                 HStack(spacing: 6) {
                     aiContextBadge
+                    aiVisibilityBadge
                     expandButton
                     if isMine {
                         // Local-only status; copy says "sent to relay", never "delivered" (D5).
@@ -351,6 +399,14 @@ struct MessageBubble: View {
     /// `senderName` — that's the configurable alias/persona ("Me" by default, but
     /// editable), so "<senderName>'s AI" rendered "Me's AI" for the owner.
     private var agentLabel: String {
+        // A co-authored message (the human directed + approved their AI's draft)
+        // names BOTH contributors — "made with the person and the AI" (user
+        // request). It STILL renders as an AI bubble (⟡ + sparkles badge below),
+        // so invariant 8 holds: this credits the human director, it does not
+        // relabel an agent message as human-authored.
+        if message.coauthored {
+            return isMine ? "Made with you and your AI" : "Made with \(senderName) and their AI"
+        }
         if let agentName { return agentName }
         return isMine ? "My AI" : "\(senderName)'s AI"
     }
@@ -388,6 +444,7 @@ struct MessageBubble: View {
                     CollapsibleMessageContent(text: displayText, onFullScreen: onFullScreen)
                         .textSelection(.enabled)
                     aiContextBadge
+                    aiVisibilityBadge
                 }
                 .padding(.horizontal, 14)
                 .padding(.vertical, 9)
@@ -410,7 +467,10 @@ struct MessageBubble: View {
         .id(message.id)
         .privacySensitive()
         .accessibilityElement(children: .combine)
-        .accessibilityLabel("AI message from \(agentLabel): \(Self.accessibleText(displayText))")
+        .accessibilityLabel(
+            message.coauthored
+                ? "AI message, \(agentLabel): \(Self.accessibleText(displayText))"
+                : "AI message from \(agentLabel): \(Self.accessibleText(displayText))")
         .accessibilityIdentifier("agent-bubble")
     }
 

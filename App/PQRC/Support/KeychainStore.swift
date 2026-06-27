@@ -146,8 +146,14 @@ struct KeychainStore: Sendable {
     /// the caller can message accordingly (a cancel is not an error — the user
     /// may want to type a different account's passphrase). Call off the main
     /// thread (the biometric prompt blocks).
-    func loadBiometric(account: String, prompt: String) -> BiometricLoad {
-        let context = LAContext()
+    ///
+    /// `context` lets the caller REUSE one `LAContext` across reads so a single
+    /// Face ID / Touch ID evaluation covers the whole unlock — and, with
+    /// `touchIDAuthenticationAllowableReuseDuration` set on it, a recent success
+    /// doesn't re-prompt. Passing `nil` makes a fresh one-shot context (the old
+    /// behavior). The repeated-prompt bug came from a NEW `LAContext()` per call.
+    func loadBiometric(account: String, prompt: String, context: LAContext? = nil) -> BiometricLoad {
+        let context = context ?? LAContext()
         context.localizedReason = prompt
         let query: [String: Any] = [
             // Use the modern data-protection keychain on EVERY platform. On iOS / "Designed

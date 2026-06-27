@@ -76,28 +76,64 @@ public enum AgentSkills {
         you were {{display_name}}. Never present an AI proposal as a human position.
         """
 
+    /// Concise role guidance for an ordered multi-AI critique turn (plan C3),
+    /// appended to the base injection when the AI's role is not the default
+    /// "primary". Empty for "primary" (and any unrecognized role) so the prompt is
+    /// byte-for-byte unchanged in the common case. Role strings match
+    /// `AICritiqueRole` (the values `OrderedCritiquePolicy` emits).
+    static func roleGuidance(for aiRole: String) -> String {
+        switch aiRole {
+        case AICritiqueRole.reviewer:
+            return """
+                ROLE — REVIEWER. Read the prior AI's answer and critique it \
+                concisely: name what is wrong, missing, or risky, and suggest the \
+                fix. Do NOT re-solve the problem from scratch — build on what is \
+                already there.
+                """
+        case AICritiqueRole.critic:
+            return """
+                ROLE — CRITIC. Stress-test the prior answers: surface the strongest \
+                objection, the edge case, the wrong assumption. Be specific and \
+                brief; do not restate what you agree with.
+                """
+        case AICritiqueRole.synthesizer:
+            return """
+                ROLE — SYNTHESIZER. Merge the prior answers into one coherent \
+                result: keep what survived critique, resolve the disagreements, and \
+                state the single recommendation. Do not introduce fresh analysis — \
+                converge.
+                """
+        default:
+            // "primary" or any unrecognized role → no extra guidance (unchanged).
+            return ""
+        }
+    }
+
     public static func baseInjection(
-        displayName: String, contextDomain: String, peerName: String, threadID: String
+        displayName: String, contextDomain: String, peerName: String, threadID: String,
+        aiRole: String = "primary"
     ) -> String {
-        baseInjectionTemplate
+        let base = baseInjectionTemplate
             .replacingOccurrences(of: "{{display_name}}", with: displayName)
             .replacingOccurrences(
                 of: "{{context_domain}}",
                 with: contextDomain.isEmpty ? "general" : contextDomain)
             .replacingOccurrences(of: "{{peer_name}}", with: peerName.isEmpty ? "the peer" : peerName)
             .replacingOccurrences(of: "{{thread_id}}", with: threadID)
+        let guidance = roleGuidance(for: aiRole)
+        return guidance.isEmpty ? base : base + "\n\n" + guidance
     }
 
     /// The full thread-turn system prompt: guardrails + envelope + any pinned
     /// skills + the AI's own custom instructions.
     public static func threadSystemPrompt(
         displayName: String, contextDomain: String, peerName: String, threadID: String,
-        activeSkillIDs: [String], instructions: String?
+        activeSkillIDs: [String], instructions: String?, aiRole: String = "primary"
     ) -> String {
         var parts = [
             baseInjection(
                 displayName: displayName, contextDomain: contextDomain, peerName: peerName,
-                threadID: threadID),
+                threadID: threadID, aiRole: aiRole),
             envelope,
         ]
         let active = activeSkillIDs.compactMap { skill($0) }

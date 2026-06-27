@@ -29,6 +29,28 @@ enum AITypeIcon {
         }
     }
 
+    /// A real emoji per backend KIND, for the Settings backend picker (the user
+    /// asked for emojis on the model rows). Distinct from `symbol(forKind:)` (SF
+    /// Symbols, used by the corner badge) and from `glyph(...)` (the name-based
+    /// engine override): this is a plain glyph the menu `Text` can prefix, chosen
+    /// to read at a glance and to never collide with the 🦞 engine glyph.
+    static func emoji(forKind kind: String) -> String {
+        switch kind {
+        case "ondevice": return "📱"          // on-device — your phone
+        case "pcc": return "🍏"               // Apple Private Cloud Compute
+        case "claude": return "✴️"            // Anthropic
+        case "openai": return "🌀"            // OpenAI
+        case "gemini": return "✨"            // Google Gemini (its mark IS a sparkle)
+        case "openrouter": return "🔀"        // routes across many models
+        case "groq": return "⚡️"             // speed
+        case "custom": return "🏠"            // self-hosted on your own network
+        case "hub": return "📡"               // nearby host over Multipeer
+        case "acp": return "🖥️"              // Mac-Tethered-AI
+        case "demo": return "🐞"              // simulated (matches the ladybug symbol)
+        default: return "🤖"                  // unknown / peer AI
+        }
+    }
+
     /// An emoji glyph that OVERRIDES the SF Symbol when we can identify the engine
     /// behind a backend by its name/model — today only sybilclaw / OpenClaw (🦞),
     /// distinct from a generic Mac-Tethered-AI. nil ⇒ use `symbol(forKind:)`.

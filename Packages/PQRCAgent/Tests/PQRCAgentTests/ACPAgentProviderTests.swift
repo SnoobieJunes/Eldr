@@ -264,6 +264,11 @@ struct ACPAgentProviderTests {
     // The prompt rendering REUSES the shared transcript renderer + the context's
     // own system prompts — same context every other provider sends, one wire blob.
     @Test func composePromptReusesSharedRendererAndSystemPrompt() {
+        // Give the context real instructions so the system prompt is non-empty:
+        // EldrChat's conduit default (AC49) makes `draftSystemPrompt()` EMPTY when
+        // there are no instructions, and `composePrompt` then sends transcript-only
+        // (no "[System]" chaff). This test exercises the labeled-block path, so it
+        // needs a non-empty system prompt to assert on.
         let ctx = AgentContext(
             myIdentityHex: "me", myDisplayName: "Alice",
             transcript: [
@@ -273,9 +278,12 @@ struct ACPAgentProviderTests {
                 TranscriptEntry(
                     senderIdentityHex: "bob", senderDisplayName: "Bob",
                     participantType: .agent, text: "auto-reply"),
-            ])
+            ],
+            instructions: "Be concise.")
         let prompt = ACPAgentProvider.composePrompt(system: ctx.draftSystemPrompt(), context: ctx)
         // System guidance is present as a labeled block …
+        #expect(!ctx.draftSystemPrompt().isEmpty)
+        #expect(prompt.contains("[System]"))
         #expect(prompt.contains(ctx.draftSystemPrompt()))
         // … above the EXACT shared transcript render (so ACP sends identical
         // context to every other backend).

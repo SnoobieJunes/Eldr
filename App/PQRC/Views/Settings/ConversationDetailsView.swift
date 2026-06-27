@@ -23,6 +23,8 @@ struct ConversationDetailsView: View {
     /// Per-conversation egress-firewall override: "default" (inherit the account
     /// setting) | "on" (redact) | "off" (raw — a private chat with your own agents).
     @State private var firewallOverride = "default"
+    /// Per-conversation "AIs reply in order (critique panel)" toggle (C4/C3).
+    @State private var orderedCritique = false
     /// Read-only echo of the primary AI's effective mode / remoteness / firewall
     /// for this conversation, refreshed when the override changes.
     @State private var summary: (mode: String, isRemote: Bool, firewallOn: Bool) =
@@ -167,6 +169,17 @@ struct ConversationDetailsView: View {
                         summary = model.primaryAIContextSummary(conversationID)
                     }
                     Text("Only affects a REMOTE (cloud) AI. \"Off\" lets this chat's real names and content reach that AI raw — for a private chat with your own agents. \"On\" redacts before anything leaves your device.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    Toggle("AIs reply in order (critique panel)", isOn: Binding(
+                        get: { orderedCritique },
+                        set: { newValue in
+                            orderedCritique = newValue
+                            AppSession.setOrderedCritique(
+                                newValue, conversationID: conversationID, siloID: model.siloID)
+                        }))
+                        .accessibilityIdentifier("ordered-critique-toggle")
+                    Text("In a thread here, your AIs take turns in order — the first drafts, the next critiques, the last merges — instead of all replying at once. Bounded by the thread's AI-turn limit.")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 } header: {
@@ -314,6 +327,7 @@ struct ConversationDetailsView: View {
                 firewallOverride =
                     AppSession.conversationFirewall(conversationID, siloID: model.siloID)
                     .map { $0 ? "on" : "off" } ?? "default"
+                orderedCritique = AppSession.orderedCritique(conversationID, siloID: model.siloID)
                 summary = model.primaryAIContextSummary(conversationID)
                 // Group vs 1:1: a group has a roster keyed by its UUID; a 1:1's id is
                 // the peer identity key. For a group, resolve the roster and SKIP the

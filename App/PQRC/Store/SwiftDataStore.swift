@@ -112,6 +112,12 @@ struct ThreadMeta: Codable, Sendable {
     var title: String
     var createdBy: String
     var anchorMessageID: String?
+    /// C6: a "My AI" per-AI sub-thread (a 1:1 with one of my own AIs — no invite /
+    /// countdown; the pinned AI replies like the solo "My AI" chat). Optional ⇒ older
+    /// thread metas decode with these nil (back-compat).
+    var isSoloThread: Bool?
+    /// The tethered AI (ConfiguredAI id) a solo sub-thread is pinned to.
+    var soloAIID: String?
 }
 
 /// Everything the app knows about a verified contact, sealed as one blob.

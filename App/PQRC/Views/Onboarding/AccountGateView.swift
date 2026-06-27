@@ -24,6 +24,9 @@ struct AccountGateView: View {
     /// Fire the launch Face ID attempt at most once (it's a convenience, not a
     /// gate — the passphrase field is always available as the fallback).
     @State private var autoTriedBiometric = false
+    /// The "Why Eldr for teams" enterprise tour, surfaced from the New-here section so
+    /// a funder/new viewer can see the pitch before creating an account (E1).
+    @State private var showEnterpriseTour = false
 
     var body: some View {
         NavigationStack {
@@ -40,6 +43,14 @@ struct AccountGateView: View {
                 }
             }
             .navigationTitle("EldrChat")
+            // Anchored to the Form root (not the recycled Section row) so the cover
+            // doesn't tear down mid-present — the AC52 "attach to a stable root" pattern.
+            .fullScreenCover(isPresented: $showEnterpriseTour) {
+                OnboardingTourView(
+                    steps: EnterpriseTourScript.steps,
+                    finishLabel: "Aye",
+                    onFinish: { showEnterpriseTour = false })
+            }
             .disabled(working)
             .overlay { if working { ProgressView() } }
             .task {
@@ -136,6 +147,13 @@ struct AccountGateView: View {
                     Label("See the live demo", systemImage: "play.circle")
                 }
                 .accessibilityIdentifier("gate-see-demo")
+                Button {
+                    session.unlockError = nil
+                    showEnterpriseTour = true
+                } label: {
+                    Label("Why Eldr for teams", systemImage: "bird.fill")
+                }
+                .accessibilityIdentifier("gate-why-teams")
             } header: {
                 Text("New to EldrChat?")
             } footer: {

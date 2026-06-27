@@ -219,7 +219,11 @@ struct AISettingsView: View {
             .opacity(ai.wrappedValue.isEnabled ? 1 : 0.6)
             Picker("Backend", selection: ai.kind) {
                 ForEach(ConfiguredAI.kinds, id: \.tag) { kind in
-                    Text(kind.label).tag(kind.tag)
+                    // Emoji prefix per model (user request) — kept in the picker
+                    // row only, so the registry `label` (tests, summary row, status
+                    // text) stays plain and the summary row's SF-Symbol badge isn't
+                    // doubled up.
+                    Text("\(AITypeIcon.emoji(forKind: kind.tag))  \(kind.label)").tag(kind.tag)
                 }
             }
             .onChange(of: ai.kind.wrappedValue) { _, newKind in
@@ -319,6 +323,26 @@ struct AISettingsView: View {
                     "Context depth: \(ai.wrappedValue.effectiveDepth) messages",
                     value: depthBinding(ai), in: 1...100)
                     .accessibilityIdentifier("ai-depth")
+                // Self-hosted endpoints can hang; bound the wait. Only the "custom"
+                // OpenAI-compatible backend honors this — cloud SDKs manage their own.
+                if ai.wrappedValue.kind == "custom" {
+                    Stepper(
+                        ai.wrappedValue.requestTimeoutSeconds.map { "Request timeout: \(Int($0))s" }
+                            ?? "Request timeout: default",
+                        value: timeoutBinding(ai), in: 0...600, step: 10)
+                        .accessibilityIdentifier("ai-timeout")
+                }
+                // C4/AC34: mark this AI suitable for coding scopes so a coding
+                // conversation (or a paired Mac node's chat) can route to it.
+                Toggle("Handles coding tasks", isOn: Binding(
+                    get: { ai.wrappedValue.capabilities?.contains("code") ?? false },
+                    set: { on in
+                        var caps = ai.wrappedValue.capabilities ?? []
+                        if on { caps.insert("code") } else { caps.remove("code") }
+                        ai.wrappedValue.capabilities = caps.isEmpty ? nil : caps
+                        persist()
+                    }))
+                    .accessibilityIdentifier("ai-capability-code")
             }
             .padding(.top, 4)
 
@@ -381,6 +405,11 @@ struct AISettingsView: View {
                 AppSession.saveConfiguredAIs(ais, siloID: siloID)
             })
     }
+    private func timeoutBinding(_ ai: Binding<ConfiguredAI>) -> Binding<Double> {
+        Binding(
+            get: { ai.wrappedValue.requestTimeoutSeconds ?? 0 },
+            set: { ai.wrappedValue.requestTimeoutSeconds = $0 <= 0 ? nil : $0; persist() })
+    }
     private func policyBinding(_ ai: Binding<ConfiguredAI>) -> Binding<String> {
         Binding(
             get: { ai.wrappedValue.effectivePolicy },
@@ -429,7 +458,11 @@ struct AISettingsView: View {
             if let node = acpNode {
                 return "Connected · \(node.name)"
             }
-            return "Not connected — pair a Mac node first. Replies are simulated until then."
+            // Provisioning a Mac is now one command (`eldrctl install`); pairing is the same
+            // scan/paste either way. Be honest that replies are simulated AND that consent
+            // (not the network path) is what activates it / lifts the firewall.
+            return
+                "Not connected — provision a Mac with `eldrctl install`, then scan its pairing link. Replies are simulated, and the egress firewall stays on, until you enable \u{201C}Drive this agent\u{201D} for it."
         }
         if ConfiguredAI.isRemote(ai.kind) {
             return hasKey(for: ai)

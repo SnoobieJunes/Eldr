@@ -77,6 +77,10 @@ public enum PQRCConstants {
     /// Event kinds (SPEC §14).
     public static let bindingEventKind = 10420
     public static let prekeyBundleEventKind = 10421
+    /// Ephemeral receiving key (SPEC §9.3 strong mitigation, NIP-XX §13). A
+    /// replaceable event advertising a rotating X25519 sub-key used as the
+    /// gift-wrap `p` tag so the long-term identity npub never appears on a relay.
+    public static let ephemeralReceivingKeyEventKind = 10422
     public static let dmRelayListEventKind = 10050
     public static let sealEventKind = 13
     public static let giftWrapEventKind = 1059

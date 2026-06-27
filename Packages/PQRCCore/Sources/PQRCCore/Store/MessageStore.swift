@@ -24,13 +24,19 @@ public struct StoredMessage: Codable, Equatable, Sendable, Identifiable {
     /// "your AI" when several AIs share a conversation. nil for human messages
     /// and for peers' agents (those resolve to a locally-derived name).
     public var agentName: String?
+    /// True when this message was drafted by an AI and approved/sent by a human
+    /// (the "Draft with AI ▸ Send as my AI" flow) — a co-authored "made with the
+    /// person and their AI" message, as opposed to an autonomous agent send.
+    /// Mirrors `MessageBody.coauthored`, which DOES ride inside the ciphertext, so
+    /// every participant stores and renders the co-authorship (not local-only).
+    public var coauthored: Bool
 
     public init(
         id: String, conversationID: String, senderIdentity: String,
         participantType: ParticipantType, text: String, sentAt: Int64,
         threadID: String? = nil, isContext: Bool = false,
         aiContext: Bool = false, localStatus: String = "queued",
-        agentName: String? = nil
+        agentName: String? = nil, coauthored: Bool = false
     ) {
         self.id = id
         self.conversationID = conversationID
@@ -43,11 +49,12 @@ public struct StoredMessage: Codable, Equatable, Sendable, Identifiable {
         self.aiContext = aiContext
         self.localStatus = localStatus
         self.agentName = agentName
+        self.coauthored = coauthored
     }
 
     enum CodingKeys: String, CodingKey {
         case id, conversationID, senderIdentity, participantType, text, sentAt
-        case threadID, isContext, aiContext, localStatus, agentName
+        case threadID, isContext, aiContext, localStatus, agentName, coauthored
     }
 
     /// Tolerant decode: `aiContext` was added after first ship, so payloads
@@ -66,6 +73,7 @@ public struct StoredMessage: Codable, Equatable, Sendable, Identifiable {
         aiContext = try c.decodeIfPresent(Bool.self, forKey: .aiContext) ?? false
         localStatus = try c.decodeIfPresent(String.self, forKey: .localStatus) ?? "queued"
         agentName = try c.decodeIfPresent(String.self, forKey: .agentName)
+        coauthored = try c.decodeIfPresent(Bool.self, forKey: .coauthored) ?? false
     }
 }
 

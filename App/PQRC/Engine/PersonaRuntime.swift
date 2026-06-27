@@ -21,7 +21,6 @@ enum RuntimeEvent: Sendable {
     /// is `AIContextGrant.Scope.tag` ("conversation:<id>" | "thread:<id>").
     case aiContextGrantChanged(scopeTag: String, identityHex: String, activeUntil: Int64?)
     case threadCreated(conversationID: String, threadID: String, title: String)
-    case loopGuardChanged(threadID: String, paused: Bool)
     /// An autonomous AI reply (solo chat / window) failed for every tethered AI —
     /// surfaced so the user sees WHY instead of silence (the Bug-2 philosophy).
     case agentError(String)
@@ -148,7 +147,10 @@ actor PersonaRuntime {
     private var nearbyContactNames: [String: String] = [:]
     /// Open-inbox window: unknown senders are auto-accepted until this time
     /// (Settings → Reachability). nil/past = normal message-request gate.
-    private var openInboxUntil: Int64?
+    private var reachabilityEnabled = false
+    /// T3 throttle: last time (unix seconds) we re-checked a contact's published
+    /// binding for a safety-code change. Bounds relay re-fetches to ~once/24h/contact.
+    private var lastBindingCheck: [String: Int64] = [:]
     /// My self-chosen alias — travels only inside established encrypted
     /// sessions, so only connected contacts ever learn it.
     private var myAlias: String?
@@ -171,6 +173,9 @@ actor PersonaRuntime {
     /// Conversations with a solo self-reply run currently in flight — coalesces
     /// rapid sends so tethered AIs don't stack overlapping reply storms.
     private var soloRepliesInFlight: Set<String> = []
+    /// C6: My-AI per-AI sub-threads → the tethered AI (ConfiguredAI id) each is
+    /// pinned to. Drives the no-invite solo reply + the suppressed-countdown UI.
+    private var soloThreadAIID: [String: String] = [:]
     /// Reassembly buffers for chunked large messages (relay chunking). Keyed by
     /// chunk id; an entry holds the parts seen so far plus a template body (the
     /// first-arriving chunk, text cleared) used to rebuild the whole message
@@ -465,18 +470,29 @@ actor PersonaRuntime {
     /// Auto-managed (no toggle) — drafting in your Mac-agent chat uses the Mac, every other
     /// chat unchanged. Called from setAIs, bootstrap, and setContactType.
     private func refreshRoutingPolicy() {
+        // Manage ONLY the policies WE install (Default / Capability / Composite);
+        // never clobber one a host or test set explicitly via setAISelectionPolicy.
+        let oursToManage =
+            aiSelection is DefaultAISelectionPolicy<TetheredAI>
+            || aiSelection is CapabilityRoutingPolicy<TetheredAI>
+            || aiSelection is CompositeAISelectionPolicy<TetheredAI>
+        guard oursToManage else { return }
+        // WHO answers: a consented coding-agent node's conversation requires "code"
+        // (routes to the acp engine). Empty otherwise ⇒ default selection.
+        var map: [String: Set<String>] = [:]
         let codingNodes = verifiedContacts.keys.filter { isConsentedCodingAgentNode($0) }
-        guard !codingNodes.isEmpty, ais.contains(where: { $0.kind == "acp" }) else {
-            // No consented coding node: if WE installed a capability policy, revert to the
-            // default; never clobber a policy someone else set (a test / future feature
-            // via setAISelectionPolicy).
-            if aiSelection is CapabilityRoutingPolicy<TetheredAI> {
-                aiSelection = DefaultAISelectionPolicy<TetheredAI>()
-            }
-            return
+        if !codingNodes.isEmpty, ais.contains(where: { $0.kind == "acp" }) {
+            for node in codingNodes { map[node] = Set(["code"]) }
         }
-        let map = Dictionary(uniqueKeysWithValues: codingNodes.map { ($0, Set(["code"])) })
-        aiSelection = CapabilityRoutingPolicy<TetheredAI>(byConversation: map)
+        // ORDER: compose with the per-conversation "AIs reply in order" toggle (C4/C3),
+        // read LIVE per turn so toggling it needs no policy rebuild. With an empty map
+        // and no ordered scopes, the composite behaves exactly like the default policy.
+        let silo = siloID
+        aiSelection = CompositeAISelectionPolicy<TetheredAI>(
+            base: CapabilityRoutingPolicy<TetheredAI>(byConversation: map),
+            orderedScope: { conversationID, _ in
+                AppSession.orderedCritique(conversationID, siloID: silo)
+            })
     }
 
     /// Whether an ACP ToolKind needs autonomous-changes consent before the phone
@@ -513,6 +529,38 @@ actor PersonaRuntime {
 
     func setFirewallEnabled(_ enabled: Bool) {
         firewallEnabled = enabled
+    }
+
+    /// Set the user's per-thread loop-guard limit ("max AI turns", C1). Clamped to
+    /// 0…9999 (0 = unlimited); persisted per-silo+thread and applied live to the
+    /// engine so a running thread picks it up on its next turn.
+    func setThreadLoopGuardLimit(_ value: Int, threadID: String) async {
+        let clamped = max(0, min(9999, value))
+        AppSession.setThreadLoopGuardLimit(clamped, threadID: threadID, siloID: siloID)
+        await engine.setThreadLoopGuardLimit(clamped, threadID: threadID)
+    }
+
+    /// T3 — real safety-code-change detection. On a message from a known contact,
+    /// re-fetch their published kind-10420 binding (throttled ~24h/contact) and
+    /// compare its identity key to the one we verified at pairing. A mismatch means
+    /// the contact's identity key rotated — a legit device change OR a MITM — so we
+    /// raise the persistent "verify again" banner. Uses `peekBinding` (no auto-adopt:
+    /// a changed key must NOT be silently trusted). Degrades safely: a relay failure
+    /// SKIPS the check (no false alarm) and clears the throttle so the next message
+    /// retries. WARNS, never blocks (the user re-verifies in person to clear it).
+    func checkSafetyCode(forContact identityHex: String) async {
+        guard let contact = verifiedContacts[identityHex] else { return }
+        let now = clock.now()
+        if let last = lastBindingCheck[identityHex], now - last < 86_400 { return }
+        lastBindingCheck[identityHex] = now
+        guard let fresh = try? await messenger.peekBinding(nostrPubkeyHex: contact.nostrPubkeyHex)
+        else {
+            lastBindingCheck[identityHex] = nil  // relay failed → allow a retry next time
+            return
+        }
+        if fresh.identityPubkey != contact.binding.identityPubkey {
+            eventContinuation?.yield(.safetyCodeChanged(identityHex: identityHex))
+        }
     }
 
     /// Inject a routing policy at runtime (Phase 2). Defaults to
@@ -559,13 +607,6 @@ actor PersonaRuntime {
         pairedPubkeysPublisher?(pairedNostrPubkeys())
     }
 
-    /// Apply a changed per-silo loop-guard threshold (DEVIATIONS D14) to the live
-    /// engine so it takes effect without re-booting the silo. `0` turns the guard
-    /// off (unbounded). Persistence is the caller's (Settings) responsibility;
-    /// this only pushes the value into the running engine.
-    func setLoopGuardLimit(_ limit: Int) async {
-        await engine?.setLoopGuardLimit(limit)
-    }
 
     /// Builds the context for one AI: the normal (byte-bounded) context for an
     /// on-device AI, or the firewalled (name-redacted) context for a remote AI
@@ -586,7 +627,7 @@ actor PersonaRuntime {
     }
 
     private func contextFor(
-        _ ai: TetheredAI, conversationID: String, threadID: String?
+        _ ai: TetheredAI, conversationID: String, threadID: String?, aiRole: String = "primary"
     ) async -> AgentContext {
         // A per-conversation override (Settings → conversation details) wins over
         // the AI's own gather policy.
@@ -645,7 +686,8 @@ actor PersonaRuntime {
                 peerName: promptPeerName,
                 threadID: tid,
                 activeSkillIDs: AppSession.threadSkills(tid, siloID: siloID),
-                instructions: ai.instructions)
+                instructions: ai.instructions,
+                aiRole: aiRole)
             // App-layer overlay: append any pinned CUSTOM skills' instruction text
             // the same way the package appends a built-in's fragment. The package
             // catalog stays the built-in source of truth; these are merged in only
@@ -833,7 +875,15 @@ actor PersonaRuntime {
             randomSource: randomSource, nonceSource: nonceSource)
         engine = AgentEngine(
             myIdentity: identity, clock: clock, sink: RuntimeSink(runtime: self),
-            loopGuardLimit: AppSession.agentLoopGuardLimit(siloID: siloID))
+            // Loop guard ARMED (plan C1). Multi-AI collaboration means AIs reply to
+            // each other IN A THREAD, so an unbounded cascade could run forever (and
+            // cost). The guard pauses a thread after N consecutive agent messages and
+            // resets the instant a human speaks — a human always stays in the loop
+            // (the cardinal rule). AI-to-AI happens only in threads; the main
+            // conversation stays human-triggered (see handleReceived dispatch).
+            // This account-wide default (50) is the fallback; each thread can override
+            // it with a user-set "max AI turns" (0–9999, 0 = unlimited) restored below.
+            loopGuardLimit: AppSession.defaultThreadLoopGuardLimit)
 
         // Restore persisted state: contacts (bindings re-verified — invariant 7
         // survives persistence), ratchet sessions, group rosters, threads, and
@@ -841,10 +891,16 @@ actor PersonaRuntime {
         if let aliasData = loadSecret("my-alias") {
             myAlias = String(decoding: aliasData, as: UTF8.self)
         }
-        if let untilData = loadSecret("open-inbox-until"),
+        // Reachability (permanent open-inbox toggle). Migrate the legacy timed
+        // "open-inbox-until" window: a still-future value becomes the toggle ON.
+        if loadSecret("reachability-enabled") != nil {
+            reachabilityEnabled = true
+        } else if let untilData = loadSecret("open-inbox-until"),
             let until = Int64(String(decoding: untilData, as: UTF8.self)), until > clock.now()
         {
-            openInboxUntil = until
+            reachabilityEnabled = true
+            try? saveSecret(Data("1".utf8), account: "reachability-enabled")
+            keychain.delete(account: "open-inbox-until")
         }
         for record in (try? await store.contacts()) ?? [] {
             guard
@@ -876,6 +932,13 @@ actor PersonaRuntime {
         for (threadID, conversationID, meta) in (try? await store.threadMetas()) ?? [] {
             threadConversations[threadID] = conversationID
             threadTitles[threadID] = meta.title
+            if meta.isSoloThread == true, let aid = meta.soloAIID {
+                soloThreadAIID[threadID] = aid  // C6: restore the pinned-AI mapping
+            }
+            // Restore the user's per-thread loop-guard limit (C1); engine falls back
+            // to the account-wide default for threads the user never customized.
+            await engine.setThreadLoopGuardLimit(
+                AppSession.threadLoopGuardLimit(threadID, siloID: siloID), threadID: threadID)
         }
         await messenger.seedProcessedWrapIDs((try? await store.processedEventIDs()) ?? [])
 
@@ -1367,22 +1430,20 @@ actor PersonaRuntime {
         return contact.identityHex
     }
 
-    /// Open-inbox window: messages from anyone are auto-accepted until
-    /// `until` (nil disables). Survives relaunch; the privacy trade is the
-    /// user's explicit, time-bounded choice (THREAT_MODEL note).
-    func setOpenInbox(until: Int64?) {
-        openInboxUntil = until
-        if let until {
-            try? saveSecret(Data(String(until).utf8), account: "open-inbox-until")
+    /// Reachability (open inbox): when ON, messages from anyone are auto-accepted
+    /// instead of waiting in Message Requests. A PERMANENT toggle (no timer) that
+    /// survives relaunch; the privacy trade is the user's explicit choice
+    /// (THREAT_MODEL note). Replaces the legacy time-bounded window.
+    func setReachability(_ enabled: Bool) {
+        reachabilityEnabled = enabled
+        if enabled {
+            try? saveSecret(Data("1".utf8), account: "reachability-enabled")
         } else {
-            keychain.delete(account: "open-inbox-until")
+            keychain.delete(account: "reachability-enabled")
         }
     }
 
-    func openInboxActiveUntil() -> Int64? {
-        guard let openInboxUntil, openInboxUntil > clock.now() else { return nil }
-        return openInboxUntil
-    }
+    func reachabilityIsOpen() -> Bool { reachabilityEnabled }
 
     /// Replenishes one-time prekeys and republishes 10420/10421/10050. Used by
     /// Settings → Republish and on a relay-list change. Throws on publish
@@ -1435,6 +1496,46 @@ actor PersonaRuntime {
 
     /// Sends a human (or agent) message into a conversation, fanning out for
     /// groups. >64 KB content takes the blob path automatically (SPEC §11).
+    /// Parse @-mentions (people + tethered AIs) from message text. Matches a single
+    /// @token (letters/digits/-/_) against contact display names and AI names
+    /// (case-insensitive; an AI wins a name tie so "@<ai>" routes to the AI). At most
+    /// one Mention per distinct name. Multi-word display names match only their first
+    /// token (MVP). (C2)
+    private func resolveMentions(in text: String) -> [MessageBody.Mention] {
+        guard text.contains("@") else { return [] }
+        var byName: [String: (id: String, kind: String)] = [:]
+        for hex in verifiedContacts.keys {
+            let n = contactName(hex).lowercased()
+            if !n.isEmpty { byName[n] = (hex, "person") }
+        }
+        for ai in ais {
+            let n = ai.name.lowercased()
+            if !n.isEmpty { byName[n] = (ai.id, "ai") }  // AI wins a name tie
+        }
+        var out: [MessageBody.Mention] = []
+        var seen = Set<String>()
+        let chars = Array(text)
+        var i = 0
+        while i < chars.count {
+            guard chars[i] == "@" else { i += 1; continue }
+            var j = i + 1
+            var token = ""
+            while j < chars.count,
+                chars[j].isLetter || chars[j].isNumber || chars[j] == "-" || chars[j] == "_"
+            {
+                token.append(chars[j])
+                j += 1
+            }
+            let key = token.lowercased()
+            if !key.isEmpty, !seen.contains(key), let hit = byName[key] {
+                seen.insert(key)
+                out.append(MessageBody.Mention(id: hit.id, displayName: token, kind: hit.kind))
+            }
+            i = j
+        }
+        return out
+    }
+
     func sendMessage(
         _ text: String, conversationID: String, participantType: ParticipantType = .human,
         threadID: String? = nil, isContext: Bool = false, aiContext: Bool = false,
@@ -1442,7 +1543,7 @@ actor PersonaRuntime {
         aiContextGrant: AIContextGrant? = nil,
         threadCreate: ThreadCreate? = nil, groupCreate: GroupCreate? = nil,
         asSystemRow: Bool = false, agentName: String? = nil,
-        localTextOverride: String? = nil
+        localTextOverride: String? = nil, coauthored: Bool = false
     ) async throws {
         let recipients = recipientsFor(conversationID: conversationID)
         // A group I'm a member of with no other humans (the "solo AI chat") is a
@@ -1465,7 +1566,18 @@ actor PersonaRuntime {
             aiContextGrant: aiContextGrant,
             // Self-chosen alias rides along inside the ciphertext so every
             // connected peer stays current (and ONLY connected peers — D11).
-            alias: participantType == .human ? myAlias : nil)
+            alias: participantType == .human ? myAlias : nil,
+            // "Made with you and your AI" co-authorship rides inside the
+            // ciphertext so every participant sees it (and only participants —
+            // SPEC §0). Set only on the human-directed draft path; autonomous
+            // agent sends leave it nil.
+            coauthored: coauthored ? true : nil)
+
+        // @-mentions (C2): parse people + tethered AIs from the text and carry them
+        // INSIDE the ciphertext (never wire metadata — SPEC §0). Human messages only.
+        let mentions = (participantType == .human && !asSystemRow)
+            ? resolveMentions(in: text) : []
+        if !mentions.isEmpty { body.mentions = mentions }
 
         // Large text is split into ordered, ratcheted chunks carried over the
         // relay (SPEC §11 chunking — the privacy-preserving alternative to a
@@ -1494,13 +1606,11 @@ actor PersonaRuntime {
             senderIdentity: identityHex, participantType: participantType,
             text: localTextOverride ?? body.text, sentAt: body.sentAt, threadID: threadID,
             isContext: isContext, aiContext: aiContext,
-            localStatus: asSystemRow ? "system" : "sent", agentName: agentName)
+            localStatus: asSystemRow ? "system" : "sent", agentName: agentName,
+            coauthored: coauthored)
         try await store.save(message)
         if let threadID {
             await engine.recordThreadMessage(threadID: threadID, participantType: participantType)
-            eventContinuation?.yield(
-                .loopGuardChanged(
-                    threadID: threadID, paused: await engine.loopGuardActive(threadID: threadID)))
         }
         eventContinuation?.yield(.messageAdded(message))
 
@@ -1555,6 +1665,29 @@ actor PersonaRuntime {
         {
             soloRepliesInFlight.insert(conversationID)
             Task { [weak self] in await self?.runSelfAIReplies(conversationID: conversationID) }
+        }
+
+        // My-AI per-AI sub-thread (C6): a human message in a solo sub-thread → its
+        // pinned AI replies (no invite/timer; a 1:1 with my own AI, no other human).
+        if participantType == .human, !asSystemRow, let threadID, isSoloThread(threadID),
+            !soloRepliesInFlight.contains(threadID)
+        {
+            soloRepliesInFlight.insert(threadID)
+            Task { [weak self] in await self?.runSoloThreadReply(threadID: threadID) }
+        }
+
+        // @-mention of one of MY tethered AIs in a THREAD → that AI takes a turn now
+        // (the thread send path doesn't otherwise self-trigger my AIs). Matched by
+        // NAME so it targets MY AI of that name; still engine-gated (no active invite
+        // ⇒ the turn fails closed and posts nothing). (C2)
+        if participantType == .human, !asSystemRow, let threadID {
+            let wanted = Set(mentions.filter { $0.kind == "ai" }.map { $0.displayName.lowercased() })
+            let mine = wanted.intersection(Set(ais.map { $0.name.lowercased() }))
+            if !mine.isEmpty {
+                Task { [weak self] in
+                    await self?.takeAgentThreadTurn(threadID: threadID, mentionedAINames: mine)
+                }
+            }
         }
     }
 
@@ -1627,14 +1760,90 @@ actor PersonaRuntime {
         }
     }
 
+    /// C6: the pinned AI's reply in a "My AI" per-AI sub-thread. Mirrors
+    /// `runSelfAIReplies` (the no-invite solo path — there is no other human to gate
+    /// against) but scoped to ONE AI and posted INTO the thread. Gated only by the
+    /// solo-thread pin + the AI's own "off" policy; never goes through the engine
+    /// invite/window gate — invariant 9 still holds because a solo thread has no other
+    /// human (re-checked after the await, in case a human was just added to the parent).
+    private func runSoloThreadReply(threadID: String) async {
+        defer { soloRepliesInFlight.remove(threadID) }
+        guard let conversationID = threadConversations[threadID],
+            let aiID = soloThreadAIID[threadID],
+            let ai = ais.first(where: { $0.id == aiID }),
+            !aiSuppressed(in: conversationID),
+            resolvedPolicy(ai, conversationID: conversationID) != "off"
+        else { return }
+        let context = await contextFor(ai, conversationID: conversationID, threadID: threadID)
+        do {
+            let draft = try await withThrowingTimeout(seconds: 30) {
+                try await ai.provider.draftReply(context: context)
+            }
+            let text = draft.text.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !text.isEmpty else { return }
+            // Still a solo thread with no other human? (TOCTOU: a human could have been
+            // added to the parent during the await — then an ungated agent send must
+            // fail closed, invariant 9.)
+            guard isSoloThread(threadID), isSoloConversation(conversationID) else { return }
+            try await sendMessage(
+                text, conversationID: conversationID, participantType: .agent,
+                threadID: threadID, agentName: ai.name)
+        } catch {
+            let detail: String
+            if case AgentProviderError.unavailable(let d) = error {
+                detail = d
+            } else if case TimeoutError.timedOut = error {
+                detail = "Your AI took too long to respond. Check Settings ▸ AI."
+            } else {
+                detail = (error as NSError).localizedDescription
+            }
+            eventContinuation?.yield(.agentError(detail))
+        }
+    }
+
     /// Creates a solo AI chat: a group with only me, where my tethered AIs
     /// engage by default. People can be added later (it becomes a normal group).
     /// The AI is "on" from creation, so it ingests messages from here forward.
     func createSelfChat() async throws -> String {
         // createGroup turns the AI on for a member-less group, so this is just a
         // named solo group.
-        try await createGroup(name: "My AI", memberIdentityHexes: [])
+        let groupID = try await createGroup(name: "My AI", memberIdentityHexes: [])
+        // C6: a per-AI 1:1 sub-thread for each tethered AI — like a 1:1 chat with that
+        // one AI, while the root "My AI" keeps ALL AIs replying. Best-effort; a failure
+        // for one AI never blocks the others or the chat itself.
+        for ai in ais {
+            _ = try? await createSoloAIThread(conversationID: groupID, aiID: ai.id, title: ai.name)
+        }
+        return groupID
     }
+
+    /// C6: create a "My AI" per-AI sub-thread pinned to ONE tethered AI. Behaves like a
+    /// 1:1 with that AI — it replies with no invite/timer (there is no other human to
+    /// gate against, same as the solo chat). The pin is recorded so the reply path and
+    /// the suppressed-countdown UI can find it.
+    @discardableResult
+    func createSoloAIThread(conversationID: String, aiID: String, title: String) async throws
+        -> String
+    {
+        let threadID = UUID().uuidString
+        threadConversations[threadID] = conversationID
+        threadTitles[threadID] = title
+        soloThreadAIID[threadID] = aiID
+        aiActiveSince[threadID] = clock.now()
+        persistThread(threadID)
+        let create = ThreadCreate(
+            threadID: threadID, title: title, anchorMessageID: nil, createdBy: identityHex)
+        try await sendMessage(
+            "started a 1:1 with \(title)", conversationID: conversationID,
+            threadID: threadID, threadCreate: create, asSystemRow: true)
+        eventContinuation?.yield(
+            .threadCreated(conversationID: conversationID, threadID: threadID, title: title))
+        return threadID
+    }
+
+    /// C6: whether a thread is a "My AI" per-AI sub-thread (drives no-invite replies +
+    /// the suppressed-countdown UI).
+    func isSoloThread(_ threadID: String) -> Bool { soloThreadAIID[threadID] != nil }
 
     /// Adds verified contacts to a group/solo conversation (the "add people at
     /// any time" path). Once a real human is in, my AIs stop auto-replying and
@@ -2000,8 +2209,10 @@ actor PersonaRuntime {
 
     private func persistThread(_ threadID: String) {
         guard let conversationID = threadConversations[threadID] else { return }
+        let soloAI = soloThreadAIID[threadID]
         let meta = ThreadMeta(
-            title: threadTitles[threadID] ?? "Thread", createdBy: identityHex, anchorMessageID: nil)
+            title: threadTitles[threadID] ?? "Thread", createdBy: identityHex, anchorMessageID: nil,
+            isSoloThread: soloAI != nil ? true : nil, soloAIID: soloAI)
         let store = store
         Task {
             try? await store?.saveThreadMeta(
@@ -2034,13 +2245,16 @@ actor PersonaRuntime {
 
     // MARK: - Threads & AI (SPEC §13, APP-SPEC §8–9)
 
-    func createThread(conversationID: String, title: String) async throws -> String {
+    func createThread(
+        conversationID: String, title: String, anchorMessageID: String? = nil
+    ) async throws -> String {
         let threadID = UUID().uuidString
         threadConversations[threadID] = conversationID
         threadTitles[threadID] = title
         persistThread(threadID)
         let create = ThreadCreate(
-            threadID: threadID, title: title, anchorMessageID: nil, createdBy: identityHex)
+            threadID: threadID, title: title, anchorMessageID: anchorMessageID,
+            createdBy: identityHex)
         try await sendMessage(
             "started the thread \"\(title)\"", conversationID: conversationID,
             threadID: threadID, threadCreate: create, asSystemRow: true)
@@ -2171,7 +2385,11 @@ actor PersonaRuntime {
     }
 
     func sendAsMyAI(_ text: String, conversationID: String) async throws {
-        try await sendMessage(text, conversationID: conversationID, participantType: .agent)
+        // The only caller is the "Draft with AI ▸ Send as my AI" flow: the human
+        // directed and approved this AI draft, so it is co-authored ("made with
+        // you and your AI"). Autonomous agent sends use the engine sink, not this.
+        try await sendMessage(
+            text, conversationID: conversationID, participantType: .agent, coauthored: true)
     }
 
     /// The EXACT messages the AI would see for this scope, with the per-message
@@ -2295,23 +2513,39 @@ actor PersonaRuntime {
     /// my tethered AIs takes a turn in order, rebuilding the context each time so
     /// a later AI sees what an earlier one just posted — that's how multiple AIs
     /// share context back and forth in a thread.
-    func takeAgentThreadTurn(threadID: String) async {
+    func takeAgentThreadTurn(threadID: String, mentionedAINames: Set<String>? = nil) async {
         let conversationID = threadConversations[threadID] ?? ""
         guard !conversationID.isEmpty, !aiSuppressed(in: conversationID) else { return }
-        for ai in aiSelection.participants(
+        // Ordered critique panel (C3) when the active selection policy supplies one
+        // — each AI tagged with a role (primary → reviewer/critic → synthesizer),
+        // and the role flows into the thread system prompt. Otherwise the flat
+        // autonomous participant set, all "primary" (the default, unchanged).
+        var ordered: [(ai: TetheredAI, role: String)]
+        if let critique = aiSelection.critiqueTurn(
             from: ais, conversationID: conversationID, threadID: threadID)
         {
+            ordered = critique
+        } else {
+            ordered = aiSelection.participants(
+                from: ais, conversationID: conversationID, threadID: threadID
+            ).map { ($0, "primary") }
+        }
+        // @-mention routing (C2): if the triggering message named specific AIs, run
+        // ONLY my AIs of those names (matched by name across devices). nil ⇒ no AI
+        // mention ⇒ all participants (the default). Empty after filter ⇒ none here.
+        if let names = mentionedAINames {
+            ordered = ordered.filter { names.contains($0.ai.name.lowercased()) }
+        }
+        for (ai, role) in ordered {
             // "off" is the silence contract — never let a provider run here.
             guard resolvedPolicy(ai, conversationID: conversationID) != "off" else { continue }
             _ = await engine.runThreadTurn(
                 provider: ai.provider,
-                context: await contextFor(ai, conversationID: conversationID, threadID: threadID),
+                context: await contextFor(
+                    ai, conversationID: conversationID, threadID: threadID, aiRole: role),
                 threadID: threadID,
                 agentName: ai.name)
         }
-        eventContinuation?.yield(
-            .loopGuardChanged(
-                threadID: threadID, paused: await engine.loopGuardActive(threadID: threadID)))
     }
 
     func engineActiveWindow(identityHex: String) async -> Int64? {
@@ -2407,9 +2641,9 @@ actor PersonaRuntime {
         case .message(let received):
             await handleReceived(received)
         case .messageRequest(let sender, _):
-            // Open-inbox window: the user opted into being reachable by
-            // anyone for a bounded time — auto-accept instead of gating.
-            if let until = openInboxUntil, until > clock.now() {
+            // Reachability: the user opted into an open inbox — auto-accept
+            // instead of gating (a permanent toggle, no time bound).
+            if reachabilityEnabled {
                 if (try? await acceptMessageRequest(senderNostrPubkeyHex: sender)) != nil {
                     return
                 }
@@ -2685,18 +2919,28 @@ actor PersonaRuntime {
             senderIdentity: senderHex, participantType: received.participantType,
             text: text, sentAt: body.sentAt, threadID: body.thread?.id,
             isContext: body.isContext ?? false, aiContext: body.aiContext ?? false,
-            localStatus: isSystemRow ? "system" : "received")
+            localStatus: isSystemRow ? "system" : "received",
+            coauthored: body.coauthored ?? false)
         try? await store.save(message)
         eventContinuation?.yield(.messageAdded(message))
+
+        // T3: a known contact's identity key may have rotated (a device change, or a
+        // MITM republishing a binding). Re-check (throttled, off the receive path) and
+        // WARN via the persistent banner — never block.
+        if verifiedContacts[senderHex] != nil, senderHex != identityHex, !isSystemRow {
+            Task { await self.checkSafetyCode(forContact: senderHex) }
+        }
 
         // Agent reactions — every gate lives in the engine (fail closed).
         if let threadID = body.thread?.id {
             await engine.recordThreadMessage(
                 threadID: threadID, participantType: received.participantType)
-            eventContinuation?.yield(
-                .loopGuardChanged(
-                    threadID: threadID, paused: await engine.loopGuardActive(threadID: threadID)))
-            await takeAgentThreadTurn(threadID: threadID)
+            // @-mention routing (C2): if this message named specific AIs, only MY AI
+            // of that name responds; otherwise all participant AIs (the default).
+            let aiNames = (body.mentions ?? []).filter { $0.kind == "ai" }
+                .map { $0.displayName.lowercased() }
+            await takeAgentThreadTurn(
+                threadID: threadID, mentionedAINames: aiNames.isEmpty ? nil : Set(aiNames))
         } else if received.participantType == .human, senderHex != identityHex,
             myWindowConversationID == conversationID, !aiSuppressed(in: conversationID)
         {
