@@ -156,7 +156,7 @@ enum BackendRegistry {
                 hubClient.map { NearbyHubAIProvider(client: $0) } ?? DemoAgentProvider()
             }),
         BackendDescriptor(
-            tag: "acp", label: "Mac coding harness (ACP)",
+            tag: "acp", label: "Mac-Tethered-AI",
             isRemote: true, appliesEgressFirewall: true, requiresConsent: true,
             keyAccount: nil, usesPerAIKey: true,
             makeProvider: { _, _, _ in

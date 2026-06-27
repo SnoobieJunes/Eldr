@@ -22,6 +22,12 @@ struct MessageBubble: View {
     /// signal — agent bubbles always carry the outline + sparkles glyph too
     /// (SPEC §8.2 / colorblind safety), regardless of palette.
     var palette: PartyColor.Palette? = nil
+    /// Backend-type badge for an AGENT bubble — the same mark the Settings AI row
+    /// shows (AITypeIcon): exactly one of an SF Symbol or an emoji glyph, or neither
+    /// (a peer's AI, whose backend isn't broadcast). Display-only; resolved at the
+    /// call site from the authoring AI's configured kind.
+    var typeSymbol: String? = nil
+    var typeGlyph: String? = nil
     /// Toggles the "Add to AI Context" marker (Feature 3). nil hides the action.
     var onToggleAIContext: (() -> Void)? = nil
     /// Opens this message's markdown/HTML in the full-screen reader. nil hides it.
@@ -359,6 +365,12 @@ struct MessageBubble: View {
                     Label("⟡ \(agentLabel)", systemImage: "sparkles")
                         .font(.caption2.weight(.semibold))
                         .foregroundStyle(agentLabelColor)
+                    // Backend-type badge (Apple/phone/Mac-Tethered-AI/🦞/…): which
+                    // KIND of AI this is, matching the Settings row. Only set for my
+                    // own AIs (a peer's backend isn't broadcast).
+                    AITypeBadgeView(
+                        symbol: typeSymbol, glyph: typeGlyph, size: 11, tint: agentLabelColor)
+                        .accessibilityHidden(true)
                     expandButton
                 }
                 HStack(alignment: .top, spacing: 6) {

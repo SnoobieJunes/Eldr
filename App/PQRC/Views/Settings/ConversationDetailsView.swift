@@ -6,6 +6,9 @@ struct ConversationDetailsView: View {
     @Bindable var model: AppModel
     let conversationID: String
     @Environment(\.dismiss) private var dismiss
+    /// Optional — used to re-resolve providers when consenting a node auto-adds the
+    /// Mac-Tethered-AI to Settings ▸ AI (so it goes live without a Settings trip).
+    @Environment(AppSession.self) private var session: AppSession?
     @State private var safetyCode = ""
     @State private var verified = false
     @State private var showReport = false
@@ -45,6 +48,15 @@ struct ConversationDetailsView: View {
     /// control" disclosure (closed by default), so Details opens on a calm
     /// summary rather than a wall of switches.
     @State private var showAgentControls = false
+    /// True when `conversationID` is a GROUP (a UUID), not a 1:1 contact identity
+    /// key. Gates out the 1:1-only Name/safety-code/verify/block surfaces (which
+    /// render garbage for a group id) in favor of the roster below.
+    @State private var isGroupConversation = false
+    /// Resolved group members (identity hex → local name; self → "You"), the
+    /// asserted-by name, and the revision — for the group roster section.
+    @State private var groupMembers: [(hex: String, name: String)] = []
+    @State private var groupAssertedBy = "a member"
+    @State private var groupRevision = 0
 
     /// One-line summary shown on the collapsed "Mac agent control" disclosure so
     /// the current consent posture is legible without expanding it.
@@ -59,6 +71,23 @@ struct ConversationDetailsView: View {
     var body: some View {
         NavigationStack {
             Form {
+                // For a GROUP, `conversationID` is a UUID, not a peer identity key, so
+                // the Name / safety-code / verify / block surfaces below are 1:1-only
+                // (they'd show an empty code + meaningless "verify"). Show the roster
+                // instead, and gate those sections out.
+                if isGroupConversation {
+                    Section {
+                        ForEach(groupMembers, id: \.hex) { member in
+                            Label(member.name, systemImage: "person.crop.circle")
+                                .accessibilityIdentifier("group-member-row")
+                        }
+                    } header: {
+                        Text("Members (\(groupMembers.count))")
+                    } footer: {
+                        Text("Membership as asserted by \(groupAssertedBy) (revision \(groupRevision)). Group membership is not cryptographically guaranteed — there's no membership agreement, so a tampering member could present a different list.")
+                    }
+                }
+                if !isGroupConversation {
                 Section("Name") {
                     TextField(
                         "Local name for this contact", text: $nickname,
@@ -95,6 +124,7 @@ struct ConversationDetailsView: View {
                     Text("Verify \(model.contactNames[conversationID] ?? "contact")")
                         .helpInfo("Confirm you're really talking to this person, not an impostor. Read the 60 digits aloud in person or over a trusted call — if they match on both phones, you're verified and get a green shield. If the code ever changes, a red banner warns you before you trust new messages.")
                 }
+                }  // end 1:1-only (Name + Verify) sections — a group has no peer key
                 Section {
                     // Unified vocabulary (matches the per-AI "Gathers" picker and
                     // the in-chat "AI here" chip): Use default · Off · Marked only
@@ -161,6 +191,16 @@ struct ConversationDetailsView: View {
                                     // stub (OFF) with no reboot.
                                     let nodeHex = conversationID
                                     Task { await model.runtime.refreshACPBindings() }
+                                    if newValue {
+                                        // Surface the Mac-Tethered-AI under Settings ▸ AI and the
+                                        // "My AI" chat the moment it's consented, named after this
+                                        // node — so it's usable without hunting through Settings.
+                                        if model.ensureMacTetheredAIConfigured(
+                                            nodeName: model.contactNames[conversationID])
+                                        {
+                                            Task { await session?.applyAIProvider() }
+                                        }
+                                    }
                                     if !newValue {
                                         // Revoking dev-control also drops the transport + denies
                                         // any pending prompts for this node (fail-closed). Phase D3:
@@ -237,24 +277,28 @@ struct ConversationDetailsView: View {
                         }
                         .accessibilityIdentifier("acp-advanced-disclosure")
                     } header: {
-                        Text("Mac coding agent")
-                            .helpInfo("Two switches, both off by default. The first lets your phone drive this paired Mac's coding agent over the relay at all. The second lets it create/modify files and run shell commands WITHOUT prompting — with it off, every mutating action asks you here, and your phone is the last brake before a destructive change runs on that Mac.")
+                        Text("Mac-Tethered-AI")
+                            .helpInfo("Two switches, both off by default. The first lets your phone drive this paired Mac-Tethered-AI over the relay at all. The second lets it create/modify files and run shell commands WITHOUT prompting — with it off, every mutating action asks you here, and your phone is the last brake before a destructive change runs on that Mac.")
                     } footer: {
                         Text("Off by default (privacy-first). Open “Mac agent control” to drive the agent; leave autonomous changes off to be asked before each file/shell change.")
                     }
                 }
                 Section("Safety") {
-                    Button(blocked ? "Unblock" : "Block", role: .destructive) {
-                        if blocked {
-                            // Unblock is recoverable — apply immediately, no confirm.
-                            blocked = false
-                            Task { await model.runtime.setBlocked(conversationID, blocked: false) }
-                        } else {
-                            // Block drops their messages — confirm first (§2.6).
-                            showBlockConfirm = true
+                    // Block targets a peer identity key — meaningless for a group
+                    // UUID, so it's 1:1-only. (Leaving a group is a separate action.)
+                    if !isGroupConversation {
+                        Button(blocked ? "Unblock" : "Block", role: .destructive) {
+                            if blocked {
+                                // Unblock is recoverable — apply immediately, no confirm.
+                                blocked = false
+                                Task { await model.runtime.setBlocked(conversationID, blocked: false) }
+                            } else {
+                                // Block drops their messages — confirm first (§2.6).
+                                showBlockConfirm = true
+                            }
                         }
+                        .accessibilityIdentifier("block-contact")
                     }
-                    .accessibilityIdentifier("block-contact")
                     Button("Report a problem") {
                         showReport = true
                     }
@@ -263,16 +307,37 @@ struct ConversationDetailsView: View {
             }
             .navigationTitle("Details")
             .task {
-                safetyCode = await model.runtime.safetyCode(with: conversationID)
-                let info = await model.runtime.contactInfo(conversationID)
-                verified = info.verified
-                blocked = info.blocked
+                // The per-conversation AI-context + egress-firewall overrides apply to
+                // BOTH 1:1 and group chats, so load them regardless.
                 aiContextMode =
                     AppSession.conversationContextMode(conversationID, siloID: model.siloID) ?? "default"
                 firewallOverride =
                     AppSession.conversationFirewall(conversationID, siloID: model.siloID)
                     .map { $0 ? "on" : "off" } ?? "default"
                 summary = model.primaryAIContextSummary(conversationID)
+                // Group vs 1:1: a group has a roster keyed by its UUID; a 1:1's id is
+                // the peer identity key. For a group, resolve the roster and SKIP the
+                // 1:1-only contact lookups (safety code / verify / block / coding-agent
+                // consent), which are meaningless for a group id.
+                if let roster = await model.runtime.groupRoster(conversationID) {
+                    isGroupConversation = true
+                    groupRevision = roster.revision
+                    groupAssertedBy =
+                        roster.assertedBy == model.myIdentityHex
+                        ? "you" : await model.runtime.contactName(roster.assertedBy)
+                    var resolved: [(hex: String, name: String)] = []
+                    for hex in roster.members {
+                        let name =
+                            hex == model.myIdentityHex ? "You" : await model.runtime.contactName(hex)
+                        resolved.append((hex, name))
+                    }
+                    groupMembers = resolved
+                    return
+                }
+                safetyCode = await model.runtime.safetyCode(with: conversationID)
+                let info = await model.runtime.contactInfo(conversationID)
+                verified = info.verified
+                blocked = info.blocked
                 isCodingAgent = await model.runtime.contactType(conversationID) == "coding_agent"
                 autonomousChanges = AppSession.autonomousChangesConsent(
                     nodeID: conversationID, siloID: model.siloID)

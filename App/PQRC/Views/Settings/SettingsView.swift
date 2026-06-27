@@ -121,6 +121,18 @@ struct SettingsView: View {
             .onReceive(ticker) { _ in
                 now = Int64(Date().timeIntervalSince1970)
             }
+            // The funder / "Why Eldr for teams" pitch (the ported Huginn cards),
+            // presented over Settings as a full-screen cover. Anchored to the Form
+            // ROOT (a stable container), never to the `aboutSection` Section — a
+            // cover attached to a lazily-recycled Form row is torn down the instant
+            // it occludes the Form ("opens, then immediately closes"). The button
+            // that flips `showEnterpriseTour` lives in `aboutSection`.
+            .fullScreenCover(isPresented: $showEnterpriseTour) {
+                OnboardingTourView(
+                    steps: EnterpriseTourScript.steps,
+                    finishLabel: "Aye",
+                    onFinish: { showEnterpriseTour = false })
+            }
         }
     }
 
@@ -465,13 +477,13 @@ struct SettingsView: View {
             Button {
                 showConnectAgent = true
             } label: {
-                Label("Connect your Mac coding agent", systemImage: "desktopcomputer")
+                Label("Pair your Mac-Tethered-AI", systemImage: "desktopcomputer")
             }
             .accessibilityIdentifier("connect-mac-agent")
         } header: {
-            Text("Mac coding agent")
+            Text("Mac-Tethered-AI")
         } footer: {
-            Text("Pair the Eldr ACP Configurator running on your Mac so its coding agent can join a conversation — controlled by you, under your AI window. On the Mac: open the Bridge tab, then scan its QR here (or use “Open in EldrChat” / paste its address). Paired this way, the agent is recognized as yours and its answers are shown to you in full while secrets are redacted for everyone else.")
+            Text("Pair the Eldr ACP Configurator (Huginn) running on your Mac so your Mac-Tethered-AI — sybilclaw or a local model you host (LM Studio / Ollama) — can join a conversation, controlled by you, under your AI window. On the Mac: open the Bridge tab, then scan its QR here (or use “Open in EldrChat” / paste its address). Paired this way, it's recognized as yours and its answers are shown to you in full while secrets are redacted for everyone else.")
         }
         .sheet(isPresented: $showConnectAgent) {
             // Reuse the verified-pairing flow, pre-tagged as a coding agent so its
@@ -795,12 +807,12 @@ struct SettingsView: View {
                 .font(.caption)
                 .foregroundStyle(.secondary)
         }
-        .fullScreenCover(isPresented: $showEnterpriseTour) {
-            OnboardingTourView(
-                steps: EnterpriseTourScript.steps,
-                finishLabel: "Aye",
-                onFinish: { showEnterpriseTour = false })
-        }
+        // NOTE: the "Why Eldr for teams" cover is intentionally attached to the
+        // Form root in `body` (next to .onReceive), NOT here on the Section.
+        // A Form is a lazy, recycling container: when the full-screen cover fully
+        // occluded the Form, SwiftUI tore down the offscreen Section that OWNED the
+        // presentation, which tore the cover straight back down — "opens, then
+        // immediately closes." Anchoring it to the stable Form root fixes that.
     }
 }
 

@@ -92,6 +92,12 @@ struct ThreadView: View {
                             isMine: message.senderIdentity == model.myIdentityHex,
                             senderName: model.contactNames[message.senderIdentity] ?? "Contact",
                             agentName: message.agentName ?? model.aiNames[message.senderIdentity],
+                            typeSymbol: model.aiTypeBadge(
+                                agentName: message.agentName,
+                                isMine: message.senderIdentity == model.myIdentityHex)?.symbol,
+                            typeGlyph: model.aiTypeBadge(
+                                agentName: message.agentName,
+                                isMine: message.senderIdentity == model.myIdentityHex)?.glyph,
                             onToggleAIContext: {
                                 Task {
                                     await model.markAIContext(

@@ -96,19 +96,30 @@ struct TourStepCard: View {
                         colors: step.gradient, startPoint: .topLeading, endPoint: .bottomTrailing)
                 )
                 .symbolRenderingMode(.hierarchical)
-            // Small accent glyph in a corner satellite, for a richer mock.
+            // Small accent glyph in a corner satellite, for a richer mock. The
+            // accent may be an SF Symbol name (all-ASCII, e.g. "sailboat.fill") OR a
+            // literal emoji (e.g. the enterprise tour's 🦞). `Image(systemName:)`
+            // silently renders NOTHING for an emoji, so a non-ASCII accent must be
+            // drawn as Text — otherwise that card shows an empty badge.
             if let accent = step.accentSymbol {
-                Image(systemName: accent)
-                    .font(.system(size: 22, weight: .bold))
-                    .foregroundStyle(.white)
-                    .padding(10)
-                    .background(
-                        Circle().fill(
-                            LinearGradient(
-                                colors: step.gradient, startPoint: .top, endPoint: .bottom))
-                    )
-                    .overlay(Circle().strokeBorder(.background, lineWidth: 3))
-                    .offset(x: 58, y: 54)
+                Group {
+                    if accent.allSatisfy(\.isASCII) {
+                        Image(systemName: accent)
+                            .font(.system(size: 22, weight: .bold))
+                            .foregroundStyle(.white)
+                    } else {
+                        Text(accent)
+                            .font(.system(size: 22))
+                    }
+                }
+                .padding(10)
+                .background(
+                    Circle().fill(
+                        LinearGradient(
+                            colors: step.gradient, startPoint: .top, endPoint: .bottom))
+                )
+                .overlay(Circle().strokeBorder(.background, lineWidth: 3))
+                .offset(x: 58, y: 54)
             }
         }
         .frame(height: 240)

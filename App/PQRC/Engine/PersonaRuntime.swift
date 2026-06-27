@@ -614,7 +614,14 @@ actor PersonaRuntime {
         // hard-coded guardrail/window "chaff" is skipped — it gets only the raw
         // transcript + the user's own instructions. An explicit per-conversation
         // setting still wins either way (the user can re-enable the firewall).
-        let trustedNode = isConsentedCodingAgentNode(conversationID)
+        // The auto-OFF firewall + raw "conduit" prompt is for the owner's OWN trusted
+        // Mac agent — so it applies ONLY when the AI receiving this context is the
+        // "acp" conduit driving the paired node, NOT to any co-tethered cloud AI that
+        // happens to reply in the same conversation. Keying it on the conversation
+        // alone would fail OPEN: a Claude/OpenAI AI in a consented coding-agent
+        // conversation would receive un-redacted real names. Gate on the receiving
+        // AI's kind so every remote vendor stays firewalled here (privacy cardinal rule).
+        let trustedNode = ai.kind == "acp" && isConsentedCodingAgentNode(conversationID)
         // Per-conversation override (Settings → conversation details) wins over the
         // account default — a private, paired chat with your own agents can pass raw.
         let firewallOn = AppSession.conversationFirewall(conversationID, siloID: siloID)
@@ -2114,6 +2121,48 @@ actor PersonaRuntime {
             .aiInviteChanged(threadID: threadID, identityHex: identityHex, activeUntil: nil))
     }
 
+    /// Stop MY AI from autonomously replying in this conversation, NOW — the honest,
+    /// single "off switch" behind the in-chat control. It (1) closes the on-wire
+    /// ai_window for this conversation so every peer's "AI active" indicator AND any
+    /// owner-gated Mac bridge node (`isAuthorizedForOwner`) clear; (2) withdraws the
+    /// conversation-scope context-sharing grant (the old button's only job); and
+    /// (3) for a solo "My AI" chat — which has no window, only `runSelfAIReplies`
+    /// gated by `aiSuppressed` — flips the per-conversation context mode to "off".
+    /// Message-driven and fail-closed: the closing announcement carries a past
+    /// `activeUntil`, so it can only ever REVOKE, never self-activate (SPEC §13,
+    /// invariant 9). Idempotent — safe to call when nothing is active.
+    func endMyAIWindow(conversationID: String) async {
+        // Solo "My AI" space: replies come from `runSelfAIReplies`, gated ONLY by
+        // `aiSuppressed` (context mode "off") — there is no window to close. Mute it
+        // so the AI actually goes silent. (The re-enable path clears this again.)
+        if isSoloConversation(conversationID) {
+            AppSession.setConversationContextMode(
+                "off", conversationID: conversationID, siloID: siloID)
+        }
+        // Does a live window for THIS conversation need an on-wire close (so peers +
+        // the bridge node drop it)? Only my own window, only for this conversation.
+        // (Compute the await separately — `&&` takes an autoclosure that can't await.)
+        let windowLive = (await engine.activeWindow(for: identityHex)) != nil
+        let hadWindow = myWindowConversationID == conversationID && windowLive
+        // Always clear my LOCAL gate (engine clears `conversationWindows[me]` via its
+        // `defer` and returns the signed closing announcement) — a stale entry must
+        // never keep authorizing me even if no window was technically "live".
+        let closing = try? await engine.endMyWindowEarly()
+        if hadWindow, let closing {
+            try? await sendMessage(
+                "turned off always-on AI", conversationID: conversationID,
+                aiWindow: closing, asSystemRow: true)
+        }
+        if myWindowConversationID == conversationID { myWindowConversationID = nil }
+        aiActiveSince[conversationID] = nil
+        eventContinuation?.yield(
+            .aiWindowChanged(
+                conversationID: conversationID, identityHex: identityHex, activeUntil: nil))
+        // Withdraw the conversation-scope sharing grant too, so the "AI context
+        // sharing is on" indicator clears alongside the window.
+        await withdrawAIContext(scope: .conversation(conversationID))
+    }
+
     func sendAsMyAI(_ text: String, conversationID: String) async throws {
         try await sendMessage(text, conversationID: conversationID, participantType: .agent)
     }
@@ -2642,11 +2691,17 @@ actor PersonaRuntime {
                     threadID: threadID, paused: await engine.loopGuardActive(threadID: threadID)))
             await takeAgentThreadTurn(threadID: threadID)
         } else if received.participantType == .human, senderHex != identityHex,
-            !aiSuppressed(in: conversationID)
+            myWindowConversationID == conversationID, !aiSuppressed(in: conversationID)
         {
-            // Conversation scope: only during MY active ai_window. Each tethered
-            // AI that participates replies in turn (the engine gate fails closed
-            // when no window; draft-only/off AIs never auto-post).
+            // Conversation scope: only during MY active ai_window FOR THIS
+            // conversation. The engine's window gate is keyed on my identity alone
+            // (global), and a reply posts to `windowConversation()` — so without the
+            // `myWindowConversationID == conversationID` guard, a message arriving in
+            // conversation B while my window is open in A would build context from B
+            // and post the reply into A, leaking B's content/participants into A
+            // (SPEC §0). The guard pins replies to the conversation the window is for.
+            // Each participating tethered AI then replies in turn (the engine gate
+            // still fails closed when no window; draft-only/off AIs never auto-post).
             for ai in aiSelection.participants(
                 from: ais, conversationID: conversationID, threadID: nil)
             {

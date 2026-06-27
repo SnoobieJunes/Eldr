@@ -136,8 +136,20 @@ public actor AgentEngine {
         return announcement
     }
 
-    public func endMyWindowEarly() {
-        conversationWindows[myIdentityHex] = nil
+    /// Close MY conversation window NOW, returning a SIGNED closing announcement
+    /// (`activeUntil = now`) that the caller MUST publish — otherwise only this
+    /// device closes, and every peer's "AI active" indicator AND any owner-gated
+    /// bridge node (`isAuthorizedForOwner`) would keep the stale window live until
+    /// its original expiry, continuing to post as the owner's signed agent.
+    ///
+    /// A present/past `activeUntil` only ever REVOKES: `receiveWindow` accepts it,
+    /// and `activeWindow` / `authorizeAutonomousSend` / `isAuthorizedForOwner` all
+    /// read it as already-expired. So this can never self-activate an agent
+    /// (invariant 9 / SPEC §13) — it is purely a human-driven revocation. My local
+    /// gate is cleared via `defer` even if signing throws, so it always closes here.
+    public func endMyWindowEarly() throws -> AIWindowAnnouncement {
+        defer { conversationWindows[myIdentityHex] = nil }
+        return try AIWindowAnnouncement.make(activeUntil: clock.now(), identity: myIdentity)
     }
 
     /// Validates an incoming announcement: signed by the claimed sender's HUMAN

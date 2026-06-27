@@ -27,6 +27,14 @@ struct ThreadVM: Identifiable, Hashable {
     var messageCount: Int
 }
 
+/// A compact reference to one of MY configured AIs' backend type, cached on the
+/// model so a chat bubble can show the right type badge (AITypeIcon) without
+/// re-decoding the AI config per row.
+struct AITypeRef: Sendable, Equatable {
+    let kind: String
+    let model: String?
+}
+
 /// A nearby (binding-verified, relay-free) peer for the New Conversation list.
 struct NearbyVM: Identifiable, Hashable {
     var id: String { identityHex }
@@ -95,6 +103,11 @@ final class AppModel {
     /// used to label their assistant's bubbles. My own AIs label via the
     /// message's stored `agentName`.
     var aiNames: [String: String] = [:]
+    /// Cached `agentName -> (backend kind, model)` for MY OWN configured AIs, so a
+    /// chat bubble can show the right type badge (AITypeIcon) without re-reading +
+    /// decoding UserDefaults per row. Rebuilt by `refreshAITypes()` (on start and on
+    /// conversation appear, after Settings may have changed).
+    private(set) var aiTypeByName: [String: AITypeRef] = [:]
     /// conversationID -> the latest plan/TODO checklist a paired coding-agent node
     /// reported for the turn it's running (Phase D1). Display-only; the node re-sends
     /// the whole plan on each change, so this is replaced wholesale, never merged.
@@ -140,6 +153,7 @@ final class AppModel {
         prekeyCount = await runtime.oneTimePrekeyCount()
         contactNames[myIdentityHex] = personaName
         localLinkEnabled = await runtime.isLocalLinkEnabled
+        refreshAITypes()
         await restorePersistedUI()
         onboarded = true
         pumpTask = Task { [weak self] in
@@ -477,6 +491,28 @@ final class AppModel {
         return until > now
     }
 
+    /// Stop MY AI from replying in this conversation — the single honest off-switch.
+    /// Closes the on-wire ai_window, withdraws the conversation sharing grant, and
+    /// mutes a solo "My AI" chat to "off". See `PersonaRuntime.endMyAIWindow`.
+    func stopAIHere(conversationID: String) async {
+        await runtime.endMyAIWindow(conversationID: conversationID)
+    }
+
+    /// Whether MY AI is currently set up to reply here — a live window, a live
+    /// context grant, OR a solo "My AI" group (just me) that isn't muted to "off".
+    /// Drives whether the single "Stop my AI replying here" control is shown.
+    func aiActiveHere(conversationID: String, now: Int64) -> Bool {
+        if let until = aiWindows[conversationID]?[myIdentityHex], until > now { return true }
+        if iGrantedContext(scope: .conversation(conversationID), now: now) { return true }
+        if let row = conversations.first(where: { $0.id == conversationID }),
+            row.isGroup, row.memberCount <= 1,
+            AppSession.conversationContextMode(conversationID, siloID: siloID) != "off"
+        {
+            return true  // a solo AI chat auto-replies unless explicitly muted
+        }
+        return false
+    }
+
     /// A one-shot diagnostic: runs the active provider on a sample transcript
     /// and returns its reply, or the precise error (Settings "Test AI now").
     func testAI() async -> String {
@@ -579,6 +615,45 @@ final class AppModel {
         return (mode, isRemote, firewallOn)
     }
 
+    /// Ensure a "Mac-Tethered-AI" (`acp`) entry exists under Settings ▸ AI once a
+    /// node is paired+consented, so it shows in Models AND participates in the "My
+    /// AI" solo chat. Idempotent: adds AT MOST one and never overrides the user's own
+    /// config (if they already have an `acp` AI, this is a no-op). Returns true if it
+    /// added one — the caller should re-resolve providers (`applyAIProvider`) so it
+    /// goes live. Persists only; the runtime rebind is the caller's job.
+    func ensureMacTetheredAIConfigured(nodeName: String?) -> Bool {
+        var ais = AppSession.loadConfiguredAIs(siloID: siloID)
+        guard !ais.contains(where: { $0.kind == "acp" }) else { return false }
+        let trimmed = (nodeName ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        ais.append(
+            ConfiguredAI(
+                id: UUID().uuidString,
+                name: trimmed.isEmpty ? "Mac-Tethered-AI" : trimmed,
+                kind: "acp", enabled: true))
+        AppSession.saveConfiguredAIs(ais, siloID: siloID)
+        refreshAITypes()
+        return true
+    }
+
+    /// Rebuild the `agentName -> backend type` cache from the persisted AI config.
+    /// Cheap; call on conversation appear so a bubble badge reflects Settings edits.
+    func refreshAITypes() {
+        var map: [String: AITypeRef] = [:]
+        for ai in AppSession.loadConfiguredAIs(siloID: siloID) {
+            map[ai.name] = AITypeRef(kind: ai.kind, model: ai.model)
+        }
+        aiTypeByName = map
+    }
+
+    /// The backend-type badge (an SF Symbol OR an emoji glyph) for an agent bubble,
+    /// resolved from the authoring AI's configured kind. Only MY OWN AIs are
+    /// resolvable — a peer's backend isn't broadcast (privacy) — so a peer's AI
+    /// bubble returns nil and keeps the generic sparkles signal.
+    func aiTypeBadge(agentName: String?, isMine: Bool) -> (symbol: String?, glyph: String?)? {
+        guard isMine, let agentName, let ref = aiTypeByName[agentName] else { return nil }
+        return AITypeIcon.badge(kind: ref.kind, model: ref.model, name: agentName)
+    }
+
     func block(_ identityHex: String) async {
         await runtime.setBlocked(identityHex, blocked: true)
     }
@@ -678,7 +753,12 @@ final class AppModel {
 
     func activeWindowBanner(conversationID: String, now: Int64) -> (name: String, until: Int64)? {
         guard let windows = aiWindows[conversationID] else { return nil }
+        // My OWN window in a conversation muted to "off" posts nothing — the reply
+        // path short-circuits on `aiSuppressed` — so don't claim "AI active" for it.
+        // (A peer's window still shows: their AI's activity isn't gated by my mute.)
+        let mutedHere = AppSession.conversationContextMode(conversationID, siloID: siloID) == "off"
         for (identityHex, until) in windows where until > now {
+            if identityHex == myIdentityHex && mutedHere { continue }
             return (contactNames[identityHex] ?? "Contact", until)
         }
         return nil

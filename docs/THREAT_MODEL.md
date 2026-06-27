@@ -235,7 +235,13 @@ bound it, neither is a confidentiality guarantee against the provider itself:
   aliases are replaced with local **codenames** before text leaves the device,
   and the outbound context is **hard-capped at 64 KB** — bounding both identity
   leakage and how much any single call can exfiltrate. Your signing keys never
-  leave the device regardless.
+  leave the device regardless. The firewall defaults OFF only for a **user's own
+  trusted Mac conduit** (a consented `coding_agent` node, DEVIATIONS AC50) — and,
+  as of AC55, that off-by-default is keyed on the **receiving AI**, not the
+  conversation: a co-tethered **cloud** AI replying in that same conversation is
+  still fully firewalled (codenames + 64 KB cap). Only the conduit's own `acp`
+  provider gets the raw path; closing a prior fail-open where a cloud AI in a
+  consented-node chat would have seen un-redacted names.
 - **Default context minimization (A21).** Unless the AI is actively engaged (a
   live window/invite or the solo chat), only messages you explicitly marked "Add
   to AI Context" are sent — not the whole history.

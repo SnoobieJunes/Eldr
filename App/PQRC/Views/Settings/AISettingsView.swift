@@ -165,6 +165,12 @@ struct AISettingsView: View {
                     .fill(ai.isEnabled ? Color.green : Color.secondary)
                     .frame(width: 8, height: 8)
                     .accessibilityHidden(true)
+                // Backend-type mark — the SAME icon the chat bubble corner shows.
+                AITypeBadgeView(
+                    symbol: AITypeIcon.badge(kind: ai.kind, model: ai.model, name: ai.name).symbol,
+                    glyph: AITypeIcon.badge(kind: ai.kind, model: ai.model, name: ai.name).glyph,
+                    size: 13, tint: .secondary)
+                    .accessibilityHidden(true)
                 Text(ai.name).font(.headline)
                 Spacer()
                 Text(ConfiguredAI.label(for: ai.kind))

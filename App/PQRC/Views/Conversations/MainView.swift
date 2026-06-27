@@ -719,6 +719,11 @@ struct NewGroupView: View {
     @State private var selected: Set<String> = []
 
     private var candidates: [(id: String, name: String)] {
+        // Includes paired Mac-Tethered-AI nodes: a node CAN be a group member — it
+        // replies to its owner via Huginn's owner-gated bridge (AC26). (It won't reply
+        // to OTHER members by design; the watch-along/window path is how it helps
+        // them.) Earlier this excluded `isCodingAgent`, which broke the core "invite my
+        // Mac agent into a group" workflow — reverted.
         model.conversations.filter { !$0.isGroup }.map { ($0.id, $0.title) }
     }
 
