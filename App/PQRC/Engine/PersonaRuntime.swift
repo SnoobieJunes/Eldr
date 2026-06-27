@@ -21,7 +21,6 @@ enum RuntimeEvent: Sendable {
     /// is `AIContextGrant.Scope.tag` ("conversation:<id>" | "thread:<id>").
     case aiContextGrantChanged(scopeTag: String, identityHex: String, activeUntil: Int64?)
     case threadCreated(conversationID: String, threadID: String, title: String)
-    case loopGuardChanged(threadID: String, paused: Bool)
     /// An autonomous AI reply (solo chat / window) failed for every tethered AI —
     /// surfaced so the user sees WHY instead of silence (the Bug-2 philosophy).
     case agentError(String)
@@ -559,13 +558,6 @@ actor PersonaRuntime {
         pairedPubkeysPublisher?(pairedNostrPubkeys())
     }
 
-    /// Apply a changed per-silo loop-guard threshold (DEVIATIONS D14) to the live
-    /// engine so it takes effect without re-booting the silo. `0` turns the guard
-    /// off (unbounded). Persistence is the caller's (Settings) responsibility;
-    /// this only pushes the value into the running engine.
-    func setLoopGuardLimit(_ limit: Int) async {
-        await engine?.setLoopGuardLimit(limit)
-    }
 
     /// Builds the context for one AI: the normal (byte-bounded) context for an
     /// on-device AI, or the firewalled (name-redacted) context for a remote AI
@@ -833,7 +825,12 @@ actor PersonaRuntime {
             randomSource: randomSource, nonceSource: nonceSource)
         engine = AgentEngine(
             myIdentity: identity, clock: clock, sink: RuntimeSink(runtime: self),
-            loopGuardLimit: AppSession.agentLoopGuardLimit(siloID: siloID))
+            // Auto-pause is OFF by product decision: AI threads no longer pause
+            // themselves after a run of AI messages (user request). The engine
+            // keeps the loop-guard capability, but the app never arms it (0 =
+            // unbounded); ThreadView surfaces an off-by-default turn counter
+            // instead, so a human still has the visibility without a forced stop.
+            loopGuardLimit: 0)
 
         // Restore persisted state: contacts (bindings re-verified — invariant 7
         // survives persistence), ratchet sessions, group rosters, threads, and
@@ -1442,7 +1439,7 @@ actor PersonaRuntime {
         aiContextGrant: AIContextGrant? = nil,
         threadCreate: ThreadCreate? = nil, groupCreate: GroupCreate? = nil,
         asSystemRow: Bool = false, agentName: String? = nil,
-        localTextOverride: String? = nil
+        localTextOverride: String? = nil, coauthored: Bool = false
     ) async throws {
         let recipients = recipientsFor(conversationID: conversationID)
         // A group I'm a member of with no other humans (the "solo AI chat") is a
@@ -1465,7 +1462,12 @@ actor PersonaRuntime {
             aiContextGrant: aiContextGrant,
             // Self-chosen alias rides along inside the ciphertext so every
             // connected peer stays current (and ONLY connected peers — D11).
-            alias: participantType == .human ? myAlias : nil)
+            alias: participantType == .human ? myAlias : nil,
+            // "Made with you and your AI" co-authorship rides inside the
+            // ciphertext so every participant sees it (and only participants —
+            // SPEC §0). Set only on the human-directed draft path; autonomous
+            // agent sends leave it nil.
+            coauthored: coauthored ? true : nil)
 
         // Large text is split into ordered, ratcheted chunks carried over the
         // relay (SPEC §11 chunking — the privacy-preserving alternative to a
@@ -1494,13 +1496,11 @@ actor PersonaRuntime {
             senderIdentity: identityHex, participantType: participantType,
             text: localTextOverride ?? body.text, sentAt: body.sentAt, threadID: threadID,
             isContext: isContext, aiContext: aiContext,
-            localStatus: asSystemRow ? "system" : "sent", agentName: agentName)
+            localStatus: asSystemRow ? "system" : "sent", agentName: agentName,
+            coauthored: coauthored)
         try await store.save(message)
         if let threadID {
             await engine.recordThreadMessage(threadID: threadID, participantType: participantType)
-            eventContinuation?.yield(
-                .loopGuardChanged(
-                    threadID: threadID, paused: await engine.loopGuardActive(threadID: threadID)))
         }
         eventContinuation?.yield(.messageAdded(message))
 
@@ -2171,7 +2171,11 @@ actor PersonaRuntime {
     }
 
     func sendAsMyAI(_ text: String, conversationID: String) async throws {
-        try await sendMessage(text, conversationID: conversationID, participantType: .agent)
+        // The only caller is the "Draft with AI ▸ Send as my AI" flow: the human
+        // directed and approved this AI draft, so it is co-authored ("made with
+        // you and your AI"). Autonomous agent sends use the engine sink, not this.
+        try await sendMessage(
+            text, conversationID: conversationID, participantType: .agent, coauthored: true)
     }
 
     /// The EXACT messages the AI would see for this scope, with the per-message
@@ -2309,9 +2313,6 @@ actor PersonaRuntime {
                 threadID: threadID,
                 agentName: ai.name)
         }
-        eventContinuation?.yield(
-            .loopGuardChanged(
-                threadID: threadID, paused: await engine.loopGuardActive(threadID: threadID)))
     }
 
     func engineActiveWindow(identityHex: String) async -> Int64? {
@@ -2685,7 +2686,8 @@ actor PersonaRuntime {
             senderIdentity: senderHex, participantType: received.participantType,
             text: text, sentAt: body.sentAt, threadID: body.thread?.id,
             isContext: body.isContext ?? false, aiContext: body.aiContext ?? false,
-            localStatus: isSystemRow ? "system" : "received")
+            localStatus: isSystemRow ? "system" : "received",
+            coauthored: body.coauthored ?? false)
         try? await store.save(message)
         eventContinuation?.yield(.messageAdded(message))
 
@@ -2693,9 +2695,6 @@ actor PersonaRuntime {
         if let threadID = body.thread?.id {
             await engine.recordThreadMessage(
                 threadID: threadID, participantType: received.participantType)
-            eventContinuation?.yield(
-                .loopGuardChanged(
-                    threadID: threadID, paused: await engine.loopGuardActive(threadID: threadID)))
             await takeAgentThreadTurn(threadID: threadID)
         } else if received.participantType == .human, senderHex != identityHex,
             myWindowConversationID == conversationID, !aiSuppressed(in: conversationID)

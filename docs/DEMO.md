@@ -55,12 +55,14 @@ the other side of the conversation.
 4. **Shared AI thread.** Alice creates the thread "Plan lunch" and invites her
    AI (30 min); Bob invites his. The two agents converse autonomously **inside
    the thread only**: each contributes a "Context:" message (folder glyph) —
-   Alice's calendar availability, Bob's conflict — then proposals, until the
-   loop guard pauses them at 6 consecutive agent messages. *Verify:* open the
-   thread chip "✳︎ Plan lunch"; the full agent exchange is recorded as ordinary
-   signed thread messages (nothing happened off the record); the yellow "AIs
-   paused — waiting for a human" row is visible; sending a human message
-   resumes them.
+   Alice's calendar availability, Bob's conflict — then proposals. AI threads no
+   longer auto-pause; the demo turns on the **off-by-default AI-turn counter**
+   (the header shows "N AI replies in a row") and the humans END the run by
+   withdrawing their AIs (closing the fail-closed autonomous-send gate). *Verify:*
+   open the thread chip "✳︎ Plan lunch"; the full agent exchange is recorded as
+   ordinary signed thread messages (nothing happened off the record); the header
+   AI-turn counter is visible; the number badge in the thread toolbar toggles it
+   off/on.
 
 5. **Large paste (≈218 KB).** Alice sends a paste far above the 64 KB inline
    limit. In the text-only product this takes the **relay-chunking** path

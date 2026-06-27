@@ -157,7 +157,7 @@ final class PQRCUITests: XCTestCase {
         XCTAssertTrue(banner.label.contains("AI is active"))
     }
 
-    func test_thread_inviteBothAIs_exchangeRecorded_loopGuardVisible() throws {
+    func test_thread_inviteBothAIs_exchangeRecorded_counterVisible() throws {
         let app = launchUniverse()
         openConversation(app, "Bob")
         let chip = element(app, "thread-chip-Plan lunch")
@@ -167,11 +167,13 @@ final class PQRCUITests: XCTestCase {
         XCTAssertTrue(
             element(app, "agent-bubble").waitForExistence(timeout: 20),
             "agent exchange must be recorded in the thread")
-        // ...including a Context contribution and the loop-guard pause row.
+        // ...including a Context contribution.
         XCTAssertTrue(messageVisible(app, "Context:"), "context contributions render in the thread")
+        // AI threads no longer auto-pause; the demo enables the off-by-default
+        // AI-turn counter on this thread, so the header tally is visible.
         XCTAssertTrue(
-            element(app, "loop-guard-row").waitForExistence(timeout: 10),
-            "loop guard pause must be visible")
+            element(app, "thread-counter").waitForExistence(timeout: 10),
+            "AI-turn counter must be visible when enabled")
     }
 
     func test_largePaste_200KB_becomesChip_sendsViaChunks_uiResponsive() throws {
@@ -250,7 +252,7 @@ final class PQRCUITests: XCTestCase {
                 }
                 // A row partially under one of the overlaying bars (which
                 // live inside the scroll view's frame as safe-area insets).
-                for barID in ["loop-guard-row", "composer-field", "thread-composer-field"] {
+                for barID in ["composer-field", "thread-composer-field"] {
                     let bar = app.descendants(matching: .any)
                         .matching(identifier: barID).firstMatch
                     if bar.exists, bar.frame.intersects(element.frame) {

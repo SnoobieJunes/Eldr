@@ -351,6 +351,14 @@ struct MessageBubble: View {
     /// `senderName` — that's the configurable alias/persona ("Me" by default, but
     /// editable), so "<senderName>'s AI" rendered "Me's AI" for the owner.
     private var agentLabel: String {
+        // A co-authored message (the human directed + approved their AI's draft)
+        // names BOTH contributors — "made with the person and the AI" (user
+        // request). It STILL renders as an AI bubble (⟡ + sparkles badge below),
+        // so invariant 8 holds: this credits the human director, it does not
+        // relabel an agent message as human-authored.
+        if message.coauthored {
+            return isMine ? "Made with you and your AI" : "Made with \(senderName) and their AI"
+        }
         if let agentName { return agentName }
         return isMine ? "My AI" : "\(senderName)'s AI"
     }
@@ -410,7 +418,10 @@ struct MessageBubble: View {
         .id(message.id)
         .privacySensitive()
         .accessibilityElement(children: .combine)
-        .accessibilityLabel("AI message from \(agentLabel): \(Self.accessibleText(displayText))")
+        .accessibilityLabel(
+            message.coauthored
+                ? "AI message, \(agentLabel): \(Self.accessibleText(displayText))"
+                : "AI message from \(agentLabel): \(Self.accessibleText(displayText))")
         .accessibilityIdentifier("agent-bubble")
     }
 

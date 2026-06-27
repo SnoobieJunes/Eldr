@@ -447,6 +447,15 @@ public struct MessageBody: Codable, Equatable, Sendable {
     /// the owner's phone to voice to the group (SPEC §13.5 endpoint model). Inside the
     /// ciphertext only, owner↔agent; nil for ordinary messages.
     public var agentDraft: AgentDraft?
+    /// True when this message was drafted by the sender's AI and approved/sent by
+    /// the human — a co-authored "made with you and your AI" message (the in-app
+    /// "Draft with AI ▸ Send as my AI" flow), as opposed to an autonomous agent
+    /// send. Travels INSIDE the ciphertext so every participant's client can show
+    /// the co-authorship, and ONLY participants (relays/observers never see it —
+    /// SPEC §0). Honest under invariant 8: the message stays `participant_type ==
+    /// agent`, agent-signed, and renders with the AI badge; this only adds the
+    /// human's directing credit. Optional + ignored by older clients (SPEC §12).
+    public var coauthored: Bool?
 
     enum CodingKeys: String, CodingKey {
         case text
@@ -464,6 +473,7 @@ public struct MessageBody: Codable, Equatable, Sendable {
         case alias
         case chunk
         case agentDraft = "agent_draft"
+        case coauthored
     }
 
     public init(
@@ -473,7 +483,8 @@ public struct MessageBody: Codable, Equatable, Sendable {
         aiInvite: AIInvite? = nil, isContext: Bool? = nil,
         aiContext: Bool? = nil, aiContextMark: AIContextMark? = nil,
         aiContextGrant: AIContextGrant? = nil, alias: String? = nil,
-        chunk: MessageChunk? = nil, agentDraft: AgentDraft? = nil
+        chunk: MessageChunk? = nil, agentDraft: AgentDraft? = nil,
+        coauthored: Bool? = nil
     ) {
         self.text = text
         self.sentAt = sentAt
@@ -490,6 +501,7 @@ public struct MessageBody: Codable, Equatable, Sendable {
         self.alias = alias
         self.chunk = chunk
         self.agentDraft = agentDraft
+        self.coauthored = coauthored
     }
 }
 

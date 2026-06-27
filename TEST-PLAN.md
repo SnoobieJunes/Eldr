@@ -77,7 +77,7 @@ Generated once by a `--generate-vectors` test utility, then committed and assert
 
 ## 10. Suite: app & UI (XCUITest, Local Universe)
 
-`onboarding_generatesIdentityAndPublishesBundle` · `roundTrip_aliceToBob_throughSimulator` · `aiDraft_previewThenSendAsAI_rendersAgentBubble` · `aiWindow_bannerAppearsForPeer_andExpires` · `thread_createInviteBothAIs_exchangeRecorded_loopGuardVisible` · `largePaste_200KB_becomesChip_sendsViaBlobPath_uiResponsive` · `group_of4_sendReceive` · `messageRequest_unknownSenderGatedUntilAccepted` · `safetyCodeChange_warningBannerAppears` · `accessibilityAudit_allPrimaryScreens` (`performAccessibilityAudit()`).
+`onboarding_generatesIdentityAndPublishesBundle` · `roundTrip_aliceToBob_throughSimulator` · `aiDraft_previewThenSendAsAI_rendersAgentBubble` · `aiWindow_bannerAppearsForPeer_andExpires` · `thread_inviteBothAIs_exchangeRecorded_counterVisible` · `largePaste_200KB_becomesChip_sendsViaBlobPath_uiResponsive` · `group_of4_sendReceive` · `messageRequest_unknownSenderGatedUntilAccepted` · `safetyCodeChange_warningBannerAppears` · `accessibilityAudit_allPrimaryScreens` (`performAccessibilityAudit()`).
 
 ## 11. Suite: performance (XCTest `measure` + XCTMetric)
 

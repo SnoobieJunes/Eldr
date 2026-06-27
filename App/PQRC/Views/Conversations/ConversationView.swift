@@ -715,8 +715,13 @@ struct DraftSheet: View {
     var body: some View {
         NavigationStack {
             VStack(alignment: .leading, spacing: 16) {
-                Label("Draft from your AI", systemImage: "sparkles")
-                    .font(.headline)
+                VStack(alignment: .leading, spacing: 4) {
+                    Label("Made with you and your AI", systemImage: "sparkles")
+                        .font(.headline)
+                    Text("Your AI drafted this from your conversation. Review or edit it, then send as your AI — it'll show as made with you and your AI for everyone in the chat.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
                 TextEditor(text: $draft)
                     .frame(minHeight: 120)
                     .padding(4)

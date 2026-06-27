@@ -93,7 +93,6 @@ final class AppModel {
     /// Outcome of publishing my keys to the relay — shown in Settings so the
     /// user can see at a glance whether peers can reach their keys.
     var keyPublish: KeyPublishStatus = .pending
-    var loopGuardPaused: Set<String> = []
     var protocolViolations: [String] = []
     /// Conversations with a pending safety-code-change warning (APP-SPEC §6.2).
     var safetyCodeChangedFor: Set<String> = []
@@ -248,12 +247,6 @@ final class AppModel {
             }
         case .agentError(let message):
             agentError = message
-        case .loopGuardChanged(let threadID, let paused):
-            if paused {
-                loopGuardPaused.insert(threadID)
-            } else {
-                loopGuardPaused.remove(threadID)
-            }
         case .safetyCodeChanged(let identityHex):
             safetyCodeChangedFor.insert(identityHex)
         case .nearbyDiscovered:
@@ -710,13 +703,6 @@ final class AppModel {
     func setMyAlias(_ alias: String?) async {
         await runtime.setMyAlias(alias)
         contactNames[myIdentityHex] = alias ?? personaName
-    }
-
-    /// Persist the per-silo loop-guard threshold (DEVIATIONS D14) and push it into
-    /// the live engine so it takes effect immediately. `0` turns the guard OFF.
-    func setLoopGuardLimit(_ limit: Int) async {
-        AppSession.setAgentLoopGuardLimit(limit, siloID: siloID)
-        await runtime.setLoopGuardLimit(AppSession.agentLoopGuardLimit(siloID: siloID))
     }
 
     func togglePinned(_ conversationID: String) async {

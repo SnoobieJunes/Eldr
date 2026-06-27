@@ -47,10 +47,6 @@ struct SettingsView: View {
     /// enabling it shares decrypted (codename-redacted) chat with a local agent that
     /// can read and — with writes — draft, mark, and send-as-your-AI in active windows.
     @State private var showLocalMCPConsent = false
-    /// Per-silo loop-guard threshold (DEVIATIONS D14): pause a thread's AIs after
-    /// this many consecutive agent messages with no human. `0` = guard OFF
-    /// (unbounded). Loaded in `.onAppear`, written through `model.setLoopGuardLimit`.
-    @State private var loopGuardLimit = PQRCConstants.agentLoopGuardLimit
     /// Pairing-token reveal state: masked by default, shown once on "Reveal",
     /// then re-masked (the platform-standard view-once pattern). Reset whenever
     /// the connection (and thus the token) changes.
@@ -75,7 +71,6 @@ struct SettingsView: View {
                 nearbySection
                 reachabilitySection
                 aiSection
-                aiLoopGuardSection
                 codingAgentSection
                 prekeysSection
                 privacySection
@@ -106,7 +101,6 @@ struct SettingsView: View {
                     UserDefaults.standard.string(forKey: AppSession.displayNameKey(model.siloID)) ?? ""
                 biometricOn = session.hasBiometricUnlock
                 localMCPOn = session.isLocalMCPRunning
-                loopGuardLimit = AppSession.agentLoopGuardLimit(siloID: model.siloID)
                 showAgentEnvelope = AppSession.showAgentEnvelope(siloID: model.siloID)
                 Task {
                     openInboxUntil = await model.runtime.openInboxActiveUntil()
@@ -415,55 +409,6 @@ struct SettingsView: View {
                 .font(.caption)
                 .foregroundStyle(.secondary)
         }
-    }
-
-    // MARK: AI loop guard (DEVIATIONS D14)
-
-    /// The loop guard pauses a shared thread's AIs once they've sent N messages in
-    /// a row with no human, keeping a person in the loop. Per-silo (deniability),
-    /// applied live to the running engine. `0` = OFF (unbounded — AIs may loop).
-    private var aiLoopGuardSection: some View {
-        Section {
-            Toggle("Pause AIs after a run of messages", isOn: Binding(
-                get: { loopGuardLimit > 0 },
-                set: { on in
-                    // Turning it back on restores the spec default; OFF stores 0.
-                    setLoopGuard(on ? PQRCConstants.agentLoopGuardLimit : 0)
-                }))
-                .accessibilityIdentifier("loop-guard-toggle")
-            if loopGuardLimit > 0 {
-                Stepper(value: Binding(
-                    get: { loopGuardLimit },
-                    set: { setLoopGuard($0) }
-                ), in: AppSession.agentLoopGuardMin...AppSession.agentLoopGuardMax) {
-                    LabeledContent("Pause after") {
-                        Text("\(loopGuardLimit) messages")
-                            .monospacedDigit()
-                            .accessibilityIdentifier("loop-guard-value")
-                    }
-                }
-                .accessibilityIdentifier("loop-guard-stepper")
-                .accessibilityValue("\(loopGuardLimit) consecutive AI messages")
-            }
-        } header: {
-            Text("AI loop guard")
-        } footer: {
-            if loopGuardLimit > 0 {
-                Text("In a shared AI thread, your assistants pause automatically after \(loopGuardLimit) message\(loopGuardLimit == 1 ? "" : "s") in a row with no human, so a person always stays in the loop. Anyone typing in the thread resumes them. Lower keeps you more in control; higher lets the AIs go further on their own.")
-            } else {
-                Text("OFF — your assistants will NOT auto-pause in a shared AI thread. Two AIs left talking to each other can loop indefinitely (and, with a remote provider, keep spending tokens) until you step in. Recommended: keep this on.")
-                    .foregroundStyle(.orange)
-            }
-        }
-    }
-
-    /// Persist + apply the loop-guard threshold and reflect it in the UI. `0` =
-    /// OFF; positive values are clamped to the supported range by AppSession.
-    private func setLoopGuard(_ value: Int) {
-        let clamped = value <= 0 ? 0
-            : min(max(value, AppSession.agentLoopGuardMin), AppSession.agentLoopGuardMax)
-        loopGuardLimit = clamped
-        Task { await model.setLoopGuardLimit(clamped) }
     }
 
     // MARK: Mac coding agent (watch-along pairing, §13.5)
