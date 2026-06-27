@@ -140,7 +140,7 @@ and set each one's instructions, what it gathers, how deep, and whether it draft
 or posts.
 
 **Transparency first:** see exactly what each model receives in **Settings ▸ AI ▸
-What your AI sees**. Tap **Test primary AI now** to confirm it works (it shows the
+What your AI sees**. Tap **Test** (on any AI row) to confirm it works (it shows the
 real reply or the exact error).
 
 #### Running your own model (self-hosted)
@@ -178,22 +178,23 @@ Open any conversation and tap the **sparkles icon** for AI options:
   and drops it into your message box. **Nothing is sent** — you read it, edit it,
   and decide. You can also send it labeled *as your AI*.
 - **Turn your AI "on" (an AI window):** in the **"AI here"** sheet, choose
-  *Responds in chat* and a duration to give your AI permission to talk to
-  **everyone in the chat** for that time. While it's on, **everyone in the
-  conversation sees a banner** saying your AI is active and counting down. AIs can
-  never switch themselves on — only you can.
+  *Responds in chat* and a duration (1, 8, or 24 hours) to give your AI permission
+  to talk to **everyone in the chat** for that time. While it's on, **everyone in
+  the conversation sees a banner** saying your AI is active and counting down. AIs
+  can never switch themselves on — only you can.
 - **Turn it back off whenever you want.** The same sheet has **"Stop my AI
   replying here"** — it closes the window, stops sharing, and goes quiet
   immediately (everyone's banner clears). You don't have to wait for the timer.
 
-**Bringing your Mac agent (or a self-hosted model) into a group.** A paired Mac
-agent is **your own tethered AI**, not a separate chat member — so you don't add
-it to the group's member list (you can't, by design). Instead: enable it as your
-AI in **Settings ▸ AI**, pair and consent the Mac in **Settings ▸ Mac coding
-agent**, then in the group open **"AI here" ▸ Responds in chat**. Your agent then
-answers the group **as your signed AI** for the window. Each person turns on
-**their own** AI the same way — no one can switch on someone else's. The "AI here"
-sheet tells you if your Mac agent isn't actually connected yet.
+**Bringing your Mac-Tethered-AI into a group.** Your paired Mac-Tethered-AI
+(sybilclaw, or a local model you host with LM Studio / Ollama behind Huginn) is
+**your own tethered AI**. Two ways to bring it into a group: enable it under
+**Settings ▸ AI** and turn on **"AI here" ▸ Responds in chat** so it answers the
+group **as your signed AI** under your window; or add the paired node as a group
+member, where it answers **you** directly (it replies only to its owner, never to
+other members — by design). Either way each person turns on **their own** AI; no
+one can switch on someone else's. The "AI here" sheet tells you if your
+Mac-Tethered-AI isn't actually connected yet.
 
 ### Threads: AIs collaborating
 
@@ -225,7 +226,7 @@ By default, **your AI does not read your whole history.** It only sees:
 
 A peer's marked messages reach your AI only when **both of you** have turned on
 context sharing. You can **see exactly what your AI receives** anytime in
-**Settings ▸ AI ▸ View tethered LLM context** — it's read-only and sent nowhere.
+**Settings ▸ AI ▸ Context inspector** — it's read-only and sent nowhere.
 
 ### AI privacy in one line
 
@@ -323,9 +324,10 @@ Two integrations are available if you run EldrChat on a Mac:
 - **Let an AI agent (Goose, Xcode, Claude) read your secure chat** — turn on
   **Settings ▸ Local agent access (MCP)**; EldrChat shows a one-line command + a
   pairing token to paste into your MCP client. Be clear-eyed about what this does:
-  a local agent on *this machine* gets to **read your conversations**. It is
-  read-only (there is no way for it to send or post anything), it talks to the app
-  only over a **loopback socket** that never leaves the device, it needs the
+  a local agent on *this machine* gets to **read your conversations**. It can also
+  draft replies, mark messages as context, and **send as your AI** (`send_as_my_ai`)
+  — but a send is **gated on a human-opened AI window** (no window, no send), it talks
+  to the app only over a **loopback socket** that never leaves the device, it needs the
   pairing token to connect, and every contact's name is replaced with a **local
   codename** (never a real name or key) with message text **size-capped** first.
   It is **off by default**, there is **no remembered "leave it on" setting**, and
@@ -342,7 +344,7 @@ Two integrations are available if you run EldrChat on a Mac:
 Both are off by default and documented step-by-step in **docs/SETUP-GUIDE.md §9**
 (Xcode 27 registration) and the in-app Settings.
 
-For the Xcode 27 agent, there's also a point-and-click **Eldr ACP Configurator**
+For the Xcode 27 agent, there's also a point-and-click **Huginn**
 macOS app (`Apps/Huginn/`) that wraps the whole setup in a wizard, with
 a live config panel, a log viewer, an in-app test chat, and self-learning per-project
 memory. See **Apps/Huginn/README.md**.
