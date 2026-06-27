@@ -1,4 +1,5 @@
 import CryptoKit
+import LocalAuthentication
 import PQRCAgent
 import PQRCCore
 import PQRCMCP
@@ -580,36 +581,22 @@ final class AppSession {
         loadCustomSkills(siloID: siloID).first { $0.id == id }
     }
 
-    /// Bounds the Settings stepper for the loop-guard threshold (DEVIATIONS D14):
-    /// a sensible floor so a human is reliably kept in the loop, up to a high cap.
-    /// `nonisolated` so the (actor) PersonaRuntime and the nonisolated setter can
-    /// read them without hopping to the main actor.
-    nonisolated static let agentLoopGuardMin = 2
-    nonisolated static let agentLoopGuardMax = 20
-
-    /// Per-silo loop-guard threshold (DEVIATIONS D14): pause a thread's agents
-    /// after this many consecutive agent messages with no human in between.
-    /// Returns the spec default (`PQRCConstants.agentLoopGuardLimit`) when unset,
-    /// or the user's per-account value — including `0`, which means the guard is
-    /// OFF (unbounded). Per-silo so a hidden account never shares/leaks the knob
-    /// (A33). `nonisolated` so the (actor) PersonaRuntime can read it without an
-    /// await before constructing its engine.
-    nonisolated static func agentLoopGuardLimit(siloID: String = "") -> Int {
-        let key = siloDefaultsKey("agentLoopGuardLimit", siloID)
-        // `object(forKey:)` distinguishes "never set" (use the default) from an
-        // explicit `0` (the user turned the guard OFF) — `integer(forKey:)` can't.
-        guard UserDefaults.standard.object(forKey: key) != nil else {
-            return PQRCConstants.agentLoopGuardLimit
-        }
-        return UserDefaults.standard.integer(forKey: key)
+    /// Per-thread "show AI turn counter" toggle (default OFF). AI threads no longer
+    /// auto-pause; instead a human can opt a thread into a small live counter of how
+    /// many AI replies have run in a row (ThreadView header) for situational
+    /// awareness. Per-silo + per-thread so a hidden account never shares/leaks which
+    /// threads have it on (A33), and absent-key ⇒ OFF (we only persist `true`,
+    /// removing the key for `false` — the same default-off pattern as threadSkills /
+    /// showAgentEnvelope). `nonisolated` so views read it without a main-actor hop.
+    nonisolated static func showThreadCounter(_ threadID: String, siloID: String = "") -> Bool {
+        UserDefaults.standard.bool(forKey: siloDefaultsKey("showThreadCounter.\(threadID)", siloID))
     }
-
-    /// Persist the per-silo loop-guard threshold. `0` turns the guard OFF; any
-    /// positive value is clamped to `[agentLoopGuardMin, agentLoopGuardMax]`.
-    nonisolated static func setAgentLoopGuardLimit(_ limit: Int, siloID: String = "") {
-        let key = siloDefaultsKey("agentLoopGuardLimit", siloID)
-        let clamped = limit <= 0 ? 0 : min(max(limit, agentLoopGuardMin), agentLoopGuardMax)
-        UserDefaults.standard.set(clamped, forKey: key)
+    nonisolated static func setShowThreadCounter(
+        _ value: Bool, threadID: String, siloID: String = ""
+    ) {
+        let key = siloDefaultsKey("showThreadCounter.\(threadID)", siloID)
+        if value { UserDefaults.standard.set(true, forKey: key) }
+        else { UserDefaults.standard.removeObject(forKey: key) }
     }
 
     /// The configured AIs bound to live providers — the runtime's tethered AIs.
@@ -831,6 +818,9 @@ final class AppSession {
         relayClient = nil
         activeSilo = nil
         mode = .locked
+        // Drop the authenticated biometric context so the reuse window can't carry a
+        // prior account's Face ID approval into the next unlock (deniability).
+        biometricContextBox.reset()
     }
 
     // MARK: - Local agent access (in-process MCP server, A35 Phase 2)
@@ -949,6 +939,22 @@ final class AppSession {
     private static let biometricService = "chat.pqrc.biometric"
     private static let biometricAccount = "primary"
 
+    /// The single `LAContext` reused across biometric Keychain reads, so ONE Face ID /
+    /// Touch ID evaluation covers an unlock attempt instead of one prompt per read.
+    /// Reset on `lockSilo()` so the reuse window never spans an account switch
+    /// (deniability) — a fresh process also starts fresh.
+    ///
+    /// `@unchecked Sendable` justification: `LAContext` is not `Sendable`, but access is
+    /// serialized — `biometricUnlock` is `@MainActor`, at most one runs at a time (the
+    /// gate UI's `autoTriedBiometric` + the single on-screen unlock), and the context is
+    /// handed to exactly one `Task.detached` read which is awaited before any next use.
+    /// No concurrent access occurs.
+    private final class BiometricContextBox: @unchecked Sendable {
+        private(set) var context = LAContext()
+        func reset() { context = LAContext() }
+    }
+    private let biometricContextBox = BiometricContextBox()
+
     /// Surfaced in Settings when enabling Face ID unlock fails (e.g. no device
     /// passcode set, so a `.userPresence` Keychain item can't be created).
     var biometricError: String?
@@ -996,8 +1002,16 @@ final class AppSession {
         unlockError = nil
         let service = Self.biometricService
         let account = Self.biometricAccount
+        // Reuse the one shared LAContext (captured via its Sendable box) so a single
+        // Face ID / Touch ID evaluation covers this attempt — and a success within the
+        // reuse window skips re-prompting on any follow-up read.
+        let box = biometricContextBox
         let outcome = await Task.detached {
-            KeychainStore(service: service).loadBiometric(account: account, prompt: "Unlock EldrChat")
+            let context = box.context
+            context.touchIDAuthenticationAllowableReuseDuration =
+                LATouchIDAuthenticationMaximumAllowableReuseDuration
+            return KeychainStore(service: service)
+                .loadBiometric(account: account, prompt: "Unlock EldrChat", context: context)
         }.value
         switch outcome {
         case .success(let blob):

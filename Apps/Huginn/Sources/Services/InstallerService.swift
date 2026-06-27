@@ -110,10 +110,15 @@ final class InstallerService: ObservableObject {
               export DEVELOPER_DIR="/Applications/Xcode-beta.app/Contents/Developer"
             fi
             source "\(paths.envFile)" 2>/dev/null || true
-            # C-8: the LLM token is NOT in the env file (it lives in the login Keychain).
+            # C-8: the LLM token is NOT in the env file (it lives in the Keychain).
             # If the spawning client didn't already provide it, read it from the Keychain.
             # (The Configurator injects it directly; this covers external clients like
-            # Xcode/OpenClaw. The first read may prompt once for Keychain access.)
+            # Xcode/OpenClaw.) The Configurator keeps a FILE-keychain mirror of the token
+            # precisely so `/usr/bin/security` can read it — the data-protection copy used
+            # by Huginn itself is invisible to the `security` CLI. The first read prompts
+            # once and the grant STICKS, because `/usr/bin/security` is Apple-signed and
+            # stable across Huginn rebuilds (the recurring prompts were Huginn re-reading
+            # its OWN items under a changed signature — now on the data-protection keychain).
             if [[ -z "${ELDR_LLM_TOKEN:-}" ]]; then
               ELDR_LLM_TOKEN="$(security find-generic-password -w -s 'chat.eldr.huginn' -a 'llm-token' 2>/dev/null)"
               export ELDR_LLM_TOKEN

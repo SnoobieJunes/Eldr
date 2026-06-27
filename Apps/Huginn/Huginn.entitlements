@@ -19,5 +19,18 @@
 	     exceptions" change — see statusreport.md §2.7 / DEVIATIONS AC36.) -->
 	<key>com.apple.security.app-sandbox</key>
 	<false/>
+	<!-- Routes the Configurator's long-term secrets into the DATA-PROTECTION keychain
+	     (see KeychainBox.useDataProtection). A Developer ID app gets no
+	     application-identifier from a provisioning profile, so without this entitlement
+	     the data-protection keychain rejects access with errSecMissingEntitlement
+	     (-34018). One team-scoped group is enough: items land in it by default (no
+	     explicit kSecAttrAccessGroup), and because the group is keyed on the Team ID —
+	     not the per-build code signature — every same-team rebuild reads silently,
+	     ending the "Always Allow" prompt storm. $(AppIdentifierPrefix) expands to the
+	     team id at signing time. eldr-node carries the same group (eldr-node.entitlements). -->
+	<key>keychain-access-groups</key>
+	<array>
+		<string>$(AppIdentifierPrefix)chat.eldr.shared</string>
+	</array>
 </dict>
 </plist>

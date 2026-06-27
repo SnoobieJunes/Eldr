@@ -31,7 +31,24 @@ import PQRCNostr
 @main
 struct EldrNodeMain {
     static func main() async {
-        let arguments = parse(CommandLine.arguments)
+        let rawArguments = CommandLine.arguments
+        let arguments = parse(rawArguments)
+
+        // Mode: seed the LLM token into the node Keychain from STDIN, then exit. The token
+        // is read from stdin only — never argv (it'd show in `ps`), the env file (C-8), or
+        // shell history. This is how the SSH installer provisions the token headlessly.
+        if rawArguments.contains("--import-token") {
+            await importTokenMode()
+            return
+        }
+
+        // Mode: print the `pqrc:add?npub=…&type=coding_agent` pairing link the phone scans,
+        // then exit. Loads-or-creates the node identity (idempotent; same npub the daemon
+        // serves under), so the installer can emit the link without the GUI.
+        if rawArguments.contains("--print-pairing-link") {
+            printPairingLinkMode(arguments)
+            return
+        }
 
         // --owner is REQUIRED. Fail closed if absent: a node with no pinned owner has no
         // C-3 gate target, so it must not serve anyone.
@@ -75,9 +92,31 @@ struct EldrNodeMain {
                 randomSource: SystemRandomSource(), nonceSource: SystemNonceSource())
 
             // Model: read from the environment (same knobs as the Configurator/launcher).
-            let llmConfig = LLMConfig.fromEnvironment(env)
-            let llm = OpenAICompatibleLLMClient(config: llmConfig)
+            // C-8: if no ELDR_LLM_TOKEN is in the environment, fall back to the Keychain copy
+            // seeded by `--import-token` — never the env file.
+            var llmEnv = env
+            if llmEnv["ELDR_LLM_TOKEN"]?.nonEmpty == nil,
+                let stored = NodeKeychain().load(account: tokenAccount),
+                let token = String(data: stored, encoding: .utf8)?.nonEmpty
+            {
+                llmEnv["ELDR_LLM_TOKEN"] = token
+            }
+            let llmConfig = LLMConfig.fromEnvironment(llmEnv)
             let toolEnvironment = ToolEnvironment(workdir: workdir, baseEnvironment: env)
+
+            // Responder: who answers the owner's chats. `sybilclaw` (default) routes the turn
+            // to the user's OWN assistant over its local Gateway (their "current agent");
+            // `eldr-acp` uses the node's own local LLM tool loop (the proven path). The
+            // sybilclaw path reuses the same ACP plumbing via an LLMClient adapter.
+            let responder = arguments["responder"]?.nonEmpty?.lowercased() ?? "sybilclaw"
+            let gatewayPort = arguments["gateway-port"]?.nonEmpty.flatMap { Int($0) } ?? 18789
+            let useSybilclaw = !["eldr-acp", "eldracp", "acp"].contains(responder)
+            let llm: any LLMClient =
+                useSybilclaw
+                ? SybilclawLLMClient(
+                    gateway: SybilclawGatewayClient(
+                        port: gatewayPort, token: env["SYBILCLAW_GATEWAY_TOKEN"]))
+                : OpenAICompatibleLLMClient(config: llmConfig)
 
             // Status only — never secrets/payloads (inv. 10, 12). `identityHex` is a
             // PUBLIC key derived from the (actor-isolated) identity; awaited, prefix only.
@@ -87,7 +126,12 @@ struct EldrNodeMain {
             print("  owner:    \(hexPrefix(ownerIdentityHex)) (C-3 gate target)")
             print("  node id:  \(hexPrefix(nodeIdentityHex))")
             print("  workdir:  \(workdir) (C-2 jail)")
-            print("  model:    \(llmConfig.url) [\(llmConfig.model)]")
+            if useSybilclaw {
+                print("  responder: sybilclaw assistant (local Gateway :\(gatewayPort))")
+            } else {
+                print("  responder: eldr-acp — \(llmConfig.url) [\(llmConfig.model)]")
+            }
+            print("  pairing:  \(pairingLink(npub: nostrKeypair.npub, relay: relayURL))")
             print("  Publishing keys + serving the owner over the relay. Stop with Ctrl-C.")
 
             // Publish our keys (10420/10421/10050) so the owner's phone can fetch + verify
@@ -143,6 +187,64 @@ struct EldrNodeMain {
     /// the Configurator's `relayACPMaxFrameBytes`, staying well under a strict 65 535-byte
     /// relay even after wrapping.
     static let relayACPMaxFrameBytes = 16 * 1024
+
+    /// The Keychain account the LLM token is seeded into by `--import-token` and read back
+    /// at serve time (C-8: the token lives in the Keychain, never the env file).
+    static let tokenAccount = "node-llm-token"
+
+    // MARK: - Headless provisioning modes (exit after running)
+
+    /// Read the LLM token from STDIN and store it in the node Keychain. Never logs the
+    /// token; reads stdin only (not argv/env). The SSH installer pipes the token here.
+    private static func importTokenMode() async {
+        let data = FileHandle.standardInput.readDataToEndOfFile()
+        let token = String(decoding: data, as: UTF8.self)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !token.isEmpty else {
+            FileHandle.standardError.write(Data(
+                "eldr-node --import-token: empty token on stdin; nothing imported.\n".utf8))
+            exit(2)
+        }
+        do {
+            try NodeKeychain().save(Data(token.utf8), account: tokenAccount)
+            FileHandle.standardError.write(Data(
+                "eldr-node: LLM token imported to the Keychain (account \(tokenAccount)).\n".utf8))
+        } catch {
+            FileHandle.standardError.write(Data(
+                "eldr-node --import-token: Keychain write failed: \(error)\n".utf8))
+            exit(1)
+        }
+    }
+
+    /// Print the `pqrc:add?npub=…&type=coding_agent` deep link the phone scans, then exit.
+    /// Loads-or-creates the node's Nostr identity so the printed npub matches what the
+    /// daemon serves under. `--relay` (or `PQRC_RELAY_URL`) rides along as a hint.
+    private static func printPairingLinkMode(_ arguments: [String: String]) {
+        let env = ProcessInfo.processInfo.environment
+        let relayURL =
+            arguments["relay"]?.nonEmpty ?? env["PQRC_RELAY_URL"]?.nonEmpty
+        do {
+            let keypair = try loadOrCreateNostrKeypair(NodeKeychain())
+            print(pairingLink(npub: keypair.npub, relay: relayURL))
+        } catch {
+            FileHandle.standardError.write(Data(
+                "eldr-node --print-pairing-link: \(error)\n".utf8))
+            exit(1)
+        }
+    }
+
+    /// The deep link EldrChat's `handleDeepLink` parses (same shape as the Configurator's
+    /// `ACPBridgeService.deepLink`): npub + the `coding_agent` type tag, plus an optional
+    /// relay hint the app may use to suggest the matching relay.
+    static func pairingLink(npub: String, relay: String?) -> String {
+        var link = "pqrc:add?npub=\(npub)&type=coding_agent"
+        if let relay, !relay.isEmpty,
+            let encoded = relay.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed)
+        {
+            link += "&relay=\(encoded)"
+        }
+        return link
+    }
 
     // MARK: - Identity load-or-create (macOS Keychain; key bytes never logged)
 

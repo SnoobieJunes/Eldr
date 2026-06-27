@@ -160,13 +160,26 @@ final class ConfigurationStore: ObservableObject {
         writeFile(paths.envFile, contents: lines.joined(separator: "\n"))
     }
 
+    /// The legacy FILE-keychain mirror of the LLM token, read by the `eldr-acp` launcher
+    /// via `/usr/bin/security` (which cannot see data-protection items). Prompts at most
+    /// once for `security`, and the grant sticks because `/usr/bin/security` is
+    /// Apple-signed and stable across Huginn rebuilds (unlike Huginn's own changing
+    /// signature). C-8 still holds: the token lives in the Keychain, never the env file.
+    private var launcherTokenKeychain: KeychainBox {
+        KeychainBox(service: keychain.service, useDataProtection: false)
+    }
+
     /// C-8: persist the LLM token to the Keychain (or delete it when blank). Replaces
-    /// the cleartext `export ELDR_LLM_TOKEN=…` that used to land in the env file.
+    /// the cleartext `export ELDR_LLM_TOKEN=…` that used to land in the env file. Written
+    /// to BOTH the data-protection keychain (Huginn's own prompt-free reads) and the file
+    /// keychain (the launcher's `security` read for external Xcode/OpenClaw clients).
     private func saveTokenToKeychain() {
         if llmToken.isEmpty {
             keychain.delete(account: Self.tokenAccount)
+            launcherTokenKeychain.delete(account: Self.tokenAccount)
         } else if let data = llmToken.data(using: .utf8) {
             try? keychain.save(data, account: Self.tokenAccount)
+            try? launcherTokenKeychain.save(data, account: Self.tokenAccount)
         }
     }
 

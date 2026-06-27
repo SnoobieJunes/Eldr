@@ -219,7 +219,11 @@ struct AISettingsView: View {
             .opacity(ai.wrappedValue.isEnabled ? 1 : 0.6)
             Picker("Backend", selection: ai.kind) {
                 ForEach(ConfiguredAI.kinds, id: \.tag) { kind in
-                    Text(kind.label).tag(kind.tag)
+                    // Emoji prefix per model (user request) — kept in the picker
+                    // row only, so the registry `label` (tests, summary row, status
+                    // text) stays plain and the summary row's SF-Symbol badge isn't
+                    // doubled up.
+                    Text("\(AITypeIcon.emoji(forKind: kind.tag))  \(kind.label)").tag(kind.tag)
                 }
             }
             .onChange(of: ai.kind.wrappedValue) { _, newKind in
@@ -429,7 +433,11 @@ struct AISettingsView: View {
             if let node = acpNode {
                 return "Connected · \(node.name)"
             }
-            return "Not connected — pair a Mac node first. Replies are simulated until then."
+            // Provisioning a Mac is now one command (`eldrctl install`); pairing is the same
+            // scan/paste either way. Be honest that replies are simulated AND that consent
+            // (not the network path) is what activates it / lifts the firewall.
+            return
+                "Not connected — provision a Mac with `eldrctl install`, then scan its pairing link. Replies are simulated, and the egress firewall stays on, until you enable \u{201C}Drive this agent\u{201D} for it."
         }
         if ConfiguredAI.isRemote(ai.kind) {
             return hasKey(for: ai)

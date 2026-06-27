@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!-- The standalone headless node (eldr-node) ships UNSANDBOXED for the same reason
+	     as Huginn: it spawns developer harnesses and makes outbound LLM/relay
+	     connections (see Huginn.entitlements). It carries the SAME team-scoped keychain
+	     access group as Huginn so its long-term secrets live in the data-protection
+	     keychain (no legacy-ACL re-prompt across updates), and so a future shared-token
+	     read between the two same-team binaries is possible. The node seeds its LLM token
+	     via `eldr-node --import-token` (stdin) into its own `node-llm-token` account; it
+	     does not read Huginn's item today. Signed Developer ID + Hardened Runtime via
+	     build-dmg.sh's `--entitlements eldr-node.entitlements`. -->
+	<key>keychain-access-groups</key>
+	<array>
+		<string>$(AppIdentifierPrefix)chat.eldr.shared</string>
+	</array>
+</dict>
+</plist>
