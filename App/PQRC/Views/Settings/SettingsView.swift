@@ -15,6 +15,11 @@ struct SettingsView: View {
     /// Relaunch the first-run "explore a new planet" tour (provided by RootView).
     @Environment(TourCoordinator.self) private var tour
     @State private var wipeConfirmStage = 0
+    /// The enterprise / funder "Why Eldr for teams" tour (the ported Huginn cards),
+    /// launched from the About section next to "Take the tour". A self-contained,
+    /// manually-launched cover — no first-run trigger, no "seen" flag. Surfaced
+    /// here so the pitch runs on a phone when the Mac running Huginn isn't present.
+    @State private var showEnterpriseTour = false
     /// Mirrors the per-silo "Show agent protocol envelope" pref (a per-silo
     /// UserDefaults read, which `@AppStorage` can't namespace and `@Observable`
     /// can't track) so the toggle re-renders when flipped. Loaded in `.onAppear`,
@@ -22,7 +27,6 @@ struct SettingsView: View {
     /// ⟡⟡ envelope is stripped from agent bubbles (only the body shows); the
     /// stored record always keeps every raw byte (§23) — this is display-only.
     @State private var showAgentEnvelope = false
-    @AppStorage("ephemeralReceivingKeys") private var ephemeralKeys = false
     @AppStorage("localLinkEnabled") private var localLinkEnabled = AppSession.localLinkEnabled
     @State private var relayURLs: [String] = []
     @State private var newRelayURL = ""
@@ -116,6 +120,18 @@ struct SettingsView: View {
             // Settings open was getting the client throttled by the relay.
             .onReceive(ticker) { _ in
                 now = Int64(Date().timeIntervalSince1970)
+            }
+            // The funder / "Why Eldr for teams" pitch (the ported Huginn cards),
+            // presented over Settings as a full-screen cover. Anchored to the Form
+            // ROOT (a stable container), never to the `aboutSection` Section — a
+            // cover attached to a lazily-recycled Form row is torn down the instant
+            // it occludes the Form ("opens, then immediately closes"). The button
+            // that flips `showEnterpriseTour` lives in `aboutSection`.
+            .fullScreenCover(isPresented: $showEnterpriseTour) {
+                OnboardingTourView(
+                    steps: EnterpriseTourScript.steps,
+                    finishLabel: "Aye",
+                    onFinish: { showEnterpriseTour = false })
             }
         }
     }
@@ -461,13 +477,13 @@ struct SettingsView: View {
             Button {
                 showConnectAgent = true
             } label: {
-                Label("Connect your Mac coding agent", systemImage: "desktopcomputer")
+                Label("Pair your Mac-Tethered-AI", systemImage: "desktopcomputer")
             }
             .accessibilityIdentifier("connect-mac-agent")
         } header: {
-            Text("Mac coding agent")
+            Text("Mac-Tethered-AI")
         } footer: {
-            Text("Pair the Eldr ACP Configurator running on your Mac so its coding agent can join a conversation — controlled by you, under your AI window. On the Mac: open the Bridge tab, then scan its QR here (or use “Open in EldrChat” / paste its address). Paired this way, the agent is recognized as yours and its answers are shown to you in full while secrets are redacted for everyone else.")
+            Text("Pair the Eldr ACP Configurator (Huginn) running on your Mac so your Mac-Tethered-AI — sybilclaw or a local model you host (LM Studio / Ollama) — can join a conversation, controlled by you, under your AI window. On the Mac: open the Bridge tab, then scan its QR here (or use “Open in EldrChat” / paste its address). Paired this way, it's recognized as yours and its answers are shown to you in full while secrets are redacted for everyone else.")
         }
         .sheet(isPresented: $showConnectAgent) {
             // Reuse the verified-pairing flow, pre-tagged as a coding agent so its
@@ -517,11 +533,6 @@ struct SettingsView: View {
 
     private var privacySection: some View {
         Section("Privacy") {
-            Toggle("Ephemeral receiving keys", isOn: $ephemeralKeys)
-                .disabled(true)
-            Text("Experimental — hides your address from relay observers per conversation. Off in this build; see THREAT_MODEL.md.")
-                .font(.caption)
-                .foregroundStyle(.secondary)
             Toggle("Show agent protocol envelope", isOn: Binding(
                 get: { showAgentEnvelope },
                 set: { on in
@@ -779,12 +790,29 @@ struct SettingsView: View {
             }
             .accessibilityIdentifier("take-the-tour")
             .accessibilityHint("Replays the guided tour of EldrChat's features and privacy.")
+            // The funder / "Why Eldr for teams" pitch (the ported Huginn cards),
+            // presented over Settings as a full-screen cover. Lives next to "Take
+            // the tour" rather than pinned to the conversation list so the chat
+            // list stays uncluttered.
+            Button {
+                showEnterpriseTour = true
+            } label: {
+                Label("Why Eldr for teams", systemImage: "bird.fill")
+            }
+            .accessibilityIdentifier("why-eldr-for-teams")
+            .accessibilityHint("Opens the \u{201C}Why Eldr for teams\u{201D} tour — the Huginn enterprise pitch.")
             LabeledContent("Protocol", value: "pqrc-v1")
             LabeledContent("License", value: "AGPL-3.0")
             Text("Honest limits: relays can see your IP address and that someone messaged you. They cannot see who sent it or what it says. Messages are not deniable, and this identity lives only on this device.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
         }
+        // NOTE: the "Why Eldr for teams" cover is intentionally attached to the
+        // Form root in `body` (next to .onReceive), NOT here on the Section.
+        // A Form is a lazy, recycling container: when the full-screen cover fully
+        // occluded the Form, SwiftUI tore down the offscreen Section that OWNED the
+        // presentation, which tore the cover straight back down — "opens, then
+        // immediately closes." Anchoring it to the stable Form root fixes that.
     }
 }
 

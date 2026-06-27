@@ -41,7 +41,11 @@ struct AISettingsView: View {
         Form {
             Section {
                 ForEach($ais) { $ai in
-                    aiRow($ai)
+                    NavigationLink {
+                        aiDetail($ai)
+                    } label: {
+                        aiSummaryRow($ai.wrappedValue)
+                    }
                 }
                 .onDelete { offsets in
                     ais.remove(atOffsets: offsets)
@@ -65,7 +69,7 @@ struct AISettingsView: View {
                 Text("Tethered AIs")
                     .helpInfo("Bring your own AI into your chats — openly and on your terms. Pick on-device Core AI (nothing leaves your phone), a cloud provider via your own API key, or a model on your own machine. Add several and they can collaborate. No one ever talks to an AI without seeing it.")
             } footer: {
-                Text("Add several to let them share context with each other in a chat or thread. Each gets a local, private name you can edit; names are never broadcast. Use each AI's “Test” button to check it against a sample.")
+                Text("Tap an AI to set it up and see exactly what it receives. Add several to let them share context in a chat or thread. Each gets a local, private name you can edit; names are never broadcast.")
             }
 
             Section {
@@ -106,25 +110,6 @@ struct AISettingsView: View {
                 Text("A short label of what THIS device brings to a shared AI thread (e.g. \"iOS / Xcode\" or \"backend / staging\"). Each person's AI advertises its domain so two of them divide work without dumping full context. Optional — used by the thread Skills feature.")
             }
 
-            Section {
-                NavigationLink {
-                    AIContextInspectorView(model: model)
-                } label: {
-                    Label("Context inspector", systemImage: "doc.text.magnifyingglass")
-                }
-                .accessibilityIdentifier("ai-context-inspector")
-                NavigationLink {
-                    AIContextView(model: model)
-                } label: {
-                    Label("Quick view (read-only)", systemImage: "eye")
-                }
-                .accessibilityIdentifier("view-ai-context")
-            } header: {
-                Text("What your AI sees")
-                    .helpInfo("Transparency first, with control. The Context inspector shows EXACTLY what each AI receives for a conversation — its instructions, how much it gathers, and every message — and lets you adjust the depth and include/exclude individual messages, live. The quick view is the same context, read-only. A remote AI always sees your private codenames, never real names.")
-            } footer: {
-                Text("The inspector's edits map to real, saved controls (per-AI depth and the per-message \"Add to AI Context\" marker) — not a separate copy.")
-            }
         }
         .navigationTitle("AI")
         .navigationBarTitleDisplayMode(.inline)
@@ -169,6 +154,52 @@ struct AISettingsView: View {
 
     private var showConsent: Binding<Bool> {
         Binding(get: { pendingRemote != nil }, set: { if !$0 { pendingRemote = nil } })
+    }
+
+    /// Compact list row — enabled dot, name, backend, and live status. Tapping
+    /// pushes the AI's detail (its full config + a per-AI inspection).
+    @ViewBuilder private func aiSummaryRow(_ ai: ConfiguredAI) -> some View {
+        VStack(alignment: .leading, spacing: 3) {
+            HStack(spacing: 8) {
+                Circle()
+                    .fill(ai.isEnabled ? Color.green : Color.secondary)
+                    .frame(width: 8, height: 8)
+                    .accessibilityHidden(true)
+                // Backend-type mark — the SAME icon the chat bubble corner shows.
+                AITypeBadgeView(
+                    symbol: AITypeIcon.badge(kind: ai.kind, model: ai.model, name: ai.name).symbol,
+                    glyph: AITypeIcon.badge(kind: ai.kind, model: ai.model, name: ai.name).glyph,
+                    size: 13, tint: .secondary)
+                    .accessibilityHidden(true)
+                Text(ai.name).font(.headline)
+                Spacer()
+                Text(ConfiguredAI.label(for: ai.kind))
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+            Text(statusLine(for: ai))
+                .font(.caption2)
+                .foregroundStyle(statusOK(for: ai) ? .green : .orange)
+        }
+        .padding(.vertical, 2)
+        .accessibilityElement(children: .combine)
+        .accessibilityIdentifier("ai-row")
+    }
+
+    /// One AI's full screen: its configuration (the same controls as the old
+    /// inline row) PLUS a live per-AI inspection (pick a conversation → exactly
+    /// what's sent + the transcript it sees). Reached by a plain destination-based
+    /// NavigationLink — consistent with how Settings pushes the rest of its
+    /// screens — so the destination is always visible to the link.
+    @ViewBuilder private func aiDetail(_ ai: Binding<ConfiguredAI>) -> some View {
+        Form {
+            Section { aiRow(ai) }
+            AIInspectionView(model: model, aiID: ai.wrappedValue.id)
+        }
+        .navigationTitle(ai.wrappedValue.name)
+        .navigationBarTitleDisplayMode(.inline)
+        // Per-keystroke fields (instructions/name/key) save without a provider
+        // re-bind; do it when leaving the detail so the next turn uses them.
+        .onDisappear { Task { await session.applyAIProvider() } }
     }
 
     @ViewBuilder private func aiRow(_ ai: Binding<ConfiguredAI>) -> some View {
@@ -486,84 +517,5 @@ struct AISettingsView: View {
     /// while replies are simulated.
     private func refreshACPNode() async {
         acpNode = await model.consentedCodingAgentNode()
-    }
-}
-
-/// Read-only view of the exact context the tethered LLM(s) receive — so the
-/// user can see what their AI sees (transparency; SPEC §0). Nothing here is
-/// editable or sent anywhere.
-struct AIContextView: View {
-    @Bindable var model: AppModel
-
-    @State private var aiNames: [String] = []
-    @State private var selectedConversation: String?
-    @State private var lines: [ContextPreviewLine] = []
-
-    var body: some View {
-        List {
-            Section("Tethered AIs") {
-                if aiNames.isEmpty {
-                    Text("None configured.").foregroundStyle(.secondary)
-                }
-                ForEach(aiNames, id: \.self) { name in
-                    Label(name, systemImage: "sparkles")
-                }
-            }
-
-            Section("Conversation") {
-                if model.conversations.isEmpty {
-                    Text("Start a conversation to see its context.")
-                        .foregroundStyle(.secondary)
-                }
-                Picker("Conversation", selection: $selectedConversation) {
-                    ForEach(model.conversations) { conversation in
-                        Text(conversation.title).tag(Optional(conversation.id))
-                    }
-                }
-                .pickerStyle(.menu)
-                .onChange(of: selectedConversation) { _, _ in Task { await reload() } }
-            }
-
-            Section {
-                if lines.isEmpty {
-                    Text("No context yet — the AI sees nothing for this conversation.")
-                        .foregroundStyle(.secondary)
-                }
-                ForEach(lines) { line in
-                    VStack(alignment: .leading, spacing: 2) {
-                        HStack(spacing: 6) {
-                            Text(line.role)
-                                .font(.caption.weight(.semibold))
-                                .foregroundStyle(.secondary)
-                            if line.shared {
-                                Text("shared context")
-                                    .font(.caption2)
-                                    .foregroundStyle(.purple)
-                            }
-                        }
-                        Text(line.text)
-                            .font(.callout)
-                            .textSelection(.enabled)
-                    }
-                    .padding(.vertical, 1)
-                }
-            } header: {
-                Text("What the AI receives")
-            } footer: {
-                Text("By default your AI only sees messages you long-press and \"Add to AI Context\" — not the whole chat. It sees the full recent conversation only while it's active (an AI window/invite is on, or it's your solo AI chat). A peer's marked messages appear only when you've both turned on context sharing.")
-            }
-        }
-        .navigationTitle("AI Context")
-        .navigationBarTitleDisplayMode(.inline)
-        .task {
-            aiNames = await model.tetheredAINames()
-            if selectedConversation == nil { selectedConversation = model.conversations.first?.id }
-            await reload()
-        }
-    }
-
-    private func reload() async {
-        guard let id = selectedConversation else { lines = []; return }
-        lines = await model.contextPreview(conversationID: id)
     }
 }

@@ -45,6 +45,15 @@ struct ConversationView: View {
     private var isGroup: Bool {
         model.conversations.first { $0.id == conversationID }?.isGroup ?? false
     }
+    /// Total participants in this group (INCLUDES me). 0/1 ⇒ a solo "My AI" group.
+    private var memberCount: Int {
+        model.conversations.first { $0.id == conversationID }?.memberCount ?? 0
+    }
+    /// Group-header subtitle: the participant count. A member-less solo group reads
+    /// as "just you + your AI" rather than "1 person".
+    private var groupMemberLabel: String {
+        memberCount <= 1 ? "Just you · your AI" : "\(memberCount) people"
+    }
     private var currentContactName: String {
         model.contactNames[conversationID] ?? "Conversation"
     }
@@ -124,8 +133,32 @@ struct ConversationView: View {
                 largePaste = String(repeating: "PQRC large paste demo line.\n", count: 8000)
             }
             aiSummary = model.primaryAIContextSummary(conversationID)
+            // Refresh the agent-bubble type badges in case the AI config changed.
+            model.refreshAITypes()
         }
         .toolbar {
+            // Group header: name + participant count, tappable to open the
+            // group-aware Details (roster). 1:1 chats keep the plain navigationTitle.
+            // Without this there was NO way to see who/how many were in a group.
+            if isGroup {
+                ToolbarItem(placement: .principal) {
+                    Button {
+                        showDetails = true
+                    } label: {
+                        VStack(spacing: 1) {
+                            Text(currentContactName)
+                                .font(.headline)
+                                .lineLimit(1)
+                            Text(groupMemberLabel)
+                                .font(.caption2)
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+                    .accessibilityIdentifier("group-header")
+                    .accessibilityLabel(
+                        "\(currentContactName), \(groupMemberLabel). Opens group details.")
+                }
+            }
             ToolbarItem(placement: .topBarLeading) {
                 aiHereChip
             }
@@ -336,12 +369,17 @@ struct ConversationView: View {
         // me (the accent), a peer's AI maps to that peer's deterministic color.
         // The agent bubble then renders the matched tint+outline; color is never
         // the sole AI signal (the sparkles glyph + outline always carry it).
+        // Backend-type badge (Apple / phone / Mac-Tethered-AI / 🦞 / …) for MY OWN
+        // AI bubbles, matching the Settings AI row. nil for a peer's AI.
+        let typeBadge = model.aiTypeBadge(agentName: message.agentName, isMine: isMine)
         let bubble = MessageBubble(
             message: message,
             isMine: isMine,
             senderName: model.contactNames[message.senderIdentity] ?? "Contact",
             agentName: message.agentName ?? model.aiNames[message.senderIdentity],
             palette: PartyColor.palette(forIdentity: message.senderIdentity, isSelf: isMine),
+            typeSymbol: typeBadge?.symbol,
+            typeGlyph: typeBadge?.glyph,
             onToggleAIContext: selecting
                 ? nil
                 : {
@@ -786,6 +824,10 @@ struct AIHereSheet: View {
     /// Last on-demand private draft, presented in the DraftSheet.
     @State private var aiRespondsDraft: String?
     @State private var showAIRespondsDraft = false
+    /// When a Mac coding-agent ("acp") AI is enabled, a one-line note on whether it's
+    /// actually connected — the real missed precondition behind "my conduit won't
+    /// reply in a group." nil when no acp AI is enabled. Loaded in `.task`.
+    @State private var conduitHint: String?
 
     /// Context-sharing scope for the "My AI responds" control — this conversation.
     private var aiRespondsScope: AIContextGrant.Scope { .conversation(conversationID) }
@@ -840,15 +882,25 @@ struct AIHereSheet: View {
                     .accessibilityIdentifier("ai-responds-duration")
                     if aiRespondsMode == .respondsInChat {
                         Button {
-                            // Identical privacy semantics to the former AIRespondsSheet:
-                            // open the signed AI window for the chosen time, THEN grant
-                            // context-sharing for the same scope/duration.
+                            // Open the signed AI window for the chosen time, THEN grant
+                            // context-sharing for the same scope/duration. A prior
+                            // "Off in this conversation" override would silently neuter
+                            // the new window (aiSuppressed → the AI shows "on" but never
+                            // replies), so clear it first and reset the picker to match.
                             Task {
+                                if AppSession.conversationContextMode(
+                                    conversationID, siloID: model.siloID) == "off"
+                                {
+                                    AppSession.setConversationContextMode(
+                                        nil, conversationID: conversationID, siloID: model.siloID)
+                                    aiContextMode = "default"
+                                }
                                 await model.startWindow(
                                     conversationID: conversationID, minutes: aiRespondsHours * 60)
                                 await model.grantContextSharing(
                                     scope: aiRespondsScope, minutes: aiRespondsHours * 60,
                                     conversationID: conversationID)
+                                summary = model.primaryAIContextSummary(conversationID)
                             }
                         } label: {
                             Label(
@@ -867,19 +919,41 @@ struct AIHereSheet: View {
                         }
                         .accessibilityIdentifier("ai-responds-draft-now")
                     }
-                    if model.iGrantedContext(
-                        scope: aiRespondsScope, now: Int64(Date().timeIntervalSince1970))
+                    // The single, HONEST off-switch. Shown whenever my AI is active
+                    // here (a live window OR a live grant OR a solo "My AI" chat) —
+                    // not only when a grant exists. The old "Stop sharing AI context"
+                    // button withdrew only the grant and then VANISHED, while the
+                    // ai_window kept the AI auto-posting for the rest of its life — the
+                    // reported "turning off sharing didn't stop my AI." This closes the
+                    // window, withdraws sharing, and mutes a solo chat, in one action.
+                    if model.aiActiveHere(
+                        conversationID: conversationID, now: Int64(Date().timeIntervalSince1970))
                     {
-                        Button("Stop sharing AI context", role: .destructive) {
-                            Task { await model.withdrawContextSharing(scope: aiRespondsScope) }
+                        Button("Stop my AI replying here", role: .destructive) {
+                            Task {
+                                await model.stopAIHere(conversationID: conversationID)
+                                aiContextMode =
+                                    AppSession.conversationContextMode(
+                                        conversationID, siloID: model.siloID) ?? "default"
+                                summary = model.primaryAIContextSummary(conversationID)
+                            }
                         }
-                        .accessibilityIdentifier("ai-responds-stop-sharing")
+                        .accessibilityIdentifier("ai-responds-stop")
+                    }
+                    // The missed precondition behind "my conduit won't reply in a
+                    // group": a Mac coding-agent AI that's enabled but not connected.
+                    // Surfaced here, where you turn the AI on for the conversation.
+                    if let conduitHint {
+                        Label(conduitHint, systemImage: "desktopcomputer")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .accessibilityIdentifier("conduit-hint")
                     }
                 } header: {
                     Text("My AI responds")
                 } footer: {
                     Text(aiRespondsMode == .respondsInChat
-                        ? "Your AI replies in this conversation as your signed agent for the chosen time and shares your AI context with the others present. Everyone in the conversation will see that your AI is active."
+                        ? "Your tethered AIs — including a paired Mac agent — reply here as your signed agent for the chosen time, and share your AI context with the others present. This is how your AI (or your Mac conduit) helps a group: you turn it on; it can't switch itself on. Everyone sees that your AI is active. Each person turns on their OWN AI separately."
                         : "Your AI only drafts replies for you to review and send — nothing is posted to the conversation and no AI context is shared. Drafting is on demand; tap below whenever you want one.")
                 }
             }
@@ -889,6 +963,18 @@ struct AIHereSheet: View {
                 aiContextMode =
                     AppSession.conversationContextMode(conversationID, siloID: model.siloID) ?? "default"
                 summary = model.primaryAIContextSummary(conversationID)
+                // If a Mac coding-agent ("acp") AI is enabled, tell the user whether
+                // it's actually connected — the real reason a "conduit" stays silent.
+                let acpEnabled = AppSession.loadConfiguredAIs(siloID: model.siloID)
+                    .contains { $0.kind == "acp" && $0.isEnabled }
+                if acpEnabled {
+                    if let node = await model.consentedCodingAgentNode() {
+                        conduitHint = "Mac-Tethered-AI “\(node.name)” is connected — it answers here when you turn the AI on."
+                    } else {
+                        conduitHint =
+                            "A Mac-Tethered-AI is enabled but not connected — pair it in Settings ▸ AI ▸ Mac-Tethered-AI, or it can't reply."
+                    }
+                }
             }
             .toolbar {
                 ToolbarItem(placement: .confirmationAction) {

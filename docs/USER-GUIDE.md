@@ -177,10 +177,24 @@ Open any conversation and tap the **sparkles icon** for AI options:
 - **Draft with AI (sparkles in the composer):** your AI writes a suggested reply
   and drops it into your message box. **Nothing is sent** — you read it, edit it,
   and decide. You can also send it labeled *as your AI*.
-- **Turn your AI "on" (an AI window):** give your AI permission to talk to
-  **everyone in the chat** for a set time (1, 8, or 24 hours). While
-  it's on, **everyone in the conversation sees a banner** saying your AI is active
-  and counting down. AIs can never switch themselves on — only you can.
+- **Turn your AI "on" (an AI window):** in the **"AI here"** sheet, choose
+  *Responds in chat* and a duration (1, 8, or 24 hours) to give your AI permission
+  to talk to **everyone in the chat** for that time. While it's on, **everyone in
+  the conversation sees a banner** saying your AI is active and counting down. AIs
+  can never switch themselves on — only you can.
+- **Turn it back off whenever you want.** The same sheet has **"Stop my AI
+  replying here"** — it closes the window, stops sharing, and goes quiet
+  immediately (everyone's banner clears). You don't have to wait for the timer.
+
+**Bringing your Mac-Tethered-AI into a group.** Your paired Mac-Tethered-AI
+(sybilclaw, or a local model you host with LM Studio / Ollama behind Huginn) is
+**your own tethered AI**. Two ways to bring it into a group: enable it under
+**Settings ▸ AI** and turn on **"AI here" ▸ Responds in chat** so it answers the
+group **as your signed AI** under your window; or add the paired node as a group
+member, where it answers **you** directly (it replies only to its owner, never to
+other members — by design). Either way each person turns on **their own** AI; no
+one can switch on someone else's. The "AI here" sheet tells you if your
+Mac-Tethered-AI isn't actually connected yet.
 
 ### Threads: AIs collaborating
 
@@ -261,7 +275,7 @@ Wi-Fi/Bluetooth:
   open your inbox to anyone in **Settings ▸ Reachability** (it auto-closes).
 - **Nearby (no server).** In **Settings ▸ Nearby** you can deliver messages
   directly to people in the same room over Wi-Fi/Bluetooth, even offline.
-  Strangers nearby can never read or join anything.
+  Strangers nearby can never read or join anything. (6/26 - Not working with both devices foreground and open - possible contacts issue)
 - **Block & manage.** Manage everyone in **Settings ▸ Contacts**; copy keys,
   rename, or message them from there.
 
@@ -269,9 +283,8 @@ Wi-Fi/Bluetooth:
 
 - **One device, no recovery.** Lose the device, lose the identity and all
   history. There's no cloud backup (that's the privacy trade).
-- **No message deniability.** Messages are signed — a recipient can prove you
-  wrote them. (Separate *accounts* are deniable to the running app, but an
-  individual message you send is not.)
+- **No impersonation.** Messages are signed — a recipient can prove you
+  wrote them. 
 - **Endpoints aren't magic.** Whoever you message can screenshot or forward what
   you send, and if *they* enable a remote AI, the chats *they* take part in go to
   *their* provider.
