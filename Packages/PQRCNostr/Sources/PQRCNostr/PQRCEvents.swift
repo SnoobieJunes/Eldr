@@ -105,6 +105,65 @@ public enum PQRCEvents {
         return bundle
     }
 
+    // MARK: kind 10422 — ephemeral receiving key (SPEC §9.3, NIP-XX §13)
+
+    /// Builds the replaceable kind-10422 event advertising a rotating ephemeral
+    /// receiving sub-key. Outer BIP-340 signature (Nostr key) + inner Ed25519
+    /// signature (identity key, carried in the `sig` tag) give the same
+    /// both-directions binding as the kind-10420 identity assertion.
+    public static func ephemeralReceivingKeyEvent(
+        key: EphemeralReceivingKey, signer: NostrKeypair, createdAt: Int64,
+        randomSource: any RandomSource
+    ) throws -> NostrEvent {
+        try signer.sign(
+            NostrEvent(
+                pubkey: signer.publicKeyHex,
+                createdAt: createdAt,
+                kind: PQRCConstants.ephemeralReceivingKeyEventKind,
+                tags: [
+                    ["pqrc_version", key.version],
+                    ["identity_key", key.identityPubkey.hexString],
+                    ["public_key", key.publicKey.hexString],
+                    ["conversation_binding", key.conversationBinding],
+                    ["epoch", String(key.epoch)],
+                    ["sig", key.signature.base64EncodedString()],
+                ],
+                content: ""
+            ), randomSource: randomSource)
+    }
+
+    /// Parses AND fully verifies a kind-10422 event for a sender about to use the
+    /// sub-key as a `p` tag. Both directions are checked: the outer BIP-340
+    /// signature (the author Nostr key vouches for the event) and the inner
+    /// Ed25519 signature over `pqrc-ephemeral-receiving-v1` (the identity key owns
+    /// the sub-key). `expectedIdentityPubkey` is the recipient's
+    /// binding-verified identity — a sub-key signed by any other identity is
+    /// rejected. Returns a trusted key only on success.
+    public static func verifyEphemeralReceivingKeyEvent(
+        _ event: NostrEvent, expectedIdentityPubkey: Data
+    ) throws -> EphemeralReceivingKey {
+        guard event.kind == PQRCConstants.ephemeralReceivingKeyEventKind,
+            NostrKeypair.verify(event)  // outer direction: Nostr key signs the event
+        else { throw PQRCError.invalidPrekeySignature }
+        guard let version = event.firstTagValue("pqrc_version"),
+            let identityHex = event.firstTagValue("identity_key"),
+            let identityKey = Data(hexString: identityHex),
+            let publicHex = event.firstTagValue("public_key"),
+            let publicKey = Data(hexString: publicHex),
+            let binding = event.firstTagValue("conversation_binding"),
+            let epochStr = event.firstTagValue("epoch"), let epoch = UInt64(epochStr),
+            let sigB64 = event.firstTagValue("sig"), let signature = Data(base64Encoded: sigB64)
+        else { throw PQRCError.invalidPrekeySignature }
+        let key = EphemeralReceivingKey(
+            identityPubkey: identityKey, publicKey: publicKey,
+            conversationBinding: binding, epoch: epoch, version: version, signature: signature)
+        // Inner direction: identity key signs the sub-key, and it must be the
+        // identity we expect for this recipient.
+        guard EphemeralReceivingKey.isValidEphemeralKey(key, identityPubkey: expectedIdentityPubkey)
+        else { throw PQRCError.invalidPrekeySignature }
+        return key
+    }
+
     // MARK: kind 10050 — DM relay list
 
     public static func relayListEvent(

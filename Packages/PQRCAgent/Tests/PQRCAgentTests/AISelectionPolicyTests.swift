@@ -110,4 +110,98 @@ struct CapabilityRoutingPolicyTests {
         #expect(policy.primary(from: ais, conversationID: "x", threadID: "code-thread")?.id == "mac")
         #expect(policy.primary(from: ais, conversationID: "x", threadID: nil)?.id == "chat")
     }
+
+    /// The optional ordered-critique API is OFF for the existing policies — they
+    /// inherit the protocol default (`nil`), so today's behavior is unchanged.
+    @Test func existingPolicies_critiqueTurn_isNil() {
+        let ais = [
+            FakeAI(id: "a", participatesAutonomously: true),
+            FakeAI(id: "b", participatesAutonomously: true),
+        ]
+        #expect(
+            DefaultAISelectionPolicy<FakeAI>().critiqueTurn(
+                from: ais, conversationID: "c", threadID: nil) == nil)
+        #expect(
+            CapabilityRoutingPolicy<FakeAI>(byConversation: [:]).critiqueTurn(
+                from: ais, conversationID: "c", threadID: nil) == nil)
+    }
+}
+
+@Suite("Ordered critique policy (multi-AI turn-taking)")
+struct OrderedCritiquePolicyTests {
+    private let policy = OrderedCritiquePolicy<FakeAI>()
+
+    /// N=2: first is the "primary", the last is the "synthesizer".
+    @Test func critiqueTurn_two_primaryThenSynthesizer() {
+        let ais = [
+            FakeAI(id: "a", participatesAutonomously: true),
+            FakeAI(id: "b", participatesAutonomously: true),
+        ]
+        let turn = policy.critiqueTurn(from: ais, conversationID: "c", threadID: "t")
+        #expect(turn?.map { $0.ai.id } == ["a", "b"])
+        #expect(turn?.map { $0.role } == ["primary", "synthesizer"])
+    }
+
+    /// N=3: primary → reviewer → synthesizer, in stable input order.
+    @Test func critiqueTurn_three_primaryReviewerSynthesizer() {
+        let ais = [
+            FakeAI(id: "a", participatesAutonomously: true),
+            FakeAI(id: "b", participatesAutonomously: true),
+            FakeAI(id: "c", participatesAutonomously: true),
+        ]
+        let turn = policy.critiqueTurn(from: ais, conversationID: "c", threadID: "t")
+        #expect(turn?.map { $0.ai.id } == ["a", "b", "c"])
+        #expect(turn?.map { $0.role } == ["primary", "reviewer", "synthesizer"])
+    }
+
+    /// N=4: the middle slots alternate "reviewer" then "critic".
+    @Test func critiqueTurn_four_middleAlternatesReviewerCritic() {
+        let ais = (0..<4).map { FakeAI(id: "ai\($0)", participatesAutonomously: true) }
+        let turn = policy.critiqueTurn(from: ais, conversationID: "c", threadID: "t")
+        #expect(turn?.map { $0.role } == ["primary", "reviewer", "critic", "synthesizer"])
+    }
+
+    /// A single autonomous AI is just the "primary" (no critique partners).
+    @Test func critiqueTurn_one_isPrimary() {
+        let solo = [FakeAI(id: "only", participatesAutonomously: true)]
+        let turn = policy.critiqueTurn(from: solo, conversationID: "c", threadID: "t")
+        #expect(turn?.map { $0.role } == ["primary"])
+    }
+
+    /// Non-autonomous (draft-only / off) AIs are excluded; the remaining order and
+    /// the role assignment are unaffected by the gaps.
+    @Test func critiqueTurn_excludesNonAutonomous_keepsOrder() {
+        let ais = [
+            FakeAI(id: "a", participatesAutonomously: true),
+            FakeAI(id: "draft", participatesAutonomously: false),
+            FakeAI(id: "b", participatesAutonomously: true),
+            FakeAI(id: "c", participatesAutonomously: true),
+        ]
+        let turn = policy.critiqueTurn(from: ais, conversationID: "c", threadID: "t")
+        #expect(turn?.map { $0.ai.id } == ["a", "b", "c"])
+        #expect(turn?.map { $0.role } == ["primary", "reviewer", "synthesizer"])
+    }
+
+    /// No autonomous AI ⇒ a non-nil but empty ordered set (the policy is still
+    /// "driving"; there is simply no one to run).
+    @Test func critiqueTurn_noAutonomous_isEmptyNotNil() {
+        let ais = [FakeAI(id: "off", participatesAutonomously: false)]
+        let turn = policy.critiqueTurn(from: ais, conversationID: "c", threadID: "t")
+        #expect(turn != nil)
+        #expect(turn?.isEmpty == true)
+    }
+
+    /// `participants` / `primary` keep the same MEMBERSHIP as the default policy
+    /// (the autonomous set, in order), so a host that ignores `critiqueTurn` still
+    /// gets the right AIs.
+    @Test func participantsAndPrimary_matchAutonomousSet() {
+        let ais = [
+            FakeAI(id: "a", participatesAutonomously: true),
+            FakeAI(id: "off", participatesAutonomously: false),
+            FakeAI(id: "b", participatesAutonomously: true),
+        ]
+        #expect(
+            policy.participants(from: ais, conversationID: "c", threadID: nil).map(\.id) == ["a", "b"])
+        #expect(policy.primary(from: ais, conversationID: "c", threadID: nil)?.id == "a")
+    }
 }

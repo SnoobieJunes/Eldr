@@ -54,11 +54,22 @@ struct ConfiguredAI: Identifiable, Codable, Equatable, Sendable {
     /// Optional response-length cap for PCC. nil → framework default.
     var maxResponseTokens: Int?
 
+    /// Optional per-request timeout (seconds) for self-hosted / OpenAI-compatible
+    /// backends ("custom"). Bounds a wedged or unreachable endpoint. nil → the
+    /// URLSession default. Cloud SDK backends (claude/gemini/pcc) ignore it.
+    var requestTimeoutSeconds: Double?
+
+    /// User-declared routing capabilities (plan C4 / AC34): e.g. ["code"] marks this AI
+    /// as suitable for coding scopes, so a coding conversation can route to it. nil /
+    /// empty → the kind's default (only the `acp` Mac node advertises "code").
+    var capabilities: Set<String>?
+
     init(
         id: String, name: String, kind: String, instructions: String? = nil,
         contextPolicy: String? = nil, contextDepth: Int? = nil, outputMode: String? = nil,
         baseURL: String? = nil, model: String? = nil, enabled: Bool? = nil,
-        reasoningLevel: String? = nil, temperature: Double? = nil, maxResponseTokens: Int? = nil
+        reasoningLevel: String? = nil, temperature: Double? = nil, maxResponseTokens: Int? = nil,
+        requestTimeoutSeconds: Double? = nil, capabilities: Set<String>? = nil
     ) {
         self.id = id
         self.name = name
@@ -73,6 +84,8 @@ struct ConfiguredAI: Identifiable, Codable, Equatable, Sendable {
         self.reasoningLevel = reasoningLevel
         self.temperature = temperature
         self.maxResponseTokens = maxResponseTokens
+        self.requestTimeoutSeconds = requestTimeoutSeconds
+        self.capabilities = capabilities
     }
 
     static let defaultDepth = 20
@@ -217,6 +230,8 @@ struct TetheredAI: Sendable {
     var contextDepth: Int = ConfiguredAI.defaultDepth
     /// "participate" | "draft" | "summarize".
     var outputMode: String = "participate"
+    /// User-declared routing capabilities (C4/AC34); empty → the kind's default.
+    var capabilities: Set<String> = []
 
     /// Whether this AI may post on its own (solo replies, window/thread turns).
     /// "draft"-only AIs and "off" AIs never auto-post.
@@ -235,7 +250,9 @@ struct TetheredAI: Sendable {
 /// routing, identical to the default policy).
 extension TetheredAI: AISelectionCandidate {
     var routingCapabilities: Set<String> {
-        kind == "acp" ? ["code"] : []
+        // A user override (Settings ▸ AI ▸ "Handles coding tasks") wins; else the kind
+        // default — only the `acp` Mac node advertises "code".
+        capabilities.isEmpty ? (kind == "acp" ? ["code"] : []) : capabilities
     }
 }
 

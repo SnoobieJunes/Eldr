@@ -38,6 +38,12 @@ public actor LocalRelaySimulator {
     public let url: String
     private var chaos: ChaosOptions
     private let chaosRandom: SeededRandomSource
+    /// Anchor-relay privacy gate (SPEC §9.1): when true (default), kind-1059
+    /// envelopes are served ONLY to the AUTHed, p-tagged recipient. A PUBLIC
+    /// relay sets this false and serves kind-1059 by filter match alone — the
+    /// model ephemeral receiving keys (SPEC §9.3) rely on, since a recipient
+    /// cannot AUTH as an X25519 routing sub-key (it is not a Nostr keypair).
+    private let anchorGating: Bool
 
     private var events: [NostrEvent] = []
     private var knownEventIDs: Set<String> = []
@@ -54,10 +60,13 @@ public actor LocalRelaySimulator {
     private var reorderBuffer: [(subscriberID: UUID, event: NostrEvent)] = []
     private var challenges: [String: String] = [:]  // connectionID -> challenge
 
-    public init(url: String = "local://relay", chaos: ChaosOptions = .none) {
+    public init(
+        url: String = "local://relay", chaos: ChaosOptions = .none, anchorGating: Bool = true
+    ) {
         self.url = url
         self.chaos = chaos
         self.chaosRandom = SeededRandomSource(seed: chaos.seed)
+        self.anchorGating = anchorGating
     }
 
     public func setChaos(_ newChaos: ChaosOptions) {
@@ -174,7 +183,7 @@ public actor LocalRelaySimulator {
     /// wrong-key clients get nothing — not even existence.
     private func visible(_ event: NostrEvent, to subscriber: Subscriber) -> Bool {
         guard subscriber.filters.contains(where: { $0.matches(event) }) else { return false }
-        if event.kind == PQRCConstants.giftWrapEventKind {
+        if anchorGating, event.kind == PQRCConstants.giftWrapEventKind {
             guard let authed = subscriber.authedPubkey,
                 event.firstTagValue("p") == authed
             else { return false }

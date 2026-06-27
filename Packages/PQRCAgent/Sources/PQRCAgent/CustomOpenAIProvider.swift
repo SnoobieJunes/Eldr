@@ -16,13 +16,21 @@ public struct CustomOpenAIProvider: AgentProvider {
     public let model: String
     private let session: URLSession
 
-    public init(baseURL: String, apiKey: String, model: String) {
+    public init(baseURL: String, apiKey: String, model: String, requestTimeoutSeconds: Double? = nil) {
         self.baseURL = baseURL
         self.apiKey = apiKey
         // Local servers (LM Studio) ignore the model name and serve whatever's
         // loaded; Ollama needs a real one — surfaced in Settings.
         self.model = model.isEmpty ? "local-model" : model
-        self.session = URLSession(configuration: .ephemeral)
+        let configuration = URLSessionConfiguration.ephemeral
+        // A self-hosted endpoint can hang (a wedged model, an unreachable LAN host).
+        // An explicit per-AI timeout (Settings ▸ AI) bounds the wait; nil/≤0 keeps the
+        // URLSession default. Cloud providers manage their own timeouts.
+        if let requestTimeoutSeconds, requestTimeoutSeconds > 0 {
+            configuration.timeoutIntervalForRequest = requestTimeoutSeconds
+            configuration.timeoutIntervalForResource = requestTimeoutSeconds
+        }
+        self.session = URLSession(configuration: configuration)
     }
 
     public func draftReply(context: AgentContext) async throws -> Draft {

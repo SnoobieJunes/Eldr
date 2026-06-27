@@ -204,12 +204,15 @@ final class ACPBridgeService: ObservableObject {
     /// closed (never "first peer wins").
     @Published private(set) var ownerIdentityHex: String?
 
-    /// Watch-along participation mode. Defaults to `.direct` (the Mac fans out itself —
-    /// owner raw, others redacted) because it works in BOTH 1:1 and group chats and is
-    /// the path the first live demo exercises. `.endpoint` is the §13.5 hardening (Mac
-    /// drafts to the owner's phone, the phone voices to the group as the owner's signed
-    /// agent) — it only makes sense in a GROUP (in a 1:1 there's no group to voice into),
-    /// so switch to it once you're testing the multi-party scenario.
+    /// Watch-along participation mode. Defaults to `.direct` — the Mac broadcasts the
+    /// agent's reply itself (owner raw, others redacted), so it appears in the chat with
+    /// no extra gate. `.endpoint` (the §13.5 hardening — the Mac drafts to the owner's
+    /// phone, which redacts + voices it as the owner's own signed agent) is stronger but
+    /// REQUIRES an ACTIVE ai_window to voice the draft (`voiceAgentDraft` →
+    /// `authorizeAutonomousSend`); without one the reply is DROPPED (only a "your AI
+    /// window is off" system note shows). So `.endpoint` is an opt-in for group
+    /// watch-along WITH a live window — NOT the default: defaulting to it (the reverted
+    /// A3) broke the ordinary 1:1 drive (reply generated in LM Studio, never displayed).
     @Published var watchAlongMode: WatchAlongMode = .direct
 
     /// Who answers the owner's chat on the Mac: our own `eldr-acp` agent (its configured

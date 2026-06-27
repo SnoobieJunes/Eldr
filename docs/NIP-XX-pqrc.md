@@ -20,6 +20,7 @@ events. Event kinds:
 |-------|--------------------------------------|--------------------------|
 | 10420 | identity binding (replaceable)       | Nostr key (secp256k1)    |
 | 10421 | prekey bundle (replaceable)          | Nostr key                |
+| 10422 | ephemeral receiving key (replaceable, OPTIONAL) | Nostr key (outer) + identity key (inner) |
 | 10050 | DM relay list (replaceable)          | Nostr key                |
 | 1420  | rumor (NEVER published, unsigned)    | — (unsigned)             |
 | 13    | seal                                 | sender's Nostr key       |
@@ -41,6 +42,7 @@ All binary values are base64 in JSON bodies and lowercase hex in tags, as shown.
 | `pqrc-prekey-v1`      | ‖ label(utf8: `ik_dh`/`spk`/`pqpk`/`lrp`) ‖ key bytes          |
 | `pqrc-ai-window-v1`   | ‖ active_until(i64be) ‖ enabled_by(32) [‖ thread_id(utf8)]     |
 | `pqrc-agent-msg-v1`   | ‖ ratchet ciphertext                                           |
+| `pqrc-ephemeral-receiving-v1` | ‖ identity_pub(32) ‖ public_key(32) ‖ conversation_binding(utf8) ‖ epoch(u64be) |
 
 ## 3. kind 10420 — identity binding
 
@@ -283,3 +285,66 @@ Reproduce `TestVectors/*.json` byte-for-byte: agent_derivation, binding_10420,
 pqxdh_handshake (responder path), ratchet_chain (full 40-message replay),
 pq_rekey (receiver replay across the boundary), padding, giftwrap
 (deterministic re-wrap given seeds).
+
+## 13. kind 10422 — ephemeral receiving key (SPEC §9.3, OPTIONAL)
+
+A replaceable event advertising a rotating X25519 **public** sub-key. When a
+sender has fetched the recipient's current sub-key, it uses it as the gift-wrap
+`p` tag (§9) instead of the recipient's long-term identity Nostr pubkey, so a
+passive relay observer cannot link the envelope to the identity. The sub-key is
+**only a routing tag** — `SK`, the ratchet, and the seal/wrap *encryption* are
+unchanged (still to the recipient's Nostr key), so confidentiality is unaffected.
+
+```json
+{
+  "kind": 10422,
+  "pubkey": "<recipient_nostr_pubkey_hex>",
+  "tags": [
+    ["pqrc_version", "1"],
+    ["identity_key", "<ed25519_identity_pub_hex>"],
+    ["public_key", "<x25519_sub_key_hex>"],
+    ["conversation_binding", "<utf8 domain>"],
+    ["epoch", "<u64 decimal>"],
+    ["sig", "<base64 ed25519 sig, context pqrc-ephemeral-receiving-v1>"]
+  ],
+  "content": ""
+}
+```
+
+Verification is bidirectional, like kind 10420 (a sender MUST do both before
+using the sub-key):
+1. outer BIP-340 signature verifies under `pubkey` (the Nostr key vouches for
+   the event);
+2. `sig` verifies under `identity_key` over the `pqrc-ephemeral-receiving-v1`
+   context, AND `identity_key` equals the recipient's binding-verified identity
+   (the identity key owns the sub-key).
+
+Derivation (so a peer reconstructs nothing — it simply reads the published key —
+and so the recipient re-derives the same sub-key after a restart from the epoch
+alone):
+```
+seed   = HKDF(ikm = identity_priv, salt = "pqrc-ephemeral-receiving-v1",
+              info = "pqrc-ephemeral-receiving-root" ‖ identity_pub, 32)
+subkey = HKDF(ikm = seed, salt = "pqrc-ephemeral-receiving-v1",
+              info = "pqrc-ephemeral-receiving-sub" ‖ conversation_binding ‖ epoch(u64be), 32)
+public_key = X25519(subkey).publicKey
+```
+
+`epoch` rotates **message-driven** (no wall-clock; SPEC §5.2 / invariant 1),
+roughly every 20–30 messages with random jitter. The recipient subscribes to
+gift wraps p-tagged with BOTH its identity pubkey AND its current (and
+immediately-previous) sub-keys, so the changeover never drops in-flight traffic
+and an old, identity-p-tag sender still reaches it.
+
+`conversation_binding` is signed material; the **privacy-safe default is the
+recipient's own identity hex** (one rotating key, leaking nothing the kind-10420
+binding doesn't already). A per-peer binding would expose the social link to any
+observer and MUST NOT be used in a cleartext tag without that tradeoff being
+understood (DEVIATIONS T4, THREAT_MODEL).
+
+Because a recipient cannot NIP-42-AUTH as an X25519 sub-key (it is not a Nostr
+keypair), this mitigation is **incompatible with an anchor relay that gates
+kind-1059 delivery to the AUTHed p-tagged recipient (§10)**; it targets public
+relays that serve kind-1059 by filter match. The two §9.3 mitigations are
+therefore alternatives, not layers. Relays SHOULD AUTH-gate *writes* of kind
+10422 so only the owner publishes theirs.

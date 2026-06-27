@@ -57,6 +57,48 @@ public protocol AISelectionPolicy<AI>: Sendable {
     /// `threadID` (nil for a conversation-scope/window turn) let a future policy
     /// route by scope; the default policy ignores them.
     func participants(from ais: [AI], conversationID: String, threadID: String?) -> [AI]
+
+    /// OPTIONAL ordered, role-tagged turn-taking for a bounded multi-AI critique
+    /// loop in a thread (plan C3). Returns the autonomous participants in a stable
+    /// order, each tagged with a role (e.g. "primary" → "reviewer"/"critic" → … →
+    /// "synthesizer") so the host can run them in sequence — each AI rebuilding
+    /// context so it sees the prior AIs' messages — and re-run the set for a
+    /// bounded number of rounds (terminated by the C1 loop guard).
+    ///
+    /// `nil` (the default in the protocol extension below) means "this policy does
+    /// NOT do ordered critique — use `participants(from:)` exactly as today", so
+    /// `DefaultAISelectionPolicy` and `CapabilityRoutingPolicy` are unaffected. A
+    /// non-nil result — even an empty array — means the policy is driving the turn
+    /// order explicitly. Like `participants`, the result is content-blind: it is
+    /// derived only from the candidate set and the scope, never from message text
+    /// (SPEC §0).
+    func critiqueTurn(
+        from ais: [AI], conversationID: String, threadID: String?
+    ) -> [(ai: AI, role: String)]?
+}
+
+public extension AISelectionPolicy {
+    /// Default: no ordered critique. Existing policies inherit this and keep
+    /// today's behavior; the host falls back to `participants(from:)`.
+    func critiqueTurn(
+        from ais: [AI], conversationID: String, threadID: String?
+    ) -> [(ai: AI, role: String)]? { nil }
+}
+
+/// The role tags `OrderedCritiquePolicy` emits for a multi-AI critique turn, and
+/// the values `AgentSkills.threadSystemPrompt(aiRole:)` recognizes for
+/// role-specific prompt guidance. One source of truth so the selection policy and
+/// the prompt builder agree on the exact spelling.
+public enum AICritiqueRole {
+    /// The first AI: produces the initial answer. Also the default role — no extra
+    /// prompt guidance is injected for it (today's behavior).
+    public static let primary = "primary"
+    /// A middle AI: critiques the prior answer rather than re-solving.
+    public static let reviewer = "reviewer"
+    /// A middle AI: stress-tests the prior answers (objections, edge cases).
+    public static let critic = "critic"
+    /// The last AI: merges the prior answers into one converged result.
+    public static let synthesizer = "synthesizer"
 }
 
 /// The default routing policy: EXACTLY today's behavior.
@@ -136,5 +178,109 @@ public struct CapabilityRoutingPolicy<AI: AISelectionCandidate>: AISelectionPoli
         // Prefer the capable subset, but never strand a scope with zero
         // participants when none match — fall back to the full autonomous set.
         return matching.isEmpty ? autonomous : matching
+    }
+}
+
+/// Ordered, role-tagged multi-AI turn-taking for a bounded critique loop in a
+/// thread (plan C3): the autonomous participants run in a stable sequence —
+/// primary → reviewer/critic(s) → synthesizer — each one rebuilding context so it
+/// sees the prior AIs' messages, so a primary answer can be reviewed and then
+/// merged. The host re-runs the ordered set for a bounded number of rounds; the
+/// C1 loop guard terminates it.
+///
+/// **Privacy (SPEC §0): content-blind.** Order and roles are derived ONLY from the
+/// candidate set (its stable input order) and its size — never from message text.
+/// The policy reads no plaintext to make a routing/ordering call. Deterministic and
+/// `Sendable`.
+///
+/// Drop-in `AISelectionPolicy`: swap it in via
+/// `PersonaRuntime.setAISelectionPolicy(_:)`. `participants`/`primary` keep the same
+/// MEMBERSHIP as `DefaultAISelectionPolicy` (the autonomous set), so a host that
+/// ignores the `critiqueTurn` API still behaves; the ordering/roles live in
+/// `critiqueTurn`.
+public struct OrderedCritiquePolicy<AI: AISelectionCandidate>: AISelectionPolicy {
+    public init() {}
+
+    /// The primary AI for a private draft: the first autonomous AI (the one tagged
+    /// "primary" in the critique order), or — if none participate autonomously —
+    /// the first AI, so a draft always has an engine. Mirrors today's contract
+    /// (never nil for a non-empty set).
+    public func primary(from ais: [AI], conversationID: String, threadID: String?) -> AI? {
+        autonomous(from: ais).first ?? ais.first
+    }
+
+    /// The autonomous set, in stable input order — identical MEMBERSHIP to the
+    /// default policy. (Ordering and roles are carried by `critiqueTurn`.)
+    public func participants(from ais: [AI], conversationID: String, threadID: String?) -> [AI] {
+        autonomous(from: ais)
+    }
+
+    /// The ordered, role-tagged critique turn: the autonomous participants in their
+    /// stable input order — first = "primary", last = "synthesizer", middle =
+    /// alternating "reviewer"/"critic". Always non-nil for this policy (an empty
+    /// array when no AI participates autonomously). Content-blind.
+    public func critiqueTurn(
+        from ais: [AI], conversationID: String, threadID: String?
+    ) -> [(ai: AI, role: String)]? {
+        let ordered = autonomous(from: ais)
+        let count = ordered.count
+        return ordered.enumerated().map { index, ai in
+            (ai: ai, role: Self.role(at: index, of: count))
+        }
+    }
+
+    /// Deterministic, content-blind role assignment for `count` participants:
+    ///  - 0 or 1 → "primary"
+    ///  - first → "primary", last → "synthesizer"
+    ///  - middle slots → "reviewer" / "critic", alternating from the second slot
+    ///    (slot 1 = reviewer, slot 2 = critic, slot 3 = reviewer, …)
+    static func role(at index: Int, of count: Int) -> String {
+        guard count > 1 else { return AICritiqueRole.primary }
+        if index == 0 { return AICritiqueRole.primary }
+        if index == count - 1 { return AICritiqueRole.synthesizer }
+        return index % 2 == 1 ? AICritiqueRole.reviewer : AICritiqueRole.critic
+    }
+
+    private func autonomous(from ais: [AI]) -> [AI] {
+        ais.filter { $0.participatesAutonomously }
+    }
+}
+
+/// Composes capability routing (WHO answers) with optional ordered critique (the
+/// ORDER + roles), per plan C4. `primary`/`participants` defer to the wrapped
+/// `CapabilityRoutingPolicy` (so coding scopes still route to the Mac node); when the
+/// host flags a scope as "ordered critique", `critiqueTurn` returns the
+/// capability-selected participants in the `OrderedCritiquePolicy` order/roles,
+/// otherwise nil (the runtime then runs them flat — unchanged behavior). This lets the
+/// app's auto coding-node map AND the user's per-conversation "AIs reply in order"
+/// toggle coexist in the single `aiSelection` slot. Content-blind, `Sendable`.
+public struct CompositeAISelectionPolicy<AI: AISelectionCandidate>: AISelectionPolicy {
+    private let base: CapabilityRoutingPolicy<AI>
+    private let orderedScope: @Sendable (_ conversationID: String, _ threadID: String?) -> Bool
+
+    public init(
+        base: CapabilityRoutingPolicy<AI>,
+        orderedScope: @escaping @Sendable (_ conversationID: String, _ threadID: String?) -> Bool
+    ) {
+        self.base = base
+        self.orderedScope = orderedScope
+    }
+
+    public func primary(from ais: [AI], conversationID: String, threadID: String?) -> AI? {
+        base.primary(from: ais, conversationID: conversationID, threadID: threadID)
+    }
+
+    public func participants(from ais: [AI], conversationID: String, threadID: String?) -> [AI] {
+        base.participants(from: ais, conversationID: conversationID, threadID: threadID)
+    }
+
+    public func critiqueTurn(
+        from ais: [AI], conversationID: String, threadID: String?
+    ) -> [(ai: AI, role: String)]? {
+        guard orderedScope(conversationID, threadID) else { return nil }
+        // Order/role the capability-selected participants for this scope.
+        let parts = base.participants(from: ais, conversationID: conversationID, threadID: threadID)
+        return OrderedCritiquePolicy<AI>().critiqueTurn(
+            from: parts, conversationID: conversationID, threadID: threadID)
     }
 }

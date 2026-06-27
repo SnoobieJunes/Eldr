@@ -50,4 +50,49 @@ struct AgentSkillsTests {
         #expect(p.contains("CONTEXT BOUNDARY"))
         #expect(p.contains("PASS"), "with no skill pinned the AI may still PASS to stay silent")
     }
+
+    /// The default role ("primary") injects NO role guidance, and an explicit
+    /// "primary" produces byte-for-byte the same prompt as the default — backward
+    /// compatible for every existing caller.
+    @Test func threadSystemPrompt_primary_isDefaultAndUnchanged() {
+        let omitted = AgentSkills.threadSystemPrompt(
+            displayName: "Alice", contextDomain: "iOS", peerName: "Bob", threadID: "t-1",
+            activeSkillIDs: ["tech-spec"], instructions: "Be terse.")
+        let explicit = AgentSkills.threadSystemPrompt(
+            displayName: "Alice", contextDomain: "iOS", peerName: "Bob", threadID: "t-1",
+            activeSkillIDs: ["tech-spec"], instructions: "Be terse.", aiRole: "primary")
+        #expect(omitted == explicit)
+        #expect(!omitted.contains("ROLE —"), "no role guidance for the default primary role")
+    }
+
+    /// A non-primary role appends concise role guidance while preserving the
+    /// guardrails, the envelope, and the AI's own instructions.
+    @Test func threadSystemPrompt_reviewer_injectsCritiqueGuidance() {
+        let p = AgentSkills.threadSystemPrompt(
+            displayName: "Alice", contextDomain: "iOS", peerName: "Bob", threadID: "t-1",
+            activeSkillIDs: [], instructions: nil, aiRole: "reviewer")
+        #expect(p.contains("ROLE — REVIEWER"))
+        #expect(p.contains("critique"), "the reviewer is told to critique, not re-solve")
+        // Guardrails still present alongside the role text.
+        #expect(p.contains("CONTEXT BOUNDARY"))
+        #expect(p.contains("⟡⟡"), "the shared envelope is still present")
+    }
+
+    @Test func threadSystemPrompt_synthesizer_injectsMergeGuidance() {
+        let p = AgentSkills.threadSystemPrompt(
+            displayName: "Alice", contextDomain: "iOS", peerName: "Bob", threadID: "t-1",
+            activeSkillIDs: [], instructions: nil, aiRole: "synthesizer")
+        #expect(p.contains("ROLE — SYNTHESIZER"))
+        #expect(p.contains("Merge"), "the synthesizer is told to merge the prior answers")
+    }
+
+    /// An unrecognized role is treated like "primary": no guidance, prompt
+    /// unchanged (fail-open to the default, never a broken prompt).
+    @Test func baseInjection_unknownRole_isUnchanged() {
+        let base = AgentSkills.baseInjection(
+            displayName: "A", contextDomain: "", peerName: "", threadID: "t")
+        let unknown = AgentSkills.baseInjection(
+            displayName: "A", contextDomain: "", peerName: "", threadID: "t", aiRole: "bogus")
+        #expect(base == unknown)
+    }
 }

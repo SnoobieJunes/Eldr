@@ -437,6 +437,45 @@ final class AppSession {
         else { UserDefaults.standard.removeObject(forKey: key) }
     }
 
+    /// Default per-thread loop guard ("max AI turns" before a thread pauses for a
+    /// human): 50. `0` = unlimited. `nonisolated` so the (actor) PersonaRuntime can
+    /// read it without an await (matches the sibling accessors).
+    nonisolated static let defaultThreadLoopGuardLimit = 50
+
+    /// Per-thread loop-guard limit (the user's "max AI turns", plan C1): how many
+    /// consecutive AI messages may run in a thread before it pauses for a human.
+    /// `0` = unlimited; default 50. Per-silo + per-thread. `nonisolated` so the
+    /// (actor) PersonaRuntime can read it without an await.
+    nonisolated static func threadLoopGuardLimit(_ threadID: String, siloID: String = "") -> Int {
+        let key = siloDefaultsKey("loopGuard.\(threadID)", siloID)
+        guard UserDefaults.standard.object(forKey: key) != nil else {
+            return defaultThreadLoopGuardLimit
+        }
+        return UserDefaults.standard.integer(forKey: key)
+    }
+    nonisolated static func setThreadLoopGuardLimit(
+        _ value: Int, threadID: String, siloID: String = ""
+    ) {
+        let clamped = max(0, min(9999, value))
+        UserDefaults.standard.set(clamped, forKey: siloDefaultsKey("loopGuard.\(threadID)", siloID))
+    }
+
+    /// Per-conversation "AIs reply in order (critique panel)" toggle (plan C4): when
+    /// on, the tethered AIs in a thread take ordered, role-tagged turns
+    /// (primary → reviewer/critic → synthesizer) instead of replying flat. OFF by
+    /// default. Per-silo + per-conversation. `nonisolated` for the actor runtime.
+    nonisolated static func orderedCritique(_ conversationID: String, siloID: String = "") -> Bool {
+        UserDefaults.standard.bool(
+            forKey: siloDefaultsKey("orderedCritique.\(conversationID)", siloID))
+    }
+    nonisolated static func setOrderedCritique(
+        _ value: Bool, conversationID: String, siloID: String = ""
+    ) {
+        let key = siloDefaultsKey("orderedCritique.\(conversationID)", siloID)
+        if value { UserDefaults.standard.set(true, forKey: key) }
+        else { UserDefaults.standard.removeObject(forKey: key) }
+    }
+
     /// Per-node REMOTE DEV-CONTROL consent (ACPRouterplan Phase 3, C-3): whether the
     /// owner has consented to drive a paired `coding_agent` node's real ACP agent over
     /// the relay. OFF by default — privacy-first, the cardinal rule. The relay-carried
@@ -611,7 +650,8 @@ final class AppSession {
                 instructions: config.instructions,
                 contextPolicy: config.effectivePolicy,
                 contextDepth: config.effectiveDepth,
-                outputMode: config.effectiveOutputMode)
+                outputMode: config.effectiveOutputMode,
+                capabilities: config.capabilities ?? [])
         }
     }
 

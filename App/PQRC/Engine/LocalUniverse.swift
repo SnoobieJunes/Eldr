@@ -179,7 +179,9 @@ final class LocalUniverse {
         //    humans pin "plan-sync" so each side's thread-turn AI gets the skill
         //    plus the base PQRC guardrails injected (pure prompt composition — no
         //    new wire format). Both invite their AIs; the agents exchange context
-        //    inside the thread only, until the loop guard pauses them.
+        //    inside the thread only. AI threads no longer auto-pause (user request),
+        //    so the humans END the run by withdrawing their AIs; the off-by-default
+        //    AI-turn counter is enabled here to showcase it.
         if let threadID = await alice.createThread(
             conversationID: bob.myIdentityHex, title: "Plan lunch")
         {
@@ -187,15 +189,24 @@ final class LocalUniverse {
                 ["plan-sync"], threadID: threadID, siloID: alice.siloID)
             AppSession.setThreadSkills(
                 ["plan-sync"], threadID: threadID, siloID: bob.siloID)
+            // Show the new AI-turn counter on this thread for both personas (it is
+            // OFF by default everywhere else).
+            AppSession.setShowThreadCounter(true, threadID: threadID, siloID: alice.siloID)
+            AppSession.setShowThreadCounter(true, threadID: threadID, siloID: bob.siloID)
             try await settle()
             await alice.inviteAI(threadID: threadID, minutes: 30)
             try await settle()
             await bob.inviteAI(threadID: threadID, minutes: 30)
-            // Let the agents talk; the engine's loop guard stops them at 6.
+            // Let the agents talk a few rounds, then a human ends the run by
+            // withdrawing — there is no automatic pause anymore. Withdrawing closes
+            // the autonomous-send gate (fail closed), so the ping-pong stops.
             for _ in 0..<8 {
                 try await settle(milliseconds: 120)
             }
-            log("4. Shared AI thread (skill: plan-sync) ran to the loop guard")
+            await alice.withdrawAI(threadID: threadID)
+            await bob.withdrawAI(threadID: threadID)
+            try await settle()
+            log("4. Shared AI thread (skill: plan-sync) — AI-turn counter shown, then withdrawn")
         }
 
         // 4.5 Solo "My AI" chat (the brain icon / member-less group, §20): just

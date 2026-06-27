@@ -102,6 +102,11 @@ public actor AgentEngine {
     /// OFF (unbounded) — agents can ping-pong without an automatic pause.
     private var loopGuardLimit: Int
 
+    /// Per-thread loop-guard overrides (user-set "max AI turns" for a thread, plan
+    /// C1). A thread's own value wins over the account-wide `loopGuardLimit`;
+    /// `0` = unlimited for that thread.
+    private var threadLoopGuardLimits: [String: Int] = [:]
+
     public init(
         myIdentity: PQRCIdentity, clock: any Clock, sink: any AgentMessageSink,
         loopGuardLimit: Int = PQRCConstants.agentLoopGuardLimit
@@ -112,14 +117,22 @@ public actor AgentEngine {
         self.loopGuardLimit = loopGuardLimit
     }
 
-    /// Update the loop-guard threshold live (e.g. the user changed the per-silo
-    /// setting while a session is running). `<= 0` turns the guard off.
+    /// Update the account-wide loop-guard threshold live. `<= 0` turns it off.
     public func setLoopGuardLimit(_ limit: Int) {
         loopGuardLimit = limit
     }
 
-    /// Whether the loop guard is enforcing at all (a positive threshold).
-    private var loopGuardEnabled: Bool { loopGuardLimit > 0 }
+    /// Set a per-thread loop-guard threshold (the user's "max AI turns" for this
+    /// thread). `0` = unlimited. Overrides `loopGuardLimit` for `threadID`.
+    public func setThreadLoopGuardLimit(_ limit: Int, threadID: String) {
+        threadLoopGuardLimits[threadID] = limit
+    }
+
+    /// The effective threshold for a thread: its own override if set, else the
+    /// account-wide default. `<= 0` means the guard is off (unlimited) for it.
+    private func effectiveLoopGuardLimit(for threadID: String) -> Int {
+        threadLoopGuardLimits[threadID] ?? loopGuardLimit
+    }
 
     private var myIdentityHex: String { myIdentity.publicKeyData.hexString }
 
@@ -280,9 +293,8 @@ public actor AgentEngine {
             guard let until = threadInvites[threadID]?[myIdentityHex], now < until else {
                 throw AgentEngineError.autonomousSendNotAuthorized
             }
-            if loopGuardEnabled,
-                consecutiveAgentMessages[threadID, default: 0] >= loopGuardLimit
-            {
+            let limit = effectiveLoopGuardLimit(for: threadID)
+            if limit > 0, consecutiveAgentMessages[threadID, default: 0] >= limit {
                 throw AgentEngineError.loopGuardPaused
             }
         } else {
@@ -500,7 +512,8 @@ public actor AgentEngine {
     }
 
     public func loopGuardActive(threadID: String) -> Bool {
-        guard loopGuardEnabled else { return false }
-        return consecutiveAgentMessages[threadID, default: 0] >= loopGuardLimit
+        let limit = effectiveLoopGuardLimit(for: threadID)
+        guard limit > 0 else { return false }
+        return consecutiveAgentMessages[threadID, default: 0] >= limit
     }
 }

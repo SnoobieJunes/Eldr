@@ -323,6 +323,26 @@ struct AISettingsView: View {
                     "Context depth: \(ai.wrappedValue.effectiveDepth) messages",
                     value: depthBinding(ai), in: 1...100)
                     .accessibilityIdentifier("ai-depth")
+                // Self-hosted endpoints can hang; bound the wait. Only the "custom"
+                // OpenAI-compatible backend honors this — cloud SDKs manage their own.
+                if ai.wrappedValue.kind == "custom" {
+                    Stepper(
+                        ai.wrappedValue.requestTimeoutSeconds.map { "Request timeout: \(Int($0))s" }
+                            ?? "Request timeout: default",
+                        value: timeoutBinding(ai), in: 0...600, step: 10)
+                        .accessibilityIdentifier("ai-timeout")
+                }
+                // C4/AC34: mark this AI suitable for coding scopes so a coding
+                // conversation (or a paired Mac node's chat) can route to it.
+                Toggle("Handles coding tasks", isOn: Binding(
+                    get: { ai.wrappedValue.capabilities?.contains("code") ?? false },
+                    set: { on in
+                        var caps = ai.wrappedValue.capabilities ?? []
+                        if on { caps.insert("code") } else { caps.remove("code") }
+                        ai.wrappedValue.capabilities = caps.isEmpty ? nil : caps
+                        persist()
+                    }))
+                    .accessibilityIdentifier("ai-capability-code")
             }
             .padding(.top, 4)
 
@@ -384,6 +404,11 @@ struct AISettingsView: View {
                 // (`.onDisappear`) and on any discrete picker change instead.
                 AppSession.saveConfiguredAIs(ais, siloID: siloID)
             })
+    }
+    private func timeoutBinding(_ ai: Binding<ConfiguredAI>) -> Binding<Double> {
+        Binding(
+            get: { ai.wrappedValue.requestTimeoutSeconds ?? 0 },
+            set: { ai.wrappedValue.requestTimeoutSeconds = $0 <= 0 ? nil : $0; persist() })
     }
     private func policyBinding(_ ai: Binding<ConfiguredAI>) -> Binding<String> {
         Binding(

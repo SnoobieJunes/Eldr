@@ -62,13 +62,23 @@ public enum GiftWrap {
     /// Wraps one rumor for one recipient. The same fuzzed timestamp the sender
     /// committed into the AEAD AD is used for both seal and wrap `created_at`
     /// (APP-SPEC §2; test fuzz_sameValueUsedInADandWrap).
+    ///
+    /// `recipientReceivingKey` (SPEC §9.3, kind 10422): when the sender has
+    /// fetched the recipient's rotating ephemeral receiving sub-key, it is used as
+    /// the relay-visible `p` tag instead of the recipient's identity Nostr pubkey,
+    /// so a passive relay observer cannot link the envelope to the identity. It is
+    /// PURELY the routing tag — the seal/wrap encryption is still to
+    /// `recipientNostrPubkey`, unchanged. `nil` (the default) keeps the identity
+    /// p-tag, so behavior is byte-identical for senders that have not opted in
+    /// (backward compatibility — an old sender still reaches a new receiver).
     public static func wrap(
         rumor: RumorContent,
         sender: NostrKeypair,
         recipientNostrPubkey: String,
         fuzzedTimestamp: Int64,
         randomSource: any RandomSource,
-        nonceSource: any NonceSource
+        nonceSource: any NonceSource,
+        recipientReceivingKey: String? = nil
     ) throws -> NostrEvent {
         // Layers 1–2 (rumor + seal), shared with the local-link path.
         let seal = try seal(
@@ -85,20 +95,35 @@ public enum GiftWrap {
         // after this time. Anchored to the FUZZED created_at (not real now) so it
         // reveals no timing beyond what created_at already does (SPEC §8.4).
         let expiration = fuzzedTimestamp + PQRCConstants.expirationWindowSeconds
+        // The `p` tag is the only recipient-routing surface a relay sees. Use the
+        // ephemeral receiving sub-key when the sender has one; otherwise the
+        // identity Nostr pubkey (default, unchanged).
+        let pTag = recipientReceivingKey ?? recipientNostrPubkey
         return try oneTimeKey.sign(
             NostrEvent(
                 pubkey: oneTimeKey.publicKeyHex,
                 createdAt: fuzzedTimestamp,
                 kind: PQRCConstants.giftWrapEventKind,
-                tags: [["p", recipientNostrPubkey], ["expiration", String(expiration)]],
+                tags: [["p", pTag], ["expiration", String(expiration)]],
                 content: wrapContent
             ), randomSource: randomSource)
     }
 
     /// Recipient side: unwrap → verify → unseal → verify → rumor.
-    public static func unwrap(_ wrapEvent: NostrEvent, recipient: NostrKeypair) throws -> Unwrapped {
+    ///
+    /// `acceptsReceivingPTag` lets a recipient also accept a gift wrap addressed
+    /// to one of its rotating ephemeral receiving sub-keys (SPEC §9.3, kind 10422)
+    /// — the sub-key is only a routing pseudonym, so decryption still uses the
+    /// recipient's identity Nostr key below. The default rejects every non-identity
+    /// p-tag, so behavior is unchanged for callers that have not opted in.
+    public static func unwrap(
+        _ wrapEvent: NostrEvent,
+        recipient: NostrKeypair,
+        acceptsReceivingPTag: (String) -> Bool = { _ in false }
+    ) throws -> Unwrapped {
         guard wrapEvent.kind == PQRCConstants.giftWrapEventKind,
-            wrapEvent.firstTagValue("p") == recipient.publicKeyHex,
+            let pTag = wrapEvent.firstTagValue("p"),
+            pTag == recipient.publicKeyHex || acceptsReceivingPTag(pTag),
             NostrKeypair.verify(wrapEvent)
         else { throw NostrError.wrapMalformed }
 

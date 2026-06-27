@@ -13,7 +13,14 @@ struct ThreadView: View {
     @State private var draftText = ""
     @State private var showInvitePicker = false
     @State private var showSkills = false
+    @State private var showTurnLimit = false
     @State private var pinnedSkillCount = 0
+    /// C6: true when this is a "My AI" per-AI sub-thread — hides the invite/countdown.
+    @State private var isSoloThread = false
+    /// Off by default (user request): when on, the header shows a small live
+    /// counter of how many AI replies have run in a row. Replaces the removed
+    /// auto-pause — informational only, never stops the thread. Per-silo+thread.
+    @State private var showCounter = false
     /// Markdown/HTML message currently open in the full-screen reader.
     @State private var fullScreenContent: FullScreenContent?
 
@@ -23,32 +30,37 @@ struct ThreadView: View {
             // own 1 Hz clock (ThreadHeader) so the per-second tick re-evaluates
             // only the header — NOT this body, and therefore not the thread
             // message `ForEach`/`ScrollView` below.
-            ThreadHeader(model: model, thread: thread, showInvitePicker: $showInvitePicker)
+            ThreadHeader(
+                model: model, thread: thread,
+                showInvitePicker: $showInvitePicker, showCounter: showCounter,
+                isSoloThread: isSoloThread)
             messageList
-                // Bottom bars as a safe-area inset, not VStack siblings: when
-                // the loop-guard row appears mid-conversation the inset grows
-                // and the anchored scroll shifts up with it — a sibling would
-                // occlude the last bubble in place (which also reads as a
-                // contrast-audit failure, A7).
+                // Composer as a bottom safe-area inset (not a VStack sibling): the
+                // anchored scroll keeps the last bubble above it instead of being
+                // occluded in place (which also reads as a contrast-audit failure, A7).
                 .safeAreaInset(edge: .bottom, spacing: 0) {
-                    VStack(spacing: 0) {
-                        if model.loopGuardPaused.contains(thread.id) {
-                            Label("AIs paused — waiting for a human", systemImage: "pause.circle")
-                                .font(.callout.weight(.medium))
-                                .frame(maxWidth: .infinity)
-                                .padding(.vertical, 8)
-                                // Opaque tint: translucent fills break the
-                                // contrast auditor's background sampling (A7).
-                                .background(Color.yellow.mix(with: Color(.systemBackground), by: 0.85))
-                                .accessibilityIdentifier("loop-guard-row")
-                        }
-                        composer
-                    }
+                    composer
                 }
         }
         .navigationTitle("✳︎ \(thread.title)")
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
+            ToolbarItem(placement: .topBarTrailing) {
+                // AI-turn counter toggle (off by default). AI threads don't
+                // auto-pause; this lets a human opt THIS thread into a live tally
+                // of AI replies-in-a-row for situational awareness.
+                Button {
+                    showCounter.toggle()
+                    AppSession.setShowThreadCounter(
+                        showCounter, threadID: thread.id, siloID: model.siloID)
+                } label: {
+                    Label(
+                        showCounter ? "Hide AI turn counter" : "Show AI turn counter",
+                        systemImage: showCounter ? "number.square.fill" : "number.square")
+                }
+                .accessibilityIdentifier("thread-counter-toggle")
+                .help("Show a live count of how many AI replies have run in a row in this thread. AI threads no longer pause on their own — this is just so you can keep an eye on a long AI exchange.")
+            }
             ToolbarItem(placement: .topBarTrailing) {
                 Button {
                     showSkills = true
@@ -60,6 +72,18 @@ struct ThreadView: View {
                 .accessibilityIdentifier("thread-skills")
                 .help("Pin shared skills — a common vocabulary (plan-sync, tech-spec, code-debug…) so each person's AI can hand off work the other can act on, instead of free-form chatter.")
             }
+            ToolbarItem(placement: .topBarTrailing) {
+                Button {
+                    showTurnLimit = true
+                } label: {
+                    Label("AI turn limit", systemImage: "gauge.with.dots.needle.bottom.50percent")
+                }
+                .accessibilityIdentifier("thread-turn-limit")
+                .help("Cap how many AI replies can run in a row in this thread before it pauses for a human. 0 = unlimited; default 50.")
+            }
+        }
+        .sheet(isPresented: $showTurnLimit) {
+            ThreadTurnLimitView(model: model, threadID: thread.id)
         }
         .sheet(isPresented: $showSkills) {
             ThreadSkillsView(threadID: thread.id, siloID: model.siloID)
@@ -67,7 +91,11 @@ struct ThreadView: View {
                     pinnedSkillCount = AppSession.threadSkills(thread.id, siloID: model.siloID).count
                 }
         }
-        .task { pinnedSkillCount = AppSession.threadSkills(thread.id, siloID: model.siloID).count }
+        .task {
+            pinnedSkillCount = AppSession.threadSkills(thread.id, siloID: model.siloID).count
+            showCounter = AppSession.showThreadCounter(thread.id, siloID: model.siloID)
+            isSoloThread = await model.isSoloThread(thread.id)
+        }
         .fullScreenCover(item: $fullScreenContent) { content in
             FullScreenReaderView(text: content.text)
         }
@@ -185,10 +213,58 @@ struct ThreadView: View {
 /// `ForEach`. Reads the same `@Observable` model state as before; `now` only
 /// affects which invites are still "active" and the displayed minutes, so the
 /// visible content is identical to the inline version.
+/// Per-thread "max AI turns" editor (plan C1): how many AI replies may run in a
+/// row before the thread pauses for a human. 0 = unlimited; default 50.
+struct ThreadTurnLimitView: View {
+    @Bindable var model: AppModel
+    let threadID: String
+    @State private var limitText = ""
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        NavigationStack {
+            Form {
+                Section {
+                    TextField("Max AI turns", text: $limitText)
+                        .keyboardType(.numberPad)
+                        .accessibilityIdentifier("thread-turn-limit-field")
+                } footer: {
+                    Text("How many AI replies can run in a row in this thread before it pauses for a human turn. Enter 0–9999; 0 = unlimited. Default 50.")
+                }
+            }
+            .navigationTitle("AI turn limit")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Cancel") { dismiss() }
+                }
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Save") {
+                        let value = max(
+                            0, min(9999, Int(limitText) ?? AppSession.defaultThreadLoopGuardLimit))
+                        Task { await model.setThreadLoopGuardLimit(value, threadID: threadID) }
+                        dismiss()
+                    }
+                    .accessibilityIdentifier("thread-turn-limit-save")
+                }
+            }
+            .task {
+                limitText = String(AppSession.threadLoopGuardLimit(threadID, siloID: model.siloID))
+            }
+        }
+        .presentationDetents([.medium])
+    }
+}
+
 private struct ThreadHeader: View {
     let model: AppModel
     let thread: ThreadVM
     @Binding var showInvitePicker: Bool
+    /// Off by default (user request). When on, shows the AI-replies-in-a-row tally.
+    var showCounter: Bool = false
+    /// C6: a My-AI per-AI sub-thread — hide the invite/withdraw/context controls and
+    /// the per-AI countdown (the pinned AI is always on; there's no peer or timer).
+    var isSoloThread: Bool = false
     @State private var now = Int64(Date().timeIntervalSince1970)
     private let ticker = Timer.publish(every: 1, on: .main, in: .common).autoconnect()
 
@@ -201,8 +277,34 @@ private struct ThreadHeader: View {
 
     private var threadScope: AIContextGrant.Scope { .thread(thread.id) }
 
+    /// How many AI replies have run consecutively since the last human message —
+    /// the run length the removed auto-pause used to cap. Counts every party's AI
+    /// (resets on any human message), computed from the visible thread so it needs
+    /// no engine round-trip and updates as messages arrive.
+    private var aiTurnsInARow: Int {
+        var n = 0
+        for message in model.threadMessages(thread.id, conversationID: thread.conversationID).reversed() {
+            guard message.participantType == .agent else { break }
+            n += 1
+        }
+        return n
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
+            if showCounter {
+                let n = aiTurnsInARow
+                Label(
+                    "\(n) AI repl\(n == 1 ? "y" : "ies") in a row",
+                    systemImage: "sparkles")
+                .font(.caption.weight(.medium))
+                .monospacedDigit()
+                .foregroundStyle(.secondary)
+                .accessibilityIdentifier("thread-counter")
+                .accessibilityLabel(
+                    "\(n) AI repl\(n == 1 ? "y" : "ies") in a row since the last person spoke")
+            }
+            if !isSoloThread {
             ForEach(Array((model.aiInvites[thread.id] ?? [:]).keys.sorted()), id: \.self) { identityHex in
                 if let until = model.aiInvites[thread.id]?[identityHex], until > now {
                     Label(
@@ -249,6 +351,7 @@ private struct ThreadHeader: View {
                     .accessibilityIdentifier("grant-context")
                 }
             }
+            }  // end if !isSoloThread (C6)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding()
