@@ -314,6 +314,18 @@ public actor ACPClientDriver {
             ]))
     }
 
+    /// Phase D4 / feature 9 — resize a live terminal's window (TIOCSWINSZ on the node).
+    /// Fire-and-forget; no-op without a session.
+    public func terminalResize(terminalId: String, cols: Int, rows: Int) async {
+        guard let sessionId else { return }
+        await notify(
+            method: "terminal/resize",
+            params: .object([
+                "sessionId": .string(sessionId), "terminalId": .string(terminalId),
+                "cols": .int(cols), "rows": .int(rows),
+            ]))
+    }
+
     /// Tear down: stop reading, close our write end, terminate a spawned process, and
     /// fail any outstanding requests.
     public func shutdown() async {

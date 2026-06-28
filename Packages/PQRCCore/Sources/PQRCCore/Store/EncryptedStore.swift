@@ -63,6 +63,21 @@ public struct EncryptedStore: Sendable {
         try wrapper.wrap(masterKey: masterKey.rawData)
     }
 
+    /// Derive a stable, purpose-scoped sub-key from the master key for an out-of-band
+    /// channel that a SEPARATE process must also key — e.g. the eldr-acp metadata files
+    /// (`events.jsonl`, `eldr.md`), which the agent process writes and Huginn reads. Same
+    /// HKDF construction as `recordKey` but `label` as `info`, so callers get a deterministic
+    /// 32-byte key tied to the SE-wrapped master key (one root of trust). The returned bytes
+    /// are sensitive: never log or persist them in the clear (invariant 12).
+    public func deriveKey(label: String, byteCount: Int = 32) -> Data {
+        HKDF<SHA256>.deriveKey(
+            inputKeyMaterial: masterKey,
+            salt: Data("pqrc-store-v1".utf8),
+            info: Data(label.utf8),
+            outputByteCount: byteCount
+        ).rawData
+    }
+
     private func recordKey(for recordID: String) -> SymmetricKey {
         HKDF<SHA256>.deriveKey(
             inputKeyMaterial: masterKey,

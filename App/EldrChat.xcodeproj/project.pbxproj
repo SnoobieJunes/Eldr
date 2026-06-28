@@ -37,6 +37,7 @@
 		AA0000000000000000000701 /* EldrChat.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = EldrChat.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		AA0000000000000000000702 /* EldrChatTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = EldrChatTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		AA0000000000000000000703 /* EldrChatUITests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = EldrChatUITests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+		B9C4C4802FF08EEE0005B92A /* EldrChat.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = EldrChat.entitlements; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFileSystemSynchronizedRootGroup section */
@@ -92,6 +93,7 @@
 		AA0000000000000000000601 = {
 			isa = PBXGroup;
 			children = (
+				B9C4C4802FF08EEE0005B92A /* EldrChat.entitlements */,
 				AA0000000000000000000401 /* PQRC */,
 				AA0000000000000000000402 /* PQRCTests */,
 				AA0000000000000000000403 /* PQRCUITests */,
@@ -392,7 +394,8 @@
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = Info.plist;
 				INFOPLIST_KEY_CFBundleDisplayName = EldrChat;
-				INFOPLIST_KEY_ITSAppUsesNonExemptEncryption = YES;
+				INFOPLIST_KEY_ITSAppUsesNonExemptEncryption = NO;
+				INFOPLIST_KEY_NSLocalNetworkUsageDescription = "EldrChat uses your local network to connect to nearby devices over the encrypted Multipeer link and to reach a self-hosted AI you run on your own network. Nothing is sent to third parties.";
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
 				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
 				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
@@ -425,7 +428,8 @@
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = Info.plist;
 				INFOPLIST_KEY_CFBundleDisplayName = EldrChat;
-				INFOPLIST_KEY_ITSAppUsesNonExemptEncryption = YES;
+				INFOPLIST_KEY_ITSAppUsesNonExemptEncryption = NO;
+				INFOPLIST_KEY_NSLocalNetworkUsageDescription = "EldrChat uses your local network to connect to nearby devices over the encrypted Multipeer link and to reach a self-hosted AI you run on your own network. Nothing is sent to third parties.";
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
 				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
 				INFOPLIST_KEY_UILaunchScreen_Generation = YES;

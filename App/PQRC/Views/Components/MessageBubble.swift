@@ -49,6 +49,16 @@ struct MessageBubble: View {
     /// Long-press entry to start a new AI thread anchored to THIS message.
     var onStartThread: (() -> Void)? = nil
 
+    /// Long-press entry (inside a thread) to copy THIS message back into the parent
+    /// conversation — "bring the answer back" (D4). nil hides it.
+    var onPromoteToMain: (() -> Void)? = nil
+
+    /// My tethered AIs (id, name) for the per-AI context submenu (feature 7). Empty
+    /// hides the submenu.
+    var myAIs: [(id: String, name: String)] = []
+    /// Toggle THIS message in ONE specific AI's context (feature 7). nil hides it.
+    var onMarkForAI: ((_ aiID: String, _ value: Bool) -> Void)? = nil
+
     /// How many tethered AIs currently include THIS message in their context
     /// (and whether any is a firewalled remote AI). nil = not computed. (C5)
     var aiVisibility: AIMessageVisibility? = nil
@@ -98,8 +108,49 @@ struct MessageBubble: View {
         copyMenuItem
         fullScreenMenuItem
         aiContextMenuItem
+        perAIContextMenuItem
         answerWithAIMenuItem
         startThreadMenuItem
+        promoteToMainMenuItem
+    }
+
+    /// Per-AI context submenu (feature 7): add/remove THIS message from ONE specific
+    /// AI's context — finer than the global "Add to AI Context" flag. A checkmark
+    /// shows which AIs currently include it (a globally-marked message means "all my
+    /// AIs" until refined per-AI).
+    @ViewBuilder private var perAIContextMenuItem: some View {
+        if let onMarkForAI, !myAIs.isEmpty {
+            Menu {
+                ForEach(myAIs, id: \.id) { ai in
+                    let marked = effectiveMarks.contains(ai.id)
+                    Button {
+                        onMarkForAI(ai.id, !marked)
+                    } label: {
+                        Label(ai.name, systemImage: marked ? "checkmark" : "circle")
+                    }
+                }
+            } label: {
+                Label("Add to a specific AI", systemImage: "brain.head.profile")
+            }
+        }
+    }
+
+    /// The set of my AIs that currently see this message: the explicit per-AI marks
+    /// if set, else "all my AIs" when globally marked, else none.
+    private var effectiveMarks: Set<String> {
+        if let marks = message.aiMarks { return Set(marks) }
+        return message.aiContext ? Set(myAIs.map(\.id)) : []
+    }
+
+    /// Long-press entry (in a thread) to copy this message back into the main chat.
+    @ViewBuilder private var promoteToMainMenuItem: some View {
+        if let onPromoteToMain {
+            Button {
+                onPromoteToMain()
+            } label: {
+                Label("Copy to main chat", systemImage: "arrow.up.forward.square")
+            }
+        }
     }
 
     /// Copy the message text to the pasteboard — the right-click → Copy desktop

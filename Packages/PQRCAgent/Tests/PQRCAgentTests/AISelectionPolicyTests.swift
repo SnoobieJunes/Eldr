@@ -205,3 +205,64 @@ struct OrderedCritiquePolicyTests {
         #expect(policy.primary(from: ais, conversationID: "c", threadID: nil)?.id == "a")
     }
 }
+
+@Suite("Conversation roster policy (per-chat membership + order)")
+struct ConversationRosterPolicyTests {
+    private func ai(_ id: String, _ auto: Bool = true) -> FakeAI {
+        FakeAI(id: id, participatesAutonomously: auto)
+    }
+    private func policy(
+        base: any AISelectionPolicy<FakeAI> = DefaultAISelectionPolicy<FakeAI>(),
+        _ roster: @escaping @Sendable (String, String?) -> [String]?
+    ) -> ConversationRosterPolicy<FakeAI> {
+        ConversationRosterPolicy(aiID: { $0.id }, roster: roster, base: base)
+    }
+
+    /// nil roster ⇒ pass-through (today's behavior; the "all my AIs" default).
+    @Test func nilRoster_passesThrough() {
+        let p = policy { _, _ in nil }
+        let ais = [ai("a"), ai("b"), ai("c")]
+        #expect(
+            p.participants(from: ais, conversationID: "c", threadID: nil).map(\.id) == ["a", "b", "c"])
+        #expect(p.primary(from: ais, conversationID: "c", threadID: nil)?.id == "a")
+    }
+
+    /// [] ⇒ no participants (silence every AI in this chat).
+    @Test func emptyRoster_silencesAll() {
+        let p = policy { _, _ in [] }
+        #expect(p.participants(from: [ai("a"), ai("b")], conversationID: "c", threadID: nil).isEmpty)
+    }
+
+    /// A roster filters to membership AND imposes order (reordering the input).
+    @Test func roster_filtersAndReorders() {
+        let p = policy { _, _ in ["c", "a"] }
+        let ais = [ai("a"), ai("b"), ai("c")]
+        #expect(p.participants(from: ais, conversationID: "x", threadID: nil).map(\.id) == ["c", "a"])
+        #expect(p.primary(from: ais, conversationID: "x", threadID: nil)?.id == "c")
+    }
+
+    /// Unknown/removed ids in the roster are skipped (an AI the user deleted).
+    @Test func roster_skipsUnknownIDs() {
+        let p = policy { _, _ in ["ghost", "b"] }
+        #expect(
+            p.participants(from: [ai("a"), ai("b")], conversationID: "x", threadID: nil).map(\.id)
+                == ["b"])
+    }
+
+    /// Roster order drives the ordered-critique sequence through the wrapped base.
+    @Test func roster_drivesCritiqueOrder() {
+        let p = policy(base: OrderedCritiquePolicy<FakeAI>()) { _, _ in ["c", "a", "b"] }
+        let ais = [ai("a"), ai("b"), ai("c")]
+        let turn = p.critiqueTurn(from: ais, conversationID: "x", threadID: "t")
+        #expect(turn?.map { $0.ai.id } == ["c", "a", "b"])
+        #expect(turn?.map { $0.role } == ["primary", "reviewer", "synthesizer"])
+    }
+
+    /// Thread scope is routed independently of conversation scope.
+    @Test func roster_perScope() {
+        let p = policy { _, threadID in threadID == "t1" ? ["b"] : ["a"] }
+        let ais = [ai("a"), ai("b")]
+        #expect(p.participants(from: ais, conversationID: "c", threadID: nil).map(\.id) == ["a"])
+        #expect(p.participants(from: ais, conversationID: "c", threadID: "t1").map(\.id) == ["b"])
+    }
+}

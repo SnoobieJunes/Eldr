@@ -33,9 +33,14 @@ STAGE="$BUILD_DIR/stage"
 DEVELOPER_ID="${DEVELOPER_ID:-Developer ID Application}"
 
 # Signing + notarization inputs, validated up front. TEAM_ID is needed as early as the
-# archive step: with manual Developer ID signing, the Swift package dependencies
-# (swift-crypto, swift-secp256k1) must resolve a development team, or the archive fails
-# with: 'Signing for "swift-crypto_Crypto" requires a development team.'
+# archive step: it feeds DEVELOPMENT_TEAM so the Swift package dependencies
+# (swift-crypto, swift-secp256k1) resolve a team, or the archive fails with:
+# 'Signing for "swift-crypto_Crypto" requires a development team.' The archive + export
+# use AUTOMATIC signing (not Manual): the keychain-access-groups entitlement (added by the
+# keychain-consolidation work) is profile-restricted, and under CODE_SIGN_STYLE=Manual
+# Xcode refuses to mint a profile even with -allowProvisioningUpdates ("Huginn requires a
+# provisioning profile"). Automatic + -allowProvisioningUpdates creates the Developer ID
+# "Mac Team Direct" profile the entitlement needs; the export re-signs Developer ID.
 : "${APPLE_ID:?set APPLE_ID (your Apple ID email)}"
 : "${APP_PASSWORD:?set APP_PASSWORD (app-specific password from appleid.apple.com)}"
 : "${TEAM_ID:?set TEAM_ID (your 10-char Apple Developer Team ID)}"
@@ -65,8 +70,7 @@ xcodebuild archive \
   -configuration "$CONFIG" \
   -archivePath "$ARCHIVE" \
   -destination 'generic/platform=macOS' \
-  CODE_SIGN_STYLE=Manual \
-  CODE_SIGN_IDENTITY="$DEVELOPER_ID" \
+  CODE_SIGN_STYLE=Automatic \
   DEVELOPMENT_TEAM="$TEAM_ID" \
   -allowProvisioningUpdates
 
@@ -79,7 +83,7 @@ cat > "$BUILD_DIR/ExportOptions.plist" <<PLIST
     <key>method</key>
     <string>developer-id</string>
     <key>signingStyle</key>
-    <string>manual</string>
+    <string>automatic</string>
     <key>teamID</key>
     <string>$TEAM_ID</string>
 </dict>
@@ -88,7 +92,8 @@ PLIST
 xcodebuild -exportArchive \
   -archivePath "$ARCHIVE" \
   -exportPath "$EXPORT_DIR" \
-  -exportOptionsPlist "$BUILD_DIR/ExportOptions.plist"
+  -exportOptionsPlist "$BUILD_DIR/ExportOptions.plist" \
+  -allowProvisioningUpdates
 
 APP="$EXPORT_DIR/$APP_NAME.app"
 [ -d "$APP" ] || { echo "error: exported app not found at $APP" >&2; exit 1; }
@@ -115,12 +120,31 @@ if [ -f "$ELDR_ACP_BIN" ]; then
   codesign --force --options runtime --timestamp --sign "$DEVELOPER_ID" "$ELDR_ACP_BIN"
   # eldr-node carries its own keychain-access-groups entitlement so the headless node's
   # secrets use the data-protection keychain (shared team-scoped group with Huginn).
+  # The raw .entitlements file holds the literal build variable $(AppIdentifierPrefix),
+  # which xcodebuild expands but codesign does NOT — signing the node with the raw file
+  # would bake the literal group "$(AppIdentifierPrefix)chat.eldr.shared" and break the
+  # data-protection keychain (errSecMissingEntitlement -34018). Expand it to the team id
+  # ($(AppIdentifierPrefix) -> "<TEAM_ID>.") into a temp entitlements file first. The file
+  # is then run through plutil to STRIP the XML comment: codesign's entitlements parser
+  # (AMFIUnserializeXML) is stricter than libxml and rejects comments with
+  # "AMFIUnserializeXML: syntax error near line N"; plutil re-serializes canonically,
+  # dropping comments while preserving the keychain-access-groups value.
   if [ -f "$ELDR_NODE_BIN" ]; then
+    NODE_ENT="$BUILD_DIR/eldr-node.expanded.entitlements"
+    sed "s/\$(AppIdentifierPrefix)/${TEAM_ID}./g" "eldr-node.entitlements" \
+      | plutil -convert xml1 -o "$NODE_ENT" -
     codesign --force --options runtime --timestamp --sign "$DEVELOPER_ID" \
-      --entitlements "eldr-node.entitlements" "$ELDR_NODE_BIN"
+      --entitlements "$NODE_ENT" "$ELDR_NODE_BIN"
   fi
+  # Re-seal the outer app around the freshly-signed nested CLIs. Re-apply the ALREADY
+  # BAKED entitlements (extracted from the exported app) rather than the raw source file:
+  # the export expanded $(AppIdentifierPrefix) AND injected com.apple.application-identifier
+  # from the provisioning profile. Signing with the raw Huginn.entitlements would drop the
+  # application-identifier and re-introduce the literal variable, breaking the keychain.
+  APP_ENT="$BUILD_DIR/huginn.expanded.entitlements"
+  codesign -d --entitlements "$APP_ENT" --xml "$APP"
   codesign --force --options runtime --timestamp --sign "$DEVELOPER_ID" \
-    --entitlements "Huginn.entitlements" "$APP"
+    --entitlements "$APP_ENT" "$APP"
   codesign --verify --deep --strict --verbose=2 "$APP"
 fi
 

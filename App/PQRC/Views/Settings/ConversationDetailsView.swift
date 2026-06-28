@@ -241,7 +241,22 @@ struct ConversationDetailsView: View {
                                     // Per-node, per-silo — the conversationID IS the node's hex.
                                     AppSession.setAutonomousChangesConsent(
                                         newValue, nodeID: conversationID, siloID: model.siloID)
+                                    // Revoking the standing consent (feature 9): a live
+                                    // interactive terminal required it, so tear it down now
+                                    // rather than letting it run to its natural exit.
+                                    if !newValue {
+                                        Task { await model.stopACPTerminal(conversationID: conversationID) }
+                                    }
                                 }
+                            // Kill any live terminal on demand without flipping the toggle.
+                            if autonomousChanges, model.acpTerminalByConversation[conversationID]?.closed == false {
+                                Button(role: .destructive) {
+                                    Task { await model.stopACPTerminal(conversationID: conversationID) }
+                                } label: {
+                                    Label("Kill live terminal", systemImage: "stop.fill")
+                                }
+                                .accessibilityIdentifier("acp-kill-terminal")
+                            }
                             Label(
                                 autonomousChanges
                                     ? "ON — the paired Mac agent can create/modify files and run shell commands on its node without asking each time."

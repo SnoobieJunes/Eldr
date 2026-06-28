@@ -247,6 +247,9 @@ final class AppModel {
             }
         case .agentError(let message):
             agentError = message
+        case .aiMentionNeedsChoice(let conversationID, let aiID, let aiName):
+            pendingAIMentionChoice = AIMentionChoice(
+                conversationID: conversationID, aiID: aiID, aiName: aiName)
         case .safetyCodeChanged(let identityHex):
             safetyCodeChangedFor.insert(identityHex)
         case .nearbyDiscovered:
@@ -387,6 +390,20 @@ final class AppModel {
     /// so the user sees *why* instead of silently getting nothing.
     var agentError: String?
 
+    /// Feature 6 / decision #5: a single @-mention of one of my AIs in a shared chat
+    /// where it isn't live. The UI presents a choice — draft privately, or open a
+    /// brief window for just that AI and post.
+    var pendingAIMentionChoice: AIMentionChoice?
+    struct AIMentionChoice: Identifiable, Equatable {
+        var id: String { conversationID + "|" + aiID }
+        let conversationID: String
+        let aiID: String
+        let aiName: String
+    }
+    /// A private draft produced by "Draft privately" — surfaced for the user to edit
+    /// and send themselves (never auto-posted to other people).
+    var mentionDraft: String?
+
     func draft(conversationID: String, threadID: String? = nil, focus: String? = nil) async -> String? {
         do {
             let text = try await runtime.draftReply(
@@ -454,6 +471,24 @@ final class AppModel {
             nodeHex: conversationID, terminalID: term.terminalID, data: text + "\n")
     }
 
+    /// Send a control byte to the live terminal's PTY (feature 9): ^C (ETX, 0x03)
+    /// interrupts the foreground job, ^D (EOT, 0x04) signals EOF, ^Z (SUB, 0x1A)
+    /// suspends. Written straight to the PTY stdin (no trailing newline, unlike a
+    /// typed line), so the node's tty delivers the matching signal.
+    func sendACPTerminalControl(_ byte: Character, conversationID: String) async {
+        guard let term = acpTerminalByConversation[conversationID], !term.closed else { return }
+        await runtime.sendACPTerminalInput(
+            nodeHex: conversationID, terminalID: term.terminalID, data: String(byte))
+    }
+
+    /// Report the phone terminal view's size (cols × rows) to the node so full-screen
+    /// tools (vim, top) lay out correctly (feature 9). No-op if no terminal is live.
+    func resizeACPTerminal(cols: Int, rows: Int, conversationID: String) async {
+        guard let term = acpTerminalByConversation[conversationID], !term.closed else { return }
+        await runtime.resizeACPTerminal(
+            nodeHex: conversationID, terminalID: term.terminalID, cols: cols, rows: rows)
+    }
+
     /// STOP/KILL the live interactive terminal in `conversationID` (the prominent Stop
     /// control). Tells the node to terminate the PTY's child process group + close its
     /// fds. Always available while a terminal is live.
@@ -475,6 +510,79 @@ final class AppModel {
     /// Mark/unmark messages as "AI context".
     func markAIContext(messageIDs: [String], value: Bool, conversationID: String) async {
         await runtime.markAsAIContext(messageIDs: messageIDs, value: value, conversationID: conversationID)
+    }
+
+    /// Per-AI context mark (feature 7): include/exclude a message in ONE of my AIs'
+    /// context, independent of the global shareability flag. Drives the per-AI
+    /// long-press submenu + the per-AI inspector toggle.
+    func markAIContext(messageIDs: [String], aiID: String, value: Bool) async {
+        for id in messageIDs { await runtime.setAIMark(messageID: id, aiID: aiID, value: value) }
+    }
+
+    /// "Bring the answer back" (D4): copy a thread message into its parent conversation
+    /// as a co-authored human message.
+    func promoteThreadMessage(messageID: String) async {
+        await runtime.promoteThreadMessageToMain(messageID: messageID)
+    }
+
+    // MARK: - Per-chat AI roster (features 4 & 5)
+
+    /// The per-chat reply-order roster (the per-AI hub). `scopeID` is a conversationID
+    /// or threadID. nil = no roster (all AIs, config order); [] = silence; [ids] =
+    /// exactly these, in order.
+    func conversationAIRoster(_ scopeID: String) -> [String]? {
+        AppSession.conversationAIRoster(scopeID, siloID: siloID)
+    }
+    func setConversationAIRoster(_ ids: [String]?, scopeID: String) {
+        AppSession.setConversationAIRoster(ids, scopeID: scopeID, siloID: siloID)
+    }
+
+    /// The configured tethered AIs (id/name/kind/enabled) — the per-AI hub's roster
+    /// rows. Includes the Mac-Tethered-AI (`acp`) like any other (feature 8).
+    func tetheredAIList() -> [ConfiguredAI] { AppSession.loadConfiguredAIs(siloID: siloID) }
+
+    /// Per-conversation "AIs reply in order (critique panel)" role toggle.
+    func isOrderedCritique(_ conversationID: String) -> Bool {
+        AppSession.orderedCritique(conversationID, siloID: siloID)
+    }
+    func setOrderedCritique(_ value: Bool, conversationID: String) {
+        AppSession.setOrderedCritique(value, conversationID: conversationID, siloID: siloID)
+    }
+
+    /// Per-conversation context-mode override ("off" | "marked" | "full" | nil =
+    /// follow each AI's own setting) — the in-chat hub's gather-mode control.
+    func conversationContextMode(_ conversationID: String) -> String? {
+        AppSession.conversationContextMode(conversationID, siloID: siloID)
+    }
+    func setConversationContextMode(_ mode: String?, conversationID: String) {
+        AppSession.setConversationContextMode(mode, conversationID: conversationID, siloID: siloID)
+    }
+
+    /// Resolve the pending single-@AI choice (decision #5). `draft` → produce a
+    /// private draft only I can send; otherwise → open a brief window and let that AI
+    /// post directly.
+    func resolveAIMentionChoice(draft: Bool) async {
+        guard let choice = pendingAIMentionChoice else { return }
+        pendingAIMentionChoice = nil
+        if draft {
+            if let d = try? await runtime.draftReply(
+                conversationID: choice.conversationID, withAIID: choice.aiID) {
+                let text = d.text.trimmingCharacters(in: .whitespacesAndNewlines)
+                mentionDraft = text.isEmpty ? nil : text
+                if text.isEmpty { agentError = "The AI returned an empty draft." }
+            } else {
+                agentError = "Couldn't draft a reply. Check Settings ▸ AI."
+            }
+        } else {
+            try? await runtime.openWindowAndPost(
+                aiID: choice.aiID, conversationID: choice.conversationID)
+        }
+    }
+
+    /// @-mention autocomplete candidates for a conversation's composer (feature 6):
+    /// my AIs, the conversation's people, and their AIs — each a `(name, kind)`.
+    func mentionCandidates(conversationID: String) async -> [(name: String, kind: String)] {
+        await runtime.mentionCandidates(conversationID: conversationID)
     }
 
     /// Allow the other party's AI to consume my marked context (and reciprocally

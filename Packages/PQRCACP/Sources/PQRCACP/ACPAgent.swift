@@ -196,6 +196,14 @@ public actor ACPAgent {
                 let data = params["data"]?.stringValue
             else { return }
             terminals[terminalId]?.process.write(data)
+        case "terminal/resize":
+            // Phase D4 / feature 9 — resize a live PTY window (TIOCSWINSZ) so
+            // full-screen tools lay out to the phone's terminal view. Best-effort.
+            guard let terminalId = params["terminalId"]?.stringValue,
+                let cols = params["cols"]?.intValue, let rows = params["rows"]?.intValue
+            else { return }
+            terminals[terminalId]?.process.resize(
+                cols: UInt16(clamping: cols), rows: UInt16(clamping: rows))
         case "terminal/release":
             // Phase D4 — the phone's Stop control. Kill the PTY at the caller's request,
             // from ANY state. Always available (the always-killable guarantee).

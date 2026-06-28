@@ -131,6 +131,51 @@ struct AgentContextGrantTests {
         }
     }
 
+    @Test func axesAreIndependentlyGranted() async throws {
+        let fx = try Self.fixture()
+        let bobHex = fx.bob.publicKeyData.hexString
+        let humanScope = AIContextGrant.Scope.thread("t1", axis: AIContextGrant.Scope.humanAxis)
+        let aiScope = AIContextGrant.Scope.thread("t1", axis: AIContextGrant.Scope.aiAxis)
+
+        // Both sides grant the HUMAN axis only (step 1: their words).
+        _ = try await fx.engine.startMyContextGrant(scope: humanScope, durationSeconds: 1800)
+        let bobHuman = try AIContextGrant.make(
+            scope: humanScope, activeUntil: fx.clock.now() + 1800, identity: fx.bob)
+        try await fx.engine.receiveContextGrant(bobHuman, fromSenderIdentityHex: bobHex)
+        // Human axis authorized; AI axis still default-deny (the 2-step split).
+        #expect(await fx.engine.contextSharingAuthorized(scope: humanScope) == true)
+        #expect(await fx.engine.contextSharingAuthorized(scope: aiScope) == false)
+
+        // Both grant the AI axis too (step 2: their AI): now independently authorized.
+        _ = try await fx.engine.startMyContextGrant(scope: aiScope, durationSeconds: 1800)
+        let bobAI = try AIContextGrant.make(
+            scope: aiScope, activeUntil: fx.clock.now() + 1800, identity: fx.bob)
+        try await fx.engine.receiveContextGrant(bobAI, fromSenderIdentityHex: bobHex)
+        #expect(await fx.engine.contextSharingAuthorized(scope: aiScope) == true)
+
+        // Withdrawing the AI axis leaves the human axis intact (independence).
+        await fx.engine.withdrawMyContextGrant(scope: aiScope)
+        #expect(await fx.engine.contextSharingAuthorized(scope: aiScope) == false)
+        #expect(await fx.engine.contextSharingAuthorized(scope: humanScope) == true)
+    }
+
+    @Test func axisLessGrantIsHumanAxis() async throws {
+        let fx = try Self.fixture()
+        let bobHex = fx.bob.publicKeyData.hexString
+        // A grant carrying no axis (older client, default) is the HUMAN axis only.
+        let legacyScope = AIContextGrant.Scope.thread("t1")  // axis defaults to "human"
+        _ = try await fx.engine.startMyContextGrant(scope: legacyScope, durationSeconds: 1800)
+        let bobLegacy = try AIContextGrant.make(
+            scope: legacyScope, activeUntil: fx.clock.now() + 1800, identity: fx.bob)
+        try await fx.engine.receiveContextGrant(bobLegacy, fromSenderIdentityHex: bobHex)
+        #expect(
+            await fx.engine.contextSharingAuthorized(
+                scope: .thread("t1", axis: AIContextGrant.Scope.humanAxis)) == true)
+        #expect(
+            await fx.engine.contextSharingAuthorized(
+                scope: .thread("t1", axis: AIContextGrant.Scope.aiAxis)) == false)
+    }
+
     @Test func mockEchoesSharedContext() async throws {
         let provider = MockAgentProvider()
         let context = AgentContext(

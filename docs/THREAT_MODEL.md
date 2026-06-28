@@ -328,6 +328,34 @@ otherwise; see below):
     (`ELDR_LLM_TOKEN`) is sent only as the model endpoint's `Authorization`
     header and is **never logged** (diagnostics log the URL and model name only).
 
+### 2.14 AI endpoint at-rest storage on the Mac (Huginn / Mac-Tethered-AI)
+
+When the owner chats their AI through the Mac node, conversation data exists on that Mac.
+Honest accounting of what is and isn't encrypted at rest (DEVIATIONS AC69–AC72):
+
+- **What Huginn encrypts (the same bar as EldrChat itself, SPEC §3.4 / D9):** every
+  owner↔AI turn is recorded to `<configDir>/transcripts/` envelope-encrypted — a 256-bit
+  master key wrapped by the **Secure Enclave** (software-KEK fallback only off-SE), per-record
+  HKDF keys, AES-256-GCM. Transcript filenames are an opaque `SHA256(session key)`; the
+  conversation/identity and content live only inside the ciphertext. `unpair()`
+  cryptographically shreds the master key.
+- **What we CANNOT encrypt (residual, disclosed):** if the owner's responder is the
+  **external sybilclaw / OpenClaw gateway**, that gateway keeps its OWN conversation history
+  as **plaintext JSONL** in its storage — a separate program outside our trust boundary. We
+  cannot change its at-rest format from here. Mitigations: (1) we name its sessions with the
+  opaque `eldr:<hash>` key (§2.x / AC69), so its files never reveal *which* PQRC identity is
+  talking; (2) we keep our own encrypted canonical copy regardless. **Full at-rest privacy
+  for AI conversations on the Mac is therefore only achievable with the `eldr-acp` backend**,
+  which Huginn fully encrypts. Choosing sybilclaw is a content-at-rest trade, made knowingly.
+- **Partial (in progress, AC72):** eldr-acp's redacted diagnostic metadata (`events.jsonl`)
+  and summarized per-project memory (`eldr.md`) are still plaintext on disk (secret-scrubbed
+  per §2.13 / C-6 and `0600`). Bringing them under the same encryption is designed and its
+  cross-process codec is landed, but not yet wired pending a race-free shared-key bootstrap;
+  until then, treat these two files as plaintext-but-redacted.
+- **No Secure Enclave (older Intel Mac):** the master key falls back to a software KEK in the
+  Keychain (`…WhenUnlockedThisDeviceOnly`), a weaker at-rest posture flagged by an inv-10
+  tripwire — same caveat as the silo KEK (§2.3a / DEVIATIONS AC31).
+
 ## 3. Endpoint compromise
 
 - **Before compromise**: FS holds — past messages' keys no longer exist

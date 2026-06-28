@@ -111,13 +111,14 @@ final class UXVerificationTests: XCTestCase {
                        "the redundant 'My AI' sparkles button should be removed")
         shot(app, "rec1-01-single-ai-chip")
 
-        // The CHIP opens the "AI here" sheet (context picker + My-AI-responds).
+        // The CHIP opens the consolidated per-AI hub (context picker + My-AI-responds
+        // + the per-chat roster + two-axis grants).
         chip.tap()
-        XCTAssertTrue(app.navigationBars["AI here"].waitForExistence(timeout: 10),
-                      "chip should open the 'AI here' sheet")
-        XCTAssertTrue(element(app, "conversation-ai-mode").exists, "sheet has the AI-context picker")
-        XCTAssertTrue(element(app, "ai-responds-mode").exists, "sheet has the My-AI-responds picker")
-        shot(app, "rec1-02-chip-opens-AIHereSheet")
+        XCTAssertTrue(app.navigationBars["AI in this chat"].waitForExistence(timeout: 10),
+                      "chip should open the per-AI hub")
+        XCTAssertTrue(element(app, "ai-hub-context-mode").exists, "hub has the AI-context picker")
+        XCTAssertTrue(element(app, "ai-responds-mode").exists, "hub has the My-AI-responds picker")
+        shot(app, "rec1-02-chip-opens-AIHub")
         app.buttons["Done"].firstMatch.tap()
 
         // Still the single AI entry point after rotating to landscape (no duplicate).

@@ -8,12 +8,13 @@ import Testing
 
 @testable import EldrChat
 
-/// Phase D4 — the PHONE-SIDE gate for the interactive PTY terminal, the project's
-/// highest-risk surface (a persistent interactive shell on the user's Mac, driven from
-/// the phone). The whole point of this suite: PTY creation is gated behind the STANDING
-/// `autonomousChangesConsent` (NOT a per-action allow-once), and FAILS CLOSED when that
-/// consent is off — even when a permission UI is wired that WOULD allow an ordinary
-/// mutating tool.
+/// Phase D4 / feature 9 — the PHONE-SIDE gate for the interactive PTY terminal, the
+/// project's highest-risk surface (a persistent interactive shell on the user's Mac,
+/// driven from the phone). Decision D6 added an ALLOW-ONCE path: standing
+/// `autonomousChangesConsent` still skips the prompt, but without it the human is asked
+/// (Allow once / Always / Deny) like any mutating tool — and FAILS CLOSED when there is
+/// no UI to ask (headless / locked). "Allow once" opens the one shell without flipping
+/// the standing consent.
 ///
 /// Two layers: (1) the pure decision logic (fast, exact), and (2) an end-to-end proof
 /// over the real relay-ACP path — a scripted node issues an interactive-terminal
@@ -217,10 +218,10 @@ struct ACPInteractiveTerminalGateTests {
             kind: "acp", isRemote: true, appliesEgressFirewall: true)
     }
 
-    /// CONSENT OFF ⇒ the owner DENIES the interactive-terminal request (fail closed),
-    /// EVEN WITH a permission UI wired that would allow an ordinary mutating tool. This is
-    /// the headline safeguard: no allow-once for an open-ended shell.
-    @Test func interactiveTerminal_deniedWithoutStandingConsent_evenWithUI() async throws {
+    /// CONSENT OFF + a permission UI wired ⇒ the interactive terminal may be approved
+    /// ONCE via the prompt (feature 9, decision D6). The asker IS consulted, and an
+    /// "allow once" answer opens the shell WITHOUT flipping the standing consent.
+    @Test func interactiveTerminal_allowOnceViaUI_withoutStandingConsent() async throws {
         let pair = try await establishPair(seedBase: 9_100, ownerAIs: [acpAI()])
         defer {
             pair.nodeAgent.cancel()
@@ -228,11 +229,9 @@ struct ACPInteractiveTerminalGateTests {
             AppSession.setRemoteDevControlConsent(false, nodeID: pair.ownerHex, siloID: "")
             AppSession.setAutonomousChangesConsent(false, nodeID: pair.nodeHex, siloID: "")
         }
-        // A permission UI IS wired AND set to allow-once: this proves the interactive-PTY
-        // gate ignores the UI entirely (an open-ended shell needs the standing consent).
         let asker = AllowingAsker()
         await pair.owner.setPermissionAsker(asker)
-        // Standing autonomous-changes consent is OFF.
+        // Standing autonomous-changes consent is OFF — the prompt is the path.
         AppSession.setAutonomousChangesConsent(false, nodeID: pair.nodeHex, siloID: "")
 
         // Drive a turn → the node requests interactive-terminal permission.
@@ -241,12 +240,40 @@ struct ACPInteractiveTerminalGateTests {
         #expect(await pair.outcomes.waitForOne(), "the node must have received a permission outcome")
         let granted = await pair.outcomes.granted
         #expect(
-            granted.allSatisfy { $0 == false },
-            "interactive-terminal permission MUST be denied without the standing consent (got \(granted))")
-        // And the UI was never consulted (the gate short-circuits before the asker).
+            granted.contains(true),
+            "interactive-terminal permission may be allowed ONCE via the prompt (got \(granted))")
         #expect(
-            await asker.requestCount() == 0,
-            "the interactive-PTY gate must not fall back to a per-action prompt")
+            await asker.requestCount() >= 1,
+            "the interactive-PTY gate now consults the prompt for an allow-once decision")
+        // Allow-once must NOT flip the standing consent (that's "Always").
+        #expect(
+            AppSession.autonomousChangesConsent(nodeID: pair.nodeHex, siloID: "") == false,
+            "an allow-once must not silently grant standing autonomous-changes consent")
+
+        await pair.owner.shutdown()
+        await pair.node.shutdown()
+    }
+
+    /// CONSENT OFF + NO permission UI (headless / locked) ⇒ FAIL CLOSED: with nothing
+    /// to ask, the interactive terminal is denied (the node's C-1 timeout agrees).
+    @Test func interactiveTerminal_deniedWithoutConsentAndNoUI() async throws {
+        let pair = try await establishPair(seedBase: 9_150, ownerAIs: [acpAI()])
+        defer {
+            pair.nodeAgent.cancel()
+            AppSession.setRemoteDevControlConsent(false, nodeID: pair.nodeHex, siloID: "")
+            AppSession.setRemoteDevControlConsent(false, nodeID: pair.ownerHex, siloID: "")
+            AppSession.setAutonomousChangesConsent(false, nodeID: pair.nodeHex, siloID: "")
+        }
+        // No asker wired AND consent OFF → decidePermission fails closed.
+        AppSession.setAutonomousChangesConsent(false, nodeID: pair.nodeHex, siloID: "")
+
+        _ = try? await pair.owner.draftReply(conversationID: pair.nodeHex)
+
+        #expect(await pair.outcomes.waitForOne(), "the node must have received a permission outcome")
+        let granted = await pair.outcomes.granted
+        #expect(
+            granted.allSatisfy { $0 == false },
+            "with no UI and no standing consent, the interactive terminal fails closed (got \(granted))")
 
         await pair.owner.shutdown()
         await pair.node.shutdown()

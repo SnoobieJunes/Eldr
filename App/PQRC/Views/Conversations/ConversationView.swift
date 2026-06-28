@@ -40,6 +40,13 @@ struct ConversationView: View {
     @State private var aiSummary: (mode: String, isRemote: Bool, firewallOn: Bool) =
         ("active", false, true)
 
+    /// @-mention autocomplete (feature 6): all candidates for this chat (my AIs +
+    /// people + their AIs), and the filtered subset shown for the active @token.
+    @State private var allMentionCandidates: [MentionSuggestionList.MentionSuggestion] = []
+    @State private var mentionSuggestions: [MentionSuggestionList.MentionSuggestion] = []
+    /// My tethered AIs (id, name) for the per-AI context submenu (feature 7).
+    @State private var myAIList: [(id: String, name: String)] = []
+
     private var conversationScope: AIContextGrant.Scope { .conversation(conversationID) }
 
     /// Whether this conversation is a paired coding-agent node (drives the plan
@@ -106,6 +113,7 @@ struct ConversationView: View {
                     .padding(.top, 6)
                     .frame(maxWidth: 760)
             }
+            ConversationAIBar(model: model, conversationID: conversationID) { showAIHere = true }
             threadChips
             messageList
             if selecting { selectionBar } else { composer }
@@ -142,6 +150,8 @@ struct ConversationView: View {
             // Refresh the agent-bubble type badges in case the AI config changed.
             model.refreshAITypes()
             Task { await refreshAIVisibility() }
+            Task { await loadMentionCandidates() }
+            myAIList = model.tetheredAIList().filter(\.isEnabled).map { ($0.id, $0.name) }
         }
         .onChange(of: model.messages(for: conversationID).count) { _, _ in
             Task { await refreshAIVisibility() }
@@ -234,7 +244,7 @@ struct ConversationView: View {
             aiSummary = model.primaryAIContextSummary(conversationID)
             Task { await refreshAIVisibility() }
         }) {
-            AIHereSheet(model: model, conversationID: conversationID)
+            AIHubSheet(model: model, conversationID: conversationID)
         }
         // "Have my AI answer this" (long-press a guest message) → preview the drafted
         // reply, then "Send as my AI" or "Edit & send as me" — the same DraftSheet the
@@ -257,6 +267,30 @@ struct ConversationView: View {
             Button("OK", role: .cancel) {}
         } message: {
             Text(model.agentError ?? "")
+        }
+        // Feature 6 / decision #5: a single @-mention of one of my AIs when it isn't
+        // live here — choose draft-privately vs. open-a-window-and-post (never a
+        // silent autonomous send to the other people).
+        .confirmationDialog(
+            "\(model.pendingAIMentionChoice?.aiName ?? "Your AI") isn't live in this chat",
+            isPresented: Binding(
+                get: { model.pendingAIMentionChoice != nil },
+                set: { if !$0 { model.pendingAIMentionChoice = nil } }),
+            titleVisibility: .visible
+        ) {
+            Button("Draft privately") { Task { await model.resolveAIMentionChoice(draft: true) } }
+            Button("Open window & post") { Task { await model.resolveAIMentionChoice(draft: false) } }
+            Button("Cancel", role: .cancel) { model.pendingAIMentionChoice = nil }
+        } message: {
+            Text("Draft a reply only you can send, or open a brief AI window for just this AI and let it post in the chat.")
+        }
+        // "Draft privately" hands the text back to the composer for you to edit + send.
+        .onChange(of: model.mentionDraft) { _, draft in
+            if let draft {
+                if draftText.isEmpty { draftText = draft }
+                else { draftText += (draftText.hasSuffix("\n") ? "" : "\n") + draft }
+                model.mentionDraft = nil
+            }
         }
     }
 
@@ -428,6 +462,19 @@ struct ConversationView: View {
                     threadSourceMessageID = message.id
                     showThreadSheet = true
                 },
+            // Per-AI context submenu (feature 7): add/remove THIS message from a
+            // specific one of my AIs' context. (Declared before `aiVisibility`, so it
+            // must precede it here.)
+            myAIs: selecting ? [] : myAIList,
+            onMarkForAI: selecting
+                ? nil
+                : { aiID, value in
+                    Task {
+                        await model.markAIContext(
+                            messageIDs: [message.id], aiID: aiID, value: value)
+                        await refreshAIVisibility()
+                    }
+                },
             aiVisibility: aiVisibilityByMessage[message.id],
             // Strip the AgentSkills ⟡⟡ envelope from agent bubbles unless the
             // per-silo "Show agent protocol envelope" toggle is on (default off).
@@ -502,11 +549,53 @@ struct ConversationView: View {
         guard !outgoing.isEmpty else { return }
         largePaste = nil
         draftText = ""
+        mentionSuggestions = []
         Task { await model.send(outgoing, conversationID: conversationID) }
+    }
+
+    // MARK: @-mention autocomplete (feature 6)
+
+    /// The trailing "@token" the user is composing, if any (the @ must start the text
+    /// or follow whitespace, and only token chars may follow it to the end).
+    private func activeMentionRange(_ text: String) -> (range: Range<String.Index>, query: String)? {
+        guard let atIndex = text.lastIndex(of: "@") else { return nil }
+        let after = text[text.index(after: atIndex)...]
+        guard after.allSatisfy({ $0.isLetter || $0.isNumber || $0 == "-" || $0 == "_" }) else {
+            return nil
+        }
+        if atIndex > text.startIndex {
+            guard text[text.index(before: atIndex)].isWhitespace else { return nil }
+        }
+        return (atIndex..<text.endIndex, String(after))
+    }
+
+    private func updateMentionSuggestions(_ text: String) {
+        guard let (_, query) = activeMentionRange(text) else {
+            mentionSuggestions = []
+            return
+        }
+        let q = query.lowercased()
+        mentionSuggestions = Array(
+            allMentionCandidates
+                .filter { q.isEmpty || $0.name.lowercased().hasPrefix(q) }
+                .prefix(8))
+    }
+
+    private func applyMention(_ pick: MentionSuggestionList.MentionSuggestion) {
+        if let (range, _) = activeMentionRange(draftText) {
+            draftText.replaceSubrange(range, with: "@\(pick.name) ")
+        }
+        mentionSuggestions = []
+    }
+
+    private func loadMentionCandidates() async {
+        allMentionCandidates = await model.mentionCandidates(conversationID: conversationID)
+            .map { MentionSuggestionList.MentionSuggestion(name: $0.name, kind: $0.kind) }
     }
 
     private var composer: some View {
         VStack(spacing: 6) {
+            MentionSuggestionList(suggestions: mentionSuggestions) { applyMention($0) }
             if let paste = largePaste {
                 // The chip: the field never visibly chokes on a 200 KB paste.
                 // Large text rides the relay as ordered, ratcheted chunks
@@ -569,6 +658,7 @@ struct ConversationView: View {
                             largePaste = newValue
                             draftText = ""
                         }
+                        updateMentionSuggestions(draftText)
                     }
                     // Long-press the empty box: "Draft with AI" beside Paste.
                     .contextMenu {
@@ -851,197 +941,3 @@ struct ThreadCreateSheet: View {
 /// signed agent for a bounded window (announces an active window + shares context).
 enum AIRespondsMode: Hashable { case draftsPrivately, respondsInChat }
 
-/// Tap-target of the in-chat "AI here" chip: the per-conversation AI context
-/// override, surfaced in the chat itself (the SAME control as
-/// ConversationDetailsView's "AI context here"). Writes/reads the SAME
-/// `AppSession.conversationContextMode`, so chip · this sheet · Details stay in
-/// sync, and the engine reads it every turn (changes apply in real time). Also
-/// hosts the "My AI responds" control (moved here from Details) so it sits beside
-/// the AI-context picker + egress-firewall indicator.
-struct AIHereSheet: View {
-    @Bindable var model: AppModel
-    let conversationID: String
-    @Environment(\.dismiss) private var dismiss
-    /// "default" | "off" | "marked" | "full".
-    @State private var aiContextMode = "default"
-    @State private var summary: (mode: String, isRemote: Bool, firewallOn: Bool) =
-        ("active", false, true)
-    /// "My AI responds" control (moved here from Details): how this AI acts in
-    /// THIS conversation — drafts privately (default, privacy-first) vs responds
-    /// in chat as the signed agent. The duration is the AI window's life AND the
-    /// context-sharing grant when in "responds in chat" mode.
-    @State private var aiRespondsMode: AIRespondsMode = .draftsPrivately
-    /// Window/grant duration in HOURS (stored as 1 / 8 / 24; sent as ×60 minutes).
-    @State private var aiRespondsHours = 1
-    /// Last on-demand private draft, presented in the DraftSheet.
-    @State private var aiRespondsDraft: String?
-    @State private var showAIRespondsDraft = false
-    /// When a Mac coding-agent ("acp") AI is enabled, a one-line note on whether it's
-    /// actually connected — the real missed precondition behind "my conduit won't
-    /// reply in a group." nil when no acp AI is enabled. Loaded in `.task`.
-    @State private var conduitHint: String?
-
-    /// Context-sharing scope for the "My AI responds" control — this conversation.
-    private var aiRespondsScope: AIContextGrant.Scope { .conversation(conversationID) }
-    /// Human-readable window/grant duration ("1 hour" / "8 hours" / "24 hours").
-    private var aiRespondsDurationLabel: String {
-        aiRespondsHours == 1 ? "1 hour" : "\(aiRespondsHours) hours"
-    }
-
-    var body: some View {
-        NavigationStack {
-            Form {
-                Section {
-                    Picker("AI context here", selection: $aiContextMode) {
-                        Text("Follow each AI's own setting").tag("default")
-                        Text("Off in this conversation").tag("off")
-                        Text("Marked only — messages I add to context").tag("marked")
-                        Text("Live — full conversation while active").tag("full")
-                    }
-                    .accessibilityIdentifier("conversation-ai-mode")
-                    .onChange(of: aiContextMode) { _, newValue in
-                        AppSession.setConversationContextMode(
-                            newValue == "default" ? nil : newValue, conversationID: conversationID,
-                            siloID: model.siloID)
-                        summary = model.primaryAIContextSummary(conversationID)
-                    }
-                    AIContextEcho(summary: summary)
-                    if summary.mode != "off" && summary.isRemote {
-                        RemoteAIFirewallRow(firewallOn: summary.firewallOn)
-                    }
-                } header: {
-                    Text("AI in this conversation — overrides your AI's default (now: \(AIContextVocab.glance(summary)))")
-                } footer: {
-                    Text("Overrides your AIs' own context setting, just here. \"Off\" keeps every AI from gathering anything OR replying in this conversation. Each conversation is separate — your AI never carries context from one chat into another. Applies in real time. Set per-AI defaults and the egress firewall in Settings ▸ AI.")
-                }
-                Section {
-                    // "My AI responds" — folds the AI window (responds-in-chat) and
-                    // private drafting into one control, styled like the AI-context
-                    // picker above. The chosen duration is the window's life;
-                    // context-sharing is implied by the mode — only "responds in chat"
-                    // shares and only it announces an active window. Privacy-first
-                    // default: drafts privately (nothing posted, no context shared).
-                    Picker("Mode", selection: $aiRespondsMode) {
-                        Text("Drafts privately").tag(AIRespondsMode.draftsPrivately)
-                        Text("Responds in chat").tag(AIRespondsMode.respondsInChat)
-                    }
-                    .accessibilityIdentifier("ai-responds-mode")
-                    Picker("For", selection: $aiRespondsHours) {
-                        Text("1 hour").tag(1)
-                        Text("8 hours").tag(8)
-                        Text("24 hours").tag(24)
-                    }
-                    .accessibilityIdentifier("ai-responds-duration")
-                    if aiRespondsMode == .respondsInChat {
-                        Button {
-                            // Open the signed AI window for the chosen time, THEN grant
-                            // context-sharing for the same scope/duration. A prior
-                            // "Off in this conversation" override would silently neuter
-                            // the new window (aiSuppressed → the AI shows "on" but never
-                            // replies), so clear it first and reset the picker to match.
-                            Task {
-                                if AppSession.conversationContextMode(
-                                    conversationID, siloID: model.siloID) == "off"
-                                {
-                                    AppSession.setConversationContextMode(
-                                        nil, conversationID: conversationID, siloID: model.siloID)
-                                    aiContextMode = "default"
-                                }
-                                await model.startWindow(
-                                    conversationID: conversationID, minutes: aiRespondsHours * 60)
-                                await model.grantContextSharing(
-                                    scope: aiRespondsScope, minutes: aiRespondsHours * 60,
-                                    conversationID: conversationID)
-                                summary = model.primaryAIContextSummary(conversationID)
-                            }
-                        } label: {
-                            Label(
-                                "Turn on for \(aiRespondsDurationLabel)", systemImage: "sparkles")
-                        }
-                        .accessibilityIdentifier("ai-responds-turn-on")
-                    } else {
-                        Button {
-                            // On-demand private draft — nothing posted, no context shared.
-                            Task {
-                                aiRespondsDraft = await model.draft(conversationID: conversationID)
-                                showAIRespondsDraft = aiRespondsDraft != nil
-                            }
-                        } label: {
-                            Label("Draft a reply now", systemImage: "square.and.pencil")
-                        }
-                        .accessibilityIdentifier("ai-responds-draft-now")
-                    }
-                    // The single, HONEST off-switch. Shown whenever my AI is active
-                    // here (a live window OR a live grant OR a solo "My AI" chat) —
-                    // not only when a grant exists. The old "Stop sharing AI context"
-                    // button withdrew only the grant and then VANISHED, while the
-                    // ai_window kept the AI auto-posting for the rest of its life — the
-                    // reported "turning off sharing didn't stop my AI." This closes the
-                    // window, withdraws sharing, and mutes a solo chat, in one action.
-                    if model.aiActiveHere(
-                        conversationID: conversationID, now: Int64(Date().timeIntervalSince1970))
-                    {
-                        Button("Stop my AI replying here", role: .destructive) {
-                            Task {
-                                await model.stopAIHere(conversationID: conversationID)
-                                aiContextMode =
-                                    AppSession.conversationContextMode(
-                                        conversationID, siloID: model.siloID) ?? "default"
-                                summary = model.primaryAIContextSummary(conversationID)
-                            }
-                        }
-                        .accessibilityIdentifier("ai-responds-stop")
-                    }
-                    // The missed precondition behind "my conduit won't reply in a
-                    // group": a Mac coding-agent AI that's enabled but not connected.
-                    // Surfaced here, where you turn the AI on for the conversation.
-                    if let conduitHint {
-                        Label(conduitHint, systemImage: "desktopcomputer")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                            .accessibilityIdentifier("conduit-hint")
-                    }
-                } header: {
-                    Text("My AI responds")
-                } footer: {
-                    Text(aiRespondsMode == .respondsInChat
-                        ? "Your tethered AIs — including a paired Mac agent — reply here as your signed agent for the chosen time, and share your AI context with the others present. This is how your AI (or your Mac conduit) helps a group: you turn it on; it can't switch itself on. Everyone sees that your AI is active. Each person turns on their OWN AI separately."
-                        : "Your AI only drafts replies for you to review and send — nothing is posted to the conversation and no AI context is shared. Drafting is on demand; tap below whenever you want one.")
-                }
-            }
-            .navigationTitle("AI here")
-            .navigationBarTitleDisplayMode(.inline)
-            .task {
-                aiContextMode =
-                    AppSession.conversationContextMode(conversationID, siloID: model.siloID) ?? "default"
-                summary = model.primaryAIContextSummary(conversationID)
-                // If a Mac coding-agent ("acp") AI is enabled, tell the user whether
-                // it's actually connected — the real reason a "conduit" stays silent.
-                let acpEnabled = AppSession.loadConfiguredAIs(siloID: model.siloID)
-                    .contains { $0.kind == "acp" && $0.isEnabled }
-                if acpEnabled {
-                    if let node = await model.consentedCodingAgentNode() {
-                        conduitHint = "Mac-Tethered-AI “\(node.name)” is connected — it answers here when you turn the AI on."
-                    } else {
-                        conduitHint =
-                            "A Mac-Tethered-AI is enabled but not connected — pair it in Settings ▸ AI ▸ Mac-Tethered-AI, or it can't reply."
-                    }
-                }
-            }
-            .toolbar {
-                ToolbarItem(placement: .confirmationAction) {
-                    Button("Done") { dismiss() }
-                }
-            }
-            // On-demand private draft from "My AI responds" → reuses the same
-            // DraftSheet so the preview / "Send as my AI" / "Edit & send as me"
-            // flow is identical.
-            .sheet(isPresented: $showAIRespondsDraft) {
-                DraftSheet(
-                    model: model, conversationID: conversationID, draft: aiRespondsDraft ?? "")
-            }
-        }
-        .presentationDetents([.large])
-        .presentationSizing(.page)
-    }
-}

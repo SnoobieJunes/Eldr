@@ -89,9 +89,12 @@ struct SybilclawGatewayClient: Sendable {
 
     /// Send `prompt` to sybilclaw's assistant and return its complete reply text. Races the
     /// whole exchange against `overallTimeout` so a silent gateway can't hang the turn.
-    func ask(_ prompt: String) async throws -> String {
+    /// `sessionKey` is the stable, opaque per-conversation session id the gateway buckets
+    /// history under — supplied by the caller so a conversation keeps context across turns
+    /// and stays separate from every other conversation (and from Discord).
+    func ask(_ prompt: String, sessionKey: String) async throws -> String {
         try await withThrowingTaskGroup(of: String.self) { group in
-            group.addTask { try await self.askImpl(prompt) }
+            group.addTask { try await self.askImpl(prompt, sessionKey: sessionKey) }
             group.addTask {
                 try await Task.sleep(nanoseconds: UInt64(self.overallTimeout * 1_000_000_000))
                 throw GatewayError.timeout(lastFrame: nil)
@@ -104,7 +107,7 @@ struct SybilclawGatewayClient: Sendable {
         }
     }
 
-    private func askImpl(_ prompt: String) async throws -> String {
+    private func askImpl(_ prompt: String, sessionKey: String) async throws -> String {
         guard let url = URL(string: "ws://\(host):\(port)/") else { throw GatewayError.badURL }
         let session = URLSession(configuration: .ephemeral)
         let task = session.webSocketTask(with: url)
@@ -118,7 +121,7 @@ struct SybilclawGatewayClient: Sendable {
 
         // Attempt 1: the configured agent (nil ⇒ the gateway's default).
         do {
-            return try await runTurn(task, prompt: prompt, agentId: agentId)
+            return try await runTurn(task, prompt: prompt, sessionKey: sessionKey, agentId: agentId)
         } catch {
             // Self-heal: the gateway wants an explicit agent/session ("choose a session" /
             // UNAVAILABLE). Discover its default agent and retry ONCE, naming it explicitly.
@@ -126,7 +129,7 @@ struct SybilclawGatewayClient: Sendable {
                 let discovered = try? await discoverDefaultAgent(task),
                 discovered != agentId
             else { throw error }
-            return try await runTurn(task, prompt: prompt, agentId: discovered)
+            return try await runTurn(task, prompt: prompt, sessionKey: sessionKey, agentId: discovered)
         }
     }
 
@@ -134,12 +137,13 @@ struct SybilclawGatewayClient: Sendable {
     /// selector), send the prompt, and assemble the reply from `chat` events until the run
     /// reaches a terminal `state`. `agentId` binds the session/turn to a specific agent.
     private func runTurn(
-        _ task: URLSessionWebSocketTask, prompt: String, agentId: String?
+        _ task: URLSessionWebSocketTask, prompt: String, sessionKey: String, agentId: String?
     ) async throws -> String {
-        // Create the session. We pass our own `key`; tolerate gateways that reject create and
-        // auto-create on the first `chat.send` instead (try?), so the real error (if any)
-        // surfaces at chat.send where the retry logic can act on it.
-        let sessionKey = "eldr-" + UUID().uuidString
+        // Create the session under the caller's STABLE per-conversation `key` (so the
+        // gateway keeps this conversation's history together across turns). Tolerate
+        // gateways that reject create and auto-create on the first `chat.send` instead
+        // (try?), so the real error (if any) surfaces at chat.send where the retry logic
+        // can act on it.
         let createID = UUID().uuidString
         var createParams: [String: Any] = ["key": sessionKey]
         if let agentId { createParams["agentId"] = agentId }
@@ -304,7 +308,11 @@ struct SybilclawGatewayClient: Sendable {
 /// `workdir` is ignored — sybilclaw owns its own workspace.
 struct SybilclawAgentRunner: BridgeAgentRunner {
     let client: SybilclawGatewayClient
-    func run(prompt: String, workdir: String?) async throws -> String {
-        try await client.ask(prompt)
+    /// The gateway keeps this conversation's history under the session key (server-side), so
+    /// Huginn records its own encrypted canonical copy but must NOT re-inject prior context —
+    /// the gateway would otherwise see the history twice.
+    var selfPersistsHistory: Bool { true }
+    func run(prompt: String, workdir: String?, context: ConversationContext) async throws -> String {
+        try await client.ask(prompt, sessionKey: context.sessionKey)
     }
 }

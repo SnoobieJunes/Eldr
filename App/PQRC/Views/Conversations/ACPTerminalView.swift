@@ -68,9 +68,9 @@ struct ACPTerminalView: View {
     private var outputView: some View {
         ScrollViewReader { proxy in
             ScrollView {
-                Text(terminal.output.isEmpty ? " " : terminal.output)
-                    .font(.system(.caption, design: .monospaced))
-                    .foregroundStyle(.primary)
+                // ANSI SGR colors/bold/underline interpreted + stripped (feature 9);
+                // display-only, never persisted (invariant 12).
+                Text(ANSITerminalText.attributed(terminal.output.isEmpty ? " " : terminal.output))
                     .textSelection(.enabled)
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .padding(8)
@@ -80,6 +80,16 @@ struct ACPTerminalView: View {
             .background(
                 RoundedRectangle(cornerRadius: 8, style: .continuous)
                     .fill(Color(.systemBackground)))
+            // Report the view's size as terminal columns/rows so full-screen tools on
+            // the node lay out to the phone (feature 9). Estimated from the caption
+            // monospaced advance/line height.
+            .overlay {
+                GeometryReader { geo in
+                    Color.clear
+                        .onAppear { reportSize(geo.size) }
+                        .onChange(of: geo.size) { _, s in reportSize(s) }
+                }
+            }
             .onChange(of: terminal.output) {
                 // Keep the newest output in view as it streams.
                 withAnimation(.linear(duration: 0.1)) {
@@ -90,15 +100,54 @@ struct ACPTerminalView: View {
         }
     }
 
+    /// Estimate columns × rows from the view size and report them to the node.
+    private func reportSize(_ size: CGSize) {
+        guard size.width > 0, size.height > 0 else { return }
+        let charWidth: CGFloat = 7.2   // ~caption monospaced advance
+        let lineHeight: CGFloat = 15.0  // ~caption line height
+        let cols = max(20, Int((size.width - 16) / charWidth))
+        let rows = max(5, Int(size.height / lineHeight))
+        Task { await model.resizeACPTerminal(cols: cols, rows: rows, conversationID: conversationID) }
+    }
+
     private var stdinRow: some View {
         HStack(spacing: 8) {
-            TextField("Type a command…", text: $stdin)
+            // Interrupt / EOF controls (feature 9): send the raw control byte to the
+            // PTY so the tty delivers SIGINT / EOF to the foreground job.
+            Button {
+                Task { await model.sendACPTerminalControl("\u{03}", conversationID: conversationID) }
+            } label: {
+                Text("^C").font(.caption.weight(.bold).monospaced())
+            }
+            .buttonStyle(.bordered)
+            .tint(.orange)
+            .accessibilityLabel("Send interrupt (Control-C)")
+            .accessibilityIdentifier("acp-terminal-ctrl-c")
+            Button {
+                Task { await model.sendACPTerminalControl("\u{04}", conversationID: conversationID) }
+            } label: {
+                Text("^D").font(.caption.weight(.bold).monospaced())
+            }
+            .buttonStyle(.bordered)
+            .accessibilityLabel("Send end-of-file (Control-D)")
+            .accessibilityIdentifier("acp-terminal-ctrl-d")
+            TextField("Type a command…", text: $stdin, axis: .vertical)
                 .textFieldStyle(.roundedBorder)
                 .font(.system(.body, design: .monospaced))
+                .lineLimit(1...4)
                 .autocorrectionDisabled()
                 .textInputAutocapitalization(.never)
                 .focused($stdinFocused)
                 .onSubmit(submit)
+                #if os(macOS) || targetEnvironment(macCatalyst)
+                    // Mac: Return sends the line, Shift+Return inserts a newline.
+                    .onKeyPress { press in
+                        guard press.key == .return, !press.modifiers.contains(.shift)
+                        else { return .ignored }
+                        submit()
+                        return .handled
+                    }
+                #endif
                 .accessibilityIdentifier("acp-terminal-stdin")
             Button(action: submit) {
                 Image(systemName: "return")
