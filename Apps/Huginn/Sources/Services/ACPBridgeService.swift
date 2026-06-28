@@ -146,6 +146,16 @@ struct ACPDriverAgentRunner: BridgeAgentRunner {
             requestPermission: { _, _ in false })
         var env = environmentOverrides
         env["ELDR_ACP_STREAM"] = "0"  // need the complete message to scrub it (§10)
+        // CR-1 (cont.): since this chat/drafting path DENIES every mutating tool (the
+        // handler above), advertise ONLY the READ-ONLY tools to the model. A
+        // coding-tuned local model would otherwise keep calling run_shell / write_file,
+        // each one bounced by the deny — wasting turns and surfacing confusing "tool
+        // denied" noise in the user's LLM server (LM Studio). Reads never request
+        // permission, so this loses no capability here, and it overrides the env-file
+        // `tools` allowlist for THIS path only (the env var wins; AgentConfig §tools).
+        // The phone-driven coding-agent path (ACPRelayHost) keeps the user's full tool
+        // set and routes each mutating request to the phone for Allow / Deny.
+        env["ELDR_ACP_TOOLS"] = "read_file,list_dir"
         // Cross-turn memory: prior transcript as an in-memory system-prompt preamble. Never
         // written to disk (SPEC §3.4) — it lives only in this child process's environment.
         if let preamble = context.priorContext, !preamble.isEmpty {
