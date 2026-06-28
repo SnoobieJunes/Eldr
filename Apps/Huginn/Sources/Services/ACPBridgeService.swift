@@ -577,7 +577,8 @@ final class ACPBridgeService: ObservableObject {
         case .sybilclaw:
             agentRunner = SybilclawAgentRunner(
                 client: SybilclawGatewayClient(
-                    port: Self.sybilclawGatewayPort(), token: Self.sybilclawGatewayToken()))
+                    port: Self.sybilclawGatewayPort(), token: Self.sybilclawGatewayToken(),
+                    diagnostics: Self.sybilclawGatewayDiagnostics()))
         }
     }
 
@@ -592,6 +593,13 @@ final class ACPBridgeService: ObservableObject {
         KeychainBox().load(account: "sybilclaw-gateway-token").flatMap {
             String(data: $0, encoding: .utf8)
         }
+    }
+    /// Opt-in raw-frame gateway diagnostics (default off). Toggle with
+    /// `defaults write chat.eldr.huginn sybilclawGatewayDiagnostics -bool YES`. Logs the
+    /// connect handshake (token-redacted) + the server's raw reply to OSLog and the Agent
+    /// Inspector — protocol metadata only, never the user's prompt/reply.
+    static func sybilclawGatewayDiagnostics() -> Bool {
+        UserDefaults.standard.bool(forKey: "sybilclawGatewayDiagnostics")
     }
 
     /// Stable, opaque gateway session key for one conversation/thread. Deterministic (so the

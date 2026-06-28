@@ -1,4 +1,5 @@
 import Foundation
+import os
 
 /// A client for the **OpenClaw / sybilclaw Gateway** — the local Node daemon that runs the
 /// user's *own* assistant (its model, persona/SOUL.md, per-user memory, and tools). This is
@@ -53,12 +54,25 @@ struct SybilclawGatewayClient: Sendable {
     /// `handleInboundPrompt` also wraps the run, but `agentRunTimeout` defaults to 0
     /// (unlimited), so this is the backstop that keeps a silent gateway from hanging a turn.
     var overallTimeout: TimeInterval = 90
+    /// Opt-in raw-frame diagnostics (default off). When on, the `connect` handshake (with the
+    /// auth token redacted) and the gateway's raw `connect` reply are logged to OSLog and the
+    /// Agent Inspector, so a handshake rejection produces EVIDENCE (the offending field, the
+    /// protocol-version error) instead of a reverse-engineered theory. Logs protocol metadata
+    /// only — never the user's prompt/reply (`chat.send`/`chat` frames are never logged).
+    var diagnostics: Bool = false
 
-    init(host: String = "127.0.0.1", port: Int, token: String? = nil, agentId: String? = nil) {
+    /// Handshake/protocol diagnostics only — never message content (see `diagnostics`).
+    private static let log = Logger(subsystem: "chat.eldr.huginn", category: "gateway")
+
+    init(
+        host: String = "127.0.0.1", port: Int, token: String? = nil, agentId: String? = nil,
+        diagnostics: Bool = false
+    ) {
         self.host = host
         self.port = port
         self.token = (token?.isEmpty == false) ? token : nil
         self.agentId = (agentId?.isEmpty == false) ? agentId : nil
+        self.diagnostics = diagnostics
     }
 
     // MARK: Errors
@@ -116,8 +130,15 @@ struct SybilclawGatewayClient: Sendable {
 
         // Mandatory connect handshake — the gateway services no method until it lands.
         let connectID = UUID().uuidString
+        if diagnostics {
+            let sent = redactedConnectParamsJSON()
+            // `.public`: the redacted handshake is protocol metadata (no message content, token
+            // stripped), and the whole point is for the operator to actually read it in `log show`.
+            Self.log.debug("connect → \(sent, privacy: .public)")
+            DiagnosticsLog.shared.post(.acp, .info, "Gateway connect sent", sent)
+        }
         try await send(task, ["type": "req", "id": connectID, "method": "connect", "params": connectParams()])
-        _ = try await awaitResponse(task, id: connectID, context: "connect")
+        _ = try await awaitResponse(task, id: connectID, context: "connect", logRaw: diagnostics)
 
         // Attempt 1: the configured agent (nil ⇒ the gateway's default).
         do {
@@ -219,13 +240,19 @@ struct SybilclawGatewayClient: Sendable {
 
     /// The `connect` params (docs/gateway/protocol.md handshake). Declares an `operator`
     /// role with read+write scope; `auth.token` only when one is configured.
-    private func connectParams() -> [String: Any] {
+    /// Non-`private` so `GatewayHandshakeTests` can lock the id/mode/version against a blind edit.
+    func connectParams() -> [String: Any] {
         var params: [String: Any] = [
             "minProtocol": 3,
-            "maxProtocol": 4,
+            "maxProtocol": 3,
             "client": [
-                "id": "huginn", "version": Self.appVersion,
-                "platform": "macos", "mode": "operator",
+                // id/mode MUST come from the gateway's compiled allowlists (13 ids / 7 modes,
+                // packages/gateway-protocol/src/client-info.ts) — an off-list value is rejected with
+                // "must be equal to constant; must match a schema in anyOf". "openclaw-macos" is the
+                // normal macOS-app identity (full agent/streaming access); "backend" is a valid mode.
+                // The cofounder's fork (rdevaul/sybilclaw) speaks protocol v3, so pin the range to [3,3].
+                "id": "openclaw-macos", "version": Self.appVersion,
+                "platform": "macos", "mode": "backend",
             ],
             "role": "operator",
             "scopes": ["operator.read", "operator.write"],
@@ -237,6 +264,16 @@ struct SybilclawGatewayClient: Sendable {
         ]
         if let token { params["auth"] = ["token": token] }
         return params
+    }
+
+    /// The connect params as JSON, safe to log: the auth token (the only secret in the
+    /// handshake) is replaced with a placeholder. The handshake carries NO user message
+    /// content — that lives only in `chat.send`, which is never logged.
+    private func redactedConnectParamsJSON() -> String {
+        var p = connectParams()
+        if p["auth"] != nil { p["auth"] = ["token": "<redacted>"] }
+        let data = (try? JSONSerialization.data(withJSONObject: p, options: [.sortedKeys])) ?? Data()
+        return String(decoding: data, as: UTF8.self)
     }
 
     private static var appVersion: String {
@@ -262,12 +299,19 @@ struct SybilclawGatewayClient: Sendable {
     /// everything else as `.rpc`.
     @discardableResult
     private func awaitResponse(
-        _ task: URLSessionWebSocketTask, id: String, context: String
+        _ task: URLSessionWebSocketTask, id: String, context: String, logRaw: Bool = false
     ) async throws -> [String: Any]? {
         while !Task.isCancelled {
             let frame = try await receive(task)
             guard let obj = Self.json(frame) else { continue }
             guard obj["type"] as? String == "res", obj["id"] as? String == id else { continue }
+            if logRaw {
+                // The raw `res` frame is protocol metadata (ok/error/version) — no user content.
+                // It carries `error.code` and the AJV `errors[]` detail that `errorText` distills.
+                let ok = (obj["ok"] as? Bool) == true
+                Self.log.debug("\(context) ← \(frame, privacy: .public)")
+                DiagnosticsLog.shared.post(.acp, ok ? .success : .error, "Gateway \(context) reply", frame)
+            }
             if (obj["ok"] as? Bool) == true { return obj["payload"] as? [String: Any] }
             let message = Self.errorText(obj) ?? "rejected"
             throw context == "connect"
@@ -281,10 +325,24 @@ struct SybilclawGatewayClient: Sendable {
     }
 
     private static func errorText(_ obj: [String: Any]) -> String? {
-        if let e = obj["error"] as? [String: Any] {
-            return (e["message"] as? String) ?? (e["code"].map { "\($0)" })
+        guard let e = obj["error"] as? [String: Any] else { return obj["error"] as? String }
+        var parts: [String] = []
+        if let m = e["message"] as? String { parts.append(m) }
+        else if let code = e["code"] { parts.append("\(code)") }
+        // Schema (AJV/TypeBox) rejections — the connect-handshake case — name the offending
+        // field in `errors[]`. Surface a compact summary so "must match a schema in anyOf"
+        // isn't all the operator sees (e.g. ".../client/mode must be equal to constant").
+        if let errs = e["errors"] as? [[String: Any]] {
+            let detail = errs.compactMap { err -> String? in
+                let path = (err["instancePath"] as? String) ?? (err["dataPath"] as? String) ?? ""
+                let msg = (err["message"] as? String) ?? ""
+                let joined = [path, msg].filter { !$0.isEmpty }.joined(separator: " ")
+                return joined.isEmpty ? nil : joined
+            }.joined(separator: "; ")
+            if !detail.isEmpty { parts.append("(\(detail))") }
         }
-        return obj["error"] as? String
+        let combined = parts.joined(separator: " ")
+        return combined.isEmpty ? nil : combined
     }
 
     /// Whether an error reads like the gateway demanding an explicit agent/session selector
