@@ -49,6 +49,39 @@ struct ConversationMemoryTests {
         #expect(try await store.messages(conversationID: "eldr:2").map(\.text) == ["two"])
     }
 
+    /// B5: a crash that tears a prior append mid-write leaves the file WITHOUT a trailing "\n".
+    /// The next append must ISOLATE that torn partial as its own (skippable) line rather than
+    /// concatenating its record straight onto it — otherwise the merged line fails base64/decrypt
+    /// and the new record silently vanishes with it (cascading corruption). Save one valid message,
+    /// splice a torn partial (no newline) directly onto the file exactly as a partial fsync would,
+    /// then save a second valid message via the store; both real records must survive the poison line.
+    @Test func tornLineDoesNotCorruptFollowingRecord() async throws {
+        let dir = freshDir()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let store = EncryptedFileMessageStore(directory: dir, store: newStore())
+        let convo = "eldr:torn"
+        try await store.save(msg("1", convo, .human, "first", 1))
+
+        // Simulate the torn write: append base64-ish bytes with NO trailing "\n" onto the one
+        // conversation file (opaque hashed name, so locate it by enumerating the dir).
+        let files = try FileManager.default.contentsOfDirectory(atPath: dir.path)
+            .filter { $0.hasSuffix(".jsonl") }
+        let url = dir.appendingPathComponent(try #require(files.first))
+        let handle = try FileHandle(forWritingTo: url)
+        try handle.seekToEnd()
+        try handle.write(contentsOf: Data("GARBAGE_PARTIAL_no_newline".utf8))
+        try handle.close()
+
+        // A normal save appends the next record. The B5 fix must start a fresh line so the torn
+        // partial can't merge with — and destroy — this record.
+        try await store.save(msg("2", convo, .agent, "second", 2))
+
+        // Both valid records survive; only the torn partial (now its own line) is skipped.
+        let got = try await store.messages(conversationID: convo)
+        #expect(got.map(\.id) == ["1", "2"])
+        #expect(got.map(\.text) == ["first", "second"])
+    }
+
     /// Invariant 12: nothing conversation- or identity-derived hits disk in cleartext —
     /// not the message text, not the conversationID, not the sender hex, not in filenames.
     @Test func nothingPlaintextOrIdOnDisk() async throws {
@@ -108,6 +141,30 @@ struct ConversationMemoryTests {
         let ctx = try #require(await mem.priorContext(sessionKey: convo, maxBytes: 512))
         #expect(ctx.utf8.count <= 512)
         #expect(ctx.contains("#49"))  // tail-biased: the newest turn survives the cap
+    }
+
+    /// B3: a long-lived conversation's transcript is BOUNDED (re-sealed to the newest tail once it
+    /// crosses the trim threshold) rather than growing without limit — while the most-recent turns
+    /// survive and still decrypt. Large messages must not thrash the trimmer.
+    @Test func transcriptIsBoundedAndKeepsMostRecent() async throws {
+        let dir = freshDir()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let store = EncryptedFileMessageStore(directory: dir, store: newStore())
+        let convo = "eldr:grow"
+        let big = String(repeating: "x", count: 4096)
+        for i in 0..<700 {  // ~700 × ~5.5 KB sealed ≈ 3.8 MB unbounded; crosses the 2 MB trigger
+            try await store.save(msg("m\(i)", convo, .human, "\(big)#\(i)", Int64(i)))
+        }
+        let files = try FileManager.default.contentsOfDirectory(atPath: dir.path)
+        let maxSize = try files.map {
+            (try FileManager.default.attributesOfItem(
+                atPath: dir.appendingPathComponent($0).path)[.size] as? Int) ?? 0
+        }.max() ?? 0
+        #expect(maxSize < 2_100_000)  // bounded to ~maxFileBytes, not the ~3.8 MB it would reach
+        let got = try await store.messages(conversationID: convo)
+        #expect(got.count < 700)          // trimmed — not every message retained
+        #expect(got.count >= 100)         // but a meaningful tail survives (~keepBytes worth)
+        #expect(got.last?.id == "m699")   // the newest turn survives AND still decrypts
     }
 
     @Test func wipeRemovesTranscript() async throws {

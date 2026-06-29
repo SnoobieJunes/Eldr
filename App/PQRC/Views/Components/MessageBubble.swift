@@ -178,7 +178,9 @@ struct MessageBubble: View {
     /// Small expand glyph shown on rich bubbles for discoverability. Hidden for
     /// large bubbles — those already collapse with their own "Show more".
     @ViewBuilder private var expandButton: some View {
-        if isRich, !isLargeContent, let onFullScreen {
+        // M4: test the cheap size check FIRST so a large (collapsed) paste short-circuits before
+        // `isRich` runs a full markdown parse whose result would just be discarded here.
+        if !isLargeContent, let onFullScreen, isRich {
             Button {
                 // `displayText` == `message.text` for human bubbles; for an agent
                 // bubble it's the envelope-stripped body, so the reader matches

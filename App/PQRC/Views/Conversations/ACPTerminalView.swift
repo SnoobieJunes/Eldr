@@ -17,6 +17,15 @@ struct ACPTerminalView: View {
 
     @State private var stdin = ""
     @FocusState private var stdinFocused: Bool
+    // H1: incremental ANSI cache. Parsing the whole (≤256 KB) buffer on every streamed chunk was
+    // O(n²) and drove progressive frame drops; the renderer folds in only the newly-appended
+    // output (carrying SGR state across chunks). Updated in `.onChange` — never inside `body`.
+    @State private var renderer = ANSITerminalRenderer()
+    @State private var renderedOutput = AttributedString(" ")
+    // L2: dedupe resize reports. `.onChange(of: geo.size)` fires continuously during
+    // keyboard/scroll animations; only send when the derived cols/rows actually change
+    // so we don't spam the node over the relay.
+    @State private var lastReportedSize: (cols: Int, rows: Int)?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
@@ -69,8 +78,9 @@ struct ACPTerminalView: View {
         ScrollViewReader { proxy in
             ScrollView {
                 // ANSI SGR colors/bold/underline interpreted + stripped (feature 9);
-                // display-only, never persisted (invariant 12).
-                Text(ANSITerminalText.attributed(terminal.output.isEmpty ? " " : terminal.output))
+                // display-only, never persisted (invariant 12). Rendered incrementally into
+                // `renderedOutput` off the `body` path (H1) — see the `.onChange` below.
+                Text(renderedOutput)
                     .textSelection(.enabled)
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .padding(8)
@@ -90,8 +100,10 @@ struct ACPTerminalView: View {
                         .onChange(of: geo.size) { _, s in reportSize(s) }
                 }
             }
-            .onChange(of: terminal.output) {
-                // Keep the newest output in view as it streams.
+            .onChange(of: terminal.output, initial: true) {
+                // Fold only the newly-appended output into the cached AttributedString (H1),
+                // then keep the newest output in view as it streams.
+                renderedOutput = renderer.render(terminal.output.isEmpty ? " " : terminal.output)
                 withAnimation(.linear(duration: 0.1)) {
                     proxy.scrollTo("acp-terminal-output-end", anchor: .bottom)
                 }
@@ -107,6 +119,8 @@ struct ACPTerminalView: View {
         let lineHeight: CGFloat = 15.0  // ~caption line height
         let cols = max(20, Int((size.width - 16) / charWidth))
         let rows = max(5, Int(size.height / lineHeight))
+        guard lastReportedSize?.cols != cols || lastReportedSize?.rows != rows else { return }  // L2: only on actual change
+        lastReportedSize = (cols, rows)
         Task { await model.resizeACPTerminal(cols: cols, rows: rows, conversationID: conversationID) }
     }
 
@@ -178,5 +192,40 @@ struct ACPTerminalView: View {
         guard !line.isEmpty else { return }
         stdin = ""
         Task { await model.sendACPTerminalInput(line, conversationID: conversationID) }
+    }
+}
+
+/// H2: isolates the live-terminal subscription. Reading `acpTerminalByConversation` HERE — not in
+/// `ConversationView.body` — means a streamed terminal chunk (which fires many times a second)
+/// re-renders ONLY this slot, not the whole conversation (message `LazyVStack`, AI bar, thread
+/// chips, composer). Previously every chunk re-evaluated `ConversationView.body` and re-ran the
+/// O(n) `messages(for:)` filter, re-laying-out the entire transcript. Shown only while live.
+struct ACPTerminalSlot: View {
+    @Bindable var model: AppModel
+    let conversationID: String
+
+    var body: some View {
+        if let terminal = model.acpTerminalByConversation[conversationID] {
+            ACPTerminalView(model: model, conversationID: conversationID, terminal: terminal)
+                .padding(.horizontal)
+                .padding(.top, 6)
+                .frame(maxWidth: 760)
+        }
+    }
+}
+
+/// H2 (same rationale as `ACPTerminalSlot`): isolates the ACP plan-checklist subscription so a
+/// plan update re-renders only this slot, not the whole conversation. Shown only when non-empty.
+struct ACPPlanSlot: View {
+    @Bindable var model: AppModel
+    let conversationID: String
+
+    var body: some View {
+        if let plan = model.acpPlansByConversation[conversationID], !plan.isEmpty {
+            ACPPlanView(entries: plan)
+                .padding(.horizontal)
+                .padding(.top, 6)
+                .frame(maxWidth: 760)
+        }
     }
 }

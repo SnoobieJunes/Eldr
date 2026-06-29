@@ -280,7 +280,18 @@ final class AppModel {
             // Bound the on-screen scrollback (head-trim) so a chatty process can't grow
             // the retained string without limit.
             if term.output.utf8.count > LiveACPTerminal.maxOutputBytes {
-                term.output = String(term.output.suffix(LiveACPTerminal.maxOutputBytes / 2))
+                let target = LiveACPTerminal.maxOutputBytes / 2
+                let scalars = term.output.unicodeScalars
+                var idx = scalars.endIndex
+                var bytes = 0
+                while idx > scalars.startIndex {
+                    let prev = scalars.index(before: idx)
+                    let width = scalars[prev].utf8.count      // 1…4
+                    if bytes + width > target { break }
+                    bytes += width
+                    idx = prev
+                }
+                term.output = String(scalars[idx...])          // L1: bound by BYTES, never splitting a scalar
             }
             acpTerminalByConversation[conversationID] = term
         case .acpTerminalClosed(let conversationID, let terminalID, let exitCode):
@@ -747,6 +758,54 @@ final class AppModel {
         AppSession.saveConfiguredAIs(ais, siloID: siloID)
         refreshAITypes()
         return true
+    }
+
+    // MARK: - Coding-agent tool capability (Part 5 — reachable from the "My AI" hub)
+
+    /// The owner's paired coding-agent node (identity hex + name) REGARDLESS of consent, so the
+    /// hub can OFFER to enable its tools. nil when none paired. `async` — reads the runtime actor's
+    /// verified-contacts (like `runtime.contactType`).
+    func pairedCodingAgentNode() async -> (identityHex: String, name: String)? {
+        await runtime.pairedCodingAgentNode()
+    }
+
+    /// Whether the paired coding node's full-tool capability is on (dev-control consented) — the
+    /// gate that binds the live relay-ACP provider and lets the node act on the Mac.
+    func codingToolsEnabled(nodeHex: String) -> Bool {
+        AppSession.remoteDevControlConsent(nodeID: nodeHex, siloID: siloID)
+    }
+
+    /// Enable/disable the paired coding node's full-tool capability from the "My AI" hub. Writes
+    /// the SAME per-node `remoteDevControlConsent` key `ConversationDetailsView` does (so the two
+    /// surfaces never diverge), rebinds the live relay-ACP provider, and — on enable — ensures the
+    /// Mac-Tethered-AI (`acp`) is configured so it appears in "My AI". Returns true when it just
+    /// added that AI; the caller re-resolves providers (`AppSession.applyAIProvider`) so it goes
+    /// live. On disable, tears the relay path down fail-closed. Read-only chat (CR-1) is untouched.
+    @discardableResult
+    func setCodingToolsEnabled(_ enabled: Bool, nodeHex: String) -> Bool {
+        AppSession.setRemoteDevControlConsent(enabled, nodeID: nodeHex, siloID: siloID)
+        Task { await runtime.refreshACPBindings() }
+        if enabled {
+            return ensureMacTetheredAIConfigured(nodeName: contactNames[nodeHex])
+        }
+        Task {
+            await runtime.teardownRelayACPTransport(nodeHex: nodeHex)
+            await runtime.teardownRelayMCPHost(nodeHex: nodeHex)
+        }
+        return false
+    }
+
+    /// The paired coding node's standing autonomous-changes consent (act without asking each time).
+    func codingAutonomy(nodeHex: String) -> Bool {
+        AppSession.autonomousChangesConsent(nodeID: nodeHex, siloID: siloID)
+    }
+
+    /// Set the standing autonomous-changes consent for the paired coding node. Same per-node key
+    /// as Details' toggle. Turning it OFF also kills any live interactive terminal (which required
+    /// the standing consent), matching Details' fail-closed behavior.
+    func setCodingAutonomy(_ on: Bool, nodeHex: String) {
+        AppSession.setAutonomousChangesConsent(on, nodeID: nodeHex, siloID: siloID)
+        if !on { Task { await stopACPTerminal(conversationID: nodeHex) } }
     }
 
     /// Rebuild the `agentName -> backend type` cache from the persisted AI config.

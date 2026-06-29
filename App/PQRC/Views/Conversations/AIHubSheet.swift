@@ -15,6 +15,9 @@ struct AIHubSheet: View {
     /// participants); otherwise the conversation roster.
     var threadID: String? = nil
     @Environment(\.dismiss) private var dismiss
+    /// Re-resolve providers when enabling coding tools auto-adds the Mac-Tethered-AI (matches
+    /// `ConversationDetailsView`). Optional — a no-op if absent; `refreshACPBindings` still binds.
+    @Environment(AppSession.self) private var session: AppSession?
 
     private var scopeID: String { threadID ?? conversationID }
 
@@ -33,6 +36,11 @@ struct AIHubSheet: View {
     @State private var aiRespondsHours = 1
     @State private var aiRespondsDraft: String?
     @State private var showRespondsDraft = false
+    // Part 5 — the paired coding node's full-tool capability, surfaced here so it's reachable
+    // from "My AI". Targets the paired NODE (not this hub's conversationID); nil when none paired.
+    @State private var codingNode: (identityHex: String, name: String)?
+    @State private var codingEnabled = false
+    @State private var codingAutonomy = false
 
     private var humanScope: AIContextGrant.Scope {
         threadID.map { .thread($0, axis: AIContextGrant.Scope.humanAxis) }
@@ -49,6 +57,7 @@ struct AIHubSheet: View {
                 modeSection
                 respondsSection
                 rosterSection
+                codingSection
                 if order.count > 1 { orderSection }
                 othersSection
                 inspectorLink
@@ -62,7 +71,7 @@ struct AIHubSheet: View {
                     ToolbarItem(placement: .primaryAction) { EditButton() }
                 }
             }
-            .task { load() }
+            .task { load(); await loadCodingNode() }
             .onReceive(ticker) { now = Int64($0.timeIntervalSince1970) }
             .sheet(isPresented: $showRespondsDraft) {
                 DraftSheet(model: model, conversationID: conversationID, draft: aiRespondsDraft ?? "")
@@ -165,7 +174,11 @@ struct AIHubSheet: View {
                                 .frame(width: 18)
                             Text(ai.name).foregroundStyle(.primary)
                             if ai.kind == "acp" {
-                                Text("Mac").font(.caption2).foregroundStyle(.secondary)
+                                // Part 5: signal at a glance whether this Mac AI can act, or is
+                                // read-only. `codingEnabled` = the paired node's dev-control consent.
+                                Text(codingEnabled ? "runs commands" : "read-only")
+                                    .font(.caption2)
+                                    .foregroundStyle(codingEnabled ? AnyShapeStyle(.orange) : AnyShapeStyle(.secondary))
                             }
                             Spacer()
                             if participating.contains(id),
@@ -191,6 +204,57 @@ struct AIHubSheet: View {
                 participating.count <= 1
                     ? "Pick which of your AIs take part here. Each sees your messages and its own — never another AI's reply, unless you add it."
                     : "Drag to set the order they reply in. Because you grouped them here, each one sees the previous AIs' replies and builds on them.")
+        }
+    }
+
+    // MARK: Coding & tools (Part 5 — the paired Mac agent's full-tool capability)
+
+    /// Surfaces the full-tool coding path from "My AI": whether the paired Mac agent may run
+    /// commands / edit files (dev-control consent), and whether it may do so without asking each
+    /// time (autonomous-changes consent). Both target the paired NODE and write the SAME per-node
+    /// `AppSession` keys `ConversationDetailsView` does, so the two surfaces stay in sync. Shown
+    /// only when a coding node is paired. The read-only chat path (CR-1) is never changed here.
+    @ViewBuilder private var codingSection: some View {
+        if let node = codingNode {
+            Section {
+                Toggle("Let this AI run commands & edit files", isOn: Binding(
+                    get: { codingEnabled },
+                    set: { on in
+                        codingEnabled = on
+                        if model.setCodingToolsEnabled(on, nodeHex: node.identityHex) {
+                            Task { await session?.applyAIProvider() }
+                        }
+                        if !on { codingAutonomy = false }
+                        load()  // the acp AI (+ its capability badge) just appeared / changed
+                    }))
+                    .accessibilityIdentifier("hub-coding-enable")
+
+                Toggle("Allow changes without asking each time", isOn: Binding(
+                    get: { codingAutonomy },
+                    set: { on in
+                        codingAutonomy = on
+                        model.setCodingAutonomy(on, nodeHex: node.identityHex)
+                    }))
+                    .disabled(!codingEnabled)
+                    .accessibilityIdentifier("hub-coding-autonomy")
+
+                Label(
+                    codingEnabled
+                        ? (codingAutonomy
+                            ? "ON — this AI runs commands & edits files on your Mac without asking. Stop a live terminal from its Stop button."
+                            : "When this AI wants to run a command or change a file, you'll get an Allow / Deny card here. Reading files never asks.")
+                        : "Read-only for now — this AI can look at files for context but can't run commands or change anything.",
+                    systemImage: codingEnabled
+                        ? (codingAutonomy ? "lock.open.trianglebadge.exclamationmark" : "lock.shield")
+                        : "eye")
+                    .font(.caption)
+                    .foregroundStyle(codingEnabled && codingAutonomy ? AnyShapeStyle(.orange) : AnyShapeStyle(.secondary))
+                    .accessibilityIdentifier("hub-coding-status")
+            } header: {
+                Text("Coding & tools · \(node.name)")
+            } footer: {
+                Text("Your paired Mac agent. Enabling lets it act on your Mac when it answers here as your AI — each change is approved on this phone unless you allow autonomy. Your read-only chats are unaffected.")
+            }
         }
     }
 
@@ -252,6 +316,18 @@ struct AIHubSheet: View {
             participating = Set(allIDs)
         }
         orderedCritique = model.isOrderedCritique(conversationID)
+    }
+
+    /// Part 5: the paired coding node + its current capability state. Separate from `load()`
+    /// because `pairedCodingAgentNode()` reads the runtime actor (async); the consent reads are
+    /// synchronous `AppSession` lookups.
+    private func loadCodingNode() async {
+        let node = await model.pairedCodingAgentNode()
+        codingNode = node
+        if let hex = node?.identityHex {
+            codingEnabled = model.codingToolsEnabled(nodeHex: hex)
+            codingAutonomy = model.codingAutonomy(nodeHex: hex)
+        }
     }
 
     private func toggle(_ id: String) {

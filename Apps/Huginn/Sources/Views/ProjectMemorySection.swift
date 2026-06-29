@@ -52,6 +52,20 @@ struct ProjectMemorySection: View {
         }
         .onAppear { learner.start() }
         .onDisappear { learner.stop() }
+        .task {
+            // B2: hand the learner the at-rest metadata key derived from the SAME
+            // Secure-Enclave-wrapped master key the agent + transcript use, so it
+            // reads/writes events.jsonl + eldr.md SEALED (not cleartext). Keychain
+            // unavailable / no master key ⇒ nil ⇒ cleartext fallback (today's behavior).
+            let transcripts = URL(
+                fileURLWithPath: ConfigPaths.standard.configDir, isDirectory: true
+            ).appendingPathComponent("transcripts", isDirectory: true)
+            // `…IfProvisioned` (load-only): this is a SECOND ConversationMemory instance, so it must
+            // never CREATE the master key — only the bridge's instance does — or the two would
+            // diverge on a first-launch race and the learner couldn't read the agent's sealed files.
+            let key = await ConversationMemory(directory: transcripts).metadataKeyIfProvisioned()
+            learner.setMetadataKey(key)
+        }
         .sheet(item: $viewing) { project in
             ProjectMemoryDetail(
                 title: (project.cwd as NSString).lastPathComponent,

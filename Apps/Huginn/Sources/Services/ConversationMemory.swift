@@ -53,6 +53,14 @@ actor ConversationMemory {
     /// so a fresh start is possible after the secrets are shredded.
     private var bootstrapFailed = false
 
+    /// B2: the 32-byte at-rest key for the eldr-acp METADATA sinks (`events.jsonl`,
+    /// `eldr.md`), derived from the SAME `EncryptedStore` master key via
+    /// `deriveKey(label: "acp-metadata-v1")` and cached alongside the store. Handed to
+    /// the spawned agent (env `ELDR_ACP_METADATA_KEY`) and to Huginn's ContextLearner so
+    /// both seal/open the sinks under one root of trust. nil until a store is bootstrapped;
+    /// cleared by `wipe()`. Sensitive — never logged or persisted in the clear (invariant 12).
+    private var cachedMetadataKey: Data?
+
     // MARK: Construction
 
     /// Production: lazily bootstraps an `EncryptedStore` from the Keychain-persisted
@@ -76,6 +84,9 @@ actor ConversationMemory {
         self.keychain = nil
         self.wrapper = nil
         self.store = EncryptedFileMessageStore(directory: directory, store: encryptedStore)
+        // B2: derive the metadata key from the injected store too, so `metadataKey()` is
+        // meaningful under the test init (same HKDF as the production path below).
+        self.cachedMetadataKey = encryptedStore.deriveKey(label: "acp-metadata-v1")
     }
 
     // MARK: Public surface
@@ -105,6 +116,31 @@ actor ConversationMemory {
         )
         // Best-effort: a sealing/IO failure must not surface as a thrown turn.
         try? await store.save(message)
+    }
+
+    /// B2: the 32-byte key that seals the eldr-acp METADATA sinks (`events.jsonl`,
+    /// `eldr.md`) — derived from the SAME Secure-Enclave-wrapped master key as the
+    /// transcript, so the agent process (handed it via env) and Huginn's ContextLearner
+    /// key one root of trust. Forces a bootstrap so the key exists on first ask; returns
+    /// nil when bootstrap fails (e.g. Keychain unavailable) ⇒ callers fall back to
+    /// cleartext. Never logged / persisted in the clear (invariant 12).
+    func metadataKey() -> Data? {
+        _ = ensureStore()  // force the lazy bootstrap so the key is derived + cached
+        return cachedMetadataKey
+    }
+
+    /// Like `metadataKey()` but NEVER creates a master key — returns the derived metadata key only
+    /// when one is ALREADY provisioned (bootstraps by LOADING it), else nil. A secondary reader —
+    /// the settings-panel `ContextLearner`, which lives in its own `ConversationMemory` instance —
+    /// uses this so ONLY the bridge's instance ever CREATES the master key. Otherwise two instances
+    /// racing the first-launch create would generate different keys, one `keychain.save` would
+    /// clobber the other, and the agent (sealing under K1) and learner (reading under K2) would
+    /// diverge until relaunch. With this, the learner simply gets nil (cleartext fallback) until the
+    /// bridge has provisioned the key — after which both derive the same value deterministically.
+    func metadataKeyIfProvisioned() -> Data? {
+        if store != nil { return cachedMetadataKey }  // already bootstrapped (test init or prior use)
+        guard let keychain, keychain.load(account: Self.masterKeyAccount) != nil else { return nil }
+        return metadataKey()  // a master key exists → ensureStore takes the LOAD branch, never create
     }
 
     /// Renders the prior turns of `sessionKey` as a single plain-text transcript,
@@ -140,6 +176,8 @@ actor ConversationMemory {
         // bootstrap on the next use.
         store = nil
         bootstrapFailed = false
+        // The derived metadata key is scoped to the now-shredded master key — drop it.
+        cachedMetadataKey = nil
     }
 
     // MARK: Lazy bootstrap
@@ -165,6 +203,9 @@ actor ConversationMemory {
                 try keychain.save(blob, account: Self.masterKeyAccount)
                 encryptedStore = fresh
             }
+            // B2: cache the at-rest metadata key derived from this same store, so
+            // `metadataKey()` can hand it to the agent + ContextLearner (one root of trust).
+            cachedMetadataKey = encryptedStore.deriveKey(label: "acp-metadata-v1")
             let built = EncryptedFileMessageStore(directory: directory, store: encryptedStore)
             store = built
             return built

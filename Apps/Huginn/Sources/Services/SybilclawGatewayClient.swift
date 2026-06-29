@@ -23,16 +23,19 @@ import os
 ///      - event   : `{"type":"event", "event":…, "payload":…, "seq":…}`
 ///  • **Handshake** — the FIRST frame MUST be a `connect` request declaring `role` + `scopes`
 ///    (docs/gateway/protocol.md). The gateway services no method before it.
-///  • **Run a turn** — `chat.send` (`schema/logs-chat.ts` `ChatSendParamsSchema`). The user's
-///    prompt goes in `message`; the call targets a `sessionKey`. We use `chat.send` (NOT the
-///    `agent` method) precisely because it returns the reply INLINE over the WS as `chat`
-///    events — which is what we relay back to EldrChat — instead of delivering out-of-band.
-///  • **Session** — `sessions.create` (`schema/sessions.ts` `SessionsCreateParamsSchema`); the
-///    session is identified by `key`, passed to `chat.send` as `sessionKey`. The session is
-///    the `--session-id` selector the gateway demanded.
-///  • **Reply** — streams as `chat` events whose `payload` carries `deltaText` (incremental)
-///    and `message` (the cumulative snapshot); the turn ends when `payload.state` becomes
-///    `final` (or `error` / `aborted`).
+///  • **Run a turn** — `chat.send` (`schema/logs-chat.ts` `ChatSendParamsSchema`): the prompt
+///    goes in `message`, the conversation in `sessionKey`, plus a required `idempotencyKey`.
+///    The `res` does NOT carry the reply — it acks immediately with `{ runId, status:"in_flight" }`.
+///    There is NO separate session-create step: the gateway resolves/creates the session from
+///    `sessionKey`. To target a specific agent, encode it in the key as `agent:<id>:<base>`
+///    (`SessionKey.makeAgentSessionKey`) — `agentId` is NOT a `chat.send` field (the schema is
+///    `additionalProperties:false` and would reject it).
+///  • **Reply** — streams as `event` frames correlated by `runId`: the assistant text arrives on
+///    `event:"agent"` with `stream:"assistant"`, the cumulative text-so-far in `payload.data.text`
+///    (assign, don't append); the turn ends on an `event:"chat"` whose `payload.state` is
+///    `final` (or `error`/`aborted`, carrying `errorMessage`). `agent` frames carry no
+///    `sessionKey`, so correlation is by `runId`. (Verified field-for-field against the fork's
+///    own reference clients, rdevaul/sybilclaw apps/ios + apps/android.)
 ///  • **Agent discovery** — `agents.list` (`schema/agents-models-skills.ts`
 ///    `AgentsListResultSchema`) returns `{ agents: [{ id, … }], defaultId, mainKey }`.
 ///
@@ -137,8 +140,16 @@ struct SybilclawGatewayClient: Sendable {
             Self.log.debug("connect → \(sent, privacy: .public)")
             DiagnosticsLog.shared.post(.acp, .info, "Gateway connect sent", sent)
         }
-        try await send(task, ["type": "req", "id": connectID, "method": "connect", "params": connectParams()])
-        _ = try await awaitResponse(task, id: connectID, context: "connect", logRaw: diagnostics)
+        do {
+            try await send(task, ["type": "req", "id": connectID, "method": "connect", "params": connectParams()])
+            _ = try await awaitResponse(task, id: connectID, context: "connect", logRaw: diagnostics)
+        } catch let error as GatewayError {
+            throw error  // a real handshake rejection (schema/protocol) — keep its detail
+        } catch {
+            // Socket-level failure before the handshake landed (refused / timed out / DNS) — the
+            // gateway almost certainly isn't running. Say so, instead of leaking a raw URLError.
+            throw GatewayError.handshake("couldn't reach \(host):\(port) — \(error.localizedDescription)")
+        }
 
         // Attempt 1: the configured agent (nil ⇒ the gateway's default).
         do {
@@ -154,65 +165,79 @@ struct SybilclawGatewayClient: Sendable {
         }
     }
 
-    /// One full turn on an already-connected socket: create a session (the `--session-id`
-    /// selector), send the prompt, and assemble the reply from `chat` events until the run
-    /// reaches a terminal `state`. `agentId` binds the session/turn to a specific agent.
+    /// One full turn on an already-connected socket: send the prompt with `chat.send` and
+    /// assemble the streamed reply. The gateway resolves/creates the session from `sessionKey`
+    /// (no separate create step). `agentId`, when set, is encoded into the key as
+    /// `agent:<id>:<base>` — the only way `chat.send` targets a specific agent.
     private func runTurn(
-        _ task: URLSessionWebSocketTask, prompt: String, sessionKey: String, agentId: String?
+        _ task: URLSessionWebSocketTask, prompt: String, sessionKey baseKey: String, agentId: String?
     ) async throws -> String {
-        // Create the session under the caller's STABLE per-conversation `key` (so the
-        // gateway keeps this conversation's history together across turns). Tolerate
-        // gateways that reject create and auto-create on the first `chat.send` instead
-        // (try?), so the real error (if any) surfaces at chat.send where the retry logic
-        // can act on it.
-        let createID = UUID().uuidString
-        var createParams: [String: Any] = ["key": sessionKey]
-        if let agentId { createParams["agentId"] = agentId }
-        try await send(task, ["type": "req", "id": createID, "method": "sessions.create", "params": createParams])
-        _ = try? await awaitResponse(task, id: createID, context: "sessions.create")
+        let sessionKey = agentId.map { "agent:\($0):\(baseKey)" } ?? baseKey
 
-        // Send the prompt. `message` carries the user text (ChatSendParamsSchema).
         let sendID = UUID().uuidString
-        var sendParams: [String: Any] = [
+        let sendParams: [String: Any] = [
             "sessionKey": sessionKey,
             "message": prompt,
             "idempotencyKey": UUID().uuidString,
         ]
-        if let agentId { sendParams["agentId"] = agentId }
         try await send(task, ["type": "req", "id": sendID, "method": "chat.send", "params": sendParams])
 
-        // Assemble from `chat` events until the run reaches a terminal `state`.
+        // `chat.send` acks immediately with `{ runId, status:"in_flight" }`; the reply then
+        // streams as events. Assistant text arrives on `event:"agent"` (stream "assistant",
+        // cumulative text in `data.text`); the turn ends on an `event:"chat"` with a terminal
+        // `state`. Frames are correlated by `runId` — `agent` frames carry no `sessionKey`.
+        var runID: String?
         var assembled = ""
+        var finalMessage: String?
         var lastFrame: String?
         while !Task.isCancelled {
-            let frame = try await receive(task)
+            let frame: String
+            do {
+                frame = try await receive(task)
+            } catch {
+                // A3: the gateway can stream the whole assistant reply on `agent` frames and then
+                // CLOSE the socket without a terminal `chat:final` — `receive` throws. Don't discard
+                // a complete reply: return what streamed, and surface the error only when nothing did.
+                if !assembled.isEmpty { return assembled }
+                throw error
+            }
             lastFrame = frame
             guard let obj = Self.json(frame) else { continue }
             switch obj["type"] as? String {
             case "res":
-                // The only response we still care about is a rejection of OUR chat.send.
-                if obj["id"] as? String == sendID, (obj["ok"] as? Bool) == false {
+                guard obj["id"] as? String == sendID else { continue }
+                if (obj["ok"] as? Bool) == false {
                     throw GatewayError.rpc(Self.errorText(obj) ?? "chat.send was rejected")
                 }
+                runID = (obj["payload"] as? [String: Any])?["runId"] as? String
             case "event":
                 guard let payload = obj["payload"] as? [String: Any],
-                    (payload["sessionKey"] as? String) == sessionKey
-                else { continue }  // an event for some other session — ignore
-                if let message = payload["message"] as? String {
-                    assembled = message  // cumulative snapshot
-                } else if let delta = payload["deltaText"] as? String {
-                    if (payload["replace"] as? Bool) == true { assembled = delta }
-                    else { assembled += delta }
-                }
-                switch payload["state"] as? String {
-                case "final":
-                    return assembled.isEmpty ? "(sybilclaw returned no text)" : assembled
-                case "error":
-                    throw GatewayError.rpc((payload["errorMessage"] as? String) ?? "agent run failed")
-                case "aborted":
-                    throw GatewayError.rpc("agent run was aborted")
+                    Self.frame(payload, belongsTo: runID, sessionKey: sessionKey)
+                else { continue }  // a frame for some other run/session — ignore
+                switch obj["event"] as? String {
+                case "agent":
+                    // The live assistant text. `data.text` is the cumulative snapshot — assign,
+                    // never append (appending would duplicate the whole reply on every frame).
+                    if (payload["stream"] as? String) == "assistant",
+                        let data = payload["data"] as? [String: Any],
+                        let text = data["text"] as? String
+                    {
+                        assembled = text
+                    }
+                case "chat":
+                    if let m = payload["message"] as? String, !m.isEmpty { finalMessage = m }
+                    switch payload["state"] as? String {
+                    case "final":
+                        return Self.chooseReply(assembled: assembled, chatMessage: finalMessage)
+                    case "error":
+                        throw GatewayError.rpc((payload["errorMessage"] as? String) ?? "agent run failed")
+                    case "aborted":
+                        throw GatewayError.rpc("agent run was aborted")
+                    default:
+                        break  // a non-terminal "delta" — keep reading
+                    }
                 default:
-                    break  // a non-terminal delta — keep reading
+                    break
                 }
             default:
                 break
@@ -220,6 +245,26 @@ struct SybilclawGatewayClient: Sendable {
         }
         if !assembled.isEmpty { return assembled }
         throw GatewayError.timeout(lastFrame: lastFrame)
+    }
+
+    /// Whether a streamed event frame belongs to this turn. Correlate strictly on `runId` once
+    /// it's known: after we capture this turn's `runId` from the `chat.send` ack, any frame that
+    /// carries a `runId` must match it (a differing `runId` is another run's — reject it). Before
+    /// the ack `runID` is nil, so a runId-bearing frame is accepted (exactly one turn runs per
+    /// socket). `sessionKey` is used only for frames that carry NO `runId`; a frame with neither
+    /// is ours only on that single-turn socket. (`agent` frames carry `runId` but no `sessionKey`;
+    /// `chat` frames carry both.)
+    private static func frame(
+        _ payload: [String: Any], belongsTo runID: String?, sessionKey: String
+    ) -> Bool {
+        // A6: once we've captured this turn's runId from the chat.send ack, a frame that declares a
+        // DIFFERENT runId is another run's — reject it. Any frame that carries a runId is matched on it
+        // (before the ack, runID is nil ⇒ accept: exactly one turn runs per socket). Only a frame with
+        // NO runId falls back to sessionKey correlation (chat frames carry both; agent frames carry the
+        // runId, handled above), and a frame with neither is ours only on that single-turn socket.
+        if let frameRun = payload["runId"] as? String { return runID == nil || frameRun == runID }
+        if let frameSession = payload["sessionKey"] as? String { return frameSession == sessionKey }
+        return runID == nil
     }
 
     /// Ask the gateway for its agents and return the default agent id (`defaultId`, or the
@@ -244,18 +289,28 @@ struct SybilclawGatewayClient: Sendable {
     func connectParams() -> [String: Any] {
         var params: [String: Any] = [
             "minProtocol": 3,
-            "maxProtocol": 3,
+            // The fork's gateway runs protocol v3; upstream openclaw is v4. The server accepts a
+            // client iff its advertised [min,max] BRACKETS the server's version (verified:
+            // src/gateway/server/ws-connection/message-handler.ts rejects only when
+            // maxProtocol < server || minProtocol > server). [3,4] works against both, and
+            // future-proofs an upstream bump — pinning [3,3] would break the day he updates.
+            "maxProtocol": 4,
             "client": [
                 // id/mode MUST come from the gateway's compiled allowlists (13 ids / 7 modes,
-                // packages/gateway-protocol/src/client-info.ts) — an off-list value is rejected with
-                // "must be equal to constant; must match a schema in anyOf". "openclaw-macos" is the
-                // normal macOS-app identity (full agent/streaming access); "backend" is a valid mode.
-                // The cofounder's fork (rdevaul/sybilclaw) speaks protocol v3, so pin the range to [3,3].
+                // .../protocol/client-info.ts) — an off-list value is schema-rejected with
+                // "must be equal to constant; must match a schema in anyOf". "openclaw-macos" is
+                // the macOS identity. "backend" (NOT "ui") is deliberate: there's no role↔mode
+                // check (role-policy.ts authorizes by role alone), and "ui" can trip the gateway's
+                // browser-origin check — which this native URLSession socket would fail (it sends
+                // no Origin header). "backend" skips that path entirely.
                 "id": "openclaw-macos", "version": Self.appVersion,
                 "platform": "macos", "mode": "backend",
             ],
             "role": "operator",
-            "scopes": ["operator.read", "operator.write"],
+            // operator.write is what authorizes chat.send; operator.talk.secrets mirrors the
+            // fork's reference operator client (only needed for Talk secrets, harmless to
+            // request on a no-auth loopback gateway).
+            "scopes": ["operator.read", "operator.write", "operator.talk.secrets"],
             "caps": [String](),
             "commands": [String](),
             "permissions": [String: Any](),
@@ -322,6 +377,16 @@ struct SybilclawGatewayClient: Sendable {
 
     private static func json(_ s: String) -> [String: Any]? {
         (try? JSONSerialization.jsonObject(with: Data(s.utf8))) as? [String: Any]
+    }
+
+    /// A2: choose the turn's reply. The assistant text is the cumulative agent-stream snapshot
+    /// (`assembled`, from `event:agent` `data.text`); the terminal `chat:final` frame's `message`
+    /// is NOT guaranteed to be that text (it can be an echo/status/routing note), so prefer the
+    /// streamed text and fall back to the chat `message` only when nothing streamed (a gateway
+    /// variant that emits no agent frames). Pure + non-private so `GatewayReplyTests` can lock it.
+    static func chooseReply(assembled: String, chatMessage: String?) -> String {
+        let reply = assembled.isEmpty ? (chatMessage ?? "") : assembled
+        return reply.isEmpty ? "(sybilclaw returned no text)" : reply
     }
 
     private static func errorText(_ obj: [String: Any]) -> String? {

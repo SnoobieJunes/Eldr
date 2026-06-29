@@ -4,6 +4,7 @@ import PQRCACP
 import PQRCAgent
 import PQRCCore
 import PQRCNostr
+import os
 
 // MARK: - Pure, testable bridge pieces
 
@@ -330,6 +331,14 @@ final class ACPBridgeService: ObservableObject {
     /// Keychain-free instance via `setConversationMemory`.
     private var conversationMemory: ConversationMemory?
 
+    /// B2: base64 of the at-rest METADATA key (from `conversationMemory.metadataKey()`),
+    /// injected into the spawned `eldr-acp` process via the env var `ELDR_ACP_METADATA_KEY`
+    /// so it seals/open `events.jsonl` + `eldr.md`. Derived once the node is up (async), then
+    /// read by `applyProductionRunner`. NEVER written to the on-disk env file (that would
+    /// reverse the C-8 hardening) — it rides the process environment only. nil ⇒ the agent
+    /// falls back to cleartext (e.g. an external Xcode/OpenClaw launch that lacks the key).
+    private var metadataKeyB64: String?
+
     private var keypair: NostrKeypair?
     private var link: MultipeerNearbyLink?
     private var eventsTask: Task<Void, Never>?
@@ -487,28 +496,36 @@ final class ACPBridgeService: ObservableObject {
     /// PQRC identity seed, the identity-DH key, and the prekey state behind, so the
     /// next pair reused a stale PQRC identity under a fresh Nostr key and the handshake
     /// silently mismatched. Clearing all four makes re-pair a clean slate.
-    func unpair() {
+    func unpair() async {
         disable()
+        // B6: shred the transcript through the ConversationMemory ACTOR (`wipe()`) BEFORE deleting
+        // files/keys. The actor serializes the wipe after any in-flight `record()` — which holds
+        // the already-unwrapped store in memory, so nil-ing the reference alone doesn't stop it:
+        // without this it could seal a NEW transcript file AFTER the key + files were deleted,
+        // leaving orphan undecryptable ciphertext. `wipe()` removes the transcript files and the
+        // master/SE/software-KEK Keychain items in one actor-serialized step.
+        let memory = conversationMemory
+        conversationMemory = nil
+        await memory?.wipe()
         for account in [
             keyAccount,                    // bridge-nostr-identity
             "bridge-pqrc-identity-seed",
             "bridge-identity-dh",
             "bridge-prekey-state",
-            // Transcript secrets: deleting the wrapped master key cryptographically
-            // shreds every recorded conversation even if files linger (SPEC §3.4, D9).
+            // Transcript secrets: `wipe()` above already shredded these via the actor. Deleting
+            // them here too is idempotent and covers the case where no ConversationMemory was set
+            // (wipe had nothing to run) — the wrapped master key gone means every record is
+            // cryptographically unreadable even if files linger (SPEC §3.4, D9).
             ConversationMemory.masterKeyAccount,
             MacSecureEnclaveKeyWrapper.seKeyAccount,
             MacSecureEnclaveKeyWrapper.softwareKEKAccount,
         ] {
             keychain.delete(account: account)
         }
-        // Drop the live ConversationMemory so its in-memory (already-unwrapped) master key
-        // is released and any in-flight/queued record() no-ops instead of resurrecting a
-        // transcript file under the just-shredded key (the cached store is gone).
-        conversationMemory = nil
         // Belt-and-suspenders: remove the (now-undecryptable) transcript files, and the
-        // still-cleartext learning sinks (events.jsonl + per-project eldr.md) so unpair is a
-        // true clean slate (AC72 — those two aren't encrypted yet).
+        // learning sinks (events.jsonl + per-project eldr.md). Post-B2 those sinks are sealed
+        // under the metadata key — itself derived from the now-shredded master key, so they're
+        // already cryptographically unreadable; the removal makes unpair a true clean slate.
         if let transcriptsDir {
             try? FileManager.default.removeItem(at: transcriptsDir)
             let configDir = transcriptsDir.deletingLastPathComponent()
@@ -571,8 +588,12 @@ final class ACPBridgeService: ObservableObject {
                 paths: .standard,
                 bundled: Bundle.main.url(forResource: "eldr-acp", withExtension: nil))
             {
+                var env = Self.llmTokenEnvironment()
+                // B2: hand the spawned agent the at-rest metadata key (env only — never the
+                // on-disk env file, C-8) so it seals events.jsonl + reads sealed eldr.md.
+                if let metadataKeyB64 { env["ELDR_ACP_METADATA_KEY"] = metadataKeyB64 }
                 agentRunner = ACPDriverAgentRunner(
-                    executableURL: executable, environmentOverrides: Self.llmTokenEnvironment())
+                    executableURL: executable, environmentOverrides: env)
             }
         case .sybilclaw:
             agentRunner = SybilclawAgentRunner(
@@ -616,12 +637,22 @@ final class ACPBridgeService: ObservableObject {
     static let transcriptContextMaxBytes = 16_384
 
     static func gatewaySessionKey(for conversation: BridgeConversation) -> String {
+        // C2 (BY DESIGN — do NOT "merge" thread and conversation into one scope): a shared AI
+        // thread (SPEC §13.5) is a DISTINCT sub-conversation, so it gets its OWN gateway session +
+        // transcript, separate from the peer/group 1:1. This is intentional context ISOLATION, not
+        // a continuity bug — merging them would bleed a thread's context (in a group thread, other
+        // people's content) into the 1:1 and vice versa, violating the cardinal rule (SPEC §0). A
+        // message either belongs to a thread (has `threadID`) or the main conversation; those are
+        // genuinely different contexts, so the scope is stable per logical context.
         let scope = conversation.threadID ?? conversation.id
         var hasher = SHA256()
         hasher.update(data: gatewaySessionSalt())
         hasher.update(data: Data(scope.utf8))
         return "eldr:" + hasher.finalize().map { String(format: "%02x", $0) }.joined()
     }
+
+    /// Protocol/status diagnostics only — never salt/key/payload bytes (invariant 12).
+    private static let log = Logger(subsystem: "chat.eldr.huginn", category: "bridge")
 
     /// Process-lifetime cache of the session salt, so derivation stays stable within a run
     /// even if the Keychain is unavailable (e.g. an unsigned test host).
@@ -643,7 +674,17 @@ final class ACPBridgeService: ObservableObject {
         var bytes = [UInt8](repeating: 0, count: 32)
         _ = SecRandomCopyBytes(kSecRandomDefault, bytes.count, &bytes)
         let salt = Data(bytes)
-        try? box.save(salt, account: account)
+        do {
+            try box.save(salt, account: account)
+        } catch {
+            // C3: persistence failed (Keychain unavailable). We still cache + use the salt so keys
+            // stay STABLE for THIS process — but it won't survive a relaunch, and because the salt
+            // keys BOTH the gateway session AND the encrypted transcript filenames/record keys, a
+            // rotated salt on the next launch orphans prior transcripts as undecryptable ciphertext.
+            // Surface it (metadata only — never the salt bytes) rather than failing silently; a hard
+            // crash here would break Keychain-less / headless hosts that must still function.
+            Self.log.error("gateway session salt could not be persisted — keys won't survive an app relaunch on this device")
+        }
         cachedSessionSalt = salt
         return salt
     }
@@ -737,6 +778,12 @@ final class ACPBridgeService: ObservableObject {
             if ownerEngine == nil {
                 ownerEngine = AgentEngine(myIdentity: identity, clock: clock, sink: NoopAgentSink())
             }
+            // B2: derive the at-rest metadata key BEFORE wiring the runner, so
+            // `configureProduction` → `applyProductionRunner` hands it to the spawned agent.
+            // Async because it forces the transcript store's bootstrap; nil ⇒ cleartext
+            // fallback (e.g. Keychain unavailable on a headless host). Kept in memory only —
+            // never written to the on-disk env file (C-8).
+            metadataKeyB64 = (await conversationMemory?.metadataKey())?.base64EncodedString()
             configureProduction()
             messaging = PQRCMessengerMessaging(messenger: messenger)
 
@@ -788,12 +835,17 @@ final class ACPBridgeService: ObservableObject {
             wrapping: OpenAICompatibleLLMClient(config: llmConfig), model: llmConfig.model)
         let toolEnvironment = ToolEnvironment(
             workdir: agentWorkdir, baseEnvironment: ProcessInfo.processInfo.environment)
+        // B2: carry the at-rest metadata key so the in-process agent seals/reads the metadata
+        // sinks under the same key. (Today this host passes no configDir/events file, so this
+        // is inert; wired now so it stays correct if those are supplied later.)
+        var relayConfig = AgentConfig.default
+        relayConfig.metadataKey = metadataKeyB64.flatMap { Data(base64Encoded: $0) }
         let host = ACPRelayHost(
             ownerIdentityHex: ownerIdentityHex,
             maxFrameBytes: Self.relayACPMaxFrameBytes,
             llm: llm,
             toolEnvironment: toolEnvironment,
-            config: .default,
+            config: relayConfig,
             streamingEnabled: relayHostStreamingEnabled,
             publish: { [weak messenger] framed in
                 // The transport's send seam: publish ONE framed chunk to the owner as an

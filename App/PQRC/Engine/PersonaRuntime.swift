@@ -547,6 +547,19 @@ actor PersonaRuntime {
         return (hex, contactName(hex))
     }
 
+    /// The owner's paired `coding_agent` node — identity hex + local name — REGARDLESS of
+    /// consent. Mirror of `consentedCodingAgentNodeInfo()` WITHOUT the `remoteDevControlConsent`
+    /// filter, so a UI (the "My AI" hub) can OFFER to enable its tools, not just report an
+    /// already-consented one — the discoverability gap. Deterministic pick (lowest hex) when
+    /// more than one is paired. nil when none is paired.
+    func pairedCodingAgentNode() -> (identityHex: String, name: String)? {
+        guard let hex = verifiedContacts.keys
+            .filter({ contactType($0) == "coding_agent" })
+            .sorted().first
+        else { return nil }
+        return (hex, contactName(hex))
+    }
+
     func setFirewallEnabled(_ enabled: Bool) {
         firewallEnabled = enabled
     }

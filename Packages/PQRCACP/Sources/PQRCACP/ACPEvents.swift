@@ -138,7 +138,7 @@ public enum ACPEventLog {
     /// mangled.
     public static func writeFile(
         path filePath: String, session: String, cwd: String, to eventsFile: String?,
-        redact: ACPLogScrubber = ACPLogRedactor.scrubPath
+        key: Data? = nil, redact: ACPLogScrubber = ACPLogRedactor.scrubPath
     ) {
         append(
             [
@@ -147,7 +147,7 @@ public enum ACPEventLog {
                 ("session", .string(session)),
                 ("cwd", .string(cwd)),
                 ("ts", .string(nowISO8601())),
-            ], to: eventsFile)
+            ], to: eventsFile, key: key)
     }
 
     /// `{"type":"shell_result","cmd":…,"exit":<int>,"summary":…,"session":…,"cwd":…,"ts":…}`
@@ -157,7 +157,7 @@ public enum ACPEventLog {
     /// before the line is written, the two highest-risk at-rest leak vectors.
     public static func shellResult(
         cmd: String, exit code: Int, summary: String, session: String, cwd: String,
-        to eventsFile: String?, redact: ACPLogScrubber = ACPLogRedactor.scrub
+        to eventsFile: String?, key: Data? = nil, redact: ACPLogScrubber = ACPLogRedactor.scrub
     ) {
         append(
             [
@@ -168,7 +168,7 @@ public enum ACPEventLog {
                 ("session", .string(session)),
                 ("cwd", .string(cwd)),
                 ("ts", .string(nowISO8601())),
-            ], to: eventsFile)
+            ], to: eventsFile, key: key)
     }
 
     /// `{"type":"session_end","cwd":…,"session":…,"summary":…,"files":<int>,"build":…,"ts":…}`
@@ -176,7 +176,7 @@ public enum ACPEventLog {
     /// C-6: `summary` (the model's free-text final message) is scrubbed before disk.
     public static func sessionEnd(
         cwd: String, session: String, summary: String, files: Int, build: String,
-        to eventsFile: String?, redact: ACPLogScrubber = ACPLogRedactor.scrub
+        to eventsFile: String?, key: Data? = nil, redact: ACPLogScrubber = ACPLogRedactor.scrub
     ) {
         append(
             [
@@ -187,14 +187,26 @@ public enum ACPEventLog {
                 ("files", .int(files)),
                 ("build", .string(build)),
                 ("ts", .string(nowISO8601())),
-            ], to: eventsFile)
+            ], to: eventsFile, key: key)
     }
 
     /// Append one serialized object as a single line. JSONValue → JSONSerialization
     /// escapes embedded newlines, so a multi-line `summary` can't break JSONL framing.
-    static func append(_ fields: [(String, JSONValue)], to path: String?) {
+    ///
+    /// B2: when `key` is present, the LINE is sealed with `ACPMetadataCrypto.sealLine`
+    /// (base64) before it hits disk, so an at-rest reader sees ciphertext, not the event.
+    /// A sealed line is base64 (never starts with `{`), so a reader distinguishes it from a
+    /// legacy plaintext JSON line unambiguously (try `openLine`; nil ⇒ legacy plaintext). A
+    /// seal failure falls back to writing the plaintext line — an event is NEVER dropped.
+    static func append(_ fields: [(String, JSONValue)], to path: String?, key: Data? = nil) {
         guard let path, !path.isEmpty else { return }
-        let line = JSONValue.object(Dictionary(fields, uniquingKeysWith: { a, _ in a })).serialized() + "\n"
+        let json = JSONValue.object(Dictionary(fields, uniquingKeysWith: { a, _ in a })).serialized()
+        let line: String
+        if let key, let sealed = ACPMetadataCrypto.sealLine(json, key: key) {
+            line = sealed + "\n"
+        } else {
+            line = json + "\n"
+        }
         guard let data = line.data(using: .utf8) else { return }
 
         let fm = FileManager.default
@@ -242,23 +254,68 @@ public enum ProjectContext {
     /// neither exists or both are empty. Reads at most `maxBytes` (the budget the
     /// system-prompt block is capped to).
     public static func read(
-        explicitPath: String?, configDir: String?, cwd: String, maxBytes: Int = 4096
+        explicitPath: String?, configDir: String?, cwd: String, maxBytes: Int = 4096,
+        key: Data? = nil
     ) -> String? {
-        if let explicitPath, let text = readFile(explicitPath, maxBytes: maxBytes) { return text }
+        if let explicitPath, let text = readFile(explicitPath, maxBytes: maxBytes, key: key) {
+            return text
+        }
         if let configDir {
             let auto = memoryPath(configDir: configDir, cwd: cwd)
-            if let text = readFile(auto, maxBytes: maxBytes) { return text }
+            if let text = readFile(auto, maxBytes: maxBytes, key: key) { return text }
         }
         return nil
     }
 
+    /// B2: the magic header marking a WHOLE-FILE-sealed `eldr.md`. ASCII, newline-terminated
+    /// — a keyless/older reader can't mistake the base64 body that follows it for markdown.
+    public static let sealedHeader = "ELDR-SEALED-v1\n"
+
     /// Read the first `maxBytes` of a file, lossily decoded (a cut mid-multibyte-char
     /// becomes U+FFFD, never a crash). nil for absent/empty.
-    static func readFile(_ path: String, maxBytes: Int) -> String? {
+    ///
+    /// B2: a file that begins with `sealedHeader` is WHOLE-FILE sealed — `openFromDisk`
+    /// decrypts it (nil key or a failed open ⇒ nil ⇒ SKIP: never render ciphertext as
+    /// text). A file WITHOUT the header is legacy plaintext markdown, read exactly as before.
+    static func readFile(_ path: String, maxBytes: Int, key: Data? = nil) -> String? {
         guard let data = FileManager.default.contents(atPath: path) else { return nil }
-        let text = String(decoding: data.prefix(maxBytes), as: UTF8.self)
+        // `openFromDisk` returns the plaintext for BOTH a legacy (headerless) file and a
+        // successfully-opened sealed file; it returns nil ONLY for a sealed file we can't
+        // read (no/wrong key, corrupt) — which correctly maps to "skip" here.
+        guard let full = openFromDisk(data, key: key) else { return nil }
+        let text = String(decoding: Data(full.utf8).prefix(maxBytes), as: UTF8.self)
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         return trimmed.isEmpty ? nil : trimmed
+    }
+
+    /// B2: seal `contents` for WHOLE-FILE at-rest storage — the ASCII `sealedHeader`
+    /// followed by base64 of the AES-GCM blob. Returns nil if sealing fails (caller writes
+    /// plaintext instead). Requires a key; callers gate on `key != nil` first.
+    public static func sealForDisk(_ contents: String, key: Data) -> Data? {
+        guard let sealed = ACPMetadataCrypto.seal(Data(contents.utf8), key: key) else {
+            return nil
+        }
+        return Data(sealedHeader.utf8) + Data(sealed.base64EncodedString().utf8)
+    }
+
+    /// B2: the SINGLE source of the whole-file header logic, shared by `readFile` (the agent)
+    /// and Huginn's ContextLearner. Returns:
+    ///  - a HEADERLESS file's bytes decoded as-is (legacy plaintext markdown — used as today);
+    ///  - a sealed file's decrypted plaintext when `key` opens it;
+    ///  - nil when the file is sealed but `key` is nil or the open fails (wrong key / corrupt)
+    ///    — the caller SKIPS it and never renders ciphertext as text.
+    public static func openFromDisk(_ data: Data, key: Data?) -> String? {
+        let header = Data(sealedHeader.utf8)
+        guard data.starts(with: header) else {
+            // Legacy plaintext markdown — return it unchanged regardless of key.
+            return String(decoding: data, as: UTF8.self)
+        }
+        // Sealed: needs a key that opens the base64 body.
+        guard let key,
+            let blob = Data(base64Encoded: Data(data.dropFirst(header.count))),
+            let plaintext = ACPMetadataCrypto.open(blob, key: key)
+        else { return nil }
+        return String(decoding: plaintext, as: UTF8.self)
     }
 
     /// Wrap context for injection as a leading system message.

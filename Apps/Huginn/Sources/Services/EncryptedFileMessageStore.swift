@@ -51,8 +51,43 @@ actor EncryptedFileMessageStore: MessageStore {
     func save(_ message: StoredMessage) async throws {
         remember(message.conversationID)
         try ensureDirectoryExists()
+        let url = fileURL(for: message.conversationID)
         let line = try encodeLine(message)
-        try append(line, to: fileURL(for: message.conversationID))
+        try append(line, to: url)
+        trimIfNeeded(conversationID: message.conversationID, url: url)
+    }
+
+    // MARK: Bounding (B3)
+
+    /// When a transcript file grows past `maxFileBytes`, re-seal only the newest messages that fit
+    /// in `keepBytes`. Bounds BOTH the file size and the per-turn `priorContext` read cost (which
+    /// decrypts the whole file), so a long-lived conversation no longer grows without limit or adds
+    /// ever-increasing latency that reads as a slow AI. `keepBytes < maxFileBytes` so the trimmed
+    /// file lands below the trigger and the next save can't immediately re-trim (no thrash) — even
+    /// for large messages, since the budget is measured in real sealed line bytes, not record count.
+    /// The injected context is byte-capped far below this (`transcriptContextMaxBytes` ~16 KB), so
+    /// trimming older turns removes nothing the model would have been given.
+    private static let maxFileBytes = 2_000_000
+    private static let keepBytes = 1_000_000
+
+    /// Best-effort — never throws into `save`; a trim failure just leaves the file untrimmed.
+    private func trimIfNeeded(conversationID: String, url: URL) {
+        guard let size = try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize,
+            size > Self.maxFileBytes
+        else { return }
+        let msgs = readMessages(at: url, conversationID: conversationID)
+        // Keep the newest messages that fit in `keepBytes` (always ≥1), measured by real sealed
+        // line size so the retained file lands under `keepBytes`.
+        var kept: [StoredMessage] = []
+        var bytes = 0
+        for message in msgs.reversed() {
+            let lineSize = (try? encodeLine(message).count) ?? 0
+            if !kept.isEmpty, bytes + lineSize > Self.keepBytes { break }
+            kept.append(message)
+            bytes += lineSize
+        }
+        guard kept.count < msgs.count else { return }  // nothing to drop
+        try? rewrite(kept.reversed(), conversationID: conversationID, to: url)
     }
 
     func messages(conversationID: String) async throws -> [StoredMessage] {
@@ -147,9 +182,22 @@ actor EncryptedFileMessageStore: MessageStore {
     }
 
     private func ensureDirectoryExists() throws {
+        // B4: owner-only (0700) so a local user can't even enumerate the transcript files. The
+        // bodies are ciphertext, but the directory listing would otherwise leak metadata (which
+        // conversations exist, their line counts, sizes, mtimes) — below the at-rest bar the rest
+        // of the app holds (cf. the env file's 0600). Only applied when WE create the directory.
         try FileManager.default.createDirectory(
-            at: directory, withIntermediateDirectories: true
+            at: directory, withIntermediateDirectories: true,
+            attributes: [.posixPermissions: 0o700]
         )
+    }
+
+    /// B4: restrict a just-written transcript file to owner read/write (0600). Called after every
+    /// atomic write (which creates a fresh inode with umask-default perms); the append-to-existing
+    /// path preserves the 0600 set when the file was first created.
+    private static func restrict(_ url: URL) {
+        try? FileManager.default.setAttributes(
+            [.posixPermissions: 0o600], ofItemAtPath: url.path)
     }
 
     // MARK: Line codec
@@ -226,6 +274,7 @@ actor EncryptedFileMessageStore: MessageStore {
             data.append(try encodeLine(message))
         }
         try data.write(to: url, options: .atomic)
+        Self.restrict(url)  // B4: the atomic write made a new inode — re-restrict to 0600.
     }
 
     // MARK: Append
@@ -235,12 +284,27 @@ actor EncryptedFileMessageStore: MessageStore {
     /// append-only on the common path (rewrites happen only for edits/deletes).
     private func append(_ line: Data, to url: URL) throws {
         if FileManager.default.fileExists(atPath: url.path) {
-            let handle = try FileHandle(forWritingTo: url)
+            // `forUpdating` (O_RDWR), not `forWritingTo` (O_WRONLY): the B5 torn-write check below
+            // must READ the last byte, which a write-only handle rejects.
+            let handle = try FileHandle(forUpdating: url)
             defer { try? handle.close() }
-            try handle.seekToEnd()
+            let end = try handle.seekToEnd()
+            // B5: if a crash tore the PREVIOUS append mid-write, the file ends without a trailing
+            // "\n". Concatenating this record straight onto that partial would merge two records into
+            // one line → base64 decode fails → BOTH silently vanish (cascading corruption). Detect the
+            // torn write (last byte != "\n") and emit a separating "\n" first, so the partial becomes
+            // its OWN line that `decodeLines` harmlessly skips and this record stays intact. Best-effort
+            // and cheap: seek back one byte, read it, seek back to end. Empty file (end == 0) needs none.
+            if end > 0 {
+                try handle.seek(toOffset: end - 1)
+                let last = try handle.read(upToCount: 1)
+                try handle.seekToEnd()
+                if last != Data([0x0A]) { try handle.write(contentsOf: Data([0x0A])) }
+            }
             try handle.write(contentsOf: line)
         } else {
             try line.write(to: url, options: .atomic)
+            Self.restrict(url)  // B4: first write of this conversation's file — set 0600.
         }
     }
 }

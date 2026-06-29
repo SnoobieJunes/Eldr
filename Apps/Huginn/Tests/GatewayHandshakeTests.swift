@@ -5,10 +5,11 @@ import Testing
 
 // Locks the SybilClaw/OpenClaw gateway `connect` handshake identity against a future blind
 // edit. The id/mode MUST come from the gateway's compiled allowlists (13 client ids / 7 modes,
-// packages/gateway-protocol/src/client-info.ts) or the handshake is rejected with
+// .../protocol/client-info.ts) or the handshake is rejected with
 // "must be equal to constant; must match a schema in anyOf". The cofounder's fork
-// (rdevaul/sybilclaw v2026.5.12) speaks protocol v3, so the range must be [3, 3]. These regressed
-// once already (we shipped "huginn"/"operator"/maxProtocol 4) — that bug is what this suite guards.
+// (rdevaul/sybilclaw) speaks protocol v3 and upstream is v4; the gateway accepts a client iff
+// its advertised range BRACKETS the server version, so we send [3, 4]. These regressed once
+// already (we shipped "huginn"/"operator"/maxProtocol 4 alone) — that bug is what this guards.
 
 @Suite("Gateway connect handshake")
 struct GatewayHandshakeTests {
@@ -40,10 +41,15 @@ struct GatewayHandshakeTests {
         #expect(mode.map(Self.validClientModes.contains(_:)) == true)
     }
 
-    @Test func protocolRangeIsV3() {
+    @Test func protocolRangeBracketsForkV3() {
+        // The gateway accepts a client iff min ≤ serverVersion ≤ max. The fork is v3, so the
+        // range must include 3; we advertise [3, 4] to also accept an upstream v4 gateway.
         let p = params()
-        #expect(p["minProtocol"] as? Int == 3)
-        #expect(p["maxProtocol"] as? Int == 3)
+        let min = p["minProtocol"] as? Int
+        let max = p["maxProtocol"] as? Int
+        #expect(min == 3)
+        #expect(max == 4)
+        #expect((min ?? 99) <= 3 && (max ?? 0) >= 3)  // brackets the fork's v3
     }
 
     @Test func operatorRoleAndScopesPreserved() {
@@ -53,6 +59,9 @@ struct GatewayHandshakeTests {
         let scopes = p["scopes"] as? [String] ?? []
         #expect(scopes.contains("operator.read"))
         #expect(scopes.contains("operator.write"))
+        // Matches the fork's reference operator client. operator.write is what authorizes
+        // chat.send; operator.talk.secrets mirrors the reference (only needed for Talk secrets).
+        #expect(scopes.contains("operator.talk.secrets"))
     }
 
     @Test func handshakeCarriesNoPromptOrToken() {

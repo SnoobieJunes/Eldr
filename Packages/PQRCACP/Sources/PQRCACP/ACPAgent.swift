@@ -276,7 +276,8 @@ public actor ACPAgent {
         // else the auto-discovered per-project eldr.md). Stored once; prepended to
         // the system prompt on every turn of this session.
         if let context = ProjectContext.read(
-            explicitPath: config.contextFilePath, configDir: configDir, cwd: cwd)
+            explicitPath: config.contextFilePath, configDir: configDir, cwd: cwd,
+            key: config.metadataKey)
         {
             sessionContext[sessionId] = context
         }
@@ -806,7 +807,8 @@ public actor ACPAgent {
             // but preserves legitimate sha256/UUID path components ContextLearner
             // reads), NOT the free-text `config.logRedactor`.
             ACPEventLog.writeFile(
-                path: path, session: sessionId, cwd: cwd, to: config.eventsFilePath)
+                path: path, session: sessionId, cwd: cwd, to: config.eventsFilePath,
+                key: config.metadataKey)
         case "run_shell":
             let cmd = args["command"]?.stringValue ?? ""
             let exit = Self.parseShellExit(from: result.text)
@@ -817,7 +819,7 @@ public actor ACPAgent {
             ACPEventLog.shellResult(
                 cmd: cmd, exit: exit, summary: String(result.text.prefix(200)),
                 session: sessionId, cwd: cwd, to: config.eventsFilePath,
-                redact: config.logRedactor)
+                key: config.metadataKey, redact: config.logRedactor)
         default:
             break
         }
@@ -830,7 +832,7 @@ public actor ACPAgent {
             cwd: cwd, session: sessionId, summary: String(summary.prefix(200)),
             files: sessionWriteCounts[sessionId] ?? 0,
             build: sessionBuildStatus[sessionId] ?? "unknown",
-            to: config.eventsFilePath, redact: config.logRedactor)
+            to: config.eventsFilePath, key: config.metadataKey, redact: config.logRedactor)
     }
 
     /// Ask the client for permission for a mutating tool, and FAIL CLOSED. The request

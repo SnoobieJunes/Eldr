@@ -22,6 +22,9 @@ struct ConversationView: View {
     /// Per-message AI-context visibility for the eye badge (C5), recomputed from
     /// the runtime's inspections. Keyed by message id.
     @State private var aiVisibilityByMessage: [String: AIMessageVisibility] = [:]
+    // M1: coalesces the expensive per-AI context rebuild (`refreshAIVisibility`) so a multi-AI
+    // reply burst doesn't stack one full N-AI inspection per posted message behind reply generation.
+    @State private var visibilityRefreshTask: Task<Void, Never>?
     @State private var showDetails = false
     /// Multi-select mode for batch "Add to AI Context" (Feature 3).
     @State private var selecting = false
@@ -97,26 +100,28 @@ struct ConversationView: View {
             // only for a coding-agent conversation that currently has a plan. It's
             // node→phone status (not a message), so it sits above the transcript and
             // gets the bubbles' reading-width cap so it doesn't sprawl on iPad/Mac.
-            if isCodingAgent, let plan = model.acpPlansByConversation[conversationID], !plan.isEmpty {
-                ACPPlanView(entries: plan)
-                    .padding(.horizontal)
-                    .padding(.top, 6)
-                    .frame(maxWidth: 760)
-            }
-            // Phase D4 — a live INTERACTIVE terminal (PTY) the node is running, with its
-            // prominent Stop/Kill control. Shown only for a coding-agent conversation while
-            // a terminal is live; same reading-width cap so it doesn't sprawl on iPad/Mac.
-            if isCodingAgent, let terminal = model.acpTerminalByConversation[conversationID] {
-                ACPTerminalView(
-                    model: model, conversationID: conversationID, terminal: terminal)
-                    .padding(.horizontal)
-                    .padding(.top, 6)
-                    .frame(maxWidth: 760)
+            // H2: the plan + live terminal read their own observable state INSIDE these slot
+            // views, so their frequent churn (esp. per-chunk terminal output) re-renders only the
+            // slot — not this VStack and its message `LazyVStack`. Same reading-width cap.
+            if isCodingAgent {
+                ACPPlanSlot(model: model, conversationID: conversationID)
+                ACPTerminalSlot(model: model, conversationID: conversationID)
             }
             ConversationAIBar(model: model, conversationID: conversationID) { showAIHere = true }
             threadChips
             messageList
-            if selecting { selectionBar } else { composer }
+            if selecting {
+                selectionBar
+            } else {
+                // Part 5: in the coding node's own 1:1 (a READ-ONLY watch-along channel) BEFORE its
+                // tools are enabled, a subtle signpost to the "My AI" hub — where the run-commands/
+                // edit-files capability is turned on and each tool request is approved. Disappears
+                // once enabled. Resolves "no obvious way to reach the full-tool path from the chat."
+                if isCodingAgent, !model.codingToolsEnabled(nodeHex: conversationID) {
+                    codingReadOnlyHint
+                }
+                composer
+            }
         }
         // Full-width pane: the message bubbles get the reading-width cap (applied
         // on `messageList` itself), but the banners, status header, thread chips,
@@ -149,12 +154,13 @@ struct ConversationView: View {
             aiSummary = model.primaryAIContextSummary(conversationID)
             // Refresh the agent-bubble type badges in case the AI config changed.
             model.refreshAITypes()
-            Task { await refreshAIVisibility() }
+            scheduleVisibilityRefresh(immediate: true)
             Task { await loadMentionCandidates() }
             myAIList = model.tetheredAIList().filter(\.isEnabled).map { ($0.id, $0.name) }
         }
         .onChange(of: model.messages(for: conversationID).count) { _, _ in
-            Task { await refreshAIVisibility() }
+            // M1: debounce — a reply burst collapses into one rebuild after it settles.
+            scheduleVisibilityRefresh()
         }
         .toolbar {
             // Group header: name + participant count, tappable to open the
@@ -379,10 +385,13 @@ struct ConversationView: View {
     }
 
     private var messageList: some View {
-        ScrollViewReader { proxy in
+        // H2: compute the filtered non-thread slice ONCE per render (it was recomputed 4× —
+        // ForEach + two `.count` reads + `.last` — each an O(n) filter + fresh allocation).
+        let visible = model.messages(for: conversationID)
+        return ScrollViewReader { proxy in
             ScrollView {
                 LazyVStack(spacing: 6) {
-                    ForEach(model.messages(for: conversationID)) { message in
+                    ForEach(visible) { message in
                         messageRow(message)
                     }
                 }
@@ -395,8 +404,8 @@ struct ConversationView: View {
             .scrollEdgeEffectStyle(.hard, for: .bottom)
             // Conversations open at the latest message (iMessage behavior).
             .defaultScrollAnchor(.bottom)
-            .onChange(of: model.messages(for: conversationID).count) {
-                if let last = model.messages(for: conversationID).last {
+            .onChange(of: visible.count) {
+                if let last = visible.last {
                     withAnimation { proxy.scrollTo(last.id, anchor: .bottom) }
                 }
             }
@@ -501,6 +510,22 @@ struct ConversationView: View {
     /// inspections — once per call (expensive), cached in `aiVisibilityByMessage`.
     /// A message is "seen" by an AI when that AI's inspection includes its id; a
     /// firewalled remote AI marks the entry redacted.
+    /// M1: coalesce the expensive per-AI context rebuild. Cancels any pending refresh and runs
+    /// one — immediately on first load, or after a short debounce for the per-message onChange, so
+    /// a multi-AI reply burst (many rapid count changes) triggers a single N-AI `contextInspections`
+    /// rebuild instead of one behind every message (which stacked actor work behind the very
+    /// replies being streamed). At most one refresh is ever in flight.
+    private func scheduleVisibilityRefresh(immediate: Bool = false) {
+        visibilityRefreshTask?.cancel()
+        visibilityRefreshTask = Task {
+            if !immediate {
+                try? await Task.sleep(for: .milliseconds(200))
+                guard !Task.isCancelled else { return }
+            }
+            await refreshAIVisibility()
+        }
+    }
+
     private func refreshAIVisibility() async {
         let inspections = await model.contextInspections(conversationID: conversationID)
         var map: [String: AIMessageVisibility] = [:]
@@ -591,6 +616,24 @@ struct ConversationView: View {
     private func loadMentionCandidates() async {
         allMentionCandidates = await model.mentionCandidates(conversationID: conversationID)
             .map { MentionSuggestionList.MentionSuggestion(name: $0.name, kind: $0.kind) }
+    }
+
+    /// Part 5 — the read-only-chat signpost (see call site). Tapping opens the "My AI" hub, where
+    /// the paired agent's run-commands/edit-files capability lives (`AIHubSheet.codingSection`).
+    private var codingReadOnlyHint: some View {
+        Button { showAIHere = true } label: {
+            Label(
+                "This chat is read-only. Open **My AI** to let this agent run commands or edit files.",
+                systemImage: "wrench.and.screwdriver")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.horizontal)
+                .padding(.vertical, 6)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityIdentifier("coding-readonly-hint")
     }
 
     private var composer: some View {
@@ -762,10 +805,13 @@ private struct ConversationStatusHeader: View {
     let conversationID: String
     let scope: AIContextGrant.Scope
     @State private var now = Int64(Date().timeIntervalSince1970)
+    // M3: the firewall/mode summary JSON-decodes the AI config and does NOT change per second, so
+    // cache it and refresh only every ~5 s (+ on appear) instead of on every 1 Hz tick. Enforcement
+    // is at SEND time, not this banner, so a few seconds' display lag is cosmetic — never a gap.
+    @State private var summary: (mode: String, isRemote: Bool, firewallOn: Bool) = ("off", false, true)
     private let ticker = Timer.publish(every: 1, on: .main, in: .common).autoconnect()
 
     var body: some View {
-        let summary = model.primaryAIContextSummary(conversationID)
         VStack(spacing: 0) {
             if let banner = model.activeWindowBanner(conversationID: conversationID, now: now) {
                 AIWindowBanner(name: banner.name, until: banner.until, now: now)
@@ -810,8 +856,10 @@ private struct ConversationStatusHeader: View {
                             : "Warning: egress firewall off — full context leaves your device")
             }
         }
+        .onAppear { summary = model.primaryAIContextSummary(conversationID) }
         .onReceive(ticker) { _ in
             now = Int64(Date().timeIntervalSince1970)
+            if now % 5 == 0 { summary = model.primaryAIContextSummary(conversationID) }
         }
     }
 }
