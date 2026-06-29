@@ -127,6 +127,11 @@ struct SybilclawGatewayClient: Sendable {
     private func askImpl(_ prompt: String, sessionKey: String) async throws -> String {
         guard let url = URL(string: "ws://\(host):\(port)/") else { throw GatewayError.badURL }
         let session = URLSession(configuration: .ephemeral)
+        // Release the per-`ask()` ephemeral session (and its operation queue) promptly instead of
+        // leaving it to ARC's discretion. Declared BEFORE the task defer so it runs AFTER the
+        // graceful `task.cancel` (defers are LIFO); `finishTasksAndInvalidate` lets that close
+        // settle first. Keep this identical to the eldr-node copy.
+        defer { session.finishTasksAndInvalidate() }
         let task = session.webSocketTask(with: url)
         task.resume()
         defer { task.cancel(with: .goingAway, reason: nil) }

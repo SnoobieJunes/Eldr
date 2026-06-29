@@ -81,13 +81,24 @@ actor EncryptedFileMessageStore: MessageStore {
         var kept: [StoredMessage] = []
         var bytes = 0
         for message in msgs.reversed() {
-            let lineSize = (try? encodeLine(message).count) ?? 0
+            let lineSize = sealedLineSize(of: message)
             if !kept.isEmpty, bytes + lineSize > Self.keepBytes { break }
             kept.append(message)
             bytes += lineSize
         }
         guard kept.count < msgs.count else { return }  // nothing to drop
         try? rewrite(kept.reversed(), conversationID: conversationID, to: url)
+    }
+
+    /// The exact on-disk byte length `encodeLine(message)` WOULD produce, computed WITHOUT
+    /// sealing. `encodeLine` emits base64(`nonce(12) ‖ ciphertext ‖ tag(16)`) + "\n"; AES-GCM
+    /// keeps `ciphertext.count == plaintext.count`, and base64 is exactly `4·⌈n/3⌉` — so this is
+    /// exact, not an estimate. It lets `trimIfNeeded` size the retained set with ONE JSON encode
+    /// per line instead of a throwaway AES-GCM seal (the `rewrite` does the single real seal).
+    private func sealedLineSize(of message: StoredMessage) -> Int {
+        let plaintextCount = (try? JSONEncoder().encode(message).count) ?? 0
+        let blobCount = plaintextCount + 12 + 16  // nonce + tag
+        return ((blobCount + 2) / 3) * 4 + 1  // base64 (4·⌈n/3⌉) + "\n"
     }
 
     func messages(conversationID: String) async throws -> [StoredMessage] {

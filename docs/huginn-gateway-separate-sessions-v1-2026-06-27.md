@@ -1,5 +1,13 @@
 # Huginn Gateway — Separate Sessions from Discord
 
+> **⚠️ SUPERSEDED (2026-07-03).** This is a planning/research artifact; its recommended fix
+> ("Option B" — add `channel:"eldrchat"` + `dmScope:"per-channel-peer"` to `makeParams` on the
+> `agent` RPC) is **NOT** what shipped. The shipped approach is an **opaque per-conversation
+> `chat.send` sessionKey** (`eldr:<SHA256(salt‖conversationID)>`, agent targeted via
+> `agent:<id>:<key>`) — see **DEVIATIONS AC69** and `ACPBridgeService.gatewaySessionKey`. No
+> `dmScope` / `channel` / `per-channel-peer` / `makeParams` exists in the shipped client. Kept
+> for history.
+
 **Version:** v1 — 2026-06-27 18:20 PDT
 **Orchestrator:** Agent: Gaho — deepseek-v4-pro (cloud)
 **Human in the loop:** Garrett Kinsman

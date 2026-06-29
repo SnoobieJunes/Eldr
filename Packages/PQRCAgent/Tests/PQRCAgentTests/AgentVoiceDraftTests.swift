@@ -16,10 +16,15 @@ struct AgentVoiceDraftTests {
     actor DraftSpy: AgentMessageSink {
         struct Voiced: Sendable { let wireText: String; let rawText: String; let threadID: String? }
         private(set) var voiced: [Voiced] = []
-        func postAgentMessage(_ body: MessageBody, threadID: String, agentName: String?) async throws {}
-        func postAgentReply(_ body: MessageBody, agentName: String?) async throws {}
+        func postAgentMessage(
+            _ body: MessageBody, threadID: String, agentName: String?, agentAIID: String?
+        ) async throws {}
+        func postAgentReply(
+            _ body: MessageBody, agentName: String?, agentAIID: String?
+        ) async throws {}
         func postAgentDraft(
-            _ body: MessageBody, rawText: String, threadID: String?, agentName: String?
+            _ body: MessageBody, rawText: String, threadID: String?, agentName: String?,
+            agentAIID: String?
         ) async throws {
             voiced.append(Voiced(wireText: body.text, rawText: rawText, threadID: threadID))
         }

@@ -102,6 +102,14 @@ struct AIHubSheet: View {
                         if model.conversationContextMode(conversationID) == "off" {
                             model.setConversationContextMode(nil, conversationID: conversationID)
                         }
+                        // Same failure in a second guise: an EMPTY roster (every AI deselected =
+                        // "AIs off here") means the window opens — visible, signed — yet no AI is
+                        // eligible to reply. Clear it (nil = all my enabled AIs, config order) so
+                        // "Turn on" actually produces replies, then refresh the sheet's roster.
+                        if model.conversationAIRoster(conversationID)?.isEmpty == true {
+                            model.setConversationAIRoster(nil, scopeID: conversationID)
+                            load()
+                        }
                         await model.startWindow(
                             conversationID: conversationID, minutes: aiRespondsHours * 60)
                         await model.grantContextSharing(

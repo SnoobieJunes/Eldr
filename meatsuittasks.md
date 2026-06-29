@@ -5,7 +5,7 @@ device/account, and physical configuration. Code work (the toggles, the rename, 
 upgrades) is tracked separately in the implementation plan and git history; this file is
 only the human-in-the-loop items. Check things off as you go.
 
-Last updated: 2026-06-21.
+Last updated: 2026-07-03.
 
 ---
 
@@ -17,12 +17,17 @@ Last updated: 2026-06-21.
 
 ## Configure / run (one-time setup on your machines)
 - [ ] To run a **headless node** (server/second Mac): `swift build -c release --package-path Packages/EldrNode`, then `eldr-node --owner <your phone's PQRC identity hex>`. (Find your phone's identity hex in EldrChat settings.)
+- [ ] **Remote install via `eldrctl` (over SSH):** `eldrctl install --target user@host --owner <phone-hex>` on a second Mac stages Huginn/eldr-node + returns a pairing link; seed the token with `eldrctl conduit import-token`. Needs an **unlocked GUI login session** on the target (full runbook: `docs/CONDUIT-SETUP.md`).
 - [x] Provide the LLM endpoint + token on **each machine that runs a node** — in Huginn's settings, or via `ELDR_LLM_URL` / `ELDR_LLM_TOKEN` (+ optional `ELDR_LLM_MODEL`) for the headless `eldr-node`.
 - [x] Don't commit IDE-flipped entitlements. The new `Huginn.entitlements` ships with `app-sandbox = false` on purpose (the app spawns the agent process); if Xcode re-flips it to `true`, revert before building/committing.
 - [x] **After Huginn ships:** re-pair the Mac node with your phone (it gets a fresh identity) and re-enter the LLM token in Huginn's settings. The bundle-id change orphans the old Keychain items, so the old identity/token are not readable by the renamed app. *(Optional cleanup: delete the old `chat.eldr.acp.configurator` items in Keychain Access.app.)*
 
 ## Test on real devices (cannot be done headlessly — needs 2 devices + the real relay)
 - [ ] Per-chat **egress firewall** with a cloud AI: confirm ON redacts names/bounds context, OFF sends raw (for your own private agents).
+- [ ] **Encrypted AI memory (Mac) [needs real Keychain + SE]:** ask the Mac AI something, then a follow-up that leans on it — confirm it remembers WITHIN the chat and a *different* chat doesn't; then **Unpair** and confirm the prior transcript is unreadable (master key shredded). *(This is the branch's headline feature; it can't be proven on a headless CI host — the `LLMTokenAtRestTests`/Keychain-write path fails there, and the SE isn't exercised.)*
+- [ ] **Per-conversation gateway continuity (Mac) [needs a live gateway :18789]:** responder = sybilclaw — confirm cross-turn memory within a chat and isolation from other chats / Discord (AC69). Note: the headless `eldr-node` copy is still per-process, not per-conversation (AC69 caveat).
+- [ ] **Per-AI hub + AI-window stop (device):** open "AI in this chat", turn **Responds in chat** on for N hours → confirm the peer's countdown banner; **Stop my AI replying here** → clears. Verify the **empty-roster "Turn on"** now actually produces a reply (regression fix, 2026-07-03).
+- [ ] **eldrctl end-to-end (2nd Mac):** run `eldrctl install` against a real second Mac and drive it from the phone.
 - [x] Turn ON **"Remote dev-control"** for the node (the new toggle), send a prompt, confirm the Mac agent runs and its reply comes back on the phone.
 - [x] Run the standalone `eldr-node` on a **second Mac/server** and drive it from the phone.
 - [x] **"Ask each time":** with autonomous-changes OFF, trigger a write/shell action; confirm the phone prompts Allow once / Allow always / Deny; confirm **Deny** blocks it; confirm that **ignoring** the prompt for ~120s makes the node deny on its own (fail-closed).

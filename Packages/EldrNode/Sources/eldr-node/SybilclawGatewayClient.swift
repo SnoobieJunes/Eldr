@@ -99,6 +99,11 @@ struct SybilclawGatewayClient: Sendable {
     private func askImpl(_ prompt: String) async throws -> String {
         guard let url = URL(string: "ws://\(host):\(port)/") else { throw GatewayError.badURL }
         let session = URLSession(configuration: .ephemeral)
+        // Release the per-`ask()` ephemeral session (and its operation queue) promptly instead of
+        // leaving it to ARC's discretion. Declared BEFORE the task defer so it runs AFTER the
+        // graceful `task.cancel` (defers are LIFO); `finishTasksAndInvalidate` lets that close
+        // settle first. Keep this identical to the Huginn copy.
+        defer { session.finishTasksAndInvalidate() }
         let task = session.webSocketTask(with: url)
         task.resume()
         defer { task.cancel(with: .goingAway, reason: nil) }
@@ -229,7 +234,10 @@ struct SybilclawGatewayClient: Sendable {
         return nil
     }
 
-    private func connectParams() -> [String: Any] {
+    // Internal (not private) so `SybilclawGatewayFramingTests` can pin these protocol-critical
+    // literals to the same spec Apps/Huginn's GatewayHandshakeTests pins for the app copy — the
+    // mechanical guard against the silent re-drift this file's banner warns about.
+    func connectParams() -> [String: Any] {
         // Mirror Apps/Huginn's SybilclawGatewayClient.connectParams(). The previous values
         // ("eldr-node" / "operator") were OFF the gateway's id/mode allowlists and schema-
         // rejected EVERY connect on this path. id/mode come from .../protocol/client-info.ts;

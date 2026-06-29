@@ -148,8 +148,12 @@ struct BridgeWatchAlongTests {
     /// No-op sink — the bridge does its OWN per-recipient fan-out (§9); the engine here
     /// is only the authorization oracle, never a posting path.
     struct NoopSink: AgentMessageSink {
-        func postAgentMessage(_ body: MessageBody, threadID: String, agentName: String?) async throws {}
-        func postAgentReply(_ body: MessageBody, agentName: String?) async throws {}
+        func postAgentMessage(
+            _ body: MessageBody, threadID: String, agentName: String?, agentAIID: String?
+        ) async throws {}
+        func postAgentReply(
+            _ body: MessageBody, agentName: String?, agentAIID: String?
+        ) async throws {}
     }
 
     struct StubRunner: BridgeAgentRunner {

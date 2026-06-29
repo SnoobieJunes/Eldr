@@ -181,8 +181,10 @@ actor AgentAnswerCollector {
 /// owner-authority ORACLE (verify owner-signed windows, answer `isAuthorizedForOwner`)
 /// and does its OWN per-recipient fan-out (§9), so the engine never posts anything.
 struct NoopAgentSink: AgentMessageSink {
-    func postAgentMessage(_ body: MessageBody, threadID: String, agentName: String?) async throws {}
-    func postAgentReply(_ body: MessageBody, agentName: String?) async throws {}
+    func postAgentMessage(
+        _ body: MessageBody, threadID: String, agentName: String?, agentAIID: String?
+    ) async throws {}
+    func postAgentReply(_ body: MessageBody, agentName: String?, agentAIID: String?) async throws {}
 }
 
 // MARK: - Service
@@ -1179,15 +1181,23 @@ final class ACPBridgeService: ObservableObject {
         let recipientsAreOwnerOnly = conversation.recipients.allSatisfy { $0 == ownerIdentityHex }
         let mayInjectMemory =
             !runner.selfPersistsHistory && (watchAlongMode == .endpoint || recipientsAreOwnerOnly)
-        let priorContext: String? = mayInjectMemory
-            ? (await conversationMemory?.priorContext(
-                sessionKey: sessionKey, maxBytes: Self.transcriptContextMaxBytes) ?? nil)
-            : nil
-        let agentContext = ConversationContext(sessionKey: sessionKey, priorContext: priorContext)
+        // Build the agent context, loading cross-turn memory only when it will be injected.
+        // `priorContext` reads + decrypts the WHOLE transcript file, so it is deferred past the
+        // `.direct` owner-window gate below (via this nested builder) — an unauthorized prompt
+        // must never pay that decrypt. Still built BEFORE the prompt is recorded so the current
+        // prompt isn't duplicated into its own context.
+        func makeAgentContext() async -> ConversationContext {
+            let priorContext: String? = mayInjectMemory
+                ? (await conversationMemory?.priorContext(
+                    sessionKey: sessionKey, maxBytes: Self.transcriptContextMaxBytes) ?? nil)
+                : nil
+            return ConversationContext(sessionKey: sessionKey, priorContext: priorContext)
+        }
 
         switch watchAlongMode {
         case .direct:
             guard await ownerAuthorized(threadID: conversation.threadID) else { return }
+            let agentContext = await makeAgentContext()
             // Record the owner's prompt only once we're committed to answering it (past the
             // owner-window gate), so the transcript never accumulates a dangling User turn
             // (SPEC §3.4, D9). Best-effort: record never throws and never blocks the turn.
@@ -1215,6 +1225,7 @@ final class ACPBridgeService: ObservableObject {
                     conversation: conversation)
             }
         case .endpoint:
+            let agentContext = await makeAgentContext()
             // The draft goes to the owner's phone alone — record the prompt up front.
             await conversationMemory?.record(
                 text, as: .human, senderIdentity: senderIdentityHex,

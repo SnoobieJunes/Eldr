@@ -248,7 +248,9 @@ struct ConversationView: View {
         .sheet(isPresented: $showAIHere, onDismiss: {
             // The override lives in UserDefaults; refresh the glance chip on close.
             aiSummary = model.primaryAIContextSummary(conversationID)
-            Task { await refreshAIVisibility() }
+            // Route through the M1 coalescer (immediate: a discrete close, but it still cancels
+            // any in-flight streamed refresh so the two don't double-rebuild).
+            scheduleVisibilityRefresh(immediate: true)
         }) {
             AIHubSheet(model: model, conversationID: conversationID)
         }
@@ -444,7 +446,7 @@ struct ConversationView: View {
                         await model.markAIContext(
                             messageIDs: [message.id], value: !message.aiContext,
                             conversationID: conversationID)
-                        await refreshAIVisibility()
+                        scheduleVisibilityRefresh()
                     }
                 },
             onFullScreen: selecting ? nil : { fullScreenContent = FullScreenContent(text: $0) },
@@ -481,7 +483,7 @@ struct ConversationView: View {
                     Task {
                         await model.markAIContext(
                             messageIDs: [message.id], aiID: aiID, value: value)
-                        await refreshAIVisibility()
+                        scheduleVisibilityRefresh()
                     }
                 },
             aiVisibility: aiVisibilityByMessage[message.id],

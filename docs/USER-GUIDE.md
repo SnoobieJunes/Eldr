@@ -177,7 +177,7 @@ Open any conversation and tap the **sparkles icon** for AI options:
 - **Draft with AI (sparkles in the composer):** your AI writes a suggested reply
   and drops it into your message box. **Nothing is sent** — you read it, edit it,
   and decide. You can also send it labeled *as your AI*.
-- **Turn your AI "on" (an AI window):** in the **"AI here"** sheet, choose
+- **Turn your AI "on" (an AI window):** in the **"AI in this chat"** sheet, choose
   *Responds in chat* and a duration (1, 8, or 24 hours) to give your AI permission
   to talk to **everyone in the chat** for that time. While it's on, **everyone in
   the conversation sees a banner** saying your AI is active and counting down. AIs
@@ -189,11 +189,11 @@ Open any conversation and tap the **sparkles icon** for AI options:
 **Bringing your Mac-Tethered-AI into a group.** Your paired Mac-Tethered-AI
 (sybilclaw, or a local model you host with LM Studio / Ollama behind Huginn) is
 **your own tethered AI**. Two ways to bring it into a group: enable it under
-**Settings ▸ AI** and turn on **"AI here" ▸ Responds in chat** so it answers the
+**Settings ▸ AI** and turn on **"AI in this chat" ▸ Responds in chat** so it answers the
 group **as your signed AI** under your window; or add the paired node as a group
 member, where it answers **you** directly (it replies only to its owner, never to
 other members — by design). Either way each person turns on **their own** AI; no
-one can switch on someone else's. The "AI here" sheet tells you if your
+one can switch on someone else's. The "AI in this chat" sheet tells you if your
 Mac-Tethered-AI isn't actually connected yet.
 
 ### Threads: AIs collaborating
@@ -288,6 +288,12 @@ Wi-Fi/Bluetooth:
 - **Endpoints aren't magic.** Whoever you message can screenshot or forward what
   you send, and if *they* enable a remote AI, the chats *they* take part in go to
   *their* provider.
+- **Your Mac AI's memory is encrypted at rest.** With a paired Mac (Mac-Tethered-AI),
+  each turn is stored on that Mac **encrypted** under a Secure-Enclave key and it now
+  **remembers within a conversation** (each chat kept separate). **Unpair wipes it**
+  (the key is shredded). One caveat: if you point it at a **sybilclaw** assistant,
+  *that* program keeps its own plaintext history outside our control — pick the
+  built-in **eldr-acp** agent for fully-encrypted-at-rest AI memory.
 
 ## Privacy in plain terms
 

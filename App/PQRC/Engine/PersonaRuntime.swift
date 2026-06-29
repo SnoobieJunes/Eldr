@@ -2427,7 +2427,7 @@ actor PersonaRuntime {
         _ = await engine.runWindowReply(
             provider: ai.provider,
             context: await contextFor(ai, conversationID: conversationID, threadID: nil),
-            agentName: ai.name)
+            agentName: ai.name, agentAIID: ai.id)
     }
 
     /// Diagnostic for Settings "Test AI now": run the active provider against a
@@ -2813,9 +2813,12 @@ actor PersonaRuntime {
     /// my tethered AIs takes a turn in order, rebuilding the context each time so
     /// a later AI sees what an earlier one just posted — that's how multiple AIs
     /// share context back and forth in a thread.
-    func takeAgentThreadTurn(threadID: String, mentionedAINames: Set<String>? = nil) async {
+    /// Returns the number of messages my AIs posted this turn (0 if none were eligible or the
+    /// engine gate stayed closed) so callers can detect convergence without re-scanning the store.
+    @discardableResult
+    func takeAgentThreadTurn(threadID: String, mentionedAINames: Set<String>? = nil) async -> Int {
         let conversationID = threadConversations[threadID] ?? ""
-        guard !conversationID.isEmpty, !aiSuppressed(in: conversationID) else { return }
+        guard !conversationID.isEmpty, !aiSuppressed(in: conversationID) else { return 0 }
         // Ordered critique panel (C3) when the active selection policy supplies one
         // — each AI tagged with a role (primary → reviewer/critic → synthesizer),
         // and the role flows into the thread system prompt. Otherwise the flat
@@ -2836,16 +2839,18 @@ actor PersonaRuntime {
         if let names = mentionedAINames {
             ordered = ordered.filter { names.contains($0.ai.name.lowercased()) }
         }
+        var posted = 0
         for (ai, role) in ordered {
             // "off" is the silence contract — never let a provider run here.
             guard resolvedPolicy(ai, conversationID: conversationID) != "off" else { continue }
-            _ = await engine.runThreadTurn(
+            posted += await engine.runThreadTurn(
                 provider: ai.provider,
                 context: await contextFor(
                     ai, conversationID: conversationID, threadID: threadID, aiRole: role),
                 threadID: threadID,
-                agentName: ai.name)
+                agentName: ai.name, agentAIID: ai.id)
         }
+        return posted
     }
 
     /// A single @-mention of one of MY AIs in a regular chat (feature 6, decision #5).
@@ -2863,7 +2868,7 @@ actor PersonaRuntime {
             _ = await engine.runWindowReply(
                 provider: ai.provider,
                 context: await contextFor(ai, conversationID: conversationID, threadID: nil),
-                agentName: ai.name)
+                agentName: ai.name, agentAIID: ai.id)
         } else {
             eventContinuation?.yield(
                 .aiMentionNeedsChoice(conversationID: conversationID, aiID: aiID, aiName: ai.name))
@@ -2918,10 +2923,12 @@ actor PersonaRuntime {
     func runBoundedThreadCollaboration(threadID: String, mentionedAINames: Set<String>?) async {
         let backstop = 12
         for _ in 0..<backstop {
-            let before = (try? await store.messages(threadID: threadID))?.count ?? 0
-            await takeAgentThreadTurn(threadID: threadID, mentionedAINames: mentionedAINames)
-            let after = (try? await store.messages(threadID: threadID))?.count ?? 0
-            if after == before { break }  // no AI posted → converged or loop-guard paused
+            // `takeAgentThreadTurn` reports how many messages its AIs posted this round, so the
+            // loop no longer brackets each round with two whole-thread `store.messages(threadID:)`
+            // decrypt-all scans just to diff the count. 0 posted ⇒ converged or loop-guard paused.
+            let posted = await takeAgentThreadTurn(
+                threadID: threadID, mentionedAINames: mentionedAINames)
+            if posted == 0 { break }
         }
     }
 
@@ -2933,8 +2940,15 @@ actor PersonaRuntime {
         guard let msg = try? await store.message(id: messageID), let threadID = msg.threadID,
             let conversationID = threadConversations[threadID]
         else { return }
+        // An agent thread message's text may still carry the AgentSkills `⟡⟡ … ⟡⟡ end` envelope.
+        // Posted as .human it would bypass the agent-only bubble stripper and surface that
+        // scaffolding in the main chat — strip it here (a no-op for un-enveloped text) so the
+        // human co-authored send shows just the answer. Human sources pass through untouched.
+        let text =
+            msg.participantType == .agent
+            ? MessageBubble.strippedEnvelopeBody(msg.text) : msg.text
         try? await sendMessage(
-            msg.text, conversationID: conversationID, participantType: .human,
+            text, conversationID: conversationID, participantType: .human,
             suppressAutoReply: true, coauthored: true)
     }
 
@@ -3369,7 +3383,7 @@ actor PersonaRuntime {
                 _ = await engine.runWindowReply(
                     provider: ai.provider,
                     context: await contextFor(ai, conversationID: conversationID, threadID: nil),
-                    agentName: ai.name)
+                    agentName: ai.name, agentAIID: ai.id)
             }
         }
     }
@@ -3448,21 +3462,25 @@ actor PersonaRuntime {
 private struct RuntimeSink: AgentMessageSink {
     let runtime: PersonaRuntime
 
-    func postAgentMessage(_ body: MessageBody, threadID: String, agentName: String?) async throws {
+    func postAgentMessage(
+        _ body: MessageBody, threadID: String, agentName: String?, agentAIID: String?
+    ) async throws {
         guard let info = await runtime.threadInfo(threadID: threadID) else {
             throw PQRCError.sessionNotEstablished
         }
         try await runtime.sendMessage(
             body.text, conversationID: info.conversationID, participantType: .agent,
-            threadID: threadID, isContext: body.isContext ?? false, agentName: agentName)
+            threadID: threadID, isContext: body.isContext ?? false, agentName: agentName,
+            agentAIID: agentAIID)
     }
 
-    func postAgentReply(_ body: MessageBody, agentName: String?) async throws {
+    func postAgentReply(_ body: MessageBody, agentName: String?, agentAIID: String?) async throws {
         // The engine only calls this during MY active window; the reply goes to
         // the conversation the window was started in (single scope in v1).
         guard let conversationID = await runtime.windowConversation() else { return }
         try await runtime.sendMessage(
-            body.text, conversationID: conversationID, participantType: .agent, agentName: agentName)
+            body.text, conversationID: conversationID, participantType: .agent, agentName: agentName,
+            agentAIID: agentAIID)
     }
 
     /// §13.5 voicing: `body` (redacted) goes on the wire to the group; `rawText` is the
@@ -3470,7 +3488,8 @@ private struct RuntimeSink: AgentMessageSink {
     /// conversation scope routes via the draft's target (`voiceInto`, stashed on the
     /// runtime). Signs as the owner's agent (sendMessage `.agent` → owner's agent key).
     func postAgentDraft(
-        _ body: MessageBody, rawText: String, threadID: String?, agentName: String?
+        _ body: MessageBody, rawText: String, threadID: String?, agentName: String?,
+        agentAIID: String?
     ) async throws {
         let conversationID: String
         if let threadID, let info = await runtime.threadInfo(threadID: threadID) {
@@ -3482,7 +3501,8 @@ private struct RuntimeSink: AgentMessageSink {
         }
         try await runtime.sendMessage(
             body.text, conversationID: conversationID, participantType: .agent,
-            threadID: threadID, agentName: agentName, localTextOverride: rawText)
+            threadID: threadID, agentName: agentName, agentAIID: agentAIID,
+            localTextOverride: rawText)
     }
 
     /// Surface an autonomous-reply provider failure (window/thread) to the conversation

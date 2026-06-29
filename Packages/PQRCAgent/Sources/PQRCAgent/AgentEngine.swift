@@ -27,8 +27,16 @@ public enum AgentEngineError: Error, Equatable, Sendable {
 public protocol AgentMessageSink: Sendable {
     /// `agentName` is the local friendly codename of the producing AI (multi-AI
     /// tethering); it is stored locally for labeling and NEVER put on the wire.
-    func postAgentMessage(_ body: MessageBody, threadID: String, agentName: String?) async throws
-    func postAgentReply(_ body: MessageBody, agentName: String?) async throws  // conversation scope (ai_window)
+    /// `agentAIID` is the producing AI's STABLE local id (feature-1 per-AI isolation):
+    /// storage buckets the message by this id, not by `agentName` — a display name can
+    /// collide across two of my AIs, an id cannot. nil ⇒ the sink falls back to resolving
+    /// the id from the name (single-AI / legacy paths).
+    func postAgentMessage(
+        _ body: MessageBody, threadID: String, agentName: String?, agentAIID: String?
+    ) async throws
+    func postAgentReply(
+        _ body: MessageBody, agentName: String?, agentAIID: String?
+    ) async throws  // conversation scope (ai_window)
 
     /// Voice a watch-along DRAFT (SPEC §13.5 endpoint model): `body` carries the
     /// REDACTED text that goes on the wire to the group; `rawText` is the owner's
@@ -36,7 +44,8 @@ public protocol AgentMessageSink: Sendable {
     /// that can't split the two falls back (default) to posting the redacted body.
     /// `threadID == nil` ⇒ conversation scope.
     func postAgentDraft(
-        _ body: MessageBody, rawText: String, threadID: String?, agentName: String?
+        _ body: MessageBody, rawText: String, threadID: String?, agentName: String?,
+        agentAIID: String?
     ) async throws
 
     /// A non-fatal diagnostic from an autonomous path: the provider CALL failed
@@ -55,12 +64,14 @@ extension AgentMessageSink {
     /// Default: no raw/redacted split available — post the SAFE (redacted) `body` so a
     /// secret never reaches the wire even if a sink doesn't implement the local view.
     public func postAgentDraft(
-        _ body: MessageBody, rawText: String, threadID: String?, agentName: String?
+        _ body: MessageBody, rawText: String, threadID: String?, agentName: String?,
+        agentAIID: String?
     ) async throws {
         if let threadID {
-            try await postAgentMessage(body, threadID: threadID, agentName: agentName)
+            try await postAgentMessage(
+                body, threadID: threadID, agentName: agentName, agentAIID: agentAIID)
         } else {
-            try await postAgentReply(body, agentName: agentName)
+            try await postAgentReply(body, agentName: agentName, agentAIID: agentAIID)
         }
     }
 
@@ -343,7 +354,8 @@ public actor AgentEngine {
     /// never leaves my device — only the redacted copy goes to the group.
     @discardableResult
     public func voiceAgentDraft(
-        rawText: String, threadID: String? = nil, agentName: String? = nil
+        rawText: String, threadID: String? = nil, agentName: String? = nil,
+        agentAIID: String? = nil
     ) async -> Bool {
         do {
             try authorizeAutonomousSend(threadID: threadID)
@@ -356,7 +368,8 @@ public actor AgentEngine {
             thread: threadID.map { RumorContent.ThreadRef(id: $0) })
         do {
             try await sink.postAgentDraft(
-                body, rawText: rawText, threadID: threadID, agentName: agentName)
+                body, rawText: rawText, threadID: threadID, agentName: agentName,
+                agentAIID: agentAIID)
             if let threadID { recordThreadMessage(threadID: threadID, participantType: .agent) }
             return true
         } catch {
@@ -380,7 +393,7 @@ public actor AgentEngine {
     @discardableResult
     public func runThreadTurn(
         provider: any AgentProvider, context: AgentContext, threadID: String,
-        agentName: String? = nil
+        agentName: String? = nil, agentAIID: String? = nil
     ) async -> Int {
         do {
             try authorizeAutonomousSend(threadID: threadID)
@@ -423,7 +436,8 @@ public actor AgentEngine {
                 isContext: message.isContext
             )
             do {
-                try await sink.postAgentMessage(body, threadID: threadID, agentName: agentName)
+                try await sink.postAgentMessage(
+                    body, threadID: threadID, agentName: agentName, agentAIID: agentAIID)
                 recordThreadMessage(threadID: threadID, participantType: .agent)
                 posted += 1
             } catch {
@@ -436,7 +450,8 @@ public actor AgentEngine {
     /// Conversation-scope autonomous reply during MY active ai_window.
     @discardableResult
     public func runWindowReply(
-        provider: any AgentProvider, context: AgentContext, agentName: String? = nil
+        provider: any AgentProvider, context: AgentContext, agentName: String? = nil,
+        agentAIID: String? = nil
     ) async -> Bool {
         do {
             try authorizeAutonomousSend(threadID: nil)
@@ -462,7 +477,8 @@ public actor AgentEngine {
         do {
             try authorizeAutonomousSend(threadID: nil)
             try await sink.postAgentReply(
-                MessageBody(text: message.text, sentAt: clock.now()), agentName: agentName)
+                MessageBody(text: message.text, sentAt: clock.now()), agentName: agentName,
+                agentAIID: agentAIID)
             return true
         } catch {
             return false
