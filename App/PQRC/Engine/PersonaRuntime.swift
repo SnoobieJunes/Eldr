@@ -24,6 +24,11 @@ enum RuntimeEvent: Sendable {
     /// An autonomous AI reply (solo chat / window) failed for every tethered AI —
     /// surfaced so the user sees WHY instead of silence (the Bug-2 philosophy).
     case agentError(String)
+    /// Feature 6 / decision #5: I @-mentioned a single one of MY AIs in a shared chat
+    /// where it isn't live (no active window / not a solo chat). Posting to the other
+    /// people without a window would break fail-closed, so the UI asks me to choose:
+    /// draft it privately, or open a brief window for just that AI and post.
+    case aiMentionNeedsChoice(conversationID: String, aiID: String, aiName: String)
     case safetyCodeChanged(identityHex: String)
     /// A co-present peer was discovered + binding-verified over the local link
     /// (SPEC §10, Nearby setting) — startable with no relay.
@@ -351,16 +356,14 @@ actor PersonaRuntime {
             permissionHandler: { [weak self] title, kind in
                 guard Self.isMutatingACPToolKind(kind) else { return true }
                 guard let self else { return false }  // runtime gone → fail closed
-                // Phase D4 — an INTERACTIVE PTY (open_terminal) is a SPECIAL, higher gate:
-                // an open-ended shell can't be meaningfully approved per-keystroke, so it
-                // requires the STANDING autonomous-changes consent and FAILS CLOSED
-                // otherwise — NO per-action allow-once prompt. Recognized purely from the
-                // tool title (the ACP `execute` kind is too coarse to tell it from
-                // run_shell). Cardinal rule: the dangerous escape hatch needs the explicit,
-                // standing opt-in, never a one-tap allow.
-                if Self.isInteractiveTerminalTitle(title) {
-                    return Self.decideInteractivePTY(nodeHex: nodeHex, silo: silo)
-                }
+                // Phase D4 / feature 9 (decision D6) — an INTERACTIVE PTY (open_terminal)
+                // may be approved ONCE, not only via the standing autonomous-changes
+                // consent. It routes through the SAME human prompt as any mutating tool
+                // (Allow once / Always / Deny): standing consent still skips the prompt;
+                // "Allow once" opens THIS one shell without flipping standing consent;
+                // "Always" flips it. Recognized from the title for the card's wording, but
+                // no longer a consent-only fail-closed gate. The node's C-1 timeout still
+                // denies an ignored prompt, and the prominent Stop control kills the shell.
                 return await self.decidePermission(
                     nodeHex: nodeHex, silo: silo, title: title, kind: kind)
             },
@@ -411,6 +414,13 @@ actor PersonaRuntime {
     /// PTY view). No-op if the node has no live ACP provider.
     func sendACPTerminalInput(nodeHex: String, terminalID: String, data: String) async {
         await relayACPProviders[nodeHex]?.sendTerminalInput(terminalId: terminalID, data: data)
+    }
+
+    /// Resize a live interactive terminal on `nodeHex` (the phone's terminal view
+    /// reported a new column/row size). No-op if the node has no live ACP provider.
+    func resizeACPTerminal(nodeHex: String, terminalID: String, cols: Int, rows: Int) async {
+        await relayACPProviders[nodeHex]?.resizeTerminal(
+            terminalId: terminalID, cols: cols, rows: rows)
     }
 
     /// KILL a live interactive terminal on `nodeHex` (the phone's Stop control). The node
@@ -476,6 +486,7 @@ actor PersonaRuntime {
             aiSelection is DefaultAISelectionPolicy<TetheredAI>
             || aiSelection is CapabilityRoutingPolicy<TetheredAI>
             || aiSelection is CompositeAISelectionPolicy<TetheredAI>
+            || aiSelection is ConversationRosterPolicy<TetheredAI>
         guard oursToManage else { return }
         // WHO answers: a consented coding-agent node's conversation requires "code"
         // (routes to the acp engine). Empty otherwise ⇒ default selection.
@@ -484,15 +495,24 @@ actor PersonaRuntime {
         if !codingNodes.isEmpty, ais.contains(where: { $0.kind == "acp" }) {
             for node in codingNodes { map[node] = Set(["code"]) }
         }
-        // ORDER: compose with the per-conversation "AIs reply in order" toggle (C4/C3),
-        // read LIVE per turn so toggling it needs no policy rebuild. With an empty map
-        // and no ordered scopes, the composite behaves exactly like the default policy.
+        // ORDER + MEMBERSHIP: the per-chat roster (the per-AI hub) is the OUTERMOST
+        // policy — it filters the candidates to the AIs the user chose for THIS scope
+        // and reorders them to the user's reply order (features 4 & 5). Inside it,
+        // capability routing (the acp coding node) and the "AIs reply in order"
+        // role-tag toggle still apply to the rostered subset. All read LIVE per turn,
+        // so changing the roster / toggle needs no policy rebuild. With no roster, an
+        // empty map, and no ordered scopes, this behaves exactly like the default.
         let silo = siloID
-        aiSelection = CompositeAISelectionPolicy<TetheredAI>(
-            base: CapabilityRoutingPolicy<TetheredAI>(byConversation: map),
-            orderedScope: { conversationID, _ in
-                AppSession.orderedCritique(conversationID, siloID: silo)
-            })
+        aiSelection = ConversationRosterPolicy<TetheredAI>(
+            aiID: { $0.id },
+            roster: { conversationID, threadID in
+                AppSession.conversationAIRoster(threadID ?? conversationID, siloID: silo)
+            },
+            base: CompositeAISelectionPolicy<TetheredAI>(
+                base: CapabilityRoutingPolicy<TetheredAI>(byConversation: map),
+                orderedScope: { conversationID, _ in
+                    AppSession.orderedCritique(conversationID, siloID: silo)
+                }))
     }
 
     /// Whether an ACP ToolKind needs autonomous-changes consent before the phone
@@ -524,6 +544,19 @@ actor PersonaRuntime {
     /// Delegates to the private `consentedCodingAgentNode()` (no duplicated logic).
     func consentedCodingAgentNodeInfo() -> (identityHex: String, name: String)? {
         guard let hex = consentedCodingAgentNode() else { return nil }
+        return (hex, contactName(hex))
+    }
+
+    /// The owner's paired `coding_agent` node — identity hex + local name — REGARDLESS of
+    /// consent. Mirror of `consentedCodingAgentNodeInfo()` WITHOUT the `remoteDevControlConsent`
+    /// filter, so a UI (the "My AI" hub) can OFFER to enable its tools, not just report an
+    /// already-consented one — the discoverability gap. Deterministic pick (lowest hex) when
+    /// more than one is paired. nil when none is paired.
+    func pairedCodingAgentNode() -> (identityHex: String, name: String)? {
+        guard let hex = verifiedContacts.keys
+            .filter({ contactType($0) == "coding_agent" })
+            .sorted().first
+        else { return nil }
         return (hex, contactName(hex))
     }
 
@@ -706,10 +739,14 @@ actor PersonaRuntime {
                 displayName: promptDisplayName, peerName: promptPeerName,
                 instructions: ai.instructions, summarize: ai.summarizes)
         }
+        // Per-AI isolation gate (feature 1 + D2): build THIS AI's capability so the
+        // assembler includes only what it may unseal — its own + my own messages,
+        // reply-order siblings, thread co-members, and grant-authorized peer content.
+        let cap = await buildCapability(forAI: ai, conversationID: conversationID, threadID: threadID)
         let ctx = await agentContext(
             conversationID: conversationID, threadID: threadID, depth: ai.contextDepth,
             strict: policy == "strict", instructions: ai.instructions, summarize: ai.summarizes,
-            systemPromptOverride: override)
+            systemPromptOverride: override, forAI: cap)
         guard ai.appliesEgressFirewall, firewallOn else { return ctx }
         return redactedForRemote(ctx)
     }
@@ -1507,10 +1544,16 @@ actor PersonaRuntime {
         for hex in verifiedContacts.keys {
             let n = contactName(hex).lowercased()
             if !n.isEmpty { byName[n] = (hex, "person") }
+            // A peer's AI codename routes to THAT PEER's AI (cross-identity @mention,
+            // D4) — id is the peer's identity hex, kind "ai". MY own AI still wins a
+            // name tie (added after, below).
+            if let aiName = contactRecords[hex]?.autoAIName?.lowercased(), !aiName.isEmpty {
+                byName[aiName] = (hex, "ai")
+            }
         }
         for ai in ais {
             let n = ai.name.lowercased()
-            if !n.isEmpty { byName[n] = (ai.id, "ai") }  // AI wins a name tie
+            if !n.isEmpty { byName[n] = (ai.id, "ai") }  // MY AI wins a name tie
         }
         var out: [MessageBody.Mention] = []
         var seen = Set<String>()
@@ -1536,6 +1579,32 @@ actor PersonaRuntime {
         return out
     }
 
+    /// @-mention autocomplete candidates for a conversation's composer (feature 6):
+    /// MY AIs first, then the conversation's people and THEIR AIs. Names only — the
+    /// composer inserts "@name " and `resolveMentions` resolves it on send.
+    func mentionCandidates(conversationID: String) -> [(name: String, kind: String)] {
+        var out: [(name: String, kind: String)] = []
+        var seen = Set<String>()
+        func add(_ name: String, _ kind: String) {
+            let key = name.lowercased()
+            guard !name.isEmpty, !seen.contains(key) else { return }
+            seen.insert(key)
+            out.append((name, kind))
+        }
+        for ai in ais { add(ai.name, "ai") }
+        let peers: [String]
+        if let roster = groupRosters[conversationID] {
+            peers = roster.members.filter { $0 != identityHex }
+        } else {
+            peers = verifiedContacts.keys.contains(conversationID) ? [conversationID] : []
+        }
+        for hex in peers {
+            add(contactName(hex), "person")
+            if let aiName = contactRecords[hex]?.autoAIName { add(aiName, "ai") }
+        }
+        return out
+    }
+
     func sendMessage(
         _ text: String, conversationID: String, participantType: ParticipantType = .human,
         threadID: String? = nil, isContext: Bool = false, aiContext: Bool = false,
@@ -1543,6 +1612,7 @@ actor PersonaRuntime {
         aiContextGrant: AIContextGrant? = nil,
         threadCreate: ThreadCreate? = nil, groupCreate: GroupCreate? = nil,
         asSystemRow: Bool = false, agentName: String? = nil,
+        agentAIID: String? = nil, suppressAutoReply: Bool = false,
         localTextOverride: String? = nil, coauthored: Bool = false
     ) async throws {
         let recipients = recipientsFor(conversationID: conversationID)
@@ -1601,13 +1671,22 @@ actor PersonaRuntime {
         // `localTextOverride` lets the locally-stored copy differ from the wire body —
         // the §13.5 watch-along path stores the OWNER's RAW answer locally while the
         // wire carries the redacted text (only the owner ever sees the secret).
+        // Per-AI gate (feature 1): record WHICH of my AIs authored an agent message
+        // by its stable ConfiguredAI id. Resolve from the explicit param, else map
+        // the friendly `agentName` (the sink paths carry only the name) to its id at
+        // authorship time — stable thereafter (a later rename can't retro-change a
+        // stored message). nil for human messages; peer agents never author here.
+        let resolvedAgentAIID: String? =
+            participantType == .agent
+            ? (agentAIID ?? ais.first(where: { $0.name == agentName })?.id)
+            : nil
         let message = StoredMessage(
             id: messageID, conversationID: conversationID,
             senderIdentity: identityHex, participantType: participantType,
             text: localTextOverride ?? body.text, sentAt: body.sentAt, threadID: threadID,
             isContext: isContext, aiContext: aiContext,
             localStatus: asSystemRow ? "system" : "sent", agentName: agentName,
-            coauthored: coauthored)
+            coauthored: coauthored, agentAIID: resolvedAgentAIID)
         try await store.save(message)
         if let threadID {
             await engine.recordThreadMessage(threadID: threadID, participantType: participantType)
@@ -1660,7 +1739,7 @@ actor PersonaRuntime {
         // protects OTHER people from an unbidden agent; here there are none).
         // Detached so inference never blocks the send. Threads use the invite
         // path instead.
-        if participantType == .human, !asSystemRow, threadID == nil,
+        if participantType == .human, !asSystemRow, !suppressAutoReply, threadID == nil,
             isSoloConversation(conversationID), !soloRepliesInFlight.contains(conversationID)
         {
             soloRepliesInFlight.insert(conversationID)
@@ -1669,8 +1748,8 @@ actor PersonaRuntime {
 
         // My-AI per-AI sub-thread (C6): a human message in a solo sub-thread → its
         // pinned AI replies (no invite/timer; a 1:1 with my own AI, no other human).
-        if participantType == .human, !asSystemRow, let threadID, isSoloThread(threadID),
-            !soloRepliesInFlight.contains(threadID)
+        if participantType == .human, !asSystemRow, !suppressAutoReply, let threadID,
+            isSoloThread(threadID), !soloRepliesInFlight.contains(threadID)
         {
             soloRepliesInFlight.insert(threadID)
             Task { [weak self] in await self?.runSoloThreadReply(threadID: threadID) }
@@ -1680,12 +1759,40 @@ actor PersonaRuntime {
         // (the thread send path doesn't otherwise self-trigger my AIs). Matched by
         // NAME so it targets MY AI of that name; still engine-gated (no active invite
         // ⇒ the turn fails closed and posts nothing). (C2)
-        if participantType == .human, !asSystemRow, let threadID {
+        if participantType == .human, !asSystemRow, !suppressAutoReply, let threadID {
             let wanted = Set(mentions.filter { $0.kind == "ai" }.map { $0.displayName.lowercased() })
             let mine = wanted.intersection(Set(ais.map { $0.name.lowercased() }))
             if !mine.isEmpty {
                 Task { [weak self] in
                     await self?.takeAgentThreadTurn(threadID: threadID, mentionedAINames: mine)
+                }
+            }
+        }
+
+        // @-mention routing in a REGULAR (non-thread, non-solo) chat (feature 6 + D4):
+        //  - 2+ AIs, or ANY peer's AI → spin up / reuse a thread and let them
+        //    collaborate there (mutual visibility, bounded by the AI turn limiter);
+        //  - exactly one of MY AIs → route per decision #5 (narrow a live window, or
+        //    ask the human to draft / open a window when none is live).
+        if participantType == .human, !asSystemRow, !suppressAutoReply, threadID == nil,
+            !isSoloConversation(conversationID)
+        {
+            let myAIMentions = mentions.filter { m in m.kind == "ai" && ais.contains { $0.id == m.id } }
+            let peerAIMentions = mentions.filter { m in
+                m.kind == "ai" && verifiedContacts.keys.contains(m.id)
+            }
+            if myAIMentions.count + peerAIMentions.count >= 2 || !peerAIMentions.isEmpty {
+                let myIDs = myAIMentions.map { $0.id }
+                let peerHexes = peerAIMentions.map { $0.id }
+                Task { [weak self] in
+                    await self?.routeMentionsToCollabThread(
+                        conversationID: conversationID, myAIIDs: myIDs, peerHexes: peerHexes,
+                        seedText: text)
+                }
+            } else if let only = myAIMentions.first {
+                let aiID = only.id
+                Task { [weak self] in
+                    await self?.routeSingleMyAIMention(aiID: aiID, conversationID: conversationID)
                 }
             }
         }
@@ -1738,7 +1845,8 @@ actor PersonaRuntime {
                 // no longer a solo chat, drop the in-flight reply rather than publish it.
                 guard isSoloConversation(conversationID) else { break }
                 try await sendMessage(
-                    text, conversationID: conversationID, participantType: .agent, agentName: ai.name)
+                    text, conversationID: conversationID, participantType: .agent,
+                    agentName: ai.name, agentAIID: ai.id)
                 posted += 1
             } catch {
                 // Keep the precise reason from the provider (e.g. the on-device
@@ -1787,7 +1895,7 @@ actor PersonaRuntime {
             guard isSoloThread(threadID), isSoloConversation(conversationID) else { return }
             try await sendMessage(
                 text, conversationID: conversationID, participantType: .agent,
-                threadID: threadID, agentName: ai.name)
+                threadID: threadID, agentName: ai.name, agentAIID: ai.id)
         } catch {
             let detail: String
             if case AgentProviderError.unavailable(let d) = error {
@@ -1942,9 +2050,13 @@ actor PersonaRuntime {
 
             var entries: [AIContextInspection.Entry] = []
             if policy != "off" {
+                // The SAME per-AI gate the real assembly uses, so "what THIS AI sees"
+                // in the inspector is exactly what it gets (feature 1, P14).
+                let cap = await buildCapability(
+                    forAI: ai, conversationID: conversationID, threadID: threadID)
                 let visible = await visibleContextMessages(
                     conversationID: conversationID, threadID: threadID,
-                    depth: ai.contextDepth, strict: policy == "strict")
+                    depth: ai.contextDepth, strict: policy == "strict", forAI: cap)
                 entries = visible.map { item in
                     let message = item.message
                     let isMine = message.senderIdentity == identityHex
@@ -2292,6 +2404,32 @@ actor PersonaRuntime {
         return try await engine.draft(provider: primary.provider, context: context)
     }
 
+    /// Draft privately with a SPECIFIC one of my AIs (feature 6, decision #5 "Draft
+    /// privately"). Falls back to the policy primary if the id is unknown.
+    func draftReply(conversationID: String, withAIID aiID: String) async throws -> Draft {
+        guard let ai = ais.first(where: { $0.id == aiID }) else {
+            return try await draftReply(conversationID: conversationID)
+        }
+        let context = await contextFor(ai, conversationID: conversationID, threadID: nil)
+        return try await engine.draft(provider: ai.provider, context: context)
+    }
+
+    /// Open a brief window for the conversation and have ONE of my AIs post now
+    /// (feature 6, decision #5 "Open window & post"). The window announcement is the
+    /// usual human-signed, visible affordance — this just also fires that AI's turn.
+    func openWindowAndPost(
+        aiID: String, conversationID: String, durationSeconds: Int64 = 15 * 60
+    ) async throws {
+        try await startAIWindow(conversationID: conversationID, durationSeconds: durationSeconds)
+        guard let ai = ais.first(where: { $0.id == aiID }),
+            resolvedPolicy(ai, conversationID: conversationID) != "off"
+        else { return }
+        _ = await engine.runWindowReply(
+            provider: ai.provider,
+            context: await contextFor(ai, conversationID: conversationID, threadID: nil),
+            agentName: ai.name, agentAIID: ai.id)
+    }
+
     /// Diagnostic for Settings "Test AI now": run the active provider against a
     /// fixed sample so the user sees a real reply or the precise failure reason,
     /// independent of whether any conversation exists yet.
@@ -2397,8 +2535,148 @@ actor PersonaRuntime {
     /// actually sent) and the read-only context inspector (what the user is
     /// shown). Pure read: store + grants + settings, no engine mutation.
     /// `strict` forces marked-context-only even while the AI is active.
+    // MARK: - Per-AI context capability gate (feature 1 + D2)
+
+    /// What ONE tethered AI is permitted to unseal when its context is assembled for
+    /// a scope. Built once per (AI, scope) by `buildCapability`, consumed by
+    /// `aiAuthorGate`. Content-blind (derived only from roster / grant / thread state).
+    private struct AIContextCapability {
+        let aiID: String
+        /// My OTHER AIs co-rostered with this one here — reply-order co-membership is
+        /// the consent to chain (D5).
+        let siblingRosterAIIDs: Set<String>
+        /// This AI is an invited member of THIS thread → the thread free-for-all
+        /// (feature 3): it may unseal any author within the thread.
+        let threadMember: Bool
+        /// My ai_window is live for THIS conversation — I opened the floor for my AI,
+        /// which (D2 step 1) authorizes it to read the PEER's words I already received.
+        let conversationWindowActive: Bool
+        /// A live bilateral human-axis grant — the standing/inactive path to consuming
+        /// a PEER's marked words (D2 step 1 without an open window).
+        let humanAxisAuthorized: Bool
+        /// A live bilateral ai-axis grant authorizes consuming a PEER's AI (D2 step 2).
+        let peerAIAxisAuthorized: Bool
+    }
+
+    /// The author "bucket" a message belongs to: `human:<senderHex>` (any human's
+    /// message), `self:<agentAIID>` (one of MY AIs, by stable id), or
+    /// `peerAI:<senderHex>` (a peer's AI). A legacy agent message of mine with no
+    /// `agentAIID` buckets as `self:` and is handled specially in `aiAuthorGate`.
+    private func authorBucket(_ message: StoredMessage) -> String {
+        guard message.participantType == .agent else { return "human:\(message.senderIdentity)" }
+        if message.senderIdentity == identityHex { return "self:\(message.agentAIID ?? "")" }
+        return "peerAI:\(message.senderIdentity)"
+    }
+
+    /// Build the capability for one AI in a scope.
+    private func buildCapability(
+        forAI ai: TetheredAI, conversationID: String, threadID: String?
+    ) async -> AIContextCapability {
+        // Siblings: my OTHER AIs that share visibility with this one here. A roster
+        // (an explicit reply order) IS the consent to chain (D5) — so siblings come
+        // ONLY from a configured roster. With no roster set, a regular chat keeps the
+        // AIs ISOLATED from each other (feature 1's default); the my-own-AI solo chat
+        // / trusted conduit get their fuller behavior from the D1 exemption in
+        // `visibleContextMessages`, not from siblings.
+        let scopeID = threadID ?? conversationID
+        let rosterIDs = AppSession.conversationAIRoster(scopeID, siloID: siloID) ?? []
+        let siblings = Set(rosterIDs).subtracting([ai.id])
+        // Thread membership: my active invite (per identity → covers all my AIs) or a
+        // solo thread. Conversation scope has none.
+        let threadMember: Bool
+        let windowActive: Bool
+        if let threadID {
+            threadMember =
+                (await engine.activeInvite(threadID: threadID, identityHex: identityHex) != nil)
+                || isSoloThread(threadID)
+            windowActive = false  // threads use the invite (threadMember) path
+        } else {
+            threadMember = false
+            // My ai_window for THIS conversation authorizes my AI to read the live
+            // conversation — including the peer's words (D2 step 1; original window
+            // behavior restored). Peer AI content stays separately gated below.
+            windowActive =
+                (await engine.activeWindow(for: identityHex) != nil)
+                && myWindowConversationID == conversationID
+        }
+        let humanScope: AIContextGrant.Scope =
+            threadID.map { .thread($0, axis: AIContextGrant.Scope.humanAxis) }
+            ?? .conversation(conversationID, axis: AIContextGrant.Scope.humanAxis)
+        let aiScope: AIContextGrant.Scope =
+            threadID.map { .thread($0, axis: AIContextGrant.Scope.aiAxis) }
+            ?? .conversation(conversationID, axis: AIContextGrant.Scope.aiAxis)
+        return AIContextCapability(
+            aiID: ai.id,
+            siblingRosterAIIDs: siblings,
+            threadMember: threadMember,
+            conversationWindowActive: windowActive,
+            humanAxisAuthorized: await engine.contextSharingAuthorized(scope: humanScope),
+            peerAIAxisAuthorized: await engine.contextSharingAuthorized(scope: aiScope))
+    }
+
+    /// The per-AI AUTHOR gate (feature 1 + D2). Default-deny: a message is included
+    /// only when THIS AI holds the capability for its author bucket.
+    private func aiAuthorGate(
+        _ message: StoredMessage, cap: AIContextCapability, conversationID: String
+    ) -> Bool {
+        // Legacy agent message of mine (no recorded author id): visible to all my AIs
+        // — per-AI isolation applies to messages written from now on.
+        if message.participantType == .agent, message.senderIdentity == identityHex,
+            message.agentAIID == nil {
+            return true
+        }
+        // Thread free-for-all (feature 3): an invited thread member sees every author.
+        if cap.threadMember { return true }
+        let bucket = authorBucket(message)
+        if bucket == "self:\(cap.aiID)" { return true }      // its own prior replies
+        if bucket == "human:\(identityHex)" { return true }  // my own messages
+        if bucket.hasPrefix("self:") {
+            // A sibling of mine — reply-order roster co-membership or a per-AI mark.
+            let sibling = String(bucket.dropFirst("self:".count))
+            return cap.siblingRosterAIIDs.contains(sibling) || markedForMe(message, aiID: cap.aiID)
+        }
+        if bucket.hasPrefix("human:") {
+            // A PEER's WORDS (D2 step 1): my open ai_window is the consent for my AI to
+            // read the conversation I'm in (the peer SENT me these); a standing
+            // human-axis grant covers the inactive/marked case. This is the original
+            // window behavior — only the peer's AI content (below) is the new 2nd step.
+            return cap.conversationWindowActive || cap.humanAxisAuthorized
+        }
+        if bucket.hasPrefix("peerAI:") {
+            // A PEER's AI (D2 step 2): genuinely cross-party, so it needs the explicit
+            // bilateral ai-axis grant — NOT merely an open window. Optional per-AI
+            // allowlist narrows WHICH of my AIs may consume it.
+            guard cap.peerAIAxisAuthorized else { return false }
+            return aiInAllowlist(
+                cap.aiID, axis: AIContextGrant.Scope.aiAxis,
+                peerHex: message.senderIdentity, conversationID: conversationID)
+        }
+        return false
+    }
+
+    /// Whether a message is explicitly marked into THIS AI's context (feature 7). A
+    /// non-nil `aiMarks` is the authoritative per-AI set; a legacy message with no
+    /// `aiMarks` falls back to the single `aiContext` "all my AIs" flag.
+    private func markedForMe(_ message: StoredMessage, aiID: String) -> Bool {
+        if let marks = message.aiMarks { return marks.contains(aiID) }
+        return message.aiContext
+    }
+
+    /// Whether this AI may consume a peer's content on an axis, per the LOCAL
+    /// allowlist (D2). nil = all my AIs (the grant, already checked, is the gate).
+    private func aiInAllowlist(
+        _ aiID: String, axis: String, peerHex: String, conversationID: String
+    ) -> Bool {
+        guard
+            let allow = AppSession.aiConsumeAllowlist(
+                axis: axis, conversationID: conversationID, peerHex: peerHex, siloID: siloID)
+        else { return true }
+        return allow.contains(aiID)
+    }
+
     private func visibleContextMessages(
-        conversationID: String, threadID: String?, depth: Int, strict: Bool
+        conversationID: String, threadID: String?, depth: Int, strict: Bool,
+        forAI cap: AIContextCapability? = nil
     ) async -> [(message: StoredMessage, shared: Bool)] {
         let stored: [StoredMessage]
         if let threadID {
@@ -2406,7 +2684,9 @@ actor PersonaRuntime {
         } else {
             stored = (try? await store.messages(conversationID: conversationID)) ?? []
         }
-        // Scope for context-sharing authorization (DEVIATIONS N24).
+        // Scope for context-sharing authorization (DEVIATIONS N24). The legacy
+        // single-grant check uses the default (human) axis; the per-AI gate below
+        // splits human vs ai (D2).
         let scope: AIContextGrant.Scope =
             threadID.map { AIContextGrant.Scope.thread($0) } ?? .conversation(conversationID)
         let sharingAuthorized = await engine.contextSharingAuthorized(scope: scope)
@@ -2436,20 +2716,39 @@ actor PersonaRuntime {
         // only" override (strict) still wins — that's an explicit user choice.
         let trustedNode = isConsentedCodingAgentNode(conversationID)
         let liftWindow = trustedNode && !strict
+        // D1 exemption: a solo "My AI" chat / solo sub-thread has no other human and
+        // is entirely my OWN AIs, so it keeps today's fuller, shared-context behavior
+        // (my AIs chain freely). The per-AI isolation gate is for chats with OTHER
+        // people. A "marked only" (strict) override still narrows it — an explicit
+        // user choice — matching the trusted-node rule.
+        let soloScope =
+            !strict && (isSoloConversation(conversationID) || (threadID.map { isSoloThread($0) } ?? false))
         let since = aiActiveSince[threadID ?? conversationID] ?? Int64.max
         let recent = stored.filter { message in
-            // Trusted node: full recent history, no since-floor.
-            if liftWindow { return true }
-            // While the AI is on, it reads the LIVE conversation from the moment
-            // it was turned on (the window/invite/solo state is the authorization
-            // to participate) — but never messages from before that.
-            if effectiveActive, message.sentAt >= since { return true }
-            // Otherwise only manually-marked context: mine always; a peer's only
-            // under an active bilateral grant.
-            if message.aiContext {
-                return message.senderIdentity == identityHex || sharingAuthorized
+            // Trusted node / solo my-AI scope: full recent history, no per-AI gate.
+            if liftWindow || soloScope { return true }
+            // LAYER 1 — WHEN: is this message time-eligible at all?
+            //   active+since: the live conversation from when the AI turned on; or
+            //   a marked message (its eligibility in time, not yet WHO).
+            let timeOK: Bool
+            if effectiveActive, message.sentAt >= since {
+                timeOK = true
+            } else if message.aiContext {
+                // Marked content is time-eligible. With a per-AI capability the WHO
+                // gate (below) enforces the per-axis grant for peer content; without
+                // one (generic preview / trusted MCP view) fall back to the original
+                // single-grant check.
+                timeOK = (cap != nil) ? true : (message.senderIdentity == identityHex || sharingAuthorized)
+            } else {
+                timeOK = false
             }
-            return false
+            guard timeOK else { return false }
+            // LAYER 2 — WHO: the per-AI author gate (feature 1 + D2 axes). Excludes
+            // other AIs' messages unless this AI holds the capability, and splits a
+            // peer's words (human axis) from a peer's AI (ai axis). nil capability ⇒
+            // no author gate (generic preview / trusted conduit, D1).
+            if let cap { return aiAuthorGate(message, cap: cap, conversationID: conversationID) }
+            return true
         }.suffix(depth)
         // Byte-bound the window: keep the most recent entries whose combined text
         // fits a budget, so a few multi-MB pastes can't balloon memory or a remote
@@ -2485,10 +2784,11 @@ actor PersonaRuntime {
     private func agentContext(
         conversationID: String, threadID: String?, depth: Int = ConfiguredAI.defaultDepth,
         strict: Bool = false, instructions: String? = nil, summarize: Bool = false,
-        systemPromptOverride: String? = nil
+        systemPromptOverride: String? = nil, forAI cap: AIContextCapability? = nil
     ) async -> AgentContext {
         let visible = await visibleContextMessages(
-            conversationID: conversationID, threadID: threadID, depth: depth, strict: strict)
+            conversationID: conversationID, threadID: threadID, depth: depth, strict: strict,
+            forAI: cap)
         let transcript = visible.map { entry -> TranscriptEntry in
             let message = entry.message
             let isMine = message.senderIdentity == identityHex
@@ -2513,9 +2813,12 @@ actor PersonaRuntime {
     /// my tethered AIs takes a turn in order, rebuilding the context each time so
     /// a later AI sees what an earlier one just posted — that's how multiple AIs
     /// share context back and forth in a thread.
-    func takeAgentThreadTurn(threadID: String, mentionedAINames: Set<String>? = nil) async {
+    /// Returns the number of messages my AIs posted this turn (0 if none were eligible or the
+    /// engine gate stayed closed) so callers can detect convergence without re-scanning the store.
+    @discardableResult
+    func takeAgentThreadTurn(threadID: String, mentionedAINames: Set<String>? = nil) async -> Int {
         let conversationID = threadConversations[threadID] ?? ""
-        guard !conversationID.isEmpty, !aiSuppressed(in: conversationID) else { return }
+        guard !conversationID.isEmpty, !aiSuppressed(in: conversationID) else { return 0 }
         // Ordered critique panel (C3) when the active selection policy supplies one
         // — each AI tagged with a role (primary → reviewer/critic → synthesizer),
         // and the role flows into the thread system prompt. Otherwise the flat
@@ -2536,16 +2839,117 @@ actor PersonaRuntime {
         if let names = mentionedAINames {
             ordered = ordered.filter { names.contains($0.ai.name.lowercased()) }
         }
+        var posted = 0
         for (ai, role) in ordered {
             // "off" is the silence contract — never let a provider run here.
             guard resolvedPolicy(ai, conversationID: conversationID) != "off" else { continue }
-            _ = await engine.runThreadTurn(
+            posted += await engine.runThreadTurn(
                 provider: ai.provider,
                 context: await contextFor(
                     ai, conversationID: conversationID, threadID: threadID, aiRole: role),
                 threadID: threadID,
-                agentName: ai.name)
+                agentName: ai.name, agentAIID: ai.id)
         }
+        return posted
+    }
+
+    /// A single @-mention of one of MY AIs in a regular chat (feature 6, decision #5).
+    /// If a window is already live here, narrow the reply to JUST that AI; otherwise
+    /// emit the ask-each-time choice (draft privately vs. open a window & post) — never
+    /// an unbidden autonomous send to the other people (invariant 9).
+    private func routeSingleMyAIMention(aiID: String, conversationID: String) async {
+        guard !aiSuppressed(in: conversationID), let ai = ais.first(where: { $0.id == aiID }),
+            resolvedPolicy(ai, conversationID: conversationID) != "off"
+        else { return }
+        let windowLive =
+            await engine.activeWindow(for: identityHex) != nil
+            && myWindowConversationID == conversationID
+        if windowLive {
+            _ = await engine.runWindowReply(
+                provider: ai.provider,
+                context: await contextFor(ai, conversationID: conversationID, threadID: nil),
+                agentName: ai.name, agentAIID: ai.id)
+        } else {
+            eventContinuation?.yield(
+                .aiMentionNeedsChoice(conversationID: conversationID, aiID: aiID, aiName: ai.name))
+        }
+    }
+
+    /// @-mentioning 2+ AIs (mine and/or a peer's) opens — or reuses — a THREAD where
+    /// they collaborate with mutual visibility (feature 3), seeded with my prompt and
+    /// bounded by the per-thread AI turn limiter (D4). A peer's AI can't be invited by
+    /// me (only its owner can sign its invite); the seed naming it surfaces on their
+    /// device for a tap-to-invite.
+    private func routeMentionsToCollabThread(
+        conversationID: String, myAIIDs: [String], peerHexes: [String], seedText: String
+    ) async {
+        let setKey = (myAIIDs + peerHexes).sorted().joined(separator: "+")
+        let threadID: String
+        if let existing = AppSession.collabThreadID(
+            conversationID: conversationID, aiSetKey: setKey, siloID: siloID),
+            threadConversations[existing] != nil
+        {
+            threadID = existing
+        } else {
+            let names =
+                myAIIDs.compactMap { id in ais.first { $0.id == id }?.name }
+                + peerHexes.compactMap { contactRecords[$0]?.autoAIName }
+            let title = names.isEmpty ? "AI collaboration" : names.joined(separator: " ⨯ ")
+            guard let created = try? await createThread(conversationID: conversationID, title: title)
+            else { return }
+            threadID = created
+            AppSession.setCollabThreadID(
+                threadID, conversationID: conversationID, aiSetKey: setKey, siloID: siloID)
+        }
+        // The mentioned AIs (mine) are the thread roster, in mention order (features 4/5).
+        if !myAIIDs.isEmpty {
+            AppSession.setConversationAIRoster(myAIIDs, scopeID: threadID, siloID: siloID)
+            // One human-signed invite covers all my AIs (keyed by my identity).
+            try? await inviteMyAI(threadID: threadID, durationSeconds: 30 * 60)
+        }
+        // Seed the thread with my prompt; suppress its one-off auto-turn — the bounded
+        // loop below drives the rounds.
+        try? await sendMessage(
+            seedText, conversationID: conversationID, threadID: threadID, suppressAutoReply: true)
+        let names = Set(myAIIDs.compactMap { id in ais.first { $0.id == id }?.name.lowercased() })
+        await runBoundedThreadCollaboration(
+            threadID: threadID, mentionedAINames: names.isEmpty ? nil : names)
+    }
+
+    /// Run a thread's invited AIs round after round — each rebuilding context so it
+    /// sees the prior posts — until a round adds nothing new (converged) or the
+    /// per-thread AI turn limiter (`ThreadTurnLimitView`, the existing feature) pauses
+    /// it. A hard backstop bounds it even when the limiter is set to unlimited.
+    func runBoundedThreadCollaboration(threadID: String, mentionedAINames: Set<String>?) async {
+        let backstop = 12
+        for _ in 0..<backstop {
+            // `takeAgentThreadTurn` reports how many messages its AIs posted this round, so the
+            // loop no longer brackets each round with two whole-thread `store.messages(threadID:)`
+            // decrypt-all scans just to diff the count. 0 posted ⇒ converged or loop-guard paused.
+            let posted = await takeAgentThreadTurn(
+                threadID: threadID, mentionedAINames: mentionedAINames)
+            if posted == 0 { break }
+        }
+    }
+
+    /// "Bring the answer back" (D4): copy a thread message into the PARENT conversation
+    /// as MY human message, co-authored (made with the AI in the thread). An HONEST
+    /// human send — not a relabeled agent (invariant 8), not an autonomous agent send
+    /// (invariant 9). Visible to everyone in the conversation.
+    func promoteThreadMessageToMain(messageID: String) async {
+        guard let msg = try? await store.message(id: messageID), let threadID = msg.threadID,
+            let conversationID = threadConversations[threadID]
+        else { return }
+        // An agent thread message's text may still carry the AgentSkills `⟡⟡ … ⟡⟡ end` envelope.
+        // Posted as .human it would bypass the agent-only bubble stripper and surface that
+        // scaffolding in the main chat — strip it here (a no-op for un-enveloped text) so the
+        // human co-authored send shows just the answer. Human sources pass through untouched.
+        let text =
+            msg.participantType == .agent
+            ? MessageBubble.strippedEnvelopeBody(msg.text) : msg.text
+        try? await sendMessage(
+            text, conversationID: conversationID, participantType: .human,
+            suppressAutoReply: true, coauthored: true)
     }
 
     func engineActiveWindow(identityHex: String) async -> Int64? {
@@ -2568,6 +2972,24 @@ actor PersonaRuntime {
             if updated.senderIdentity == identityHex {
                 await sendContextMark(messageID: id, value: value, conversationID: conversationID)
             }
+        }
+    }
+
+    /// Per-AI context mark (feature 7): include/exclude THIS message in a SPECIFIC
+    /// of MY AIs' context, independent of the global "Add to AI Context"
+    /// shareability flag. Read-modify-write of the local `aiMarks` set. When the
+    /// message had no explicit marks yet, the current effective set is materialized
+    /// first (a globally-marked message means "all my AIs", so excluding one writes
+    /// the rest). PURELY LOCAL — never mirrored to a peer (it only routes among MY
+    /// own AIs, SPEC §0).
+    func setAIMark(messageID: String, aiID: String, value: Bool) async {
+        guard let message = try? await store.message(id: messageID) else { return }
+        var marks: Set<String> =
+            message.aiMarks.map(Set.init) ?? (message.aiContext ? Set(ais.map { $0.id }) : [])
+        if value { marks.insert(aiID) } else { marks.remove(aiID) }
+        try? await store.setAIMarks(messageID: messageID, aiIDs: Array(marks))
+        if let updated = try? await store.message(id: messageID) {
+            eventContinuation?.yield(.messageChanged(updated))
         }
     }
 
@@ -2961,7 +3383,7 @@ actor PersonaRuntime {
                 _ = await engine.runWindowReply(
                     provider: ai.provider,
                     context: await contextFor(ai, conversationID: conversationID, threadID: nil),
-                    agentName: ai.name)
+                    agentName: ai.name, agentAIID: ai.id)
             }
         }
     }
@@ -3040,21 +3462,25 @@ actor PersonaRuntime {
 private struct RuntimeSink: AgentMessageSink {
     let runtime: PersonaRuntime
 
-    func postAgentMessage(_ body: MessageBody, threadID: String, agentName: String?) async throws {
+    func postAgentMessage(
+        _ body: MessageBody, threadID: String, agentName: String?, agentAIID: String?
+    ) async throws {
         guard let info = await runtime.threadInfo(threadID: threadID) else {
             throw PQRCError.sessionNotEstablished
         }
         try await runtime.sendMessage(
             body.text, conversationID: info.conversationID, participantType: .agent,
-            threadID: threadID, isContext: body.isContext ?? false, agentName: agentName)
+            threadID: threadID, isContext: body.isContext ?? false, agentName: agentName,
+            agentAIID: agentAIID)
     }
 
-    func postAgentReply(_ body: MessageBody, agentName: String?) async throws {
+    func postAgentReply(_ body: MessageBody, agentName: String?, agentAIID: String?) async throws {
         // The engine only calls this during MY active window; the reply goes to
         // the conversation the window was started in (single scope in v1).
         guard let conversationID = await runtime.windowConversation() else { return }
         try await runtime.sendMessage(
-            body.text, conversationID: conversationID, participantType: .agent, agentName: agentName)
+            body.text, conversationID: conversationID, participantType: .agent, agentName: agentName,
+            agentAIID: agentAIID)
     }
 
     /// §13.5 voicing: `body` (redacted) goes on the wire to the group; `rawText` is the
@@ -3062,7 +3488,8 @@ private struct RuntimeSink: AgentMessageSink {
     /// conversation scope routes via the draft's target (`voiceInto`, stashed on the
     /// runtime). Signs as the owner's agent (sendMessage `.agent` → owner's agent key).
     func postAgentDraft(
-        _ body: MessageBody, rawText: String, threadID: String?, agentName: String?
+        _ body: MessageBody, rawText: String, threadID: String?, agentName: String?,
+        agentAIID: String?
     ) async throws {
         let conversationID: String
         if let threadID, let info = await runtime.threadInfo(threadID: threadID) {
@@ -3074,7 +3501,8 @@ private struct RuntimeSink: AgentMessageSink {
         }
         try await runtime.sendMessage(
             body.text, conversationID: conversationID, participantType: .agent,
-            threadID: threadID, agentName: agentName, localTextOverride: rawText)
+            threadID: threadID, agentName: agentName, agentAIID: agentAIID,
+            localTextOverride: rawText)
     }
 
     /// Surface an autonomous-reply provider failure (window/thread) to the conversation

@@ -428,6 +428,141 @@ struct MultiAIBehaviorTests {
             "the pinned skill's contract reached the AI's thread-turn prompt")
     }
 
+    /// Regression (D2 gate fix): an open ai_window authorizes my AI to read the
+    /// PEER's WORDS — the original window behavior. The two-axis split only gates the
+    /// peer's AI content, not their human messages. Without this, the AI replied once
+    /// to me then went blind to the peer and stopped.
+    @Test func activeWindow_aiSeesPeerHumanMessages() async throws {
+        let relay = LocalRelaySimulator()
+        let spy = SpyProvider()
+        let alice = PersonaRuntime(
+            displayName: "Alice", transports: [await relay.connect()],
+            blobStore: LocalBlossomSimulator(),
+            ais: [TetheredAI(id: "a", name: "alice-ai", provider: spy)],
+            randomSource: SeededRandomSource(seed: 471), nonceSource: SeededRandomSource(seed: 472),
+            keychainService: "chat.pqrc.test-winh-a-\(UUID().uuidString)")
+        let bob = PersonaRuntime(
+            displayName: "Bob", transports: [await relay.connect()],
+            blobStore: LocalBlossomSimulator(),
+            ais: [TetheredAI(id: "b", name: "bob-ai", provider: DemoAgentProvider())],
+            randomSource: SeededRandomSource(seed: 473), nonceSource: SeededRandomSource(seed: 474),
+            keychainService: "chat.pqrc.test-winh-b-\(UUID().uuidString)")
+        await alice.keychain.deleteAll()
+        await bob.keychain.deleteAll()
+        _ = try await alice.bootstrap(inMemoryStore: true)
+        _ = try await bob.bootstrap(inMemoryStore: true)
+        try await alice.addVerifiedPeer(bob)
+        try await bob.addVerifiedPeer(alice)
+        try await alice.establishWith(bob, firstMessage: "hi")
+        try await Task.sleep(for: .milliseconds(250))
+        let aliceHex = await alice.identityHex
+        let bobHex = await bob.identityHex
+        AppSession.setConversationAIRoster(nil, scopeID: bobHex, siloID: "")
+
+        try await alice.startAIWindow(conversationID: bobHex, durationSeconds: 15 * 60)
+        try await bob.sendMessage("the deadline is Friday", conversationID: aliceHex)
+        try await Task.sleep(for: .milliseconds(900))
+
+        let sawPeerWords = await spy.capturedTexts.contains { $0.contains("deadline is Friday") }
+        #expect(sawPeerWords, "an open window lets my AI read the peer's human message (D2 step 1)")
+        await alice.shutdown()
+        await bob.shutdown()
+    }
+
+    // MARK: - Per-AI isolation (feature 1/2) + reply-order chaining (feature 5)
+
+    /// The keystone proof. Two of MY AIs are active in a window with a PEER (a
+    /// non-solo chat, so the D1 "my-own-AI" exemption does NOT apply). By DEFAULT
+    /// they are ISOLATED: the second AI to run must NOT receive the first AI's reply
+    /// in its context — so it can't reply to it (features 1 & 2). Setting a per-chat
+    /// reply-order ROSTER is the explicit opt-in that chains them: the second AI then
+    /// DOES see the first's reply (feature 5).
+    @Test func activeWindow_aisIsolatedByDefault_chainOnlyWithARoster() async throws {
+        func run(seed: UInt64, roster: [String]?) async throws -> Bool {
+            let relay = LocalRelaySimulator()
+            let firstAI = LabeledProvider(label: "ALPHA-REPLY-\(seed)")
+            let secondSpy = SpyProvider()
+            let alice = PersonaRuntime(
+                displayName: "Alice", transports: [await relay.connect()],
+                blobStore: LocalBlossomSimulator(),
+                ais: [
+                    TetheredAI(id: "a1", name: "alice-ai-one", provider: firstAI),
+                    TetheredAI(id: "a2", name: "alice-ai-two", provider: secondSpy),
+                ],
+                randomSource: SeededRandomSource(seed: seed),
+                nonceSource: SeededRandomSource(seed: seed &+ 1),
+                keychainService: "chat.pqrc.test-iso-a-\(UUID().uuidString)")
+            let bob = PersonaRuntime(
+                displayName: "Bob", transports: [await relay.connect()],
+                blobStore: LocalBlossomSimulator(),
+                ais: [TetheredAI(id: "b", name: "bob-ai", provider: DemoAgentProvider())],
+                randomSource: SeededRandomSource(seed: seed &+ 2),
+                nonceSource: SeededRandomSource(seed: seed &+ 3),
+                keychainService: "chat.pqrc.test-iso-b-\(UUID().uuidString)")
+            await alice.keychain.deleteAll()
+            await bob.keychain.deleteAll()
+            _ = try await alice.bootstrap(inMemoryStore: true)
+            _ = try await bob.bootstrap(inMemoryStore: true)
+            try await alice.addVerifiedPeer(bob)
+            try await bob.addVerifiedPeer(alice)
+            try await alice.establishWith(bob, firstMessage: "hi")
+            try await Task.sleep(for: .milliseconds(250))
+            let bobHex = await bob.identityHex
+            let aliceHex = await alice.identityHex
+            AppSession.setConversationAIRoster(roster, scopeID: bobHex, siloID: "")
+            try await alice.startAIWindow(conversationID: bobHex, durationSeconds: 15 * 60)
+            try await bob.sendMessage("what's the plan?", conversationID: aliceHex)
+            try await Task.sleep(for: .milliseconds(900))
+            let sawFirstReply = await secondSpy.capturedTexts.contains {
+                $0.contains("ALPHA-REPLY-\(seed)")
+            }
+            AppSession.setConversationAIRoster(nil, scopeID: bobHex, siloID: "")
+            await alice.shutdown()
+            await bob.shutdown()
+            return sawFirstReply
+        }
+
+        let isolatedByDefault = try await run(seed: 451, roster: nil)
+        #expect(
+            !isolatedByDefault,
+            "by default a second AI must NOT see the first AI's reply (features 1 & 2)")
+
+        let chainsWithRoster = try await run(seed: 461, roster: ["a1", "a2"])
+        #expect(
+            chainsWithRoster,
+            "with a reply-order roster the second AI sees the first's reply (feature 5)")
+    }
+
+    /// Promote-to-main (D4, R5): copying a thread's AI answer back into the parent
+    /// conversation posts it as an HONEST `.human` co-authored message — not a
+    /// relabeled agent (invariant 8) and not an autonomous agent send (invariant 9).
+    @Test func promoteThreadMessage_postsAsCoauthoredHuman_notAgent() async throws {
+        let runtime = await makeRuntime(
+            "Me", ais: [TetheredAI(id: "a", name: "ai", provider: DemoAgentProvider())])
+        await runtime.keychain.deleteAll()
+        _ = try await runtime.bootstrap(inMemoryStore: true)
+        let chatID = try await runtime.createSelfChat()
+        // A per-AI solo sub-thread whose pinned AI replies (no invite/timer needed).
+        let threadID = try await runtime.createSoloAIThread(
+            conversationID: chatID, aiID: "a", title: "ai")
+        try await runtime.sendMessage("work on this", conversationID: chatID, threadID: threadID)
+        try await Task.sleep(for: .milliseconds(500))
+
+        let aiReply = await runtime.messages(threadID: threadID)
+            .first { $0.participantType == .agent }
+        let reply = try #require(aiReply, "the pinned AI should have replied in the thread")
+
+        await runtime.promoteThreadMessageToMain(messageID: reply.id)
+        try await Task.sleep(for: .milliseconds(200))
+
+        let promoted = await runtime.messages(conversationID: chatID)
+            .first { $0.threadID == nil && $0.text == reply.text && $0.coauthored }
+        #expect(promoted != nil, "the promoted answer appears in the MAIN chat")
+        #expect(
+            promoted?.participantType == .human,
+            "promoted as an honest human send, not a relabeled agent (invariant 8)")
+    }
+
     // MARK: - Router policy indirection (Phase 2: AISelectionPolicy seam)
 
     /// Injecting a custom policy whose `primary` returns the SECOND AI reroutes the

@@ -476,6 +476,67 @@ final class AppSession {
         else { UserDefaults.standard.removeObject(forKey: key) }
     }
 
+    /// Per-chat AI ROSTER — the SOLE source of which of my tethered AIs participate
+    /// in a scope AND in what order (features 4 & 5; the per-AI hub writes it).
+    /// `scopeID` is a conversationID or a threadID. Tri-state, matching
+    /// `ConversationRosterPolicy`:
+    ///   - `nil`   ⇒ key absent: no roster — all configured AIs in config order
+    ///             (today's default, the D1 "all my AIs" behavior).
+    ///   - `[]`    ⇒ key present but empty: silence every AI in this scope.
+    ///   - `[ids]` ⇒ exactly these AIs, in this order.
+    /// `nonisolated` so the (actor) PersonaRuntime can read it without an await.
+    nonisolated static func conversationAIRoster(_ scopeID: String, siloID: String = "") -> [String]? {
+        let key = siloDefaultsKey("aiRoster.\(scopeID)", siloID)
+        guard UserDefaults.standard.object(forKey: key) != nil else { return nil }
+        return UserDefaults.standard.stringArray(forKey: key) ?? []
+    }
+    nonisolated static func setConversationAIRoster(
+        _ ids: [String]?, scopeID: String, siloID: String = ""
+    ) {
+        let key = siloDefaultsKey("aiRoster.\(scopeID)", siloID)
+        if let ids { UserDefaults.standard.set(ids, forKey: key) }
+        else { UserDefaults.standard.removeObject(forKey: key) }
+    }
+
+    /// LOCAL-ONLY allowlist (D2, never on the wire — SPEC §0): which of MY AIs may
+    /// consume a peer's content on a given axis ("human" = their words, "ai" = their
+    /// AI) in a conversation, ON TOP of the live bilateral grant. `nil` = all my
+    /// participating AIs (subject to the grant); a (possibly empty) array restricts
+    /// it. The grant is the cryptographic gate; this only narrows WHICH of my AIs see
+    /// what the grant already authorizes.
+    nonisolated static func aiConsumeAllowlist(
+        axis: String, conversationID: String, peerHex: String, siloID: String = ""
+    ) -> [String]? {
+        let key = siloDefaultsKey("aiConsume.\(axis).\(conversationID).\(peerHex)", siloID)
+        guard UserDefaults.standard.object(forKey: key) != nil else { return nil }
+        return UserDefaults.standard.stringArray(forKey: key) ?? []
+    }
+    nonisolated static func setAIConsumeAllowlist(
+        _ ids: [String]?, axis: String, conversationID: String, peerHex: String, siloID: String = ""
+    ) {
+        let key = siloDefaultsKey("aiConsume.\(axis).\(conversationID).\(peerHex)", siloID)
+        if let ids { UserDefaults.standard.set(ids, forKey: key) }
+        else { UserDefaults.standard.removeObject(forKey: key) }
+    }
+
+    /// Reuse the SAME collaboration thread when you re-@-mention the same AI set in a
+    /// conversation (D4), instead of spawning a new one each time. `aiSetKey` is the
+    /// caller's stable key for the sorted AI set. Identity/reuse only — the round
+    /// bound comes from the per-thread `threadLoopGuardLimit` (the AI turn limiter).
+    nonisolated static func collabThreadID(
+        conversationID: String, aiSetKey: String, siloID: String = ""
+    ) -> String? {
+        UserDefaults.standard.string(
+            forKey: siloDefaultsKey("collabThread.\(conversationID).\(aiSetKey)", siloID))
+    }
+    nonisolated static func setCollabThreadID(
+        _ threadID: String?, conversationID: String, aiSetKey: String, siloID: String = ""
+    ) {
+        let key = siloDefaultsKey("collabThread.\(conversationID).\(aiSetKey)", siloID)
+        if let threadID { UserDefaults.standard.set(threadID, forKey: key) }
+        else { UserDefaults.standard.removeObject(forKey: key) }
+    }
+
     /// Per-node REMOTE DEV-CONTROL consent (ACPRouterplan Phase 3, C-3): whether the
     /// owner has consented to drive a paired `coding_agent` node's real ACP agent over
     /// the relay. OFF by default — privacy-first, the cardinal rule. The relay-carried

@@ -138,22 +138,15 @@ struct MainView: View {
         .onChange(of: commands.toggleSidebarTick) { _, _ in
             withAnimation { columnVisibility = columnVisibility == .all ? .detailOnly : .all }
         }
-        // Phase 3 item 3 — interactive per-tool approval. When a paired Mac coding agent
-        // wants a mutating action (write/edit/run) and autonomous-changes consent is OFF,
-        // it surfaces here for an explicit Allow once / Always / Deny. Global so it appears
-        // over any screen; the node's own 120s C-1 timeout denies if this is ignored
-        // (fail-closed — the prompt is the affordance, not the brake).
-        .alert(
-            "Allow this action?",
-            isPresented: Binding(
-                get: { model.acpPermissions.pending.first != nil }, set: { _ in }),
-            presenting: model.acpPermissions.pending.first
-        ) { request in
-            Button("Allow once") { model.acpPermissions.resolve(id: request.id, .allowOnce) }
-            Button("Always allow") { model.acpPermissions.resolve(id: request.id, .allowAlways) }
-            Button("Deny", role: .cancel) { model.acpPermissions.resolve(id: request.id, .deny) }
-        } message: { request in
-            Text("\(model.contactNames[request.nodeHex] ?? "Your Mac agent") wants to:\n\(request.title)")
+        // Phase 3 item 3 / feature 9 — interactive per-tool approval. When a paired Mac
+        // coding agent wants a mutating action (write/edit/run) and autonomous-changes
+        // consent is OFF, it surfaces as an INLINE, non-blocking card (replacing the old
+        // modal alert) so the rest of the app stays usable and a queue is visible. Global
+        // so it appears over any screen; the node's own 120s C-1 timeout denies if this is
+        // ignored (fail-closed — the card is the affordance, not the brake).
+        .overlay(alignment: .bottom) {
+            ACPApprovalCard(model: model)
+                .animation(.spring(duration: 0.3), value: model.acpPermissions.pending.count)
         }
     }
 
@@ -174,7 +167,11 @@ struct MainView: View {
             }
             Section {
                 ForEach(visibleConversations) { conversation in
-                    ConversationRow(conversation: conversation, muted: mutes.contains(conversation.id))
+                    ConversationRow(
+                        conversation: conversation, muted: mutes.contains(conversation.id),
+                        pendingApprovals: model.acpPermissions.pending.filter {
+                            $0.nodeHex == conversation.id
+                        }.count)
                         .tag(conversation.id)
                         // Combine the identicon + text into ONE accessibility
                         // element so the WHOLE row is the identified, hittable
@@ -466,6 +463,10 @@ struct ConversationRow: View {
     let conversation: ConversationVM
     /// When muted, the unread badge is suppressed and a bell-slash is shown.
     var muted = false
+    /// Count of this node's permission requests waiting in the inline approval queue
+    /// (feature 9) — surfaced here so queued approvals are visible from the list
+    /// without a blocking modal.
+    var pendingApprovals = 0
     /// Pointer hover (Mac / iPad trackpad). Drives a subtle row tint so the list
     /// feels alive under a mouse; `false` and inert on touch-only iPhone.
     @State private var hovering = false
@@ -501,6 +502,17 @@ struct ConversationRow: View {
                             .font(.caption2)
                             .foregroundStyle(.blue)
                             .accessibilityLabel("Coding agent")
+                    }
+                    if pendingApprovals > 0 {
+                        Text("\(pendingApprovals)")
+                            .font(.caption2.weight(.bold))
+                            .foregroundStyle(.white)
+                            .padding(.horizontal, 6)
+                            .padding(.vertical, 2)
+                            .background(.orange, in: Capsule())
+                            .accessibilityLabel(
+                                "\(pendingApprovals) approval\(pendingApprovals == 1 ? "" : "s") waiting")
+                            .accessibilityIdentifier("acp-pending-badge")
                     }
                     if conversation.isGroup {
                         Text("\(conversation.memberCount)")

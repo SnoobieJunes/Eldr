@@ -135,6 +135,11 @@ public actor ACPClient {
         await driver.terminalInput(terminalId: terminalId, data: data)
     }
 
+    /// Phase D4 / feature 9 — resize a live terminal's window (TIOCSWINSZ on the node).
+    public func terminalResize(terminalId: String, cols: Int, rows: Int) async {
+        await driver.terminalResize(terminalId: terminalId, cols: cols, rows: rows)
+    }
+
     /// Phase D4 — KILL a live interactive terminal (the Stop control). Always available.
     public func terminalKill(terminalId: String) async {
         await driver.terminalKill(terminalId: terminalId)

@@ -179,6 +179,17 @@ actor SwiftDataMessageStore: MessageStore {
 
     func save(_ message: StoredMessage) async throws {
         let crypter = try requireCrypter()
+        var message = message
+        // Per-AI sealing (feature 1): re-seal an agent message's text under its
+        // AUTHOR AI's per-record key, nested inside the outer master-sealed record.
+        // The context assembler surfaces this message to a DIFFERENT AI only by
+        // explicitly opening that author's seal — enforcement-by-construction for
+        // the isolation gate. The plaintext `text` stays for the owner's own render
+        // path (the owner is the trust root). Human messages are never re-sealed.
+        if message.sealedAgentContent == nil, let recordID = message.authorSealRecordID {
+            message.sealedAgentContent = try crypter.seal(
+                Data(message.text.utf8), recordID: recordID)
+        }
         let payload = try crypter.seal(
             try JSONEncoder().encode(message), recordID: "msg-\(message.id)")
         seqCounter += 1
@@ -245,6 +256,20 @@ actor SwiftDataMessageStore: MessageStore {
             var message = try? JSONDecoder().decode(StoredMessage.self, from: plain)
         else { throw PQRCError.recordNotFound }
         message.aiContext = value
+        model.encryptedPayload = try crypter.seal(
+            try JSONEncoder().encode(message), recordID: "msg-\(messageID)")
+        try modelContext.save()
+    }
+
+    func setAIMarks(messageID: String, aiIDs: [String]) async throws {
+        let crypter = try requireCrypter()
+        let descriptor = FetchDescriptor<MessageModel>(
+            predicate: #Predicate { $0.id == messageID })
+        guard let model = try modelContext.fetch(descriptor).first,
+            let plain = try? crypter.open(model.encryptedPayload, recordID: "msg-\(messageID)"),
+            var message = try? JSONDecoder().decode(StoredMessage.self, from: plain)
+        else { throw PQRCError.recordNotFound }
+        message.aiMarks = aiIDs
         model.encryptedPayload = try crypter.seal(
             try JSONEncoder().encode(message), recordID: "msg-\(messageID)")
         try modelContext.save()

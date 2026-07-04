@@ -285,7 +285,7 @@ struct BridgeView: View {
                 Button("Enable bridge") { bridge.enable() }
             default:
                 Button("Stop advertising") { bridge.disable() }
-                Button(role: .destructive) { bridge.unpair() } label: { Text("Unpair") }
+                Button(role: .destructive) { Task { await bridge.unpair() } } label: { Text("Unpair") }
             }
         }
     }

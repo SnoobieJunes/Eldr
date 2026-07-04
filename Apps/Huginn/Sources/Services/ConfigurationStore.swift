@@ -20,9 +20,15 @@ final class ConfigurationStore: ObservableObject {
     @Published var llmURL: String
     @Published var llmToken: String
     @Published var llmModel: String
+    /// Let a vision-capable model receive node-side images (`ELDR_LLM_VISION`). Off by
+    /// default — most local models are text-only and would choke on image input.
+    @Published var visionEnabled: Bool
 
     // MARK: Context budget (env file)
     @Published var maxToolResultBytes: Int
+    /// Read-side cap: how much of a file `read_file` pulls off disk before truncating,
+    /// so a huge file can't OOM the agent (`ELDR_ACP_MAX_READ_FILE_BYTES`). 0 = no cap.
+    @Published var maxReadFileBytes: Int
     @Published var maxHistoryTurns: Int
     @Published var maxContextChars: Int
 
@@ -33,12 +39,24 @@ final class ConfigurationStore: ObservableObject {
     @Published var llmTimeoutSeconds: Int
     /// Per-shell-command watchdog timeout in seconds (`ELDR_ACP_SHELL_TIMEOUT`).
     @Published var shellTimeoutSeconds: Int
+    /// How long to wait for you to answer a tool-permission prompt before denying it,
+    /// in seconds (`ELDR_ACP_PERMISSION_TIMEOUT`). Default 120.
+    @Published var permissionTimeoutSeconds: Int
+
+    // MARK: Security (env file)
+    /// DANGEROUS: run mutating tools (write/edit/shell) WITHOUT asking permission
+    /// (`ELDR_ACP_ALLOW_UNGATED_TOOLS`). Off by default (each change prompts). Only for
+    /// a fully trusted, isolated machine.
+    @Published var allowUngatedTools: Bool
 
     // MARK: Tools / skills / prompts (individual files)
     /// Names of the built-in tools the agent may use. Empty in AgentConfig means
     /// "all"; the UI always shows the four checkboxes, so we persist the explicit set.
     @Published var enabledTools: Set<String>
     @Published var skillsEnabled: Bool
+    /// Which built-in skills to advertise when skills are on (subset of `allSkillNames`;
+    /// full set = "all"). Persisted via the `skills` file / `ELDR_ACP_SKILLS`.
+    @Published var enabledSkills: Set<String>
     @Published var promptPreamble: String
     @Published var systemPromptOverride: String
 
@@ -46,12 +64,18 @@ final class ConfigurationStore: ObservableObject {
     /// When false, the env file sets `ELDR_ACP_EVENTS_FILE=` (empty) so the agent
     /// emits no events and the learner goes idle.
     @Published var learningEnabled: Bool
+    /// Explicit project context file (`eldr.md`) prepended to every session
+    /// (`ELDR_ACP_CONTEXT_FILE`). Empty = auto-discover per project.
+    @Published var contextFilePath: String
 
     // MARK: contextgraph (graph-based context manager) — env file.
     /// Route context assembly through the contextgraph service. Off → unchanged.
     @Published var contextGraphEnabled: Bool
     /// contextgraph REST endpoint the agent calls (and the wizard health-checks).
     @Published var contextGraphURL: String
+    /// contextgraph channel/agent label so per-project graphs stay separate
+    /// (`ELDR_ACP_CONTEXTGRAPH_AGENT`). Empty = derived from the session folder.
+    @Published var contextGraphAgentName: String
 
     // MARK: sybilclaw gateway (Huginn-only pref — NOT an eldr-acp env var)
     /// The port sybilclaw's gateway daemon listens on (default 18789). Used by the
@@ -63,6 +87,9 @@ final class ConfigurationStore: ObservableObject {
 
     /// The four built-in tools, in advertise order (mirrors ToolExecutor.allToolNames).
     static let allToolNames = ["read_file", "write_file", "list_dir", "run_shell"]
+    /// The built-in skill command names, in advertise order (mirrors PQRCACP's
+    /// `AgentSkill.builtIns`: createSpec / generateSnippet / visualizeHTML).
+    static let allSkillNames = ["spec", "snippet", "html"]
 
     let paths: ConfigPaths
     private var saveCancellable: AnyCancellable?
@@ -88,23 +115,30 @@ final class ConfigurationStore: ObservableObject {
             keychain.load(account: Self.tokenAccount).flatMap { String(data: $0, encoding: .utf8) }
             ?? llm.token
         llmModel = llm.model
+        visionEnabled = agent.visionEnabled
         // AgentConfig clamps a non-positive byte cap to Int.max ("unbounded"); show 0
         // for that so the field round-trips cleanly.
         maxToolResultBytes = agent.maxToolResultBytes == Int.max ? 0 : agent.maxToolResultBytes
+        maxReadFileBytes = agent.maxReadFileBytes == Int.max ? 0 : agent.maxReadFileBytes
         maxHistoryTurns = agent.maxHistoryTurns
         maxContextChars = agent.maxContextChars
         maxAgentSteps = agent.maxIterations
         shellTimeoutSeconds = Int(agent.shellTimeoutSeconds)
         llmTimeoutSeconds = Int(llm.requestTimeoutSeconds)
+        permissionTimeoutSeconds = Int(agent.permissionTimeoutSeconds)
+        allowUngatedTools = agent.allowUngatedTools
         enabledTools =
             agent.toolAllowlist.isEmpty
             ? Set(ConfigurationStore.allToolNames) : Set(agent.toolAllowlist)
         skillsEnabled = agent.skillsEnabled
+        enabledSkills = agent.skillAllowlist.map(Set.init) ?? Set(ConfigurationStore.allSkillNames)
         promptPreamble = agent.promptPreamble ?? ""
         systemPromptOverride = agent.systemPromptOverride ?? ""
         learningEnabled = (agent.eventsFilePath?.isEmpty == false)
+        contextFilePath = agent.contextFilePath ?? ""
         contextGraphEnabled = agent.contextGraphEnabled
         contextGraphURL = agent.contextGraphURL
+        contextGraphAgentName = agent.contextGraphAgentName ?? ""
         sybilclawGatewayPort =
             (UserDefaults.standard.object(forKey: Self.gatewayPortKey) as? Int)
             ?? Self.defaultGatewayPort
@@ -128,9 +162,18 @@ final class ConfigurationStore: ObservableObject {
         saveTokenToKeychain()
         writeEnvFile()
         writeFile(paths.toolsFile, contents: toolsFileContents())
-        writeFile(paths.skillsFile, contents: skillsEnabled ? "1" : "0")
+        writeFile(paths.skillsFile, contents: skillsFileContents())
         writeFile(paths.preambleFile, contents: promptPreamble)
         writeFile(paths.systemPromptFile, contents: systemPromptOverride)
+    }
+
+    /// The `skills` file contents (parsed by `AgentConfig.parseSkills`): "0" when off,
+    /// "1" when ALL built-ins are on, else the comma-separated subset.
+    private func skillsFileContents() -> String {
+        guard skillsEnabled else { return "0" }
+        if enabledSkills.count >= Self.allSkillNames.count { return "1" }
+        let ordered = Self.allSkillNames.filter { enabledSkills.contains($0) }
+        return ordered.isEmpty ? "0" : ordered.joined(separator: ",")
     }
 
     /// The env file the launcher `source`s. Only simple scalar values live here;
@@ -144,17 +187,25 @@ final class ConfigurationStore: ObservableObject {
             // the Configurator injects it when spawning the launcher, and the launcher
             // reads it from the Keychain for external clients (Xcode/OpenClaw).
             export("ELDR_LLM_MODEL", llmModel),
+            export("ELDR_LLM_VISION", visionEnabled ? "1" : "0"),
             export("ELDR_ACP_MAX_TOOL_RESULT_BYTES", String(maxToolResultBytes)),
+            export("ELDR_ACP_MAX_READ_FILE_BYTES", String(maxReadFileBytes)),
             export("ELDR_ACP_MAX_HISTORY_TURNS", String(maxHistoryTurns)),
             export("ELDR_ACP_MAX_CONTEXT_CHARS", String(maxContextChars)),
             // Agent limits — 0 = unlimited (the engine's `fromEnvironment` default).
             export("ELDR_ACP_MAX_ITERATIONS", String(maxAgentSteps)),
             export("ELDR_ACP_SHELL_TIMEOUT", String(shellTimeoutSeconds)),
             export("ELDR_LLM_TIMEOUT_SECONDS", String(llmTimeoutSeconds)),
+            export("ELDR_ACP_PERMISSION_TIMEOUT", String(permissionTimeoutSeconds)),
+            // Security escape hatch — only honored when explicitly turned on.
+            export("ELDR_ACP_ALLOW_UNGATED_TOOLS", allowUngatedTools ? "1" : "0"),
             // Empty value (learning off) → AgentConfig.stringEnv treats "" as nil.
             export("ELDR_ACP_EVENTS_FILE", learningEnabled ? paths.eventsFile : ""),
+            // Empty = auto-discover the per-project eldr.md.
+            export("ELDR_ACP_CONTEXT_FILE", contextFilePath),
             export("ELDR_ACP_CONTEXTGRAPH", contextGraphEnabled ? "1" : "0"),
             export("ELDR_ACP_CONTEXTGRAPH_URL", contextGraphURL),
+            export("ELDR_ACP_CONTEXTGRAPH_AGENT", contextGraphAgentName),
         ]
         lines.append("")
         writeFile(paths.envFile, contents: lines.joined(separator: "\n"))
@@ -221,6 +272,7 @@ final class ConfigurationStore: ObservableObject {
     var agentConfig: AgentConfig {
         AgentConfig(
             maxToolResultBytes: maxToolResultBytes,
+            maxReadFileBytes: maxReadFileBytes,
             maxHistoryTurns: maxHistoryTurns,
             maxContextChars: maxContextChars,
             toolAllowlist: enabledTools.count >= ConfigurationStore.allToolNames.count
@@ -228,9 +280,18 @@ final class ConfigurationStore: ObservableObject {
             promptPreamble: promptPreamble.isEmpty ? nil : promptPreamble,
             systemPromptOverride: systemPromptOverride.isEmpty ? nil : systemPromptOverride,
             skillsEnabled: skillsEnabled,
+            skillAllowlist: enabledSkills.count >= ConfigurationStore.allSkillNames.count
+                ? nil : ConfigurationStore.allSkillNames.filter { enabledSkills.contains($0) },
             eventsFilePath: learningEnabled ? paths.eventsFile : nil,
+            contextFilePath: contextFilePath.isEmpty ? nil : contextFilePath,
+            contextGraphEnabled: contextGraphEnabled,
+            contextGraphURL: contextGraphURL,
+            contextGraphAgentName: contextGraphAgentName.isEmpty ? nil : contextGraphAgentName,
+            permissionTimeoutSeconds: Double(permissionTimeoutSeconds),
             maxIterations: maxAgentSteps,
-            shellTimeoutSeconds: Double(shellTimeoutSeconds))
+            shellTimeoutSeconds: Double(shellTimeoutSeconds),
+            allowUngatedTools: allowUngatedTools,
+            visionEnabled: visionEnabled)
     }
 
     // MARK: - Env-file parsing (the inverse of writeEnvFile)

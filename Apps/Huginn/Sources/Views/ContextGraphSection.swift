@@ -41,6 +41,14 @@ struct ContextGraphSection: View {
                     }
             }
 
+            LabeledContent("Channel label") {
+                TextField("(auto — derived from each project)", text: $store.contextGraphAgentName)
+                    .textFieldStyle(.roundedBorder)
+                    .autocorrectionDisabled()
+            }
+            Text("Keeps separate projects' graphs from mixing. Leave blank to derive one per project folder.")
+                .font(.caption).foregroundStyle(.secondary)
+
             healthRow
 
             if store.contextGraphEnabled, case .down = service.state {

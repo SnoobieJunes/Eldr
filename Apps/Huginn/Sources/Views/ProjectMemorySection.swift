@@ -1,3 +1,4 @@
+import AppKit
 import SwiftUI
 
 /// The "Project Memory" section of the Configuration form: the global learning
@@ -11,6 +12,21 @@ struct ProjectMemorySection: View {
         Section("Project Memory") {
             Toggle("Self-learning (record events, build per-project eldr.md)", isOn: $store.learningEnabled)
             Text("The agent appends events as it works; the learner distills them into a per-project eldr.md it reads back next session. Turn off to stop recording.")
+                .font(.caption).foregroundStyle(.secondary)
+
+            LabeledContent("Project context file") {
+                HStack {
+                    TextField("(auto — per-project eldr.md)", text: $store.contextFilePath)
+                        .textFieldStyle(.roundedBorder)
+                        .autocorrectionDisabled()
+                        .lineLimit(1).truncationMode(.middle)
+                    Button("Choose…") { chooseContextFile() }
+                    if !store.contextFilePath.isEmpty {
+                        Button("Clear") { store.contextFilePath = "" }
+                    }
+                }
+            }
+            Text("Optional: force a specific eldr.md to prepend to every session. Leave blank to auto-discover one per project.")
                 .font(.caption).foregroundStyle(.secondary)
 
             if learner.activeProjects.isEmpty {
@@ -36,10 +52,36 @@ struct ProjectMemorySection: View {
         }
         .onAppear { learner.start() }
         .onDisappear { learner.stop() }
+        .task {
+            // B2: hand the learner the at-rest metadata key derived from the SAME
+            // Secure-Enclave-wrapped master key the agent + transcript use, so it
+            // reads/writes events.jsonl + eldr.md SEALED (not cleartext). Keychain
+            // unavailable / no master key ⇒ nil ⇒ cleartext fallback (today's behavior).
+            let transcripts = URL(
+                fileURLWithPath: ConfigPaths.standard.configDir, isDirectory: true
+            ).appendingPathComponent("transcripts", isDirectory: true)
+            // `…IfProvisioned` (load-only): this is a SECOND ConversationMemory instance, so it must
+            // never CREATE the master key — only the bridge's instance does — or the two would
+            // diverge on a first-launch race and the learner couldn't read the agent's sealed files.
+            let key = await ConversationMemory(directory: transcripts).metadataKeyIfProvisioned()
+            learner.setMetadataKey(key)
+        }
         .sheet(item: $viewing) { project in
             ProjectMemoryDetail(
                 title: (project.cwd as NSString).lastPathComponent,
                 text: learner.memoryText(project))
+        }
+    }
+
+    private func chooseContextFile() {
+        let panel = NSOpenPanel()
+        panel.canChooseFiles = true
+        panel.canChooseDirectories = false
+        panel.allowsMultipleSelection = false
+        panel.prompt = "Select"
+        panel.message = "Choose an eldr.md (or any text file) to prepend to every session"
+        if panel.runModal() == .OK, let url = panel.url {
+            store.contextFilePath = url.path
         }
     }
 }

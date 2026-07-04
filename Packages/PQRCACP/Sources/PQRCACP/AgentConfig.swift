@@ -124,6 +124,14 @@ public struct AgentConfig: Sendable, Equatable {
     /// the tool results returned to the model, or anything delivered to the owner —
     /// log hygiene on disk only.
     public var logRedactor: ACPLogScrubber
+    /// B2: the 32-byte key that seals the at-rest METADATA sinks (`events.jsonl` lines
+    /// and the per-project `eldr.md`) via `ACPMetadataCrypto`. Sourced from the process
+    /// env `ELDR_ACP_METADATA_KEY` (base64), which Huginn sets from the Secure-Enclave-
+    /// wrapped master key when IT spawns the agent — NEVER written to the on-disk env file
+    /// (that would reverse the C-8 hardening). nil ⇒ the sinks are written/read in
+    /// CLEARTEXT (today's behavior): an external Xcode/OpenClaw launch that lacks the
+    /// master key falls back gracefully and never crashes or breaks a turn.
+    public var metadataKey: Data?
 
     /// Defaults preserve/improve prior behavior: 8 KB per tool result (the loop
     /// previously fed back whole files unbounded and only capped shell at 64 KB),
@@ -149,7 +157,8 @@ public struct AgentConfig: Sendable, Equatable {
         maxIterations: 0,
         shellTimeoutSeconds: 0,
         allowUngatedTools: false,
-        visionEnabled: false)
+        visionEnabled: false,
+        metadataKey: nil)
 
     public init(
         maxToolResultBytes: Int = 8 * 1024,
@@ -171,6 +180,7 @@ public struct AgentConfig: Sendable, Equatable {
         shellTimeoutSeconds: Double = 0,
         allowUngatedTools: Bool = false,
         visionEnabled: Bool = false,
+        metadataKey: Data? = nil,
         logRedactor: @escaping ACPLogScrubber = ACPLogRedactor.scrub
     ) {
         // Clamp to sane floors: a non-positive byte cap would truncate everything to
@@ -195,6 +205,9 @@ public struct AgentConfig: Sendable, Equatable {
         self.shellTimeoutSeconds = max(0, shellTimeoutSeconds)
         self.allowUngatedTools = allowUngatedTools
         self.visionEnabled = visionEnabled
+        // Accept a metadata key only if it's exactly 32 bytes (AES-256); anything else is
+        // treated as absent so a malformed env value can't half-enable sealing.
+        self.metadataKey = metadataKey.flatMap { $0.count == 32 ? $0 : nil }
         self.logRedactor = logRedactor
     }
 
@@ -218,6 +231,7 @@ public struct AgentConfig: Sendable, Equatable {
             && lhs.permissionTimeoutSeconds == rhs.permissionTimeoutSeconds
             && lhs.allowUngatedTools == rhs.allowUngatedTools
             && lhs.visionEnabled == rhs.visionEnabled
+            && lhs.metadataKey == rhs.metadataKey
     }
 
     /// Build from the process environment, falling back to an optional config
@@ -275,6 +289,13 @@ public struct AgentConfig: Sendable, Equatable {
             ?? configDir.flatMap { Self.readConfigFile(dir: $0, name: "skills") }
         let (skillsEnabled, skillAllowlist) = Self.parseSkills(skillsRaw)
 
+        // B2: the base64 metadata key from the process env (Huginn sets it when it spawns
+        // the agent). Accept ONLY an exactly-32-byte decode; anything else ⇒ nil ⇒ cleartext.
+        let metadataKey: Data? =
+            stringEnv("ELDR_ACP_METADATA_KEY")
+            .flatMap { Data(base64Encoded: $0) }
+            .flatMap { $0.count == 32 ? $0 : nil }
+
         return AgentConfig(
             maxToolResultBytes: intEnv("ELDR_ACP_MAX_TOOL_RESULT_BYTES", default: d.maxToolResultBytes),
             maxReadFileBytes: intEnv("ELDR_ACP_MAX_READ_FILE_BYTES", default: d.maxReadFileBytes),
@@ -294,7 +315,8 @@ public struct AgentConfig: Sendable, Equatable {
             maxIterations: intEnv("ELDR_ACP_MAX_ITERATIONS", default: d.maxIterations),
             shellTimeoutSeconds: doubleEnv("ELDR_ACP_SHELL_TIMEOUT", default: d.shellTimeoutSeconds),
             allowUngatedTools: boolEnv("ELDR_ACP_ALLOW_UNGATED_TOOLS", default: d.allowUngatedTools),
-            visionEnabled: boolEnv("ELDR_LLM_VISION", default: d.visionEnabled))
+            visionEnabled: boolEnv("ELDR_LLM_VISION", default: d.visionEnabled),
+            metadataKey: metadataKey)
     }
 
     /// Interpret the overloaded `ELDR_ACP_SKILLS` value.

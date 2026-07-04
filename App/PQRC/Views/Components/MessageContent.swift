@@ -257,10 +257,40 @@ enum MarkdownInline {
     }
 
     static func attributed(_ source: String) -> AttributedString {
-        (try? AttributedString(
-            markdown: source,
-            options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace)))
+        var s =
+            (try? AttributedString(
+                markdown: source,
+                options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace)))
             ?? AttributedString(source)
+        highlightMentions(in: &s)
+        return s
+    }
+
+    /// Tint @mention tokens (an "@" at a word boundary followed by name characters)
+    /// in the accent color so an addressed AI or person stands out in a sent message
+    /// (feature 6). Display-only — never mutates the stored text.
+    static func highlightMentions(in s: inout AttributedString) {
+        var ranges: [Range<AttributedString.Index>] = []
+        let chars = s.characters
+        var i = chars.startIndex
+        while i < chars.endIndex {
+            if chars[i] == "@" {
+                let atOK = i == chars.startIndex || chars[chars.index(before: i)].isWhitespace
+                var j = chars.index(after: i)
+                while j < chars.endIndex,
+                    chars[j].isLetter || chars[j].isNumber || chars[j] == "-" || chars[j] == "_"
+                {
+                    j = chars.index(after: j)
+                }
+                if atOK, j > chars.index(after: i) { ranges.append(i..<j) }
+                i = j
+            } else {
+                i = chars.index(after: i)
+            }
+        }
+        for r in ranges {
+            s[r].foregroundColor = .accentColor
+        }
     }
 
     /// Inline markup removed, for accessibility/previews.

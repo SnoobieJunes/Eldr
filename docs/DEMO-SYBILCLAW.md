@@ -128,19 +128,31 @@ done a real 2-device run (below).
 
 ---
 
-## Stage 2 — phone → sybilclaw's own assistant via the Gateway bridge  🚧 built against the documented protocol; UNVERIFIED on a live gateway
+## Stage 2 — phone → sybilclaw's own assistant via the Gateway bridge  🚧 handshake corrected + unit-locked; live 2-device round-trip still unrun
 
 **What it is:** your phone's chat reaches **sybilclaw's own assistant** (its model, persona,
 memory, tools) — *not* eldr-acp, and **no eldr-acp LLM is used**. The phone's message rides
-the E2EE relay to Huginn; Huginn forwards it to sybilclaw's local Gateway (WebSocket
-JSON-RPC, default :18789); the reply comes back over the relay. The cockpit is sybilclaw's;
-Eldr is the private network the phone reaches it over.
+the E2EE relay to Huginn; Huginn forwards it to sybilclaw's local **OpenClaw Gateway** (a
+typed-frame WebSocket protocol — `req`/`res`/`event`, **not** JSON-RPC — default :18789); the
+reply comes back over the relay. The cockpit is sybilclaw's; Eldr is the private network the
+phone reaches it over.
 
-**How it's wired:** `SybilclawGatewayClient` (WS JSON-RPC) + `SybilclawAgentRunner` (a
-`BridgeAgentRunner`) swapped in when **Mac-side responder = "sybilclaw assistant"**. The
-owner's chat hits `handleInboundPrompt` (C-3 owner gate + redaction + timeout — all reused
-from Stage 1) → the runner asks sybilclaw → the reply is sent back. Switching the responder
-re-wires the live runner with no restart.
+**How it's wired (corrected 2026-06-28, commit `c64386c`):** `SybilclawGatewayClient` +
+`SybilclawAgentRunner` (a `BridgeAgentRunner`) swapped in when **Mac-side responder =
+"sybilclaw assistant"**. The owner's chat hits `handleInboundPrompt` (C-3 owner gate +
+redaction + timeout — all reused from Stage 1) → the runner drives the gateway → the reply is
+sent back. The gateway turn is: (1) a mandatory **`connect`** handshake declaring
+`client.id="openclaw-macos"`, `client.mode="backend"`, `role="operator"`, scopes, protocol
+range `[3,4]` (values ON the gateway's allowlists — the earlier off-allowlist ids were
+schema-rejected on every connect); (2) **`chat.send`** `{sessionKey, message, idempotencyKey}`,
+which acks immediately with `{runId, status:"in_flight"}`; (3) the reply **streams as `event`
+frames correlated by `runId`** — assistant text on `event:"agent"` (stream "assistant",
+cumulative `payload.data.text`), terminating on an `event:"chat"` whose `payload.state` is
+`final`/`error`/`aborted`. An agent is targeted by encoding it into the key as
+`agent:<id>:<sessionKey>` (there is no `agentId` field). Switching the responder re-wires the
+live runner with no restart. Two client copies exist (Huginn app + headless `eldr-node`) —
+their protocol framing is pinned by `GatewayHandshakeTests` and `SybilclawGatewayFramingTests`
+so they can't silently drift (DEVIATIONS AC73).
 
 **Run it (builds on the Stage 1 pairing):**
 1. **[human] Mac / Huginn:** pair the phone (Stage 1 steps 1–2). In the **EldrChat Bridge**
@@ -149,12 +161,16 @@ re-wires the live runner with no restart.
 2. **[human] Phone:** in the paired conversation, with your AI window on, just chat — your
    messages are forwarded to sybilclaw's assistant and its replies come back over the relay.
 
-**⚠️ Confirm on his sybilclaw (the one thing not verifiable headlessly):** the exact Gateway
-**method name + params** that run an agent turn and the **reply-frame shape** (OpenClaw
-Gateway protocol v4 — documented as `agent`/`send`). These live in three helpers in
-`SybilclawGatewayClient` (`requestMethod`, `makeParams`, `extractText`) with a robust
-multi-shape reply parser, so a mismatch is a one-spot fix. A "didn't reply in time" on a
-chat is the signal to check those against his gateway's logs.
+**⚠️ Still unverified (the one thing not testable headlessly):** the **live round-trip against
+a running gateway on two physical devices**. The handshake, `chat.send` params, and the
+event-stream reply parser were corrected against the fork's own reference clients
+(rdevaul/sybilclaw apps/ios + android) and are now locked by unit tests
+(`GatewayHandshakeTests`, `GatewayReplyTests`, `SybilclawGatewayFramingTests`) — so the earlier
+"confirm the method/params on his gateway" caveat is retired; the framing is grounded, not
+guessed. What remains is exercising it end-to-end on real hardware. A "didn't reply in time" on
+a chat is the signal to turn on opt-in gateway **diagnostics** (Bridge ▸ diagnostics; logs the
+token-redacted `connect` handshake + the gateway's raw reply, never the prompt/reply text) and
+compare against the gateway's own logs.
 
 ---
 

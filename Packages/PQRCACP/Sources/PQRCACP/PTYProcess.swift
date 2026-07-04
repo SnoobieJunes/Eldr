@@ -223,6 +223,19 @@ public final class PTYProcess: @unchecked Sendable {
     @discardableResult
     public func write(_ text: String) -> Bool { write(Data(text.utf8)) }
 
+    /// Resize the PTY window (TIOCSWINSZ) so full-screen tools (vim, top, less) lay
+    /// out to the phone's terminal view (feature 9 — enhanced PTY). Best-effort and
+    /// synchronous; a no-op once terminated or for a zero dimension.
+    @discardableResult
+    public func resize(cols: UInt16, rows: UInt16) -> Bool {
+        stateLock.lock()
+        let alive = state == .running
+        stateLock.unlock()
+        guard alive, cols > 0, rows > 0 else { return false }
+        var ws = winsize(ws_row: rows, ws_col: cols, ws_xpixel: 0, ws_ypixel: 0)
+        return ioctl(masterFD, TIOCSWINSZ, &ws) == 0
+    }
+
     /// Kill the child (its whole process group) and close the master fd. IDEMPOTENT and
     /// synchronous — safe to call from any task, repeatedly, and from a fail-closed
     /// teardown. After this the `output` stream finishes (the read source's cancel handler

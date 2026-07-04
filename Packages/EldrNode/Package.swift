@@ -58,6 +58,9 @@ let package = Package(
             name: "EldrNodeCoreTests",
             dependencies: [
                 "EldrNodeCore",
+                // The daemon target, so `SybilclawGatewayFramingTests` can `@testable import` it
+                // and pin the node's gateway connect handshake against silent protocol re-drift.
+                "eldr-node",
                 "PQRCCore",
                 "PQRCNostr",
                 .product(name: "PQRCACP", package: "PQRCACP"),

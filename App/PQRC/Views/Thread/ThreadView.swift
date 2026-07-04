@@ -135,6 +135,18 @@ struct ThreadView: View {
                             },
                             onFullScreen: { fullScreenContent = FullScreenContent(text: $0) },
                             onRetry: { Task { await model.retry(message) } },
+                            // "Bring the answer back" (D4): copy this thread message
+                            // into the parent conversation as a co-authored message.
+                            onPromoteToMain: {
+                                Task { await model.promoteThreadMessage(messageID: message.id) }
+                            },
+                            myAIs: model.tetheredAIList().filter(\.isEnabled).map { ($0.id, $0.name) },
+                            onMarkForAI: { aiID, value in
+                                Task {
+                                    await model.markAIContext(
+                                        messageIDs: [message.id], aiID: aiID, value: value)
+                                }
+                            },
                             // Strip the AgentSkills ⟡⟡ envelope from agent bubbles
                             // unless the per-silo "Show agent protocol envelope"
                             // toggle is on (default off). Display-only — the
@@ -187,6 +199,22 @@ struct ThreadView: View {
                         Label("Paste", systemImage: "doc.on.clipboard")
                     }
                 }
+                #if os(macOS) || targetEnvironment(macCatalyst)
+                    // Mac: Return sends, Shift+Return inserts a newline (matches the
+                    // main composer + the terminal stdin).
+                    .onKeyPress { press in
+                        guard press.key == .return, !press.modifiers.contains(.shift),
+                            !draftText.isEmpty
+                        else { return .ignored }
+                        let text = draftText
+                        draftText = ""
+                        Task {
+                            await model.send(
+                                text, conversationID: thread.conversationID, threadID: thread.id)
+                        }
+                        return .handled
+                    }
+                #endif
             Button {
                 let text = draftText
                 draftText = ""

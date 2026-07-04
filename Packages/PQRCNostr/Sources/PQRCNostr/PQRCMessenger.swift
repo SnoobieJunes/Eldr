@@ -968,15 +968,29 @@ public actor PQRCMessenger {
             // sender's human-identity signature. Forged grants never reach a
             // consumer; the AgentEngine re-checks (defense in depth).
             var aiContextGrant = body.aiContextGrant
-            if let grant = aiContextGrant,
-                grant.enabledBy != contact.binding.identityPubkey || !grant.hasValidSignature()
-            {
-                aiContextGrant = nil
-                eventContinuation?.yield(
-                    .protocolViolation(
-                        senderIdentityHex: contact.identityHex,
-                        reason: "ai_context_grant not signed by the sender's human identity key",
-                        wrapEventID: unwrapped.wrapEventID))
+            if let grant = aiContextGrant {
+                // Forward-compat (SPEC §12): a grant for a consume AXIS this build does
+                // not recognize is DROPPED SILENTLY (no sharing, no alarm) — a future
+                // field is not a forgery, and the signature is over a tag we can't
+                // reconstruct. Only a KNOWN axis whose signature fails is treated as a
+                // protocol violation. (Note the inverse: an OLDER peer that predates the
+                // axis field computes the human tag for an "ai"-axis grant and CANNOT
+                // verify it — it will flag a violation until it is updated.)
+                let knownAxis =
+                    grant.scope.axis == AIContextGrant.Scope.humanAxis
+                    || grant.scope.axis == AIContextGrant.Scope.aiAxis
+                if !knownAxis {
+                    aiContextGrant = nil
+                } else if grant.enabledBy != contact.binding.identityPubkey
+                    || !grant.hasValidSignature()
+                {
+                    aiContextGrant = nil
+                    eventContinuation?.yield(
+                        .protocolViolation(
+                            senderIdentityHex: contact.identityHex,
+                            reason: "ai_context_grant not signed by the sender's human identity key",
+                            wrapEventID: unwrapped.wrapEventID))
+                }
             }
             eventContinuation?.yield(
                 .message(

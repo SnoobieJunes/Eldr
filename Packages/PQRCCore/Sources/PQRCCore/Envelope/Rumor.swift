@@ -161,19 +161,59 @@ public struct AIContextGrant: Codable, Equatable, Sendable {
     /// Conversation- or thread-scoped, with the id bound into the signature so a
     /// conversation grant can't be reflected into a thread (or vice versa).
     public struct Scope: Codable, Equatable, Sendable {
+        /// The two independent content streams a grant can authorize (D2 — the
+        /// 2-step split). "human" = the peer's OWN messages; "ai" = the peer's AI
+        /// messages. Each axis is a SEPARATE grant, issued and withdrawn on its own.
+        public static let humanAxis = "human"
+        public static let aiAxis = "ai"
+
         public let kind: String  // "conversation" | "thread"
         public let id: String
+        /// Which content stream this grant authorizes (`humanAxis` | `aiAxis`).
+        /// Defaults to "human" so a grant from an older client (no axis field) keeps
+        /// its original meaning, and a human-axis grant serializes AND signs
+        /// byte-identically to before (the field is omitted on encode when "human").
+        public let axis: String
 
-        public init(kind: String, id: String) {
+        public init(kind: String, id: String, axis: String = humanAxis) {
             self.kind = kind
             self.id = id
+            self.axis = axis
         }
 
-        public static func conversation(_ id: String) -> Scope { Scope(kind: "conversation", id: id) }
-        public static func thread(_ id: String) -> Scope { Scope(kind: "thread", id: id) }
+        public static func conversation(_ id: String, axis: String = humanAxis) -> Scope {
+            Scope(kind: "conversation", id: id, axis: axis)
+        }
+        public static func thread(_ id: String, axis: String = humanAxis) -> Scope {
+            Scope(kind: "thread", id: id, axis: axis)
+        }
 
-        /// Stable key for engine state + signing.
-        public var tag: String { "\(kind):\(id)" }
+        /// Stable key for engine state + signing. The human axis is byte-identical
+        /// to before ("kind:id"); a non-human axis appends ":<axis>" so the two are
+        /// DISTINCT engine entries and DISTINCT signatures (SPEC §12: an old client
+        /// computes only the human tag, so an ai-axis grant won't verify there and
+        /// simply isn't honored — fails safe, no sharing).
+        public var tag: String {
+            axis == Self.humanAxis ? "\(kind):\(id)" : "\(kind):\(id):\(axis)"
+        }
+
+        enum CodingKeys: String, CodingKey { case kind, id, axis }
+
+        public init(from decoder: any Decoder) throws {
+            let c = try decoder.container(keyedBy: CodingKeys.self)
+            kind = try c.decode(String.self, forKey: .kind)
+            id = try c.decode(String.self, forKey: .id)
+            axis = try c.decodeIfPresent(String.self, forKey: .axis) ?? Self.humanAxis
+        }
+
+        public func encode(to encoder: any Encoder) throws {
+            var c = encoder.container(keyedBy: CodingKeys.self)
+            try c.encode(kind, forKey: .kind)
+            try c.encode(id, forKey: .id)
+            // Omit the default so a human-axis grant serializes exactly as older
+            // builds did (frozen vectors stay stable; old clients ignore the field).
+            if axis != Self.humanAxis { try c.encode(axis, forKey: .axis) }
+        }
     }
 
     public let type: String

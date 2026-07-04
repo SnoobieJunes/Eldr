@@ -24,6 +24,13 @@ final class ContextLearner: ObservableObject {
     @Published private(set) var activeProjects: [ProjectMemory] = []
 
     private let paths: ConfigPaths
+    /// B2: the at-rest key for the metadata sinks, derived from the SAME Secure-Enclave-
+    /// wrapped master key the agent + transcript use (see `ConversationMemory.metadataKey()`).
+    /// When present, `eldr.md` is written WHOLE-file sealed and each `events.jsonl` line is
+    /// opened before parsing; nil ⇒ everything stays cleartext (today's behavior — no
+    /// regression). Injected via `init`/`setMetadataKey`, so an external launch that lacks
+    /// the master key degrades gracefully. Never logged/persisted in the clear (invariant 12).
+    private var metadataKey: Data?
     private let queue = DispatchQueue(label: "chat.eldr.configurator.contextlearner")
 
     private var eventsHandle: FileHandle?
@@ -34,7 +41,15 @@ final class ContextLearner: ObservableObject {
     private var watchers: [String: DispatchSourceFileSystemObject] = [:]
     private var watcherExpiries: [String: Task<Void, Never>] = [:]
 
-    init(paths: ConfigPaths = .standard) { self.paths = paths }
+    init(paths: ConfigPaths = .standard, metadataKey: Data? = nil) {
+        self.paths = paths
+        self.metadataKey = metadataKey
+    }
+
+    /// B2: inject (or clear) the at-rest metadata key once it's derived (the derivation is
+    /// async — it forces the `ConversationMemory`/`EncryptedStore` bootstrap — so the view
+    /// pushes it in after construction). nil ⇒ cleartext fallback.
+    func setMetadataKey(_ key: Data?) { self.metadataKey = key }
 
     deinit {
         eventsSource?.cancel()
@@ -97,7 +112,12 @@ final class ContextLearner: ObservableObject {
             offset = (try? handle.offset()) ?? offset
             guard let text = String(data: data, encoding: .utf8) else { return }
             for line in text.split(separator: "\n", omittingEmptySubsequences: true) {
-                if let json = JSONValue.parse(String(line)) { ingest(event: json) }
+                // B2: a sealed line opens to its plaintext JSON; a legacy plaintext line
+                // (openLine → nil) is kept as-is; a sealed line with no key falls through
+                // to the base64 text, which JSONValue.parse rejects (skipped, not leaked).
+                let raw = String(line)
+                let plain = metadataKey.flatMap { ACPMetadataCrypto.openLine(raw, key: $0) } ?? raw
+                if let json = JSONValue.parse(plain) { ingest(event: json) }
             }
         } catch {
             stop()
@@ -190,12 +210,20 @@ final class ContextLearner: ObservableObject {
             try? cwd.data(using: .utf8)?.write(to: URL(fileURLWithPath: marker))
         }
 
-        var doc = ProjectMemoryDoc(
-            parsing: (try? String(contentsOfFile: mdPath, encoding: .utf8)) ?? "")
+        var doc = ProjectMemoryDoc(parsing: readMemoryText(mdPath))
         mutate(&doc)
         doc.cap(toBytes: 4096)
-        try? doc.serialized().data(using: .utf8)?.write(
-            to: URL(fileURLWithPath: mdPath), options: .atomic)
+        // B2: with a key, write the WHOLE file sealed (magic header + base64); without one,
+        // write plaintext exactly as before. A seal failure also falls back to plaintext so
+        // an update is never lost.
+        let serialized = doc.serialized()
+        let out: Data
+        if let metadataKey, let sealed = ProjectContext.sealForDisk(serialized, key: metadataKey) {
+            out = sealed
+        } else {
+            out = Data(serialized.utf8)
+        }
+        try? out.write(to: URL(fileURLWithPath: mdPath), options: .atomic)
         refreshProjects()
     }
 
@@ -214,16 +242,22 @@ final class ContextLearner: ObservableObject {
                 (try? String(
                     contentsOfFile: (dir as NSString).appendingPathComponent("cwd"),
                     encoding: .utf8))?.trimmingCharacters(in: .whitespacesAndNewlines) ?? hash
-            let doc = ProjectMemoryDoc(
-                parsing: (try? String(contentsOfFile: mdPath, encoding: .utf8)) ?? "")
+            let doc = ProjectMemoryDoc(parsing: readMemoryText(mdPath))
             result.append(ProjectMemory(cwd: cwd, path: mdPath, preview: doc.preview))
         }
         activeProjects = result.sorted { $0.cwd < $1.cwd }
     }
 
     /// The full eldr.md text (for the "View" sheet).
-    func memoryText(_ project: ProjectMemory) -> String {
-        (try? String(contentsOfFile: project.path, encoding: .utf8)) ?? ""
+    func memoryText(_ project: ProjectMemory) -> String { readMemoryText(project.path) }
+
+    /// B2: read an `eldr.md` from disk, transparently unsealing a WHOLE-file-sealed file
+    /// (magic header) with `metadataKey`. Returns "" when the file is absent, or is sealed
+    /// but unreadable (no/wrong key) — so ciphertext is never parsed or rendered as text; a
+    /// legacy plaintext (headerless) file is returned as-is regardless of key.
+    private func readMemoryText(_ path: String) -> String {
+        let data = (try? Data(contentsOf: URL(fileURLWithPath: path))) ?? Data()
+        return ProjectContext.openFromDisk(data, key: metadataKey) ?? ""
     }
 
     /// Delete a project's memory (the "Clear" button) and refresh.

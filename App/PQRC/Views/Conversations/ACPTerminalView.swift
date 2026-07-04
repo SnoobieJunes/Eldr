@@ -17,6 +17,15 @@ struct ACPTerminalView: View {
 
     @State private var stdin = ""
     @FocusState private var stdinFocused: Bool
+    // H1: incremental ANSI cache. Parsing the whole (≤256 KB) buffer on every streamed chunk was
+    // O(n²) and drove progressive frame drops; the renderer folds in only the newly-appended
+    // output (carrying SGR state across chunks). Updated in `.onChange` — never inside `body`.
+    @State private var renderer = ANSITerminalRenderer()
+    @State private var renderedOutput = AttributedString(" ")
+    // L2: dedupe resize reports. `.onChange(of: geo.size)` fires continuously during
+    // keyboard/scroll animations; only send when the derived cols/rows actually change
+    // so we don't spam the node over the relay.
+    @State private var lastReportedSize: (cols: Int, rows: Int)?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
@@ -68,9 +77,10 @@ struct ACPTerminalView: View {
     private var outputView: some View {
         ScrollViewReader { proxy in
             ScrollView {
-                Text(terminal.output.isEmpty ? " " : terminal.output)
-                    .font(.system(.caption, design: .monospaced))
-                    .foregroundStyle(.primary)
+                // ANSI SGR colors/bold/underline interpreted + stripped (feature 9);
+                // display-only, never persisted (invariant 12). Rendered incrementally into
+                // `renderedOutput` off the `body` path (H1) — see the `.onChange` below.
+                Text(renderedOutput)
                     .textSelection(.enabled)
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .padding(8)
@@ -80,8 +90,20 @@ struct ACPTerminalView: View {
             .background(
                 RoundedRectangle(cornerRadius: 8, style: .continuous)
                     .fill(Color(.systemBackground)))
-            .onChange(of: terminal.output) {
-                // Keep the newest output in view as it streams.
+            // Report the view's size as terminal columns/rows so full-screen tools on
+            // the node lay out to the phone (feature 9). Estimated from the caption
+            // monospaced advance/line height.
+            .overlay {
+                GeometryReader { geo in
+                    Color.clear
+                        .onAppear { reportSize(geo.size) }
+                        .onChange(of: geo.size) { _, s in reportSize(s) }
+                }
+            }
+            .onChange(of: terminal.output, initial: true) {
+                // Fold only the newly-appended output into the cached AttributedString (H1),
+                // then keep the newest output in view as it streams.
+                renderedOutput = renderer.render(terminal.output.isEmpty ? " " : terminal.output)
                 withAnimation(.linear(duration: 0.1)) {
                     proxy.scrollTo("acp-terminal-output-end", anchor: .bottom)
                 }
@@ -90,15 +112,56 @@ struct ACPTerminalView: View {
         }
     }
 
+    /// Estimate columns × rows from the view size and report them to the node.
+    private func reportSize(_ size: CGSize) {
+        guard size.width > 0, size.height > 0 else { return }
+        let charWidth: CGFloat = 7.2   // ~caption monospaced advance
+        let lineHeight: CGFloat = 15.0  // ~caption line height
+        let cols = max(20, Int((size.width - 16) / charWidth))
+        let rows = max(5, Int(size.height / lineHeight))
+        guard lastReportedSize?.cols != cols || lastReportedSize?.rows != rows else { return }  // L2: only on actual change
+        lastReportedSize = (cols, rows)
+        Task { await model.resizeACPTerminal(cols: cols, rows: rows, conversationID: conversationID) }
+    }
+
     private var stdinRow: some View {
         HStack(spacing: 8) {
-            TextField("Type a command…", text: $stdin)
+            // Interrupt / EOF controls (feature 9): send the raw control byte to the
+            // PTY so the tty delivers SIGINT / EOF to the foreground job.
+            Button {
+                Task { await model.sendACPTerminalControl("\u{03}", conversationID: conversationID) }
+            } label: {
+                Text("^C").font(.caption.weight(.bold).monospaced())
+            }
+            .buttonStyle(.bordered)
+            .tint(.orange)
+            .accessibilityLabel("Send interrupt (Control-C)")
+            .accessibilityIdentifier("acp-terminal-ctrl-c")
+            Button {
+                Task { await model.sendACPTerminalControl("\u{04}", conversationID: conversationID) }
+            } label: {
+                Text("^D").font(.caption.weight(.bold).monospaced())
+            }
+            .buttonStyle(.bordered)
+            .accessibilityLabel("Send end-of-file (Control-D)")
+            .accessibilityIdentifier("acp-terminal-ctrl-d")
+            TextField("Type a command…", text: $stdin, axis: .vertical)
                 .textFieldStyle(.roundedBorder)
                 .font(.system(.body, design: .monospaced))
+                .lineLimit(1...4)
                 .autocorrectionDisabled()
                 .textInputAutocapitalization(.never)
                 .focused($stdinFocused)
                 .onSubmit(submit)
+                #if os(macOS) || targetEnvironment(macCatalyst)
+                    // Mac: Return sends the line, Shift+Return inserts a newline.
+                    .onKeyPress { press in
+                        guard press.key == .return, !press.modifiers.contains(.shift)
+                        else { return .ignored }
+                        submit()
+                        return .handled
+                    }
+                #endif
                 .accessibilityIdentifier("acp-terminal-stdin")
             Button(action: submit) {
                 Image(systemName: "return")
@@ -129,5 +192,40 @@ struct ACPTerminalView: View {
         guard !line.isEmpty else { return }
         stdin = ""
         Task { await model.sendACPTerminalInput(line, conversationID: conversationID) }
+    }
+}
+
+/// H2: isolates the live-terminal subscription. Reading `acpTerminalByConversation` HERE — not in
+/// `ConversationView.body` — means a streamed terminal chunk (which fires many times a second)
+/// re-renders ONLY this slot, not the whole conversation (message `LazyVStack`, AI bar, thread
+/// chips, composer). Previously every chunk re-evaluated `ConversationView.body` and re-ran the
+/// O(n) `messages(for:)` filter, re-laying-out the entire transcript. Shown only while live.
+struct ACPTerminalSlot: View {
+    @Bindable var model: AppModel
+    let conversationID: String
+
+    var body: some View {
+        if let terminal = model.acpTerminalByConversation[conversationID] {
+            ACPTerminalView(model: model, conversationID: conversationID, terminal: terminal)
+                .padding(.horizontal)
+                .padding(.top, 6)
+                .frame(maxWidth: 760)
+        }
+    }
+}
+
+/// H2 (same rationale as `ACPTerminalSlot`): isolates the ACP plan-checklist subscription so a
+/// plan update re-renders only this slot, not the whole conversation. Shown only when non-empty.
+struct ACPPlanSlot: View {
+    @Bindable var model: AppModel
+    let conversationID: String
+
+    var body: some View {
+        if let plan = model.acpPlansByConversation[conversationID], !plan.isEmpty {
+            ACPPlanView(entries: plan)
+                .padding(.horizontal)
+                .padding(.top, 6)
+                .frame(maxWidth: 760)
+        }
     }
 }

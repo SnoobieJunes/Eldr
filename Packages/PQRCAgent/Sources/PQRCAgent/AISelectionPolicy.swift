@@ -284,3 +284,67 @@ public struct CompositeAISelectionPolicy<AI: AISelectionCandidate>: AISelectionP
             from: parts, conversationID: conversationID, threadID: threadID)
     }
 }
+
+/// Per-conversation roster MEMBERSHIP and ORDER (features 4 & 5). The user picks
+/// which of their tethered AIs participate in a given chat — and in what order —
+/// in the per-AI hub; that choice is the SOLE source of both the participation set
+/// and the reply order. This policy restricts + reorders the candidate set to the
+/// scope's roster, then delegates `primary`/`participants`/`critiqueTurn` to a
+/// wrapped `base` policy so capability routing and ordered-critique roles still
+/// apply to the rostered subset.
+///
+/// Roster semantics (host supplies the closure, typically reading
+/// `AppSession.conversationAIRoster`):
+///  - `nil`   ⇒ no roster set for this scope: pass the full candidate set through
+///              UNCHANGED — today's behavior and the D1 "all my AIs in config
+///              order" default. A host that never sets a roster behaves exactly as
+///              before.
+///  - `[]`    ⇒ silence: NO AI participates in this scope.
+///  - `[ids]` ⇒ exactly these AIs, in THIS order; ids not present in the candidate
+///              set (an AI the user removed) are skipped.
+///
+/// Content-blind (derives only from the scope + the stored roster, never message
+/// text — SPEC §0) and `Sendable`. Drop-in via `PersonaRuntime.setAISelectionPolicy`.
+public struct ConversationRosterPolicy<AI: AISelectionCandidate>: AISelectionPolicy {
+    private let aiID: @Sendable (AI) -> String
+    private let roster: @Sendable (_ conversationID: String, _ threadID: String?) -> [String]?
+    private let base: any AISelectionPolicy<AI>
+
+    public init(
+        aiID: @escaping @Sendable (AI) -> String,
+        roster: @escaping @Sendable (_ conversationID: String, _ threadID: String?) -> [String]?,
+        base: any AISelectionPolicy<AI>
+    ) {
+        self.aiID = aiID
+        self.roster = roster
+        self.base = base
+    }
+
+    /// The candidate set restricted to — and reordered by — this scope's roster.
+    /// A `nil` roster returns the input unchanged.
+    private func rostered(_ ais: [AI], _ conversationID: String, _ threadID: String?) -> [AI] {
+        guard let ids = roster(conversationID, threadID) else { return ais }
+        let byID = Dictionary(ais.map { (aiID($0), $0) }, uniquingKeysWith: { first, _ in first })
+        return ids.compactMap { byID[$0] }
+    }
+
+    public func primary(from ais: [AI], conversationID: String, threadID: String?) -> AI? {
+        base.primary(
+            from: rostered(ais, conversationID, threadID),
+            conversationID: conversationID, threadID: threadID)
+    }
+
+    public func participants(from ais: [AI], conversationID: String, threadID: String?) -> [AI] {
+        base.participants(
+            from: rostered(ais, conversationID, threadID),
+            conversationID: conversationID, threadID: threadID)
+    }
+
+    public func critiqueTurn(
+        from ais: [AI], conversationID: String, threadID: String?
+    ) -> [(ai: AI, role: String)]? {
+        base.critiqueTurn(
+            from: rostered(ais, conversationID, threadID),
+            conversationID: conversationID, threadID: threadID)
+    }
+}

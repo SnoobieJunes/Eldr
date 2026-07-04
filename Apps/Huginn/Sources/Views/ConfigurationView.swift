@@ -47,6 +47,11 @@ struct ConfigurationView: View {
                     TextField("local-model", text: $store.llmModel)
                         .textFieldStyle(.roundedBorder)
                 }
+                Toggle("Allow image input (vision models only)", isOn: $store.visionEnabled)
+                Text(
+                    "Only turn on if your model can read images. Most local text-only models will choke on image input."
+                )
+                .font(.caption).foregroundStyle(.secondary)
                 healthRow
             }
 
@@ -57,13 +62,16 @@ struct ConfigurationView: View {
                     "Max tool-result bytes: \(byteLabel(store.maxToolResultBytes))",
                     value: $store.maxToolResultBytes, in: 0...262_144, step: 1024)
                 Stepper(
+                    "Max file read: \(mbLabel(store.maxReadFileBytes))",
+                    value: $store.maxReadFileBytes, in: 0...(50 * 1_048_576), step: 1_048_576)
+                Stepper(
                     "Max history turns: \(store.maxHistoryTurns)",
                     value: $store.maxHistoryTurns, in: 0...64)
                 Stepper(
                     "Max context chars: \(store.maxContextChars)",
                     value: $store.maxContextChars, in: 0...262_144, step: 4096)
                 Text(
-                    "0 means unbounded. Smaller models need tighter budgets so a big file read can't flood the window."
+                    "0 means unbounded. Smaller models need tighter budgets so a big file read can't flood the window. \"Max file read\" stops a huge file from running the agent out of memory before it's even trimmed."
                 )
                 .font(.caption).foregroundStyle(.secondary)
             }
@@ -78,10 +86,29 @@ struct ConfigurationView: View {
                 Stepper(
                     "Shell command timeout: \(secondsLabel(store.shellTimeoutSeconds))",
                     value: $store.shellTimeoutSeconds, in: 0...600, step: 5)
+                Stepper(
+                    "Permission prompt timeout: \(secondsLabel(store.permissionTimeoutSeconds))",
+                    value: $store.permissionTimeoutSeconds, in: 0...600, step: 10)
                 Text(
-                    "0 = unlimited. Steps caps the agent's tool-call loop; the timeouts kill a stalled LLM request or shell command instead of hanging the turn."
+                    "0 = unlimited. \"Max agent steps\" caps the tool-call loop (set it to 0 if a turn ends too early with \"reached the tool-call limit\"). The timeouts kill a stalled LLM request or shell command; the permission timeout denies a tool change you don't answer in time."
                 )
                 .font(.caption).foregroundStyle(.secondary)
+            }
+
+            Section("Security") {
+                Toggle("Run tools without asking permission", isOn: $store.allowUngatedTools)
+                if store.allowUngatedTools {
+                    Label(
+                        "The agent will create/modify files and run shell commands with NO prompt. Only enable on a machine you fully trust and isolate.",
+                        systemImage: "exclamationmark.triangle.fill"
+                    )
+                    .font(.caption).foregroundStyle(.red)
+                } else {
+                    Text(
+                        "Off (recommended): every file or shell change asks you first, and the permission timeout above denies an unanswered prompt."
+                    )
+                    .font(.caption).foregroundStyle(.secondary)
+                }
             }
 
             ContextGraphSection()
@@ -100,7 +127,23 @@ struct ConfigurationView: View {
             }
 
             Section("Skills") {
-                Toggle("Advertise built-in skills (/spec, /snippet, /html)", isOn: $store.skillsEnabled)
+                Toggle("Advertise built-in skills", isOn: $store.skillsEnabled)
+                if store.skillsEnabled {
+                    ForEach(ConfigurationStore.allSkillNames, id: \.self) { name in
+                        Toggle(
+                            "/\(name)",
+                            isOn: Binding(
+                                get: { store.enabledSkills.contains(name) },
+                                set: { on in
+                                    if on { store.enabledSkills.insert(name) }
+                                    else { store.enabledSkills.remove(name) }
+                                })
+                        )
+                        .padding(.leading, 12)
+                    }
+                    Text("Turn off a skill to stop advertising that slash-command to the model.")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
             }
 
             Section("Prompt tuning") {
@@ -164,6 +207,10 @@ struct ConfigurationView: View {
 
     private func byteLabel(_ bytes: Int) -> String {
         bytes == 0 ? "unbounded" : "\(bytes / 1024) KB"
+    }
+
+    private func mbLabel(_ bytes: Int) -> String {
+        bytes == 0 ? "unbounded" : "\(bytes / 1_048_576) MB"
     }
 
     private func limitLabel(_ value: Int) -> String {

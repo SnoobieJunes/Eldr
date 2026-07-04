@@ -105,6 +105,12 @@ public actor ACPAgentProvider: AgentProvider {
         await live?.client.terminalInput(terminalId: terminalId, data: data)
     }
 
+    /// Resize a live interactive terminal's window so full-screen tools lay out to the
+    /// phone's view (feature 9). No-op if the session isn't started.
+    public func resizeTerminal(terminalId: String, cols: Int, rows: Int) async {
+        await live?.client.terminalResize(terminalId: terminalId, cols: cols, rows: rows)
+    }
+
     /// KILL a live interactive terminal (the phone's Stop control). Always available —
     /// the node terminates the PTY's child process group and closes its fds. No-op if the
     /// session isn't started (then there's nothing live to kill).

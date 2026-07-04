@@ -7,10 +7,13 @@ import Foundation
 // duplicates the app's `KeychainBox`: the daemon target stays self-contained and the
 // reusable `EldrNodeCore` stays free of a URLSession gateway dependency.
 //
-// ⚠️ Stage 2 (DEMO-SYBILCLAW.md): this speaks the OpenClaw/sybilclaw Gateway protocol as
-// documented from its source, but the live-gateway round-trip is UNVERIFIED on real
-// hardware. The `--responder sybilclaw` path inherits that caveat until exercised against
-// a running gateway. `--responder eldr-acp` is the proven fallback.
+// ⚠️ Stage 2 (DEMO-SYBILCLAW.md): this speaks the OpenClaw/sybilclaw Gateway protocol,
+// aligned field-for-field with the fork's own reference clients (rdevaul/sybilclaw apps/ios
+// + apps/android) — connect handshake, chat.send, and the agent/chat event stream. The
+// live-gateway round-trip is still UNVERIFIED on real hardware; `--responder sybilclaw`
+// inherits that caveat until exercised against a running gateway. `--responder eldr-acp` is
+// the proven fallback. KEEP THIS IN SYNC with Apps/Huginn's copy — they drifted once (this
+// copy kept an off-allowlist handshake after the app's was fixed) and that broke this path.
 
 /// A client for the local OpenClaw / sybilclaw Gateway — the Node daemon that runs the
 /// user's *own* assistant (its model, persona, memory, tools). The phone's message rides
@@ -20,10 +23,13 @@ import Foundation
 /// Protocol facts (grounded in the OpenClaw source, not inferred):
 ///  • Frames are discriminated by `type` (no `jsonrpc` field): `req` / `res` / `event`.
 ///  • The FIRST frame MUST be a `connect` request declaring `role` + `scopes`.
-///  • A turn runs via `chat.send` (returns the reply INLINE as `chat` events), targeting a
-///    `sessionKey` created by `sessions.create`.
-///  • Replies stream as `chat` events carrying `deltaText` (incremental) / `message`
-///    (cumulative); the turn ends when `payload.state` is `final` (or `error`/`aborted`).
+///  • A turn runs via `chat.send` {sessionKey, message, idempotencyKey}; the `res` only acks
+///    with `{ runId, status:"in_flight" }`. No separate session-create step (the gateway
+///    resolves/creates the session from `sessionKey`). Target an agent via the key
+///    `agent:<id>:<base>` — `agentId` is not a `chat.send` field.
+///  • The reply streams as events correlated by `runId`: assistant text on `event:"agent"`
+///    (stream "assistant", cumulative `payload.data.text`), terminating on an `event:"chat"`
+///    whose `payload.state` is `final` (or `error`/`aborted`).
 ///  • `agents.list` → `{ agents:[{id,…}], defaultId, mainKey }` for self-healing target
 ///    selection when the gateway demands an explicit agent/session.
 struct SybilclawGatewayClient: Sendable {
@@ -32,12 +38,23 @@ struct SybilclawGatewayClient: Sendable {
     let token: String?
     let agentId: String?
     var overallTimeout: TimeInterval = 90
+    /// A1: the stable gateway session key for THIS client instance — generated ONCE at
+    /// construction and reused for every turn, so the gateway buckets the node's turns under one
+    /// session and keeps cross-turn memory. Previously `runTurn` minted a fresh random key per
+    /// call, so every message opened an empty session (the exact "random-UUID-per-message" bug
+    /// 4c78d88 killed on the app side) — and `SybilclawLLMClient` deliberately sends only the
+    /// last user turn *because* it assumes server-side memory, so a per-call key meant NO memory.
+    /// The node serves a single owner (C-3), so one session per process is the node's conversation
+    /// scope; per-*conversation* scoping like the app's would need a session id threaded through
+    /// `LLMClient` (follow-up).
+    let sessionBase: String
 
     init(host: String = "127.0.0.1", port: Int, token: String? = nil, agentId: String? = nil) {
         self.host = host
         self.port = port
         self.token = (token?.isEmpty == false) ? token : nil
         self.agentId = (agentId?.isEmpty == false) ? agentId : nil
+        self.sessionBase = "eldr-" + UUID().uuidString
     }
 
     enum GatewayError: LocalizedError {
@@ -82,13 +99,24 @@ struct SybilclawGatewayClient: Sendable {
     private func askImpl(_ prompt: String) async throws -> String {
         guard let url = URL(string: "ws://\(host):\(port)/") else { throw GatewayError.badURL }
         let session = URLSession(configuration: .ephemeral)
+        // Release the per-`ask()` ephemeral session (and its operation queue) promptly instead of
+        // leaving it to ARC's discretion. Declared BEFORE the task defer so it runs AFTER the
+        // graceful `task.cancel` (defers are LIFO); `finishTasksAndInvalidate` lets that close
+        // settle first. Keep this identical to the Huginn copy.
+        defer { session.finishTasksAndInvalidate() }
         let task = session.webSocketTask(with: url)
         task.resume()
         defer { task.cancel(with: .goingAway, reason: nil) }
 
         let connectID = UUID().uuidString
-        try await send(task, ["type": "req", "id": connectID, "method": "connect", "params": connectParams()])
-        _ = try await awaitResponse(task, id: connectID, context: "connect")
+        do {
+            try await send(task, ["type": "req", "id": connectID, "method": "connect", "params": connectParams()])
+            _ = try await awaitResponse(task, id: connectID, context: "connect")
+        } catch let error as GatewayError {
+            throw error
+        } catch {
+            throw GatewayError.handshake("couldn't reach \(host):\(port) — \(error.localizedDescription)")
+        }
 
         do {
             return try await runTurn(task, prompt: prompt, agentId: agentId)
@@ -104,50 +132,69 @@ struct SybilclawGatewayClient: Sendable {
     private func runTurn(
         _ task: URLSessionWebSocketTask, prompt: String, agentId: String?
     ) async throws -> String {
-        let sessionKey = "eldr-" + UUID().uuidString
-        let createID = UUID().uuidString
-        var createParams: [String: Any] = ["key": sessionKey]
-        if let agentId { createParams["agentId"] = agentId }
-        try await send(task, ["type": "req", "id": createID, "method": "sessions.create", "params": createParams])
-        _ = try? await awaitResponse(task, id: createID, context: "sessions.create")
+        // A1: reuse the instance-stable session base (see `sessionBase`) so consecutive turns —
+        // and the self-heal retry with a discovered agentId — continue the SAME gateway session.
+        let sessionKey = agentId.map { "agent:\($0):\(sessionBase)" } ?? sessionBase
 
         let sendID = UUID().uuidString
-        var sendParams: [String: Any] = [
+        let sendParams: [String: Any] = [
             "sessionKey": sessionKey,
             "message": prompt,
             "idempotencyKey": UUID().uuidString,
         ]
-        if let agentId { sendParams["agentId"] = agentId }
         try await send(task, ["type": "req", "id": sendID, "method": "chat.send", "params": sendParams])
 
+        // chat.send acks with { runId, status:"in_flight" }; the reply streams as events,
+        // correlated by runId. Assistant text on event:"agent" (stream "assistant", cumulative
+        // data.text); the turn ends on event:"chat" with a terminal state.
+        var runID: String?
         var assembled = ""
+        var finalMessage: String?
         var lastFrame: String?
         while !Task.isCancelled {
-            let frame = try await receive(task)
+            let frame: String
+            do {
+                frame = try await receive(task)
+            } catch {
+                // A3: the gateway can stream the whole assistant reply on `agent` frames and then
+                // CLOSE the socket without a terminal `chat:final` — `receive` throws. Don't discard
+                // a complete reply: return what streamed, and surface the error only when nothing did.
+                if !assembled.isEmpty { return assembled }
+                throw error
+            }
             lastFrame = frame
             guard let obj = Self.json(frame) else { continue }
             switch obj["type"] as? String {
             case "res":
-                if obj["id"] as? String == sendID, (obj["ok"] as? Bool) == false {
+                guard obj["id"] as? String == sendID else { continue }
+                if (obj["ok"] as? Bool) == false {
                     throw GatewayError.rpc(Self.errorText(obj) ?? "chat.send was rejected")
                 }
+                runID = (obj["payload"] as? [String: Any])?["runId"] as? String
             case "event":
                 guard let payload = obj["payload"] as? [String: Any],
-                    (payload["sessionKey"] as? String) == sessionKey
+                    Self.frame(payload, belongsTo: runID, sessionKey: sessionKey)
                 else { continue }
-                if let message = payload["message"] as? String {
-                    assembled = message
-                } else if let delta = payload["deltaText"] as? String {
-                    if (payload["replace"] as? Bool) == true { assembled = delta }
-                    else { assembled += delta }
-                }
-                switch payload["state"] as? String {
-                case "final":
-                    return assembled.isEmpty ? "(sybilclaw returned no text)" : assembled
-                case "error":
-                    throw GatewayError.rpc((payload["errorMessage"] as? String) ?? "agent run failed")
-                case "aborted":
-                    throw GatewayError.rpc("agent run was aborted")
+                switch obj["event"] as? String {
+                case "agent":
+                    if (payload["stream"] as? String) == "assistant",
+                        let data = payload["data"] as? [String: Any],
+                        let text = data["text"] as? String
+                    {
+                        assembled = text  // cumulative snapshot, not a delta
+                    }
+                case "chat":
+                    if let m = payload["message"] as? String, !m.isEmpty { finalMessage = m }
+                    switch payload["state"] as? String {
+                    case "final":
+                        return Self.chooseReply(assembled: assembled, chatMessage: finalMessage)
+                    case "error":
+                        throw GatewayError.rpc((payload["errorMessage"] as? String) ?? "agent run failed")
+                    case "aborted":
+                        throw GatewayError.rpc("agent run was aborted")
+                    default:
+                        break
+                    }
                 default:
                     break
                 }
@@ -157,6 +204,23 @@ struct SybilclawGatewayClient: Sendable {
         }
         if !assembled.isEmpty { return assembled }
         throw GatewayError.timeout(lastFrame: lastFrame)
+    }
+
+    /// Whether a streamed event frame belongs to this turn — correlate strictly on `runId` once
+    /// known: after the chat.send ack, a runId-bearing frame must match this turn's `runId` (a
+    /// differing runId is another run's — reject it); before the ack (`runID` nil) accept it (one
+    /// turn/socket). `sessionKey` correlates only runId-less frames; neither ⇒ ours on this socket.
+    private static func frame(
+        _ payload: [String: Any], belongsTo runID: String?, sessionKey: String
+    ) -> Bool {
+        // A6: once we've captured this turn's runId from the chat.send ack, a frame that declares a
+        // DIFFERENT runId is another run's — reject it. Any frame that carries a runId is matched on it
+        // (before the ack, runID is nil ⇒ accept: exactly one turn runs per socket). Only a frame with
+        // NO runId falls back to sessionKey correlation (chat frames carry both; agent frames carry the
+        // runId, handled above), and a frame with neither is ours only on that single-turn socket.
+        if let frameRun = payload["runId"] as? String { return runID == nil || frameRun == runID }
+        if let frameSession = payload["sessionKey"] as? String { return frameSession == sessionKey }
+        return runID == nil
     }
 
     private func discoverDefaultAgent(_ task: URLSessionWebSocketTask) async throws -> String? {
@@ -170,16 +234,24 @@ struct SybilclawGatewayClient: Sendable {
         return nil
     }
 
-    private func connectParams() -> [String: Any] {
+    // Internal (not private) so `SybilclawGatewayFramingTests` can pin these protocol-critical
+    // literals to the same spec Apps/Huginn's GatewayHandshakeTests pins for the app copy — the
+    // mechanical guard against the silent re-drift this file's banner warns about.
+    func connectParams() -> [String: Any] {
+        // Mirror Apps/Huginn's SybilclawGatewayClient.connectParams(). The previous values
+        // ("eldr-node" / "operator") were OFF the gateway's id/mode allowlists and schema-
+        // rejected EVERY connect on this path. id/mode come from .../protocol/client-info.ts;
+        // "backend" (not "ui") avoids the browser-origin check this native socket would fail;
+        // [3,4] brackets the fork's protocol v3 (and upstream v4).
         var params: [String: Any] = [
             "minProtocol": 3,
             "maxProtocol": 4,
             "client": [
-                "id": "eldr-node", "version": Self.appVersion,
-                "platform": "macos", "mode": "operator",
+                "id": "openclaw-macos", "version": Self.appVersion,
+                "platform": "macos", "mode": "backend",
             ],
             "role": "operator",
-            "scopes": ["operator.read", "operator.write"],
+            "scopes": ["operator.read", "operator.write", "operator.talk.secrets"],
             "caps": [String](),
             "commands": [String](),
             "permissions": [String: Any](),
@@ -227,11 +299,36 @@ struct SybilclawGatewayClient: Sendable {
         (try? JSONSerialization.jsonObject(with: Data(s.utf8))) as? [String: Any]
     }
 
+    /// A2: choose the turn's reply. The assistant text is the cumulative agent-stream snapshot
+    /// (`assembled`, from `event:agent` `data.text`); the terminal `chat:final` frame's `message`
+    /// is NOT guaranteed to be that text (it can be an echo/status/routing note), so prefer the
+    /// streamed text and fall back to the chat `message` only when nothing streamed. Mirrors the
+    /// Huginn copy (GatewayReplyTests locks the behavior there).
+    static func chooseReply(assembled: String, chatMessage: String?) -> String {
+        let reply = assembled.isEmpty ? (chatMessage ?? "") : assembled
+        return reply.isEmpty ? "(sybilclaw returned no text)" : reply
+    }
+
     private static func errorText(_ obj: [String: Any]) -> String? {
-        if let e = obj["error"] as? [String: Any] {
-            return (e["message"] as? String) ?? (e["code"].map { "\($0)" })
+        guard let e = obj["error"] as? [String: Any] else { return obj["error"] as? String }
+        var parts: [String] = []
+        if let m = e["message"] as? String { parts.append(m) }
+        else if let code = e["code"] { parts.append("\(code)") }
+        // A5: schema (AJV/TypeBox) rejections — the connect-handshake case — name the offending
+        // field in `errors[]`. Surface a compact summary so "must match a schema in anyOf" isn't
+        // all the operator sees (e.g. ".../client/mode must be equal to constant"). Mirrors the
+        // Huginn copy so this path can tell you WHY a handshake was rejected.
+        if let errs = e["errors"] as? [[String: Any]] {
+            let detail = errs.compactMap { err -> String? in
+                let path = (err["instancePath"] as? String) ?? (err["dataPath"] as? String) ?? ""
+                let msg = (err["message"] as? String) ?? ""
+                let joined = [path, msg].filter { !$0.isEmpty }.joined(separator: " ")
+                return joined.isEmpty ? nil : joined
+            }.joined(separator: "; ")
+            if !detail.isEmpty { parts.append("(\(detail))") }
         }
-        return obj["error"] as? String
+        let combined = parts.joined(separator: " ")
+        return combined.isEmpty ? nil : combined
     }
 
     private static func isSelectionError(_ error: Error) -> Bool {

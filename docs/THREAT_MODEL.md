@@ -328,6 +328,43 @@ otherwise; see below):
     (`ELDR_LLM_TOKEN`) is sent only as the model endpoint's `Authorization`
     header and is **never logged** (diagnostics log the URL and model name only).
 
+### 2.14 AI endpoint at-rest storage on the Mac (Huginn / Mac-Tethered-AI)
+
+When the owner chats their AI through the Mac node, conversation data exists on that Mac.
+Honest accounting of what is and isn't encrypted at rest (DEVIATIONS AC69–AC72):
+
+- **What Huginn encrypts (the same bar as EldrChat itself, SPEC §3.4 / D9):** every
+  owner↔AI turn is recorded to `<configDir>/transcripts/` envelope-encrypted — a 256-bit
+  master key wrapped by the **Secure Enclave** (software-KEK fallback only off-SE), per-record
+  HKDF keys, AES-256-GCM. Transcript filenames are an opaque `SHA256(session key)`; the
+  conversation/identity and content live only inside the ciphertext. `unpair()`
+  cryptographically shreds the master key. **Scope:** this encrypted transcript is a
+  **Huginn.app** feature (the in-process bridge owns `ConversationMemory`); the eldrctl-deployed
+  headless **`eldr-node`** has no `ConversationMemory` and records no local Eldr transcript — it
+  relies on the responder's own store, so on that path the sybilclaw-gateway-plaintext residual
+  below is the whole at-rest story.
+- **What we CANNOT encrypt (residual, disclosed):** if the owner's responder is the
+  **external sybilclaw / OpenClaw gateway**, that gateway keeps its OWN conversation history
+  as **plaintext JSONL** in its storage — a separate program outside our trust boundary. We
+  cannot change its at-rest format from here. Mitigations: (1) we name its sessions with the
+  opaque `eldr:<hash>` key (§2.x / AC69), so its files never reveal *which* PQRC identity is
+  talking; (2) we keep our own encrypted canonical copy regardless. **Full at-rest privacy
+  for AI conversations on the Mac is therefore only achievable with the `eldr-acp` backend**,
+  which Huginn fully encrypts. Choosing sybilclaw is a content-at-rest trade, made knowingly.
+- **Now sealed (AC72, landed 2026-07-03):** eldr-acp's redacted diagnostic metadata
+  (`events.jsonl`) and summarized per-project memory (`eldr.md`) are AES-256-GCM sealed at rest
+  under a key derived from the same SE-wrapped master key
+  (`EncryptedStore.deriveKey("acp-metadata-v1")`) when Huginn owns that key. The wiring shipped
+  (env `ELDR_ACP_METADATA_KEY` → agent seals in `ACPAgent` ↔ `ContextLearner` opens), and the
+  race the earlier draft warned about is closed (only the bridge instance ever *creates* the
+  master key). **Residual:** when the agent is launched WITHOUT that key — an external
+  Xcode/OpenClaw process with no `ELDR_ACP_METADATA_KEY` — those two files fall back to
+  plaintext-but-redacted (secret-scrubbed per §2.13 / C-6 and `0600`); full sealing needs the
+  Huginn-spawned path.
+- **No Secure Enclave (older Intel Mac):** the master key falls back to a software KEK in the
+  Keychain (`…WhenUnlockedThisDeviceOnly`), a weaker at-rest posture flagged by an inv-10
+  tripwire — same caveat as the silo KEK (§2.3a / DEVIATIONS AC31).
+
 ## 3. Endpoint compromise
 
 - **Before compromise**: FS holds — past messages' keys no longer exist

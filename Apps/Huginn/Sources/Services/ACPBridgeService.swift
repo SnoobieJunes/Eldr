@@ -4,6 +4,7 @@ import PQRCACP
 import PQRCAgent
 import PQRCCore
 import PQRCNostr
+import os
 
 // MARK: - Pure, testable bridge pieces
 
@@ -80,17 +81,37 @@ struct PQRCMessengerMessaging: BridgeMessaging {
     }
 }
 
-/// Drives the local `eldr-acp` agent for one prompt and returns its COMPLETE final
-/// answer. Deliberately NON-streaming: per-recipient redaction (§10) must scrub a whole
-/// message — a secret split across two streamed deltas could evade a naive scrubber.
+/// Everything a runner needs to answer one turn with continuity.
+struct ConversationContext: Sendable {
+    /// Stable, opaque per-conversation id (see `ACPBridgeService.gatewaySessionKey(for:)`):
+    /// the gateway session selector AND the encrypted-transcript key.
+    let sessionKey: String
+    /// The rendered, byte-capped prior transcript Huginn injects into backends that DON'T
+    /// keep their own history (eldr-acp). nil for backends that self-persist (sybilclaw keeps
+    /// it server-side) or when there's no prior context. Owner-side plaintext, handed to the
+    /// owner's own model in memory only — never on the wire, never to disk in the clear.
+    let priorContext: String?
+}
+
+/// Drives an AI backend for one prompt and returns its COMPLETE final answer.
+/// Deliberately NON-streaming: per-recipient redaction (§10) must scrub a whole message —
+/// a secret split across two streamed deltas could evade a naive scrubber.
 protocol BridgeAgentRunner: Sendable {
-    func run(prompt: String, workdir: String?) async throws -> String
+    func run(prompt: String, workdir: String?, context: ConversationContext) async throws -> String
+    /// True ⇒ the backend keeps its OWN conversation history (e.g. sybilclaw's gateway), so
+    /// Huginn records its canonical encrypted copy but does NOT re-inject `priorContext`
+    /// (the backend would otherwise see the history twice). Default false: Huginn owns memory.
+    var selfPersistsHistory: Bool { get }
+}
+
+extension BridgeAgentRunner {
+    var selfPersistsHistory: Bool { false }
 }
 
 /// Default until the agent binary is located/configured — driving fails closed.
 struct UnavailableAgentRunner: BridgeAgentRunner {
     struct NotConfigured: Error {}
-    func run(prompt: String, workdir: String?) async throws -> String { throw NotConfigured() }
+    func run(prompt: String, workdir: String?, context: ConversationContext) async throws -> String { throw NotConfigured() }
 }
 
 /// Thrown when a single agent run exceeds the watch-along wall-clock cap.
@@ -104,7 +125,13 @@ struct ACPDriverAgentRunner: BridgeAgentRunner {
     let executableURL: URL
     var environmentOverrides: [String: String] = [:]
 
-    func run(prompt: String, workdir: String?) async throws -> String {
+    // eldr-acp spawns a fresh, stateless process per run, so Huginn supplies cross-turn
+    // memory: `context.priorContext` (the decrypted, capped transcript) is injected as an
+    // in-memory system-prompt preamble via `ELDR_ACP_PROMPT_PREAMBLE`. It rides the spawned
+    // process's environment and lands in the anchored system prompt — it is NEVER written to
+    // disk (that's why we don't use the eldr.md/context-file path here). `context.sessionKey`
+    // isn't needed: eldr-acp owns its own ephemeral workspace, and Huginn owns the transcript.
+    func run(prompt: String, workdir: String?, context: ConversationContext) async throws -> String {
         let collected = AgentAnswerCollector()
         // CR-1: this watch-along / Mac-responder runner has no interactive client to
         // approve a mutating tool, so the default `requestPermission` ({ _,_ in true })
@@ -120,6 +147,21 @@ struct ACPDriverAgentRunner: BridgeAgentRunner {
             requestPermission: { _, _ in false })
         var env = environmentOverrides
         env["ELDR_ACP_STREAM"] = "0"  // need the complete message to scrub it (§10)
+        // CR-1 (cont.): since this chat/drafting path DENIES every mutating tool (the
+        // handler above), advertise ONLY the READ-ONLY tools to the model. A
+        // coding-tuned local model would otherwise keep calling run_shell / write_file,
+        // each one bounced by the deny — wasting turns and surfacing confusing "tool
+        // denied" noise in the user's LLM server (LM Studio). Reads never request
+        // permission, so this loses no capability here, and it overrides the env-file
+        // `tools` allowlist for THIS path only (the env var wins; AgentConfig §tools).
+        // The phone-driven coding-agent path (ACPRelayHost) keeps the user's full tool
+        // set and routes each mutating request to the phone for Allow / Deny.
+        env["ELDR_ACP_TOOLS"] = "read_file,list_dir"
+        // Cross-turn memory: prior transcript as an in-memory system-prompt preamble. Never
+        // written to disk (SPEC §3.4) — it lives only in this child process's environment.
+        if let preamble = context.priorContext, !preamble.isEmpty {
+            env["ELDR_ACP_PROMPT_PREAMBLE"] = preamble
+        }
         let driver = ACPClientDriver(
             executableURL: executableURL, environmentOverrides: env, handler: handler)
         _ = try await driver.start(cwd: workdir)
@@ -139,8 +181,10 @@ actor AgentAnswerCollector {
 /// owner-authority ORACLE (verify owner-signed windows, answer `isAuthorizedForOwner`)
 /// and does its OWN per-recipient fan-out (§9), so the engine never posts anything.
 struct NoopAgentSink: AgentMessageSink {
-    func postAgentMessage(_ body: MessageBody, threadID: String, agentName: String?) async throws {}
-    func postAgentReply(_ body: MessageBody, agentName: String?) async throws {}
+    func postAgentMessage(
+        _ body: MessageBody, threadID: String, agentName: String?, agentAIID: String?
+    ) async throws {}
+    func postAgentReply(_ body: MessageBody, agentName: String?, agentAIID: String?) async throws {}
 }
 
 // MARK: - Service
@@ -278,6 +322,24 @@ final class ACPBridgeService: ObservableObject {
     private let ownerFilePath: String?
     /// File holding the agent's project working directory (`<configDir>/workdir`).
     private let workdirFilePath: String?
+    /// Encrypted-at-rest conversation transcripts dir (`<configDir>/transcripts`),
+    /// owned by `conversationMemory`. nil when there's no config dir (e.g. some tests).
+    private let transcriptsDir: URL?
+    /// Owns the encrypted conversation transcript (SPEC §3.4, D9, invariant 12): every
+    /// owner↔AI turn is recorded here, SE-wrapped + AES-GCM, so the Mac AI endpoint
+    /// holds conversations at the same at-rest bar as EldrChat itself. nil ⇒ no config
+    /// dir ⇒ recording is a no-op. Phase 1 records both backends' turns; Phase 2 feeds
+    /// it back to eldr-acp as in-memory context. `var` only so tests can inject a
+    /// Keychain-free instance via `setConversationMemory`.
+    private var conversationMemory: ConversationMemory?
+
+    /// B2: base64 of the at-rest METADATA key (from `conversationMemory.metadataKey()`),
+    /// injected into the spawned `eldr-acp` process via the env var `ELDR_ACP_METADATA_KEY`
+    /// so it seals/open `events.jsonl` + `eldr.md`. Derived once the node is up (async), then
+    /// read by `applyProductionRunner`. NEVER written to the on-disk env file (that would
+    /// reverse the C-8 hardening) — it rides the process environment only. nil ⇒ the agent
+    /// falls back to cleartext (e.g. an external Xcode/OpenClaw launch that lacks the key).
+    private var metadataKeyB64: String?
 
     private var keypair: NostrKeypair?
     private var link: MultipeerNearbyLink?
@@ -318,6 +380,11 @@ final class ACPBridgeService: ObservableObject {
         self.messaging = messaging
         self.ownerFilePath = configDir.map { ($0 as NSString).appendingPathComponent("owner") }
         self.workdirFilePath = configDir.map { ($0 as NSString).appendingPathComponent("workdir") }
+        let transcripts = configDir.map {
+            URL(fileURLWithPath: $0, isDirectory: true).appendingPathComponent("transcripts", isDirectory: true)
+        }
+        self.transcriptsDir = transcripts
+        self.conversationMemory = transcripts.map { ConversationMemory(directory: $0) }
         self.ownerIdentityHex = Self.loadOwner(from: ownerFilePath)
         self.agentWorkdir = Self.loadOwner(from: workdirFilePath)
     }
@@ -431,15 +498,41 @@ final class ACPBridgeService: ObservableObject {
     /// PQRC identity seed, the identity-DH key, and the prekey state behind, so the
     /// next pair reused a stale PQRC identity under a fresh Nostr key and the handshake
     /// silently mismatched. Clearing all four makes re-pair a clean slate.
-    func unpair() {
+    func unpair() async {
         disable()
+        // B6: shred the transcript through the ConversationMemory ACTOR (`wipe()`) BEFORE deleting
+        // files/keys. The actor serializes the wipe after any in-flight `record()` — which holds
+        // the already-unwrapped store in memory, so nil-ing the reference alone doesn't stop it:
+        // without this it could seal a NEW transcript file AFTER the key + files were deleted,
+        // leaving orphan undecryptable ciphertext. `wipe()` removes the transcript files and the
+        // master/SE/software-KEK Keychain items in one actor-serialized step.
+        let memory = conversationMemory
+        conversationMemory = nil
+        await memory?.wipe()
         for account in [
             keyAccount,                    // bridge-nostr-identity
             "bridge-pqrc-identity-seed",
             "bridge-identity-dh",
             "bridge-prekey-state",
+            // Transcript secrets: `wipe()` above already shredded these via the actor. Deleting
+            // them here too is idempotent and covers the case where no ConversationMemory was set
+            // (wipe had nothing to run) — the wrapped master key gone means every record is
+            // cryptographically unreadable even if files linger (SPEC §3.4, D9).
+            ConversationMemory.masterKeyAccount,
+            MacSecureEnclaveKeyWrapper.seKeyAccount,
+            MacSecureEnclaveKeyWrapper.softwareKEKAccount,
         ] {
             keychain.delete(account: account)
+        }
+        // Belt-and-suspenders: remove the (now-undecryptable) transcript files, and the
+        // learning sinks (events.jsonl + per-project eldr.md). Post-B2 those sinks are sealed
+        // under the metadata key — itself derived from the now-shredded master key, so they're
+        // already cryptographically unreadable; the removal makes unpair a true clean slate.
+        if let transcriptsDir {
+            try? FileManager.default.removeItem(at: transcriptsDir)
+            let configDir = transcriptsDir.deletingLastPathComponent()
+            try? FileManager.default.removeItem(at: configDir.appendingPathComponent("events.jsonl"))
+            try? FileManager.default.removeItem(at: configDir.appendingPathComponent("projects"))
         }
         keypair = nil
         activeConversations.removeAll()
@@ -461,6 +554,10 @@ final class ACPBridgeService: ObservableObject {
         self.agentRunner = runner
         self.agentWorkdir = workdir
     }
+
+    /// Test seam: inject a conversation-memory store (the tests use a Keychain-free,
+    /// `EncryptedStore`-injected instance so they run on a headless host).
+    func setConversationMemory(_ memory: ConversationMemory) { self.conversationMemory = memory }
 
     // MARK: Production wiring (Path 2 §8/§11 — narrows the AC21 runtime boundary)
 
@@ -493,13 +590,18 @@ final class ACPBridgeService: ObservableObject {
                 paths: .standard,
                 bundled: Bundle.main.url(forResource: "eldr-acp", withExtension: nil))
             {
+                var env = Self.llmTokenEnvironment()
+                // B2: hand the spawned agent the at-rest metadata key (env only — never the
+                // on-disk env file, C-8) so it seals events.jsonl + reads sealed eldr.md.
+                if let metadataKeyB64 { env["ELDR_ACP_METADATA_KEY"] = metadataKeyB64 }
                 agentRunner = ACPDriverAgentRunner(
-                    executableURL: executable, environmentOverrides: Self.llmTokenEnvironment())
+                    executableURL: executable, environmentOverrides: env)
             }
         case .sybilclaw:
             agentRunner = SybilclawAgentRunner(
                 client: SybilclawGatewayClient(
-                    port: Self.sybilclawGatewayPort(), token: Self.sybilclawGatewayToken()))
+                    port: Self.sybilclawGatewayPort(), token: Self.sybilclawGatewayToken(),
+                    diagnostics: Self.sybilclawGatewayDiagnostics()))
         }
     }
 
@@ -514,6 +616,79 @@ final class ACPBridgeService: ObservableObject {
         KeychainBox().load(account: "sybilclaw-gateway-token").flatMap {
             String(data: $0, encoding: .utf8)
         }
+    }
+    /// Opt-in raw-frame gateway diagnostics (default off). Toggle with
+    /// `defaults write chat.eldr.huginn sybilclawGatewayDiagnostics -bool YES`. Logs the
+    /// connect handshake (token-redacted) + the server's raw reply to OSLog and the Agent
+    /// Inspector — protocol metadata only, never the user's prompt/reply.
+    static func sybilclawGatewayDiagnostics() -> Bool {
+        UserDefaults.standard.bool(forKey: "sybilclawGatewayDiagnostics")
+    }
+
+    /// Stable, opaque gateway session key for one conversation/thread. Deterministic (so the
+    /// assistant keeps context across messages and app restarts) and salted with a
+    /// per-install secret (so the gateway's plaintext on-disk session files never expose
+    /// which PQRC identity / thread the owner talks to — SPEC §0). The `eldr:` namespace +
+    /// opaque hash also guarantees these never collide with another channel's keys (e.g.
+    /// Discord's `agent:…:direct:<id>`). Thread-scoped when the conversation routes a shared
+    /// AI thread, else conversation-scoped (peer hex / group id).
+    /// Byte cap for the prior-transcript context injected into stateless backends
+    /// (eldr-acp). ~16 KB keeps continuity meaningful while staying well within the model
+    /// context budget and ARG_MAX for the spawned process's environment. The renderer is
+    /// tail-biased, so the most recent turns survive the cap.
+    static let transcriptContextMaxBytes = 16_384
+
+    static func gatewaySessionKey(for conversation: BridgeConversation) -> String {
+        // C2 (BY DESIGN — do NOT "merge" thread and conversation into one scope): a shared AI
+        // thread (SPEC §13.5) is a DISTINCT sub-conversation, so it gets its OWN gateway session +
+        // transcript, separate from the peer/group 1:1. This is intentional context ISOLATION, not
+        // a continuity bug — merging them would bleed a thread's context (in a group thread, other
+        // people's content) into the 1:1 and vice versa, violating the cardinal rule (SPEC §0). A
+        // message either belongs to a thread (has `threadID`) or the main conversation; those are
+        // genuinely different contexts, so the scope is stable per logical context.
+        let scope = conversation.threadID ?? conversation.id
+        var hasher = SHA256()
+        hasher.update(data: gatewaySessionSalt())
+        hasher.update(data: Data(scope.utf8))
+        return "eldr:" + hasher.finalize().map { String(format: "%02x", $0) }.joined()
+    }
+
+    /// Protocol/status diagnostics only — never salt/key/payload bytes (invariant 12).
+    private static let log = Logger(subsystem: "chat.eldr.huginn", category: "bridge")
+
+    /// Process-lifetime cache of the session salt, so derivation stays stable within a run
+    /// even if the Keychain is unavailable (e.g. an unsigned test host).
+    private static var cachedSessionSalt: Data?
+
+    /// 32-byte per-install salt for gateway session-key derivation. Generated once and
+    /// persisted in the Keychain (stable across app restarts); never logged, never leaves
+    /// the device. Persistence is best-effort: if the Keychain is unavailable we still cache
+    /// the salt in memory, so keys stay stable for this process — they just won't survive a
+    /// relaunch on that (atypical) device.
+    private static func gatewaySessionSalt() -> Data {
+        if let cached = cachedSessionSalt { return cached }
+        let account = "sybilclaw-session-salt"
+        let box = KeychainBox()
+        if let existing = box.load(account: account), existing.count == 32 {
+            cachedSessionSalt = existing
+            return existing
+        }
+        var bytes = [UInt8](repeating: 0, count: 32)
+        _ = SecRandomCopyBytes(kSecRandomDefault, bytes.count, &bytes)
+        let salt = Data(bytes)
+        do {
+            try box.save(salt, account: account)
+        } catch {
+            // C3: persistence failed (Keychain unavailable). We still cache + use the salt so keys
+            // stay STABLE for THIS process — but it won't survive a relaunch, and because the salt
+            // keys BOTH the gateway session AND the encrypted transcript filenames/record keys, a
+            // rotated salt on the next launch orphans prior transcripts as undecryptable ciphertext.
+            // Surface it (metadata only — never the salt bytes) rather than failing silently; a hard
+            // crash here would break Keychain-less / headless hosts that must still function.
+            Self.log.error("gateway session salt could not be persisted — keys won't survive an app relaunch on this device")
+        }
+        cachedSessionSalt = salt
+        return salt
     }
 
     /// C-8: the LLM token lives in the Keychain, not the cleartext env file. Inject it
@@ -605,6 +780,12 @@ final class ACPBridgeService: ObservableObject {
             if ownerEngine == nil {
                 ownerEngine = AgentEngine(myIdentity: identity, clock: clock, sink: NoopAgentSink())
             }
+            // B2: derive the at-rest metadata key BEFORE wiring the runner, so
+            // `configureProduction` → `applyProductionRunner` hands it to the spawned agent.
+            // Async because it forces the transcript store's bootstrap; nil ⇒ cleartext
+            // fallback (e.g. Keychain unavailable on a headless host). Kept in memory only —
+            // never written to the on-disk env file (C-8).
+            metadataKeyB64 = (await conversationMemory?.metadataKey())?.base64EncodedString()
             configureProduction()
             messaging = PQRCMessengerMessaging(messenger: messenger)
 
@@ -656,12 +837,17 @@ final class ACPBridgeService: ObservableObject {
             wrapping: OpenAICompatibleLLMClient(config: llmConfig), model: llmConfig.model)
         let toolEnvironment = ToolEnvironment(
             workdir: agentWorkdir, baseEnvironment: ProcessInfo.processInfo.environment)
+        // B2: carry the at-rest metadata key so the in-process agent seals/reads the metadata
+        // sinks under the same key. (Today this host passes no configDir/events file, so this
+        // is inert; wired now so it stays correct if those are supplied later.)
+        var relayConfig = AgentConfig.default
+        relayConfig.metadataKey = metadataKeyB64.flatMap { Data(base64Encoded: $0) }
         let host = ACPRelayHost(
             ownerIdentityHex: ownerIdentityHex,
             maxFrameBytes: Self.relayACPMaxFrameBytes,
             llm: llm,
             toolEnvironment: toolEnvironment,
-            config: .default,
+            config: relayConfig,
             streamingEnabled: relayHostStreamingEnabled,
             publish: { [weak messenger] framed in
                 // The transport's send seam: publish ONE framed chunk to the owner as an
@@ -979,16 +1165,54 @@ final class ACPBridgeService: ObservableObject {
         let runner = agentRunner
         let workdir = agentWorkdir
         let timeout = agentRunTimeout
+        // Stable, opaque per-conversation session id so the assistant keeps this
+        // conversation's context across turns and separate from every other one.
+        let sessionKey = Self.gatewaySessionKey(for: conversation)
+
+        // Cross-turn memory is injected ONLY when this turn's answer will NOT reach a
+        // non-owner. In a mixed-group `.direct` watch-along the answer fans out to other
+        // members (redacted by the per-message syntactic scrubber); injecting prior turns
+        // would let the model paraphrase an EARLIER turn's secret into a new answer in a
+        // shape the scrubber misses — a cross-turn leak the cardinal rule (SPEC §0) forbids.
+        // So we withhold prior context unless recipients are owner-only, or the answer is the
+        // `.endpoint` draft that goes to the owner's phone alone. Self-persisting backends
+        // (sybilclaw) keep their own history and are never re-injected. Loaded BEFORE the
+        // prompt is recorded so the current prompt isn't duplicated into its own context.
+        let recipientsAreOwnerOnly = conversation.recipients.allSatisfy { $0 == ownerIdentityHex }
+        let mayInjectMemory =
+            !runner.selfPersistsHistory && (watchAlongMode == .endpoint || recipientsAreOwnerOnly)
+        // Build the agent context, loading cross-turn memory only when it will be injected.
+        // `priorContext` reads + decrypts the WHOLE transcript file, so it is deferred past the
+        // `.direct` owner-window gate below (via this nested builder) — an unauthorized prompt
+        // must never pay that decrypt. Still built BEFORE the prompt is recorded so the current
+        // prompt isn't duplicated into its own context.
+        func makeAgentContext() async -> ConversationContext {
+            let priorContext: String? = mayInjectMemory
+                ? (await conversationMemory?.priorContext(
+                    sessionKey: sessionKey, maxBytes: Self.transcriptContextMaxBytes) ?? nil)
+                : nil
+            return ConversationContext(sessionKey: sessionKey, priorContext: priorContext)
+        }
 
         switch watchAlongMode {
         case .direct:
             guard await ownerAuthorized(threadID: conversation.threadID) else { return }
+            let agentContext = await makeAgentContext()
+            // Record the owner's prompt only once we're committed to answering it (past the
+            // owner-window gate), so the transcript never accumulates a dangling User turn
+            // (SPEC §3.4, D9). Best-effort: record never throws and never blocks the turn.
+            await conversationMemory?.record(
+                text, as: .human, senderIdentity: senderIdentityHex,
+                sessionKey: sessionKey, threadID: conversation.threadID, agentName: nil)
             // Immediate feedback so silence (a slow/looping model) never looks dead.
             await broadcastAgentMessage("🤖 On it…", conversation: conversation)
             do {
                 let answer = try await Self.runWithTimeout(seconds: timeout) {
-                    try await runner.run(prompt: text, workdir: workdir)
+                    try await runner.run(prompt: text, workdir: workdir, context: agentContext)
                 }
+                await conversationMemory?.record(
+                    answer, as: .agent, senderIdentity: responder.rawValue,
+                    sessionKey: sessionKey, threadID: conversation.threadID, agentName: nil)
                 await broadcastAgentMessage(answer, conversation: conversation)
             } catch is AgentRunTimeout {
                 await broadcastAgentMessage(
@@ -1001,10 +1225,18 @@ final class ACPBridgeService: ObservableObject {
                     conversation: conversation)
             }
         case .endpoint:
+            let agentContext = await makeAgentContext()
+            // The draft goes to the owner's phone alone — record the prompt up front.
+            await conversationMemory?.record(
+                text, as: .human, senderIdentity: senderIdentityHex,
+                sessionKey: sessionKey, threadID: conversation.threadID, agentName: nil)
             do {
                 let answer = try await Self.runWithTimeout(seconds: timeout) {
-                    try await runner.run(prompt: text, workdir: workdir)
+                    try await runner.run(prompt: text, workdir: workdir, context: agentContext)
                 }
+                await conversationMemory?.record(
+                    answer, as: .agent, senderIdentity: responder.rawValue,
+                    sessionKey: sessionKey, threadID: conversation.threadID, agentName: nil)
                 await sendDraftToOwner(answer, conversation: conversation)
             } catch {
                 bridgeState = .error("Agent run failed: \(error)")

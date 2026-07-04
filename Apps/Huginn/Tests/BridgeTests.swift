@@ -148,13 +148,36 @@ struct BridgeWatchAlongTests {
     /// No-op sink — the bridge does its OWN per-recipient fan-out (§9); the engine here
     /// is only the authorization oracle, never a posting path.
     struct NoopSink: AgentMessageSink {
-        func postAgentMessage(_ body: MessageBody, threadID: String, agentName: String?) async throws {}
-        func postAgentReply(_ body: MessageBody, agentName: String?) async throws {}
+        func postAgentMessage(
+            _ body: MessageBody, threadID: String, agentName: String?, agentAIID: String?
+        ) async throws {}
+        func postAgentReply(
+            _ body: MessageBody, agentName: String?, agentAIID: String?
+        ) async throws {}
     }
 
     struct StubRunner: BridgeAgentRunner {
         let answer: String
-        func run(prompt: String, workdir: String?) async throws -> String { answer }
+        func run(prompt: String, workdir: String?, context: ConversationContext) async throws -> String { answer }
+    }
+
+    /// Captures the context it's handed so tests can assert key derivation + memory injection.
+    final class RecordingRunner: BridgeAgentRunner, @unchecked Sendable {
+        // @unchecked: a test-only sink, mutated only via `handleInboundPrompt`'s serialized
+        // one-run-at-a-time path; no concurrent access in these tests.
+        private(set) var lastSessionKey: String?
+        private(set) var lastPriorContext: String?
+        let answer: String
+        let selfPersistsHistory: Bool
+        init(answer: String, selfPersistsHistory: Bool = false) {
+            self.answer = answer
+            self.selfPersistsHistory = selfPersistsHistory
+        }
+        func run(prompt: String, workdir: String?, context: ConversationContext) async throws -> String {
+            lastSessionKey = context.sessionKey
+            lastPriorContext = context.priorContext
+            return answer
+        }
     }
 
     private static let secret = "sk-abc123DEF456ghi789JKL012"
@@ -285,6 +308,129 @@ struct BridgeWatchAlongTests {
         #expect(toOwner.contains { $0.contains(Self.secret) })
         #expect(toOther.contains { $0.contains("‹redacted:") })
         #expect(!toOther.contains { $0.contains(Self.secret) })
+    }
+
+    @MainActor
+    @Test func gatewaySessionKeyIsStableOpaqueAndPerConversation() {
+        let a = ACPBridgeService.BridgeConversation(id: "peerAAA", name: "A", enabled: true)
+        let b = ACPBridgeService.BridgeConversation(id: "peerBBB", name: "B", enabled: true)
+        var aThread = a
+        aThread.threadID = "thread-1"
+
+        let ka = ACPBridgeService.gatewaySessionKey(for: a)
+        // Deterministic: same conversation → same key (context persists across turns).
+        #expect(ka == ACPBridgeService.gatewaySessionKey(for: a))
+        // Distinct conversations → distinct keys (no cross-conversation leakage).
+        #expect(ka != ACPBridgeService.gatewaySessionKey(for: b))
+        // A shared AI thread is its own session, separate from the conversation scope.
+        #expect(ka != ACPBridgeService.gatewaySessionKey(for: aThread))
+        // Opaque: `eldr:` namespace + 64 hex chars, and the raw id never leaks into the key.
+        #expect(ka.hasPrefix("eldr:"))
+        let hex = String(ka.dropFirst("eldr:".count))
+        #expect(hex.count == 64)
+        #expect(hex.allSatisfy { $0.isHexDigit })
+        #expect(!ka.contains("peerAAA"))
+    }
+
+    @MainActor
+    @Test func handleInboundPromptPassesStableSessionKeyToRunner() async throws {
+        let recorder = RecordingMessaging()
+        let (bridge, ownerHex, otherHex) = try await Self.openGateBridge(recorder: recorder)
+        bridge.watchAlongMode = .direct
+        let runner = RecordingRunner(answer: "ok")
+        bridge.setAgentRunner(runner)
+
+        let convo = ACPBridgeService.BridgeConversation(
+            id: "group-1", name: "Group", enabled: true, members: [ownerHex, otherHex])
+        await bridge.handleInboundPrompt("hi", conversation: convo, senderIdentityHex: ownerHex)
+        let first = runner.lastSessionKey
+        // The runner receives exactly the derived, opaque key for this conversation.
+        #expect(first == ACPBridgeService.gatewaySessionKey(for: convo))
+        #expect(first?.hasPrefix("eldr:") == true)
+
+        // A second turn in the SAME conversation reuses the SAME key (context continuity).
+        await bridge.handleInboundPrompt("again", conversation: convo, senderIdentityHex: ownerHex)
+        #expect(runner.lastSessionKey == first)
+    }
+
+    /// Keychain-free conversation memory for Phase 2 injection tests.
+    @MainActor
+    private static func freshMemory() -> (ConversationMemory, URL) {
+        let dir = URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true)
+            .appendingPathComponent("eldr-mem-\(UUID().uuidString)", isDirectory: true)
+        let store = EncryptedStore(randomSource: SystemRandomSource(), nonceSource: SystemNonceSource())
+        return (ConversationMemory(directory: dir, encryptedStore: store), dir)
+    }
+
+    @MainActor
+    @Test func eldrAcpStyleRunnerGetsPriorContextAcrossTurns() async throws {
+        let recorder = RecordingMessaging()
+        let (bridge, ownerHex, _) = try await Self.openGateBridge(recorder: recorder)
+        bridge.watchAlongMode = .direct
+        let (memory, dir) = Self.freshMemory()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        bridge.setConversationMemory(memory)
+        let runner = RecordingRunner(answer: "ok", selfPersistsHistory: false)  // eldr-acp style
+        bridge.setAgentRunner(runner)
+        // Owner-only conversation (1:1 with the owner) — memory injection is allowed here
+        // because the answer never reaches a non-owner.
+        let convo = ACPBridgeService.BridgeConversation(
+            id: ownerHex, name: "Me + my AI", enabled: true, members: [])
+
+        await bridge.handleInboundPrompt(
+            "My name is Ada", conversation: convo, senderIdentityHex: ownerHex)
+        #expect(runner.lastPriorContext == nil)  // first turn: nothing prior to inject
+
+        await bridge.handleInboundPrompt(
+            "What is my name?", conversation: convo, senderIdentityHex: ownerHex)
+        let prior = try #require(runner.lastPriorContext)  // second turn: prior injected
+        #expect(prior.contains("Ada"))  // the earlier turn is recalled from the encrypted transcript
+    }
+
+    /// Privacy gate (SPEC §0): in a mixed-group `.direct` watch-along the answer fans out to
+    /// non-owners, so prior context must NOT be injected — else the model could resurface an
+    /// earlier turn's secret past the per-message redactor. Memory is still RECORDED, just
+    /// not re-injected.
+    @MainActor
+    @Test func mixedGroupDirectWithholdsPriorContext() async throws {
+        let recorder = RecordingMessaging()
+        let (bridge, ownerHex, otherHex) = try await Self.openGateBridge(recorder: recorder)
+        bridge.watchAlongMode = .direct
+        let (memory, dir) = Self.freshMemory()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        bridge.setConversationMemory(memory)
+        let runner = RecordingRunner(answer: "ok", selfPersistsHistory: false)
+        bridge.setAgentRunner(runner)
+        let convo = ACPBridgeService.BridgeConversation(
+            id: "group-1", name: "G", enabled: true, members: [ownerHex, otherHex])
+
+        await bridge.handleInboundPrompt(
+            "My name is Ada", conversation: convo, senderIdentityHex: ownerHex)
+        await bridge.handleInboundPrompt(
+            "What is my name?", conversation: convo, senderIdentityHex: ownerHex)
+        // Even though the turn was recorded, a group fan-out never gets prior context injected.
+        #expect(runner.lastPriorContext == nil)
+    }
+
+    @MainActor
+    @Test func selfPersistingRunnerNeverGetsInjectedContext() async throws {
+        let recorder = RecordingMessaging()
+        let (bridge, ownerHex, otherHex) = try await Self.openGateBridge(recorder: recorder)
+        bridge.watchAlongMode = .direct
+        let (memory, dir) = Self.freshMemory()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        bridge.setConversationMemory(memory)
+        let runner = RecordingRunner(answer: "ok", selfPersistsHistory: true)  // sybilclaw style
+        bridge.setAgentRunner(runner)
+        let convo = ACPBridgeService.BridgeConversation(
+            id: "group-1", name: "G", enabled: true, members: [ownerHex, otherHex])
+
+        await bridge.handleInboundPrompt(
+            "My name is Ada", conversation: convo, senderIdentityHex: ownerHex)
+        await bridge.handleInboundPrompt(
+            "What is my name?", conversation: convo, senderIdentityHex: ownerHex)
+        // The gateway keeps its own history; Huginn must never re-inject it.
+        #expect(runner.lastPriorContext == nil)
     }
 
     @MainActor
