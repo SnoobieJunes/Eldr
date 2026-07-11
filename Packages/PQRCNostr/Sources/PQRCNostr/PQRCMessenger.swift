@@ -77,6 +77,29 @@ public actor PQRCMessenger {
     private var contactsByNostrPub: [String: VerifiedContact] = [:]
     private var sessions: [String: PQRCSession] = [:]  // peer identity hex -> session
     private var processedWrapIDs: Set<String> = []
+    /// Insertion order for `processedWrapIDs`, so the set can be bounded (oldest-out).
+    private var processedWrapIDOrder: [String] = []
+    /// Cap on the envelope-dedupe set. The wrap layer of a gift wrap is ECDH-encrypted
+    /// to our PUBLIC Nostr key, so ANY network party who knows our npub (a public value —
+    /// it is how wraps are addressed) can mint distinct wraps that `GiftWrap.unwrap`
+    /// structurally accepts: the inner seal is signed by the attacker's OWN throwaway key,
+    /// so it passes the self-consistency checks. Each such forged, trivially-distinct
+    /// event would otherwise insert a new id that was NEVER evicted → unbounded growth →
+    /// OOM under a sustained flood. Bounded here; the ratchet's one-time message keys stay
+    /// the real replay backstop (see `seedProcessedWrapIDs`), so evicting the oldest id
+    /// under pressure costs at most a little retry-queue churn, never a replay. Generous
+    /// so a normal user's seeded history is never truncated in practice.
+    private static let maxProcessedWrapIDs = 8192
+
+    /// Records an envelope id as processed, bounding the dedupe set (oldest-out FIFO).
+    private func recordProcessedWrapID(_ id: String) {
+        guard processedWrapIDs.insert(id).inserted else { return }
+        processedWrapIDOrder.append(id)
+        if processedWrapIDOrder.count > Self.maxProcessedWrapIDs {
+            let evicted = processedWrapIDOrder.removeFirst()
+            processedWrapIDs.remove(evicted)
+        }
+    }
     private var pendingRetry: [GiftWrap.Unwrapped] = []
     /// Unknown-sender envelopes held for the message-request gate (D12),
     /// keyed by sender Nostr pubkey hex. Bounded both ways so a spray of
@@ -359,8 +382,11 @@ public actor PQRCMessenger {
     /// and without the seed each relaunch re-processes history (the ratchet
     /// rejects it — keys are deleted — but it churns the retry queue).
     public func seedProcessedWrapIDs(_ ids: Set<String>) {
-        processedWrapIDs.formUnion(ids)
+        for id in ids { recordProcessedWrapID(id) }
     }
+
+    /// Test hook: the current size of the bounded envelope-dedupe set.
+    public func processedWrapIDCount() -> Int { processedWrapIDs.count }
 
     public func setBlocked(_ identityHex: String, blocked: Bool) {
         if blocked {
@@ -835,7 +861,7 @@ public actor PQRCMessenger {
         else {
             return  // not for us / malformed: ignore silently (opaque to relays anyway)
         }
-        processedWrapIDs.insert(event.id)
+        recordProcessedWrapID(event.id)
         await processUnwrapped(unwrapped)
     }
 
@@ -849,7 +875,7 @@ public actor PQRCMessenger {
             return  // not for us / tampered: drop silently, same as relay path
         }
         guard !processedWrapIDs.contains(unwrapped.wrapEventID) else { return }
-        processedWrapIDs.insert(unwrapped.wrapEventID)
+        recordProcessedWrapID(unwrapped.wrapEventID)
         await processUnwrapped(unwrapped)
     }
 

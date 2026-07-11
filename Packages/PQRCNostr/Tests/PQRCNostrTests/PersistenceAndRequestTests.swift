@@ -95,6 +95,24 @@ struct PersistenceAndRequestTests {
         #expect(await bob2.pendingRetryCount() == 0)
     }
 
+    /// The envelope-dedupe set is BOUNDED. The wrap layer of a gift wrap is ECDH-encrypted
+    /// to the recipient's PUBLIC Nostr key, so any network party who knows the victim's
+    /// npub can mint distinct wraps that unwrap structurally — each would otherwise insert a
+    /// dedupe id that was never evicted (unbounded growth → OOM). Seeding far past the cap
+    /// stands in for that flood and proves the FIFO bound holds; the ratchet's one-time
+    /// keys remain the real replay backstop (proven by the test above), so the bound costs
+    /// only retry-queue churn, never a replay.
+    @Test func processedWrapIDs_isBounded() async throws {
+        let relay = LocalRelaySimulator()
+        let bob = try await Persona.make(
+            name: "Bob", seedByte: "b3", seed: 22, transports: [await relay.connect()])
+        // Seed 20k distinct ids — well past the 8192 cap.
+        let flood = Set((0..<20_000).map { "forged-wrap-id-\($0)" })
+        await bob.messenger.seedProcessedWrapIDs(flood)
+        let count = await bob.messenger.processedWrapIDCount()
+        #expect(count <= 8192, "dedupe set must stay bounded, got \(count)")
+    }
+
     /// REGRESSION (replay-desync): a DUPLICATE/replayed handshake must NOT tear
     /// down an established session. Before the fix, `processHandshake` rebuilt the
     /// responder ratchet unconditionally, so a replayed handshake (here: the
