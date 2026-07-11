@@ -146,8 +146,17 @@ public actor PQRCSession {
         // from an accepted contact would otherwise crash the app — and re-crash
         // on relaunch if the relay replays it. Garbage in known fields is never
         // fatal (SPEC §12, invariant 12).
+        //
+        // `pq.ctr` needs the same guard: it is domain-separation input to the
+        // rekey chain refresh (`DoubleRatchet.refreshChain`), which serializes it
+        // as UInt32 — and the rekey is applied BEFORE the AEAD open, so an
+        // established peer could otherwise reach that trap with an unauthenticated
+        // header.
         let maxCounter = Int(UInt32.max)
-        guard (0...maxCounter).contains(header.n), (0...maxCounter).contains(header.pn) else {
+        let range = 0...maxCounter
+        guard range.contains(header.n), range.contains(header.pn),
+            header.pq.map({ range.contains($0.ctr) }) ?? true
+        else {
             throw PQRCError.malformedRumor
         }
         let ad = AssociatedData.build(

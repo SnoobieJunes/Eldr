@@ -292,7 +292,12 @@ public struct DoubleRatchet: Sendable {
     /// `dhRatchetStep`) to stay position-synchronized between the parties.
     private mutating func refreshChain(sending: Bool, ss: SymmetricKey, counter: Int) {
         var chainInfo = Data("\(PQRCConstants.rekeyHKDFInfoPrefix)-chain".utf8)
-        chainInfo.append(Data(uint32BE: UInt32(counter)))
+        // `truncatingIfNeeded`, not `UInt32(_:)`: the latter TRAPS on a negative or
+        // >2^32 counter, and on the inbound path `counter` is `pq.ctr` straight off
+        // the wire. `PQRCSession.decrypt` already range-checks it, but a trap here
+        // is an unrecoverable process abort, so the conversion is made structurally
+        // impossible to trap for any future caller. Identical bytes in range.
+        chainInfo.append(Data(uint32BE: UInt32(truncatingIfNeeded: counter)))
         func refreshed(_ chain: SymmetricKey) -> SymmetricKey {
             var chainIKM = chain.rawData
             var ssBytes = ss.rawData

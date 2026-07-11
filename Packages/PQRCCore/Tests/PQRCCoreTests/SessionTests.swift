@@ -92,6 +92,24 @@ struct SessionTests {
         await #expect(throws: PQRCError.malformedRumor) {
             _ = try await u.bobSession.decrypt(rumor: badPn, fuzzedTimestamp: good.fuzzedTimestamp)
         }
+
+        // And so is a bad PQ-rekey counter. `pq.ctr` is domain-separation input to
+        // the rekey chain refresh, which serializes it as UInt32 — and the rekey is
+        // applied BEFORE the AEAD open, so without this guard an established peer
+        // could trap the process with an unauthenticated header, and re-trap on every
+        // relaunch as the relay replays the event.
+        for badCtr in [-1, Int(UInt32.max) + 1] {
+            let badRekey = PQRekeyHeader(
+                ct: Data(repeating: 7, count: 1088), pk: Data(repeating: 8, count: 1184),
+                ctr: badCtr, tgt: Data(repeating: 9, count: 32))
+            let badRumor = RumorContent(
+                type: .message, participantType: .human, senderRole: .identity,
+                header: RatchetHeader(dh: h.dh, pn: h.pn, n: h.n, pq: badRekey), ciphertext: ct)
+            await #expect(throws: PQRCError.malformedRumor) {
+                _ = try await u.bobSession.decrypt(
+                    rumor: badRumor, fuzzedTimestamp: good.fuzzedTimestamp)
+            }
+        }
     }
 
     @Test func session_fullConversation_bothDirections() async throws {
