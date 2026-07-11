@@ -152,7 +152,7 @@ struct BridgeWatchAlongTests {
             _ body: MessageBody, threadID: String, agentName: String?, agentAIID: String?
         ) async throws {}
         func postAgentReply(
-            _ body: MessageBody, agentName: String?, agentAIID: String?
+            _ body: MessageBody, conversationID: String, agentName: String?, agentAIID: String?
         ) async throws {}
     }
 
