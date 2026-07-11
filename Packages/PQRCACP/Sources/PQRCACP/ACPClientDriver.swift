@@ -40,7 +40,13 @@ public struct ACPClientHandler: Sendable {
     public var onTerminalOutput: @Sendable (_ terminalId: String, _ chunk: String) async -> Void
     /// Phase D4 — an interactive terminal ended (child exited or it was killed).
     public var onTerminalClosed: @Sendable (_ terminalId: String, _ exitCode: Int?) async -> Void
-    /// Decide a mutating tool's permission request. Default: allow.
+    /// Decide a mutating tool's permission request. Default: DENY (fail closed).
+    /// Reads never reach this (they request no permission), so a deny-default costs
+    /// no capability — it forces every driver of a MUTATING agent to opt into a real
+    /// approval path explicitly (the cardinal rule, SPEC §0). Production already does:
+    /// the read-only chat bridge passes `{ _,_ in false }` and the phone-driven coding
+    /// path passes `PersonaRuntime.decidePermission`. An allow-all default was a footgun
+    /// a future caller could inherit silently.
     public var requestPermission: @Sendable (_ title: String, _ kind: String) async -> Bool
     /// Serve a client-side file read (only reached if fs caps are advertised); nil →
     /// tell the agent to fall back to its own filesystem. Default: nil.
@@ -62,7 +68,7 @@ public struct ACPClientHandler: Sendable {
         onTerminalOpened: @escaping @Sendable (String, String) async -> Void = { _, _ in },
         onTerminalOutput: @escaping @Sendable (String, String) async -> Void = { _, _ in },
         onTerminalClosed: @escaping @Sendable (String, Int?) async -> Void = { _, _ in },
-        requestPermission: @escaping @Sendable (String, String) async -> Bool = { _, _ in true },
+        requestPermission: @escaping @Sendable (String, String) async -> Bool = { _, _ in false },
         readTextFile: @escaping @Sendable (String) async -> String? = { _ in nil },
         writeTextFile: @escaping @Sendable (String, String) async -> Bool = { _, _ in false }
     ) {
