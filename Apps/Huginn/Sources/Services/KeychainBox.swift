@@ -34,10 +34,15 @@ struct KeychainBox: Sendable {
         self.useDataProtection = useDataProtection
     }
 
-    /// The keychain-selection key merged into every query. Empty when using the legacy
-    /// file keychain (the launcher-readable mirror).
+    /// The keychain-selection key merged into every query. It is set EXPLICITLY in both
+    /// directions — `false` is not the same as omitting the key. Omitting it lets a query
+    /// match items in EITHER keychain, and `save()` opens with a `SecItemDelete`: the
+    /// launcher's file-keychain mirror (`useDataProtection: false`, same service+account)
+    /// would delete the data-protection item that was just written, so the token vanished
+    /// the moment it was saved and Huginn read back an empty token on every relaunch.
+    /// Pinning the selector keeps the two keychains disjoint.
     private var keychainSelector: [String: Any] {
-        useDataProtection ? [kSecUseDataProtectionKeychain as String: true] : [:]
+        [kSecUseDataProtectionKeychain as String: useDataProtection]
     }
 
     func save(_ data: Data, account: String) throws {
