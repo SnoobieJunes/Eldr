@@ -39,6 +39,12 @@ public enum Padding {
         else {
             throw PQRCError.malformedPadding
         }
-        return padded.subdata(in: 4..<(4 + Int(length)))
+        // Slice-relative, NOT absolute: `uint32BE(at:)` above offsets from
+        // `startIndex`, and `Data` slices do not rebase their indices. A literal
+        // `4..<…` here would read below `startIndex` (and trap) for any caller that
+        // passes a non-zero-based slice. Today's only caller hands us the fresh
+        // zero-based `Data` that AES.GCM.open returns, but `Padding` is public.
+        let lo = padded.startIndex + 4
+        return padded.subdata(in: lo..<(lo + Int(length)))
     }
 }
