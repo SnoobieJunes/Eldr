@@ -2952,9 +2952,14 @@ actor PersonaRuntime {
             suppressAutoReply: true, coauthored: true)
     }
 
-    func engineActiveWindow(identityHex: String) async -> Int64? {
-        await engine.activeWindow(for: identityHex)
-    }
+    // NOTE: there is deliberately no bare `engineActiveWindow(identityHex:)` passthrough.
+    // The engine's ai_window is GLOBAL — keyed `conversationWindows[myIdentityHex]`, one
+    // per identity, NOT per conversation — so a raw `engine.activeWindow(for:)` is TRUE in
+    // every conversation once a window is open anywhere. Gating a reply on it alone posts
+    // conversation B's context into conversation A. Conversation scope comes from ANDing it
+    // with `myWindowConversationID`; use `aiWindowActive(conversationID:)`, which does.
+    // (A dead unguarded passthrough lived here and was removed — it had no callers, but it
+    // was a footgun a future gate could pick up.)
 
     func engineActiveInvite(threadID: String, identityHex: String) async -> Int64? {
         await engine.activeInvite(threadID: threadID, identityHex: identityHex)
