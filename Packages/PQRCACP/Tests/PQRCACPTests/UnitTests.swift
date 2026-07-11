@@ -286,6 +286,34 @@ struct ToolExecutorTests {
         #expect(result.text.contains("/Applications/Xcode-beta.app/Contents/Developer"))
     }
 
+    /// A spawned shell must NOT inherit the agent's secrets. The agent process holds
+    /// ELDR_LLM_TOKEN / ELDR_ACP_METADATA_KEY / SYBILCLAW_GATEWAY_TOKEN in its own
+    /// environment; a prompt-injected model that gets one run_shell approved must not be
+    /// able to `env` them back into its context. A non-secret var still passes through.
+    @Test func runShell_doesNotLeakAgentSecretsToTheShell() async throws {
+        let ex = ToolExecutor(
+            capabilities: ClientCapabilities(),
+            environment: ToolEnvironment(
+                workdir: NSTemporaryDirectory(),
+                baseEnvironment: [
+                    "PATH": "/usr/bin:/bin",
+                    "ELDR_LLM_TOKEN": "sk-secret-canary",
+                    "ELDR_ACP_METADATA_KEY": "metadata-canary",
+                    "SYBILCLAW_GATEWAY_TOKEN": "gateway-canary",
+                    "ELDR_ACP_FUTURE_SECRET_KEY": "future-canary",  // owned + secret-shaped
+                    "ELDR_WORKDIR": "/tmp/keepme",  // owned but NOT secret-shaped → stays
+                ]),
+            connection: nil, sessionId: "s1")
+        let out = await ex.run(
+            tool: "run_shell", args: .object(["command": .string("env")]))
+        #expect(!out.text.contains("sk-secret-canary"))
+        #expect(!out.text.contains("metadata-canary"))
+        #expect(!out.text.contains("gateway-canary"))
+        #expect(!out.text.contains("future-canary"))
+        // A non-secret owned var and PATH must survive — the scrub is surgical.
+        #expect(out.text.contains("/tmp/keepme"))
+    }
+
     @Test func toolDefinitionsCoverAllTools() {
         let names = Set(ToolExecutor.toolDefinitions().map(\.name))
         #expect(
