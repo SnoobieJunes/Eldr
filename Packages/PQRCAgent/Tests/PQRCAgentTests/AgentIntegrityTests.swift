@@ -16,6 +16,8 @@ extension Tag {
 actor SpySink: AgentMessageSink {
     private(set) var threadPosts: [(body: MessageBody, threadID: String)] = []
     private(set) var conversationPosts: [MessageBody] = []
+    /// The conversationID the engine pinned for each window reply (F1 regression).
+    private(set) var conversationReplyDestinations: [String] = []
 
     func postAgentMessage(
         _ body: MessageBody, threadID: String, agentName: String?, agentAIID: String?
@@ -23,8 +25,11 @@ actor SpySink: AgentMessageSink {
         threadPosts.append((body, threadID))
     }
 
-    func postAgentReply(_ body: MessageBody, agentName: String?, agentAIID: String?) async throws {
+    func postAgentReply(
+        _ body: MessageBody, conversationID: String, agentName: String?, agentAIID: String?
+    ) async throws {
         conversationPosts.append(body)
+        conversationReplyDestinations.append(conversationID)
     }
 
     var totalPosts: Int { threadPosts.count + conversationPosts.count }
@@ -68,7 +73,7 @@ struct AgentIntegrityTests {
         let threadPosted = await fx.engine.runThreadTurn(
             provider: provider, context: Self.context(threadID: "t1"), threadID: "t1")
         let windowPosted = await fx.engine.runWindowReply(
-            provider: provider, context: Self.context())
+            provider: provider, context: Self.context(), conversationID: "c1")
         #expect(threadPosted == 0)
         #expect(!windowPosted)
         #expect(await fx.sink.totalPosts == 0, "silence is the default, regardless of provider")
@@ -133,11 +138,13 @@ struct AgentIntegrityTests {
 
         // 1s before expiry: authorized.
         fx.clock.set(announcement.activeUntil - 1)
-        #expect(await fx.engine.runWindowReply(provider: provider, context: Self.context()))
+        #expect(await fx.engine.runWindowReply(
+            provider: provider, context: Self.context(), conversationID: "c1"))
 
         // 1s after expiry: fails closed, no message escapes.
         fx.clock.set(announcement.activeUntil + 1)
-        let postedAfter = await fx.engine.runWindowReply(provider: provider, context: Self.context())
+        let postedAfter = await fx.engine.runWindowReply(
+            provider: provider, context: Self.context(), conversationID: "c1")
         #expect(!postedAfter)
         #expect(await fx.sink.conversationPosts.count == 1)
         await #expect(throws: AgentEngineError.autonomousSendNotAuthorized) {
@@ -145,6 +152,11 @@ struct AgentIntegrityTests {
         }
         // The indicator clears too.
         #expect(await fx.engine.activeWindow(for: fx.alice.publicKeyData.hexString) == nil)
+        // F1 regression: the reply was pinned to the conversation passed at gate time,
+        // not re-resolved later. The engine must hand the sink exactly that destination so
+        // the app-layer sink posts into the right chat even if the (single, global) window
+        // has since moved to another conversation.
+        #expect(await fx.sink.conversationReplyDestinations == ["c1"])
     }
 
     @Test func aiWindow_unboundedDurationRejected() async throws {
@@ -178,7 +190,8 @@ struct AgentIntegrityTests {
             provider: provider, context: Self.context(threadID: "t2"), threadID: "t2")
         #expect(postedT2 == 0)
         // ...and never in the parent conversation.
-        #expect(!(await fx.engine.runWindowReply(provider: provider, context: Self.context())))
+        #expect(!(await fx.engine.runWindowReply(
+            provider: provider, context: Self.context(), conversationID: "c1")))
         let posts = await fx.sink.threadPosts
         #expect(posts.allSatisfy { $0.threadID == "t1" })
         #expect(posts.allSatisfy { $0.body.thread?.id == "t1" })

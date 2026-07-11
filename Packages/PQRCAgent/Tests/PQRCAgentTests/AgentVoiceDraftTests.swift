@@ -20,7 +20,7 @@ struct AgentVoiceDraftTests {
             _ body: MessageBody, threadID: String, agentName: String?, agentAIID: String?
         ) async throws {}
         func postAgentReply(
-            _ body: MessageBody, agentName: String?, agentAIID: String?
+            _ body: MessageBody, conversationID: String, agentName: String?, agentAIID: String?
         ) async throws {}
         func postAgentDraft(
             _ body: MessageBody, rawText: String, threadID: String?, agentName: String?,

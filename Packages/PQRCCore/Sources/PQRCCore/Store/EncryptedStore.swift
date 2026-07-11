@@ -69,6 +69,18 @@ public struct EncryptedStore: Sendable {
     /// HKDF construction as `recordKey` but `label` as `info`, so callers get a deterministic
     /// 32-byte key tied to the SE-wrapped master key (one root of trust). The returned bytes
     /// are sensitive: never log or persist them in the clear (invariant 12).
+    ///
+    /// - Important: `label` and `recordID` (see `recordKey`) share ONE HKDF namespace —
+    ///   same salt, and the raw string as `info`. A `label` that equals some `recordID`
+    ///   therefore derives the IDENTICAL key. Labels are consequently RESERVED: use a
+    ///   distinctive, versioned constant (`"acp-metadata-v1"`), never anything a record
+    ///   ID could be (a UUID, a `session-<peer>` key). This is deliberately NOT fixed by
+    ///   adding a domain prefix: `info` feeds the derivation, so any change would silently
+    ///   orphan every record already sealed on disk (the phone's message store, the Mac's
+    ///   AI transcripts, the sealed metadata files). Closing it properly means bumping the
+    ///   salt to `pqrc-store-v2` behind a re-seal MIGRATION, not an in-place edit.
+    ///   Impact today is a hygiene gap, not a break: every `seal` draws a fresh nonce, so a
+    ///   collision would reuse a key but never a key+nonce pair. Tracked in DEVIATIONS.
     public func deriveKey(label: String, byteCount: Int = 32) -> Data {
         HKDF<SHA256>.deriveKey(
             inputKeyMaterial: masterKey,

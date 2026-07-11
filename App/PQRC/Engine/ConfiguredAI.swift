@@ -113,11 +113,11 @@ struct ConfiguredAI: Identifiable, Codable, Equatable, Sendable {
     /// shared account (`keyAccount(for:)`) is still read as a fallback so keys
     /// saved by older builds keep working.
     var apiKeyAccount: String? {
-        // "hub" and "pcc" are off-device but need no key (the host / Apple PCC
-        // runs the model), so they get no API-key account. The registry's
-        // `usesPerAIKey` encodes exactly the old rule
-        // (`isRemote && kind != "hub" && kind != "pcc"`); an unknown kind has no
-        // descriptor → no per-AI account (matches the old `isRemote(unknown)==false`).
+        // "hub", "pcc", and "acp" are off-device but need no key here (the host /
+        // Apple PCC runs the model; acp's LLM token lives on the Mac node, in
+        // Huginn's settings / ELDR_LLM_TOKEN — never in this app). The registry's
+        // `usesPerAIKey` encodes that rule; an unknown kind has no descriptor →
+        // no per-AI account (matches the old `isRemote(unknown)==false`).
         (BackendRegistry.descriptor(for: kind)?.usesPerAIKey ?? false) ? "apikey.\(id)" : nil
     }
 

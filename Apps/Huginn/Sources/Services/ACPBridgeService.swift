@@ -184,7 +184,9 @@ struct NoopAgentSink: AgentMessageSink {
     func postAgentMessage(
         _ body: MessageBody, threadID: String, agentName: String?, agentAIID: String?
     ) async throws {}
-    func postAgentReply(_ body: MessageBody, agentName: String?, agentAIID: String?) async throws {}
+    func postAgentReply(
+        _ body: MessageBody, conversationID: String, agentName: String?, agentAIID: String?
+    ) async throws {}
 }
 
 // MARK: - Service

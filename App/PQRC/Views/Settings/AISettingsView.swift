@@ -18,8 +18,11 @@ struct AISettingsView: View {
     @State private var rowTestResult: [String: String] = [:]
     /// The AI (by id) awaiting remote-consent confirmation.
     @State private var pendingRemote: ConfiguredAI?
-    /// Egress firewall: ON by default. Disabling is gated behind a warning.
-    @AppStorage("egressFirewallEnabled") private var firewallEnabled = true
+    /// Egress firewall: ON by default. Disabling is gated behind a warning. Per-silo
+    /// (A34) — loaded in `.task` and saved via `AppSession.setEgressFirewallEnabled`,
+    /// same pattern as `contextDomain`; a device-global `@AppStorage` key would leak the
+    /// setting across deniable accounts.
+    @State private var firewallEnabled = true
     @State private var showFirewallWarning = false
     /// The asymmetry knob for shared-thread agent skills (what THIS device brings).
     /// Loaded per-silo in `.task` (can't read `siloID` in a property initializer).
@@ -84,6 +87,7 @@ struct AISettingsView: View {
                     set: { newValue in
                         if newValue {
                             firewallEnabled = true
+                            AppSession.setEgressFirewallEnabled(true, siloID: siloID)
                             Task { await session.applyAIProvider() }
                         } else {
                             showFirewallWarning = true
@@ -116,6 +120,7 @@ struct AISettingsView: View {
         .task {
             ais = AppSession.loadConfiguredAIs(siloID: siloID)
             contextDomain = AppSession.aiContextDomain(siloID: siloID)
+            firewallEnabled = AppSession.egressFirewallEnabled(siloID: siloID)
             await refreshACPNode()
         }
         .onDisappear {
@@ -126,6 +131,7 @@ struct AISettingsView: View {
         .alert("Turn off the egress firewall?", isPresented: $showFirewallWarning) {
             Button("Turn off — send raw context", role: .destructive) {
                 firewallEnabled = false
+                AppSession.setEgressFirewallEnabled(false, siloID: siloID)
                 Task { await session.applyAIProvider() }
             }
             Button("Keep it on", role: .cancel) {}

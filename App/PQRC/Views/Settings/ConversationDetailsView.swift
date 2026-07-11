@@ -157,7 +157,7 @@ struct ConversationDetailsView: View {
                         // A consented coding-agent node defaults the firewall OFF
                         // (it's your own trusted device); every other chat follows
                         // the account default.
-                        Text("Use default (\(remoteDevControl ? "off — trusted node" : (AppSession.firewallEnabled ? "on" : "off")))").tag("default")
+                        Text("Use default (\(remoteDevControl ? "off — trusted node" : (AppSession.egressFirewallEnabled(siloID: model.siloID) ? "on" : "off")))").tag("default")
                         Text("On — redact before a cloud AI").tag("on")
                         Text("Off — send raw (your own agents)").tag("off")
                     }

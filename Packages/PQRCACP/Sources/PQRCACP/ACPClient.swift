@@ -78,7 +78,7 @@ public actor ACPClient {
     public init(
         transport: any ACPTransport,
         permissionHandler: @escaping @Sendable (_ title: String, _ kind: String) async -> Bool = {
-            _, _ in true
+            _, _ in false  // fail closed by default; see ACPClientHandler.requestPermission
         },
         advertiseChatTools: Bool = false
     ) {

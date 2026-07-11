@@ -232,7 +232,16 @@ struct AIHubSheet: View {
                         if model.setCodingToolsEnabled(on, nodeHex: node.identityHex) {
                             Task { await session?.applyAIProvider() }
                         }
-                        if !on { codingAutonomy = false }
+                        // Turning tools off also revokes standing autonomy — and it must be
+                        // PERSISTED, not only reset locally. Resetting just the @State left
+                        // the enforced consent (`autonomousChangesConsent`, read by
+                        // decidePermission) still ON while the UI showed "ask each time":
+                        // the user believed every mutating action would prompt when it would
+                        // not (F5). Persist so displayed state == enforced state.
+                        if !on {
+                            codingAutonomy = false
+                            model.setCodingAutonomy(false, nodeHex: node.identityHex)
+                        }
                         load()  // the acp AI (+ its capability badge) just appeared / changed
                     }))
                     .accessibilityIdentifier("hub-coding-enable")

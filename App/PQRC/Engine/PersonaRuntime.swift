@@ -2427,7 +2427,7 @@ actor PersonaRuntime {
         _ = await engine.runWindowReply(
             provider: ai.provider,
             context: await contextFor(ai, conversationID: conversationID, threadID: nil),
-            agentName: ai.name, agentAIID: ai.id)
+            conversationID: conversationID, agentName: ai.name, agentAIID: ai.id)
     }
 
     /// Diagnostic for Settings "Test AI now": run the active provider against a
@@ -2502,11 +2502,17 @@ actor PersonaRuntime {
         // the bridge node drop it)? Only my own window, only for this conversation.
         // (Compute the await separately — `&&` takes an autoclosure that can't await.)
         let windowLive = (await engine.activeWindow(for: identityHex)) != nil
-        let hadWindow = myWindowConversationID == conversationID && windowLive
-        // Always clear my LOCAL gate (engine clears `conversationWindows[me]` via its
-        // `defer` and returns the signed closing announcement) — a stale entry must
-        // never keep authorizing me even if no window was technically "live".
-        let closing = try? await engine.endMyWindowEarly()
+        // The engine holds ONE global window slot keyed on my identity, so it must be
+        // cleared ONLY when the window belongs to THIS conversation. `mineHere` is that
+        // test; `hadWindow` additionally requires it to be live (for the on-wire close).
+        let mineHere = myWindowConversationID == conversationID
+        let hadWindow = mineHere && windowLive
+        // Clear the engine gate iff the window is mine-here — live OR a stale local
+        // pointer for this same conversation (that entry must stop authorizing me). An
+        // UNCONDITIONAL clear was F2: "stop" tapped in a conversation that does NOT hold
+        // the window would tear down a DIFFERENT conversation's still-live window, with
+        // no closing announcement to its peer.
+        let closing = mineHere ? (try? await engine.endMyWindowEarly()) : nil
         if hadWindow, let closing {
             try? await sendMessage(
                 "turned off always-on AI", conversationID: conversationID,
@@ -2868,7 +2874,7 @@ actor PersonaRuntime {
             _ = await engine.runWindowReply(
                 provider: ai.provider,
                 context: await contextFor(ai, conversationID: conversationID, threadID: nil),
-                agentName: ai.name, agentAIID: ai.id)
+                conversationID: conversationID, agentName: ai.name, agentAIID: ai.id)
         } else {
             eventContinuation?.yield(
                 .aiMentionNeedsChoice(conversationID: conversationID, aiID: aiID, aiName: ai.name))
@@ -2952,9 +2958,14 @@ actor PersonaRuntime {
             suppressAutoReply: true, coauthored: true)
     }
 
-    func engineActiveWindow(identityHex: String) async -> Int64? {
-        await engine.activeWindow(for: identityHex)
-    }
+    // NOTE: there is deliberately no bare `engineActiveWindow(identityHex:)` passthrough.
+    // The engine's ai_window is GLOBAL — keyed `conversationWindows[myIdentityHex]`, one
+    // per identity, NOT per conversation — so a raw `engine.activeWindow(for:)` is TRUE in
+    // every conversation once a window is open anywhere. Gating a reply on it alone posts
+    // conversation B's context into conversation A. Conversation scope comes from ANDing it
+    // with `myWindowConversationID`; use `aiWindowActive(conversationID:)`, which does.
+    // (A dead unguarded passthrough lived here and was removed — it had no callers, but it
+    // was a footgun a future gate could pick up.)
 
     func engineActiveInvite(threadID: String, identityHex: String) async -> Int64? {
         await engine.activeInvite(threadID: threadID, identityHex: identityHex)
@@ -3383,7 +3394,7 @@ actor PersonaRuntime {
                 _ = await engine.runWindowReply(
                     provider: ai.provider,
                     context: await contextFor(ai, conversationID: conversationID, threadID: nil),
-                    agentName: ai.name, agentAIID: ai.id)
+                    conversationID: conversationID, agentName: ai.name, agentAIID: ai.id)
             }
         }
     }
@@ -3474,10 +3485,17 @@ private struct RuntimeSink: AgentMessageSink {
             agentAIID: agentAIID)
     }
 
-    func postAgentReply(_ body: MessageBody, agentName: String?, agentAIID: String?) async throws {
-        // The engine only calls this during MY active window; the reply goes to
-        // the conversation the window was started in (single scope in v1).
-        guard let conversationID = await runtime.windowConversation() else { return }
+    func postAgentReply(
+        _ body: MessageBody, conversationID: String, agentName: String?, agentAIID: String?
+    ) async throws {
+        // Post to the conversation pinned at GATE-check time (threaded through the engine),
+        // NOT whatever `windowConversation()` happens to be NOW. The provider call suspends
+        // across an actor hop, during which the human can switch the (single, global) window
+        // to another chat; resolving the destination here from the live pointer was F1 — it
+        // would publish chat A's peer content, agent-signed, into chat B. Re-verify the
+        // window is STILL this conversation's and drop the stale reply otherwise (fail
+        // closed): a reply built for a window that has since moved must not post at all.
+        guard await runtime.windowConversation() == conversationID else { return }
         try await runtime.sendMessage(
             body.text, conversationID: conversationID, participantType: .agent, agentName: agentName,
             agentAIID: agentAIID)

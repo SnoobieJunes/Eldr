@@ -53,9 +53,37 @@ public struct ToolEnvironment: Sendable {
             baseEnvironment: env)
     }
 
-    /// The effective environment for a spawned shell (base + DEVELOPER_DIR override).
+    /// Exact env-var names that must NEVER reach a spawned shell: the agent's own
+    /// long-term secrets. The agent process legitimately holds these (it authenticates
+    /// to the LLM, seals at-rest metadata, talks to the gateway), but a `run_shell` /
+    /// `open_terminal` it spawns has no need of them — and a prompt-injected model that
+    /// gets one shell approved could otherwise `env` them straight back into its own
+    /// context (self-exfiltration, no network needed) or pipe them outbound.
+    private static let secretEnvKeys: Set<String> = [
+        "ELDR_LLM_TOKEN", "ELDR_ACP_METADATA_KEY", "SYBILCLAW_GATEWAY_TOKEN",
+    ]
+
+    /// Defense-in-depth over the exact list: strip any secret-SHAPED key within a
+    /// namespace WE own (`ELDR_`/`PQRC_`/`SYBILCLAW_`), so a future secret added to one
+    /// of our env vars is covered without an allowlist that might drop a variable a
+    /// legitimate build tool in the shell actually needs. Scoped to our own prefixes on
+    /// purpose: never touch the user's own `*_TOKEN`/`*_KEY` build vars.
+    private static func isOwnedSecretShaped(_ key: String) -> Bool {
+        let k = key.uppercased()
+        guard k.hasPrefix("ELDR_") || k.hasPrefix("PQRC_") || k.hasPrefix("SYBILCLAW_")
+        else { return false }
+        return k.contains("TOKEN") || k.contains("SECRET") || k.contains("PASSWORD")
+            || k.contains("PASSPHRASE") || k.hasSuffix("_KEY") || k.contains("_KEY_")
+    }
+
+    /// The effective environment for a spawned shell: the base environment with the
+    /// agent's secrets removed (see `secretEnvKeys`), plus the DEVELOPER_DIR override.
     var shellEnvironment: [String: String] {
         var e = baseEnvironment
+        for key in e.keys
+        where Self.secretEnvKeys.contains(key) || Self.isOwnedSecretShaped(key) {
+            e.removeValue(forKey: key)
+        }
         if let dev = developerDir { e["DEVELOPER_DIR"] = dev }
         return e
     }

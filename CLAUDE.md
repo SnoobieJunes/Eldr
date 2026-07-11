@@ -60,22 +60,35 @@ PRESERVE it and verify on-device — don't regress it:
 - Keep it SwiftUI-only; reuse the existing `AppModel`/`PersonaRuntime` engine (it's
   platform-agnostic). Mac/iPad get the same engine, only the View layer adapts.
 
-## Repository layout (target)
+## Repository layout (actual)
 
 ```
 Packages/
   PQRCCore/        # identity, agent derivation, PQXDH, Double Ratchet, PQ rekey,
-                   # padding, AEAD, gift-wrap codec. NO UIKit/SwiftUI imports.
-                   # Must build and `swift test` on macOS (uses swift-crypto).
-  PQRCNostr/       # Nostr event model, BIP-340 signing, NIP-01 codec,
-                   # RelayTransport protocol, LocalRelaySimulator, LocalBlossomSimulator.
-  PQRCAgent/       # AgentProvider protocol + Mock / FoundationModels / Anthropic providers.
-App/               # Thin SwiftUI app target (EldrChat.xcodeproj), UI tests, perf tests.
+                   # padding, AEAD, gift-wrap codec, MessageStore protocol, EncryptedStore.
+                   # NO UIKit/SwiftUI imports. Builds + `swift test` on macOS (swift-crypto).
+  PQRCNostr/       # Nostr event model, BIP-340 signing, NIP-01 codec, RelayTransport,
+                   # LocalRelaySimulator, relay chunking, Multipeer link, `pqrc-relay` exe.
+  PQRCAgent/       # AgentProvider protocol + Demo / FoundationModels / API providers,
+                   # AgentEngine (ai_window, thread invites, loop guard).
+  PQRCACP/         # the ACP agent protocol: tool executor, path jail, permission flow,
+                   # PTY, context budget, at-rest log redaction. The `eldr-acp` executable.
+  PQRCMCP/         # MCP server — the phone's chat context to an agent, as CODENAMES only.
+  EldrNode/        # headless `eldr-node` daemon (Mac/server) + sybilclaw gateway client.
+  Eldrctl/         # `eldrctl` CLI — SSH installer / conduit provisioner.
+App/               # Thin SwiftUI iOS app (EldrChat.xcodeproj; sources still under App/PQRC/).
+Apps/Huginn/       # macOS companion app (Huginn.xcodeproj) — pairs with the phone, runs the
+                   # tethered AI + coding agent, encrypted at-rest AI memory.
 TestVectors/       # Frozen JSON vectors (see TEST-PLAN §2).
-docs/              # The four documents above + generated THREAT_MODEL.md, DEMO.md, DEVIATIONS.md.
+docs/              # Generated + working docs. The specs at the repo ROOT are the canonical
+                   # copies; docs/pqrc-SPEC-v1_1.md, docs/APP-SPEC.md, docs/TEST-PLAN.md are
+                   # symlinks to them. docs/NIP-XX-pqrc.md is a real file (the wire format).
+Eldr.xcworkspace   # ties the two apps + packages together.
 ```
 
-Core logic lives in SPM packages so `swift test` runs headlessly and fast; the app target stays thin. This is deliberate — iterate in packages, verify in the simulator.
+Core logic lives in SPM packages so `swift test` runs headlessly and fast; the app targets stay thin. This is deliberate — iterate in packages, verify in the simulator.
+
+**Sources still live under `App/PQRC/`** even though the project/scheme is `EldrChat` — the directory was never renamed. Don't "fix" it casually; the pbxproj uses file-system-synchronized groups.
 
 ## Commands
 
@@ -93,17 +106,28 @@ export DEVELOPER_DIR=/Applications/Xcode-beta.app/Contents/Developer   # Xcode 2
 ```
 
 ```bash
-# Fast inner loop (no simulator needed)
-swift test --package-path Packages/PQRCCore
-swift test --package-path Packages/PQRCNostr
-swift test --package-path Packages/PQRCAgent
+# Fast inner loop (no simulator needed) — ALL SEVEN packages, not just the first three.
+for p in PQRCCore PQRCNostr PQRCAgent PQRCACP PQRCMCP EldrNode Eldrctl; do
+  swift test --package-path "Packages/$p" || break
+done
 
-# Full app build + tests (discover available simulators first if the name fails).
-# The app project/target/scheme is EldrChat (renamed from PQRC; the old PQRC
-# scheme is stale and won't resolve a destination).
+# Full app build + tests. The app project/target/scheme is EldrChat (renamed from PQRC;
+# the old PQRC scheme is stale and won't resolve a destination).
 xcodebuild -project App/EldrChat.xcodeproj -scheme EldrChat -showdestinations
-xcodebuild test -project App/EldrChat.xcodeproj -scheme EldrChat -destination 'platform=iOS Simulator,name=iPhone 17'
+xcodebuild test -project App/EldrChat.xcodeproj -scheme EldrChat \
+  -destination 'platform=iOS Simulator,name=iPhone 17 Pro Max,OS=26.5' \
+  -skipPackagePluginValidation
+
+# The macOS companion app (Huginn) has its own project + suite — it is NOT covered by
+# the iOS scheme and NOT in CI. Run it whenever you touch Apps/Huginn or the gateway.
+xcodebuild test -project Apps/Huginn/Huginn.xcodeproj -scheme Huginn \
+  -destination 'platform=macOS' -skipPackagePluginValidation
 ```
+
+**Three xcodebuild rules that have each cost real hours — do not rediscover them:**
+- **`-skipPackagePluginValidation` is required.** swift-secp256k1 ships a build plugin; without the flag the build fails.
+- **Pin `OS=26.5` and use a device name that exists.** This Mac has both the iOS 26.5 and iOS 27.0 runtimes, and an unpinned/ambiguous name silently flips between them. There is **no plain "iPhone 17" simulator** — run `-showdestinations` and pick a real one (`iPhone 17 Pro Max` works on 26.5).
+- **NEVER pass `CODE_SIGNING_ALLOWED=NO` to `xcodebuild test` if any test touches the Keychain.** It strips entitlements, so every `SecItem*` call returns `errSecMissingEntitlement` (-34018) and the keychain/Secure-Enclave tests all fail in a way that looks like a code bug but isn't. Simulator builds sign ad-hoc and keep entitlements — just drop the flag.
 
 ## Hard invariants — MUSTs the tests enforce
 
@@ -112,7 +136,8 @@ These come straight from the SPEC/NIP. Violating any of them is a failed build, 
 1. Key rotation is **message-driven, never wall-clock-driven**. No timers anywhere in key schedule code (SPEC §5.2).
 2. Message keys are used once and **deleted immediately**; skipped-key cache bounded by `MAX_SKIP = 1000` and purged after use (SPEC §5.3).
 3. `PQ_REKEY_INTERVAL = 50` messages, exactly (SPEC §6).
-4. Plaintext padded to buckets `{256, 1024, 4096, 16384, 65536}` before AEAD; **content > 64 KB is never inlined** — Blossom pointer or chunking only (SPEC §7, §11).
+4. Plaintext padded to buckets `{256, 1024, 4096, 16384, 65536}` before AEAD; **content > 64 KB is never inlined** — **relay chunking only** (SPEC §7, §11).
+   **The product is TEXT-ONLY and there is NO blob server — Blossom is rejected, permanently.** The user will not take on the liability/cost of *storing* people's data, only *transporting* it (relay = transient store-and-forward; a blob store is not). Images/video are out of scope ("use iMessage for that"). Large text splits into ordered, ratcheted relay events (`MessageBody.chunk {id,index,total}` inside the ciphertext), sized from each relay's NIP-11 `max_content_length`. `LocalBlossomSimulator` and the `BlobStore` seam still exist in `PQRCNostr` as **vestigial** code — do not build on them, do not "finish" them, and do not present a blob path as an option.
 5. AEAD AD = `pqrc_version || participant_type || n || created_at_fuzzed`. **Timestamps are never inputs to key derivation** (SPEC §8.3, NIP).
 6. Gift wrap: rumor is unsigned and never published unwrapped; seal signed by sender's Nostr key; outer wrap signed by a fresh random one-time key per message; `created_at` on seal and wrap fuzzed up to 2 days **into the past** (SPEC §8).
 7. The kind-10420 binding is verified **in both directions** before any key from it is trusted (SPEC §3.3).
@@ -132,10 +157,10 @@ These come straight from the SPEC/NIP. Violating any of them is a failed build, 
 
 ## Definition of done (one-shot)
 
-- [ ] All three packages compile; `swift test` green on every package.
-- [ ] App target builds; `xcodebuild test` green including UI smoke tests and the accessibility audit.
+- [ ] All **seven** packages compile; `swift test` green on every package.
+- [ ] Both app targets build: `xcodebuild test` green for **EldrChat** (incl. UI smoke tests + the accessibility audit) **and for Huginn** (macOS).
 - [ ] TEST-PLAN coverage implemented: crypto vectors frozen in `TestVectors/`, ratchet/FS/PCS proofs, envelope/padding/fuzz checks, agent-integrity suite, simulator chaos matrix, group fan-out, performance budgets wired (baseline-relative).
-- [ ] Demo "Local Universe" runs: scripted Alice/Bob conversation incl. one AI-drafted message, one `ai_window`, one shared AI thread, one >64 KB paste, one group of 4. Script documented in `docs/DEMO.md`.
+- [ ] Demo "Local Universe" runs: scripted Alice/Bob conversation incl. one AI-drafted message, one `ai_window`, one shared AI thread, one >64 KB paste (**via relay chunking**), one group of 4. Script documented in `docs/DEMO.md`.
 - [ ] `docs/THREAT_MODEL.md` generated per SPEC §15.3 (honest about IP visibility, recipient `p`-tag, no deniability, single-device).
 - [ ] `docs/DEVIATIONS.md` lists every judgment call made, each tagged `[upstream-NIP]`, `[app-only]`, or `[tech-debt]`.
 - [ ] No TODO blocks a green test run.
