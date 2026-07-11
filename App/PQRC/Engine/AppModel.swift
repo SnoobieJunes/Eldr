@@ -736,7 +736,7 @@ final class AppModel {
         let trustedNode = AppSession.remoteDevControlConsent(nodeID: conversationID, siloID: siloID)
         let firewallOn =
             AppSession.conversationFirewall(conversationID, siloID: siloID)
-            ?? (trustedNode ? false : AppSession.firewallEnabled)
+            ?? (trustedNode ? false : AppSession.egressFirewallEnabled(siloID: siloID))
         return (mode, isRemote, firewallOn)
     }
 

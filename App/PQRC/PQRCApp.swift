@@ -719,8 +719,28 @@ final class AppSession {
     /// The egress firewall (redact names + byte-bound context sent to remote AIs)
     /// is ON by default; the user can disable it in Settings ▸ AI after the
     /// implications warning.
-    static var firewallEnabled: Bool {
-        UserDefaults.standard.object(forKey: "egressFirewallEnabled") as? Bool ?? true
+    ///
+    /// PER-SILO (DEVIATIONS A34): this is the master control for whether real names
+    /// and full context reach a cloud provider unredacted, so a device-global key
+    /// would be the exact deniability leak A33 fixed for every other setting — one
+    /// account disabling it would silently disable redaction for every hidden/deniable
+    /// silo on the device. Namespaced per silo. The openly-present default account
+    /// migrates the pre-A34 device-global value once (so its existing choice is kept);
+    /// every other silo gets the privacy-safe default (ON) until its OWN owner chooses.
+    static func egressFirewallEnabled(siloID: String) -> Bool {
+        let key = siloDefaultsKey("egressFirewallEnabled", siloID)
+        if let v = UserDefaults.standard.object(forKey: key) as? Bool { return v }
+        if siloID == defaultSiloID,
+            let legacy = UserDefaults.standard.object(forKey: "egressFirewallEnabled") as? Bool
+        {
+            return legacy
+        }
+        return true
+    }
+
+    static func setEgressFirewallEnabled(_ enabled: Bool, siloID: String) {
+        UserDefaults.standard.set(
+            enabled, forKey: siloDefaultsKey("egressFirewallEnabled", siloID))
     }
 
     /// Multipeer local link: user-toggleable (Settings → Nearby), OFF by
@@ -881,7 +901,7 @@ final class AppSession {
             siloKEK: kek,
             siloID: siloID,
             enableLocalLink: Self.localLinkEnabled)
-        await runtime.setFirewallEnabled(Self.firewallEnabled)
+        await runtime.setFirewallEnabled(Self.egressFirewallEnabled(siloID: siloID))
         let model = AppModel(runtime: runtime, personaName: name, siloID: siloID)
         do {
             try await model.start(
@@ -1181,7 +1201,7 @@ final class AppSession {
     func applyAIProvider() async {
         guard case .single(let model) = mode, let siloID = activeSilo?.siloID else { return }
         await model.runtime.setAIs(Self.makeRuntimeAIs(siloID: siloID, hubClient: relayClient))
-        await model.runtime.setFirewallEnabled(Self.firewallEnabled)
+        await model.runtime.setFirewallEnabled(Self.egressFirewallEnabled(siloID: siloID))
     }
 
     /// Test ONE configured AI on demand (Settings ▸ AI per-row "Test"). Builds the
