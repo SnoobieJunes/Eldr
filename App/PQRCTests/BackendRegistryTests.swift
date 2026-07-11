@@ -71,17 +71,17 @@ struct BackendRegistryTests {
     }
 
     /// The per-AI Keychain account (`apikey.<id>`) is granted exactly where the
-    /// old rule did: remote backends EXCEPT hub/pcc (which run the model
-    /// host-side / Apple-side). ACP qualifies — it gets one today even though its
-    /// provider is a Demo stub.
+    /// rule says: remote backends EXCEPT hub/pcc/acp — hub and pcc run the model
+    /// host-side / Apple-side, and acp's credential is the LLM token held on the
+    /// Mac node (Huginn settings / ELDR_LLM_TOKEN), never an API key in this app.
     @Test func perAIKeyAccount_matchesLegacyRule() {
         func account(_ kind: String) -> String? {
             ConfiguredAI(id: "fixed-id", name: "n", kind: kind).apiKeyAccount
         }
-        for kind in ["claude", "openai", "gemini", "openrouter", "groq", "custom", "acp"] {
+        for kind in ["claude", "openai", "gemini", "openrouter", "groq", "custom"] {
             #expect(account(kind) == "apikey.fixed-id", "\(kind) gets a per-AI key account")
         }
-        for kind in ["ondevice", "pcc", "hub", "demo"] {
+        for kind in ["ondevice", "pcc", "hub", "demo", "acp"] {
             #expect(account(kind) == nil, "\(kind) gets no per-AI key account")
         }
     }

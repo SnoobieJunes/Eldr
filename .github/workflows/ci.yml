@@ -16,7 +16,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        package: [PQRCCore, PQRCNostr, PQRCAgent, PQRCACP, PQRCMCP, EldrNode]
+        package: [PQRCCore, PQRCNostr, PQRCAgent, PQRCACP, PQRCMCP, EldrNode, Eldrctl]
     steps:
       - uses: actions/checkout@v4
       - name: Select Xcode 26
