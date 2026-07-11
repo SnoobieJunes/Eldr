@@ -91,8 +91,12 @@ public actor RelayACPTransport: ACPTransport {
     /// order; the receiver re-sorts by it to undo the relay's unordered delivery.
     private let lineSeqCounter = Atomic<UInt64>(0)
 
-    /// In-flight inbound lines being reassembled, keyed by `lineId`.
+    /// In-flight inbound lines being reassembled, keyed by `lineId`. Bounded by
+    /// `RelayFraming.maxPendingReassemblies` (LRU) — an incomplete line must not be
+    /// retained forever.
     private var reassembly: [String: RelayFraming.Reassembly] = [:]
+    /// Monotonic touch stamp for the reassembly LRU.
+    private var reassemblyCounter: UInt64 = 0
 
     /// Inbound line ordering, per sender `salt`: the next line index to emit, and
     /// the lines that completed reassembly AHEAD of a gap (held until the gap
@@ -109,6 +113,10 @@ public actor RelayACPTransport: ACPTransport {
     /// Frames that failed to parse/decode on the inbound side, for test
     /// introspection. The values themselves are never logged (CLAUDE.md inv. 12).
     public private(set) var droppedFrameCount = 0
+
+    /// Incomplete lines currently held for reassembly, for test introspection — this
+    /// is the quantity `RelayFraming.maxPendingReassemblies` bounds.
+    public var pendingReassemblyCount: Int { reassembly.count }
 
     public init(
         maxFrameBytes: Int,
@@ -173,6 +181,11 @@ public actor RelayACPTransport: ACPTransport {
             droppedFrameCount += 1
             return
         }
+        // `total` is a wire value — refuse an absurd one outright (see maxChunksPerLine).
+        guard chunk.total <= RelayFraming.maxChunksPerLine else {
+            droppedFrameCount += 1
+            return
+        }
         var entry = reassembly[chunk.lineId] ?? RelayFraming.Reassembly(total: chunk.total)
         // A conflicting `total` for the same id is a corrupt/forged frame stream;
         // drop the offending chunk rather than reassemble garbage.
@@ -197,7 +210,12 @@ public actor RelayACPTransport: ACPTransport {
             }
             emitInOrder(lineId: chunk.lineId, line: String(decoding: bytes, as: UTF8.self))
         } else {
+            // Incomplete: retain, stamp for LRU, and bound the map. Without the bound a
+            // single lost chunk pinned this line's payloads for the process's lifetime.
+            reassemblyCounter += 1
+            entry.receivedOrder = reassemblyCounter
             reassembly[chunk.lineId] = entry
+            RelayFraming.evictStaleReassembliesIfNeeded(&reassembly)
         }
     }
 

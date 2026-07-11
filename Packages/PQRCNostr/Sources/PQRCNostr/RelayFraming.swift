@@ -40,11 +40,40 @@ enum RelayFraming {
     /// loss or a peer that withholds a low index to wedge the stream.
     static let maxReorderBuffer = 1000
 
+    /// Cap on the chunk count a single line may declare. `total` is a wire value and
+    /// a peer can lie about it (the parse admits anything up to `UInt32.max`). Nothing
+    /// is preallocated from it, but an incomplete set pins its received payloads, so
+    /// an absurd `total` must not be accepted in the first place. 4096 chunks is far
+    /// above any legitimate ACP/MCP line (the chat path's ceiling is 512).
+    static let maxChunksPerLine: UInt32 = 4096
+
+    /// Cap on concurrently-INCOMPLETE lines held for reassembly.
+    ///
+    /// This is the bound that was missing: `maxReorderBuffer` bounds the *order*
+    /// buffer (`pendingLines`), a different map. A line missing any chunk never emits
+    /// — and, without this, never frees either. On a lossy relay every dropped chunk
+    /// permanently retained the rest of its line, and a peer could grow the map without
+    /// limit by sending one `seq` of each of many distinct `lineId`s. On overflow we
+    /// abandon the least-recently-touched incomplete line: bounded degradation, never
+    /// unbounded growth. Mirrors `PersonaRuntime.evictStaleChunkBuffersIfNeeded`.
+    static let maxPendingReassemblies = 256
+
     /// Per-line reassembly state: the expected chunk count and the payload bytes
     /// received so far, keyed by 1-based seq (so duplicates overwrite, gaps show).
+    /// `receivedOrder` is a monotonic touch stamp used only for LRU eviction.
     struct Reassembly {
         let total: UInt32
         var chunks: [UInt32: Data] = [:]
+        var receivedOrder: UInt64 = 0
+    }
+
+    /// Drops the least-recently-touched incomplete line once the map is over capacity.
+    /// Shared by both relay transports so the bound can't drift between them.
+    static func evictStaleReassembliesIfNeeded(_ map: inout [String: Reassembly]) {
+        guard map.count > maxPendingReassemblies else { return }
+        if let oldest = map.min(by: { $0.value.receivedOrder < $1.value.receivedOrder })?.key {
+            map[oldest] = nil
+        }
     }
 
     /// A decoded inbound frame chunk.

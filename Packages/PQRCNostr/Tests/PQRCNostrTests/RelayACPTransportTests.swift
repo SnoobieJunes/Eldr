@@ -356,4 +356,44 @@ struct RelayACPTransportTests {
         #expect(await lines.all().isEmpty)
         #expect(await receiver.droppedFrameCount >= 5)
     }
+
+    // MARK: - Reassembly is bounded (memory safety)
+
+    /// A line missing any chunk never emits — and must never be retained forever.
+    ///
+    /// `maxReorderBuffer` bounds the ORDER buffer (`pendingLines`); the CHUNK buffer
+    /// (`reassembly`) had no bound at all, so on a lossy relay every dropped chunk
+    /// permanently pinned the rest of its line, and a peer could grow the map without
+    /// limit by sending one `seq` of each of many distinct `lineId`s. Also pins the
+    /// `total` cap: `total` is a wire value and the parse admits up to `UInt32.max`.
+    @Test func reassembly_boundsIncompleteLines_andRejectsAbsurdTotal() async throws {
+        let receiver = RelayACPTransport(maxFrameBytes: 4096, send: { _ in })
+        let payload = RelayFraming.base64URLEncode(Data("x".utf8))
+
+        // An absurd `total` is refused outright — no entry is created for it.
+        await receiver.deliverInbound("ACP1|absurd-1|1|999999|\(payload)")
+        #expect(await receiver.droppedFrameCount == 1)
+        #expect(await receiver.pendingReassemblyCount == 0)
+
+        // Flood with lines that can never complete: each declares 2 chunks, only
+        // chunk 1 ever arrives. Unbounded, this would retain every one of them.
+        let flood = RelayFraming.maxPendingReassemblies + 50
+        for i in 0..<flood {
+            await receiver.deliverInbound("ACP1|leak\(i)-1|1|2|\(payload)")
+        }
+        #expect(await receiver.pendingReassemblyCount <= RelayFraming.maxPendingReassemblies)
+
+        // The bound must not break a legitimate line: a complete 2-chunk line still
+        // reassembles byte-exactly after the flood. The lineId's base36 tail is the
+        // SENDER-ORDER index and `nextEmit` starts at 0, so this line must be index 0
+        // or `emitInOrder` correctly holds it waiting for the gap to fill.
+        let lines = ACPLineCollector()
+        await lines.attach(receiver.inboundLines())
+        let a = RelayFraming.base64URLEncode(Data("{\"ok\":".utf8))
+        let b = RelayFraming.base64URLEncode(Data("true}".utf8))
+        await receiver.deliverInbound("ACP1|good-0|1|2|\(a)")
+        await receiver.deliverInbound("ACP1|good-0|2|2|\(b)")
+        try? await Task.sleep(for: .milliseconds(80))
+        #expect(await lines.all() == ["{\"ok\":true}"])
+    }
 }
