@@ -2427,7 +2427,7 @@ actor PersonaRuntime {
         _ = await engine.runWindowReply(
             provider: ai.provider,
             context: await contextFor(ai, conversationID: conversationID, threadID: nil),
-            agentName: ai.name, agentAIID: ai.id)
+            conversationID: conversationID, agentName: ai.name, agentAIID: ai.id)
     }
 
     /// Diagnostic for Settings "Test AI now": run the active provider against a
@@ -2874,7 +2874,7 @@ actor PersonaRuntime {
             _ = await engine.runWindowReply(
                 provider: ai.provider,
                 context: await contextFor(ai, conversationID: conversationID, threadID: nil),
-                agentName: ai.name, agentAIID: ai.id)
+                conversationID: conversationID, agentName: ai.name, agentAIID: ai.id)
         } else {
             eventContinuation?.yield(
                 .aiMentionNeedsChoice(conversationID: conversationID, aiID: aiID, aiName: ai.name))
@@ -3394,7 +3394,7 @@ actor PersonaRuntime {
                 _ = await engine.runWindowReply(
                     provider: ai.provider,
                     context: await contextFor(ai, conversationID: conversationID, threadID: nil),
-                    agentName: ai.name, agentAIID: ai.id)
+                    conversationID: conversationID, agentName: ai.name, agentAIID: ai.id)
             }
         }
     }
@@ -3485,10 +3485,17 @@ private struct RuntimeSink: AgentMessageSink {
             agentAIID: agentAIID)
     }
 
-    func postAgentReply(_ body: MessageBody, agentName: String?, agentAIID: String?) async throws {
-        // The engine only calls this during MY active window; the reply goes to
-        // the conversation the window was started in (single scope in v1).
-        guard let conversationID = await runtime.windowConversation() else { return }
+    func postAgentReply(
+        _ body: MessageBody, conversationID: String, agentName: String?, agentAIID: String?
+    ) async throws {
+        // Post to the conversation pinned at GATE-check time (threaded through the engine),
+        // NOT whatever `windowConversation()` happens to be NOW. The provider call suspends
+        // across an actor hop, during which the human can switch the (single, global) window
+        // to another chat; resolving the destination here from the live pointer was F1 — it
+        // would publish chat A's peer content, agent-signed, into chat B. Re-verify the
+        // window is STILL this conversation's and drop the stale reply otherwise (fail
+        // closed): a reply built for a window that has since moved must not post at all.
+        guard await runtime.windowConversation() == conversationID else { return }
         try await runtime.sendMessage(
             body.text, conversationID: conversationID, participantType: .agent, agentName: agentName,
             agentAIID: agentAIID)

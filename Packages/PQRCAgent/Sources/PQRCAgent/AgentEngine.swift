@@ -34,9 +34,16 @@ public protocol AgentMessageSink: Sendable {
     func postAgentMessage(
         _ body: MessageBody, threadID: String, agentName: String?, agentAIID: String?
     ) async throws
+    /// Conversation scope (ai_window). `conversationID` is the destination pinned at
+    /// GATE-check time and threaded through the (possibly slow, cross-actor) provider
+    /// call, so the reply lands in the conversation whose context it was built from — the
+    /// sink must NOT re-resolve the destination from mutable "current window" state at post
+    /// time (that was the F1 TOCTOU: the human switching the window to another chat mid-turn
+    /// would redirect chat A's content into chat B). The sink re-verifies the window still
+    /// belongs to `conversationID` and drops the reply otherwise.
     func postAgentReply(
-        _ body: MessageBody, agentName: String?, agentAIID: String?
-    ) async throws  // conversation scope (ai_window)
+        _ body: MessageBody, conversationID: String, agentName: String?, agentAIID: String?
+    ) async throws
 
     /// Voice a watch-along DRAFT (SPEC §13.5 endpoint model): `body` carries the
     /// REDACTED text that goes on the wire to the group; `rawText` is the owner's
@@ -71,7 +78,11 @@ extension AgentMessageSink {
             try await postAgentMessage(
                 body, threadID: threadID, agentName: agentName, agentAIID: agentAIID)
         } else {
-            try await postAgentReply(body, agentName: agentName, agentAIID: agentAIID)
+            // Conversation-scope DRAFT with no explicit destination: the production sink
+            // overrides `postAgentDraft` and resolves the draft target itself, so this
+            // default (test-spy) fallback has no conversation to pin — the sink ignores it.
+            try await postAgentReply(
+                body, conversationID: "", agentName: agentName, agentAIID: agentAIID)
         }
     }
 
@@ -450,8 +461,8 @@ public actor AgentEngine {
     /// Conversation-scope autonomous reply during MY active ai_window.
     @discardableResult
     public func runWindowReply(
-        provider: any AgentProvider, context: AgentContext, agentName: String? = nil,
-        agentAIID: String? = nil
+        provider: any AgentProvider, context: AgentContext, conversationID: String,
+        agentName: String? = nil, agentAIID: String? = nil
     ) async -> Bool {
         do {
             try authorizeAutonomousSend(threadID: nil)
@@ -477,8 +488,8 @@ public actor AgentEngine {
         do {
             try authorizeAutonomousSend(threadID: nil)
             try await sink.postAgentReply(
-                MessageBody(text: message.text, sentAt: clock.now()), agentName: agentName,
-                agentAIID: agentAIID)
+                MessageBody(text: message.text, sentAt: clock.now()),
+                conversationID: conversationID, agentName: agentName, agentAIID: agentAIID)
             return true
         } catch {
             return false
