@@ -645,6 +645,8 @@ public actor ACPAgent {
         if name == ToolExecutor.openTerminalTool {
             result = await openInteractiveTerminal(
                 sessionId: sessionId, args: args, cwd: cwd)
+        } else if name == ToolExecutor.delegateToCloudAgentTool {
+            result = await delegateToCloudAgent(sessionId: sessionId, args: args, cwd: cwd)
         } else if let extraTools, Self.isExtraTool(name), sessionsWithMCP.contains(sessionId) {
             // Phase D3: a tool the `extraTools` provider owns (the phone's MCP chat tools,
             // `mcp_`-prefixed) is run by the PROVIDER — a round-trip to the phone over the
@@ -773,6 +775,107 @@ public actor ACPAgent {
             method: "session/update",
             params: ACPWire.terminalClosed(
                 sessionId: live.sessionId, terminalId: terminalId, exitCode: exitCode))
+    }
+
+    // MARK: - WS3e: delegate_to_cloud_agent (cloud-CLI brokering)
+
+    /// WS3e — hand a sub-task to an external cloud-CLI harness (Claude Code / Gemini
+    /// CLI) and return its final answer. Two INDEPENDENT gates before anything is
+    /// spawned: (1) `config.cloudAgentDelegationEnabled` — the node operator's hard
+    /// off-switch, default false, checked first; (2) the phone permission card
+    /// `runOneTool` already required to reach this function at all (the same
+    /// allow-once/always/deny path every mutating tool gets — `delegate_to_cloud_agent`
+    /// takes no shortcut around it). Once spawned, the delegated harness's OWN
+    /// file/shell tool calls are proxied through the SAME `requestPermission` the outer
+    /// turn uses — so its actions surface as permission cards on the phone too, never
+    /// auto-approved just because the parent call was. A distinct `toolCallId` per
+    /// delegated request keeps it from colliding with the outer turn's own id.
+    private func delegateToCloudAgent(
+        sessionId: String, args: JSONValue, cwd: String
+    ) async -> ToolResult {
+        guard config.cloudAgentDelegationEnabled else {
+            return ToolResult(
+                text:
+                    "delegate_to_cloud_agent is disabled on this node (requires the operator's explicit opt-in).",
+                isError: true)
+        }
+        guard let harnessID = args["harness"]?.stringValue, !harnessID.isEmpty else {
+            return ToolResult(text: "delegate_to_cloud_agent: missing 'harness'.", isError: true)
+        }
+        guard let task = args["task"]?.stringValue, !task.isEmpty else {
+            return ToolResult(text: "delegate_to_cloud_agent: missing 'task'.", isError: true)
+        }
+        guard let descriptor = HarnessRegistry.descriptor(id: harnessID), descriptor.kind == .stdioSpawn
+        else {
+            return ToolResult(
+                text: "delegate_to_cloud_agent: unknown or unsupported harness \"\(harnessID)\".",
+                isError: true)
+        }
+
+        let transport = StdioHarnessTransport(descriptor: descriptor)
+        do {
+            try transport.start()
+        } catch {
+            return ToolResult(
+                text:
+                    "delegate_to_cloud_agent: could not launch \(descriptor.displayName): \(Self.describe(error))",
+                isError: true)
+        }
+
+        let accumulator = DelegatedTurnAccumulator()
+        let handler = ACPClientHandler(
+            onAgentMessageChunk: { text in await accumulator.appendText(text) },
+            onToolCallUpdate: { _, status, content, isError in
+                await accumulator.appendActivity(status: status, content: content, isError: isError)
+            },
+            requestPermission: { [weak self] title, kind in
+                guard let self else { return false }  // agent gone → fail closed
+                return await self.requestPermission(
+                    sessionId: sessionId, toolCallId: "delegate-\(UUID().uuidString)",
+                    title: "[\(descriptor.displayName)] \(title)", kind: kind)
+            })
+        let driver = ACPClientDriver(transport: transport, handler: handler)
+
+        do {
+            _ = try await driver.start(cwd: cwd)
+            let stopReason = try await driver.prompt(task)
+            transport.close()
+            return ToolResult(
+                text: await accumulator.result(stopReason: stopReason),
+                isError: stopReason == "refusal")
+        } catch {
+            transport.close()
+            return ToolResult(
+                text:
+                    "delegate_to_cloud_agent: \(descriptor.displayName) failed: \(Self.describe(error))",
+                isError: true)
+        }
+    }
+
+    /// WS3e — accumulates a delegated harness's streamed text + tool activity into one
+    /// result string, mirroring PQRCAgent's `TurnAccumulator` fold. Kept local here
+    /// (rather than reused) because PQRCACP doesn't depend on PQRCAgent.
+    private actor DelegatedTurnAccumulator {
+        private var text = ""
+        private var activity: [String] = []
+        func appendText(_ chunk: String) { text += chunk }
+        func appendActivity(status: String, content: String?, isError: Bool) {
+            var line = "[tool \(status)"
+            if isError { line += " (error)" }
+            if let content, !content.isEmpty { line += ": \(content)" }
+            line += "]"
+            activity.append(line)
+        }
+        func result(stopReason: String) -> String {
+            let assistant = text.trimmingCharacters(in: .whitespacesAndNewlines)
+            var parts: [String] = []
+            if !assistant.isEmpty { parts.append(assistant) }
+            if !activity.isEmpty { parts.append(activity.joined(separator: "\n")) }
+            if parts.isEmpty {
+                return "(the delegated agent returned no output; stopReason=\(stopReason))"
+            }
+            return parts.joined(separator: "\n\n")
+        }
     }
 
     /// Fail-closed: kill every interactive terminal owned by `sessionId` (a session/cancel

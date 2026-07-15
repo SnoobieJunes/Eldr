@@ -124,6 +124,23 @@ struct ConfigurationView: View {
                     )
                     .font(.caption).foregroundStyle(.secondary)
                 }
+
+                Divider()
+                Toggle(
+                    "Allow delegating tasks to a cloud CLI",
+                    isOn: $store.cloudAgentDelegationEnabled)
+                if store.cloudAgentDelegationEnabled {
+                    Label(
+                        "The agent may hand sub-tasks to Claude Code / Gemini CLI (Bridge ▸ Cloud coding agent's vendor key, above). That CLI's own file/shell actions still ask on your phone — this only lets the agent choose to spawn it.",
+                        systemImage: "exclamationmark.triangle.fill"
+                    )
+                    .font(.caption).foregroundStyle(.orange)
+                } else {
+                    Text(
+                        "Off (recommended): the delegate_to_cloud_agent tool is refused immediately, before any process is spawned."
+                    )
+                    .font(.caption).foregroundStyle(.secondary)
+                }
             }
 
             ContextGraphSection()

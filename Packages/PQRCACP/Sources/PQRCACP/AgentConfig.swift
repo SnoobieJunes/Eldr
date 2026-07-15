@@ -104,6 +104,12 @@ public struct AgentConfig: Sendable, Equatable {
     /// acceptance; default false (fail closed: a mutating tool runs only on an explicit
     /// grant; a timeout/error is a denial). Env: `ELDR_ACP_ALLOW_UNGATED_TOOLS`.
     public var allowUngatedTools: Bool
+    /// WS3e: the SEPARATE, DISTINCT fail-closed gate for `delegate_to_cloud_agent` — an
+    /// EXPLICIT operator opt-in, off by default, independent of `allowUngatedTools`
+    /// (enabling standing autonomous changes must NOT also silently enable handing
+    /// tasks to an external cloud CLI). When false the tool call is refused immediately,
+    /// before any process is spawned. Env: `ELDR_ACP_ALLOW_CLOUD_DELEGATION`.
+    public var cloudAgentDelegationEnabled: Bool
     /// D2 (node-side image input): whether the configured LLM can read images. When
     /// true, the agent advertises `promptCapabilities.image=true` at `initialize` and
     /// forwards a node-side ACP `image` content block to the model as a multimodal
@@ -157,6 +163,7 @@ public struct AgentConfig: Sendable, Equatable {
         maxIterations: 0,
         shellTimeoutSeconds: 0,
         allowUngatedTools: false,
+        cloudAgentDelegationEnabled: false,
         visionEnabled: false,
         metadataKey: nil)
 
@@ -179,6 +186,7 @@ public struct AgentConfig: Sendable, Equatable {
         maxIterations: Int = 0,
         shellTimeoutSeconds: Double = 0,
         allowUngatedTools: Bool = false,
+        cloudAgentDelegationEnabled: Bool = false,
         visionEnabled: Bool = false,
         metadataKey: Data? = nil,
         logRedactor: @escaping ACPLogScrubber = ACPLogRedactor.scrub
@@ -204,6 +212,7 @@ public struct AgentConfig: Sendable, Equatable {
         self.maxIterations = max(0, maxIterations)
         self.shellTimeoutSeconds = max(0, shellTimeoutSeconds)
         self.allowUngatedTools = allowUngatedTools
+        self.cloudAgentDelegationEnabled = cloudAgentDelegationEnabled
         self.visionEnabled = visionEnabled
         // Accept a metadata key only if it's exactly 32 bytes (AES-256); anything else is
         // treated as absent so a malformed env value can't half-enable sealing.
@@ -230,6 +239,7 @@ public struct AgentConfig: Sendable, Equatable {
             && lhs.contextGraphAgentName == rhs.contextGraphAgentName
             && lhs.permissionTimeoutSeconds == rhs.permissionTimeoutSeconds
             && lhs.allowUngatedTools == rhs.allowUngatedTools
+            && lhs.cloudAgentDelegationEnabled == rhs.cloudAgentDelegationEnabled
             && lhs.visionEnabled == rhs.visionEnabled
             && lhs.metadataKey == rhs.metadataKey
     }
@@ -315,6 +325,8 @@ public struct AgentConfig: Sendable, Equatable {
             maxIterations: intEnv("ELDR_ACP_MAX_ITERATIONS", default: d.maxIterations),
             shellTimeoutSeconds: doubleEnv("ELDR_ACP_SHELL_TIMEOUT", default: d.shellTimeoutSeconds),
             allowUngatedTools: boolEnv("ELDR_ACP_ALLOW_UNGATED_TOOLS", default: d.allowUngatedTools),
+            cloudAgentDelegationEnabled: boolEnv(
+                "ELDR_ACP_ALLOW_CLOUD_DELEGATION", default: d.cloudAgentDelegationEnabled),
             visionEnabled: boolEnv("ELDR_LLM_VISION", default: d.visionEnabled),
             metadataKey: metadataKey)
     }

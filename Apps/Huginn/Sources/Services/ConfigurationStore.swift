@@ -48,6 +48,12 @@ final class ConfigurationStore: ObservableObject {
     /// (`ELDR_ACP_ALLOW_UNGATED_TOOLS`). Off by default (each change prompts). Only for
     /// a fully trusted, isolated machine.
     @Published var allowUngatedTools: Bool
+    /// WS3e: the node-operator half of `delegate_to_cloud_agent`'s fail-closed gate
+    /// (`ELDR_ACP_ALLOW_CLOUD_DELEGATION`) — a HARD off-switch, independent of
+    /// `allowUngatedTools`, checked before the agent spawns any cloud CLI at all. Off
+    /// by default. The tool call ITSELF still needs a phone permission card on top of
+    /// this (the same allow-once/always/deny every mutating tool gets).
+    @Published var cloudAgentDelegationEnabled: Bool
 
     // MARK: Tools / skills / prompts (individual files)
     /// Names of the built-in tools the agent may use. Empty in AgentConfig means
@@ -138,6 +144,7 @@ final class ConfigurationStore: ObservableObject {
         llmTimeoutSeconds = Int(llm.requestTimeoutSeconds)
         permissionTimeoutSeconds = Int(agent.permissionTimeoutSeconds)
         allowUngatedTools = agent.allowUngatedTools
+        cloudAgentDelegationEnabled = agent.cloudAgentDelegationEnabled
         enabledTools =
             agent.toolAllowlist.isEmpty
             ? Set(ConfigurationStore.allToolNames) : Set(agent.toolAllowlist)
@@ -217,6 +224,10 @@ final class ConfigurationStore: ObservableObject {
             export("ELDR_ACP_PERMISSION_TIMEOUT", String(permissionTimeoutSeconds)),
             // Security escape hatch — only honored when explicitly turned on.
             export("ELDR_ACP_ALLOW_UNGATED_TOOLS", allowUngatedTools ? "1" : "0"),
+            // WS3e: cloud-CLI delegation's node-side hard off-switch — separate from
+            // allowUngatedTools above.
+            export(
+                "ELDR_ACP_ALLOW_CLOUD_DELEGATION", cloudAgentDelegationEnabled ? "1" : "0"),
             // Empty value (learning off) → AgentConfig.stringEnv treats "" as nil.
             export("ELDR_ACP_EVENTS_FILE", learningEnabled ? paths.eventsFile : ""),
             // Empty = auto-discover the per-project eldr.md.

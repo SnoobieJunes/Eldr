@@ -319,7 +319,7 @@ struct ToolExecutorTests {
         #expect(
             names == [
                 "read_file", "write_file", "edit_file", "list_dir", "search", "run_shell",
-                "open_terminal",
+                "open_terminal", "delegate_to_cloud_agent",
             ])
         // The advertised set must match the declared source of truth.
         #expect(names == Set(ToolExecutor.allToolNames))
@@ -333,6 +333,9 @@ struct ToolExecutorTests {
         // (and, phone-side, behind the stronger standing autonomous-changes consent).
         #expect(ToolExecutor.needsPermission("open_terminal"))
         #expect(ToolExecutor.kind(for: "open_terminal") == "execute")
+        // WS3e: delegating to a cloud CLI is mutating/executing too — same gate.
+        #expect(ToolExecutor.needsPermission("delegate_to_cloud_agent"))
+        #expect(ToolExecutor.kind(for: "delegate_to_cloud_agent") == "execute")
         #expect(!ToolExecutor.needsPermission("read_file"))
         #expect(!ToolExecutor.needsPermission("list_dir"))
         #expect(!ToolExecutor.needsPermission("search"))

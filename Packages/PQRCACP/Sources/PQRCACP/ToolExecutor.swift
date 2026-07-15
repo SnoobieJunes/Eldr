@@ -165,7 +165,7 @@ public struct ToolExecutor: Sendable {
     /// "what tools exist" (used to validate an allowlist).
     public static let allToolNames = [
         "read_file", "write_file", "edit_file", "list_dir", "search", "run_shell",
-        "open_terminal",
+        "open_terminal", "delegate_to_cloud_agent",
     ]
 
     /// Phase D4 — the interactive-PTY tool name. A PERSISTENT streaming terminal (REPLs,
@@ -174,6 +174,16 @@ public struct ToolExecutor: Sendable {
     /// it and manages the `PTYProcess` lifecycle. Defined here so it shares the tool
     /// allowlist + the `execute` ToolKind (and therefore the phone's mutating-tool gate).
     public static let openTerminalTool = "open_terminal"
+
+    /// WS3e — the brokering tool: hand a sub-task to an external cloud-CLI harness
+    /// (Claude Code / Gemini CLI) and return its result. NOT run by `ToolExecutor` (it
+    /// spawns and drives a whole nested ACP session, not a single call); `ACPAgent`
+    /// intercepts it, same as `open_terminal`. Gated TWICE, independently: the node
+    /// operator's `AgentConfig.cloudAgentDelegationEnabled` (a hard off-switch, checked
+    /// before anything is spawned) AND the SAME phone permission card every mutating
+    /// tool gets (`needsPermission`) — the highest-risk surface in the router plan gets
+    /// the narrowest default, not a shortcut around the existing gate.
+    public static let delegateToCloudAgentTool = "delegate_to_cloud_agent"
 
     /// The OpenAI tool/function definitions the agent advertises to its LLM,
     /// optionally filtered to an allowlist (empty → all). Descriptions are written
@@ -274,6 +284,27 @@ public struct ToolExecutor: Sendable {
                     name: "command",
                     desc: "an optional command to run immediately in the new shell (may be empty)",
                     required: false)),
+            LLMTool(
+                name: "delegate_to_cloud_agent",
+                description:
+                    "Hand a self-contained sub-task to an external cloud coding CLI (Claude Code or Gemini CLI) running on this Mac and return its final answer. Use for a task better suited to a different model — NOT for routine file/shell work you can already do yourself. May be DISABLED on this node; a disabled/denied call returns an error, not a hang. The delegated agent's own file/shell actions are separately permission-gated on the user's device, same as your own.",
+                parameters: .object([
+                    "type": .string("object"),
+                    "properties": .object([
+                        "harness": .object([
+                            "type": .string("string"),
+                            "description": .string(
+                                "which cloud CLI to delegate to: \"claude-code\" or \"gemini-cli\""),
+                        ]),
+                        "task": .object([
+                            "type": .string("string"),
+                            "description": .string(
+                                "the self-contained sub-task/prompt to hand off"),
+                        ]),
+                    ]),
+                    "required": .array([.string("harness"), .string("task")]),
+                    "additionalProperties": .bool(false),
+                ])),
         ]
         guard !allowlist.isEmpty else { return all }
         let wanted = Set(allowlist)
@@ -307,7 +338,7 @@ public struct ToolExecutor: Sendable {
         // (`PersonaRuntime.decidePermission`) — the standing autonomous-changes consent
         // still skips the prompt, but without it the human is asked per request, same as
         // any other mutating tool. The node still re-checks C-1 (deny-on-timeout).
-        case "run_shell", "open_terminal": return "execute"
+        case "run_shell", "open_terminal", "delegate_to_cloud_agent": return "execute"
         default: return "other"
         }
     }
@@ -316,7 +347,7 @@ public struct ToolExecutor: Sendable {
     /// prompt (when the client supports it) before they run.
     static func needsPermission(_ tool: String) -> Bool {
         tool == "write_file" || tool == "edit_file" || tool == "run_shell"
-            || tool == "open_terminal"
+            || tool == "open_terminal" || tool == "delegate_to_cloud_agent"
     }
 
     /// A short human title for a tool call (shown in the editor's tool UI).
@@ -337,6 +368,13 @@ public struct ToolExecutor: Sendable {
             return cmd.isEmpty
                 ? interactiveTerminalTitlePrefix
                 : "\(interactiveTerminalTitlePrefix): \(cmd)"
+        case "delegate_to_cloud_agent":
+            // WS3f will key its own distinct consent off this exact prefix, mirroring
+            // how the phone recognizes `interactiveTerminalTitlePrefix` today.
+            let harness = args["harness"]?.stringValue ?? "?"
+            let task = args["task"]?.stringValue ?? ""
+            let truncated = task.count > 80 ? "\(task.prefix(80))…" : task
+            return "\(delegateToCloudAgentTitlePrefix) (\(harness)): \(truncated)"
         default: return tool
         }
     }
@@ -345,6 +383,11 @@ public struct ToolExecutor: Sendable {
     /// carries. Re-exported from the iOS-available `ACPTerminal` (the single source of
     /// truth shared with the phone's gate) so node-side call sites stay terse.
     public static let interactiveTerminalTitlePrefix = ACPTerminal.interactiveTerminalTitlePrefix
+
+    /// WS3e/3f — the stable title prefix every `delegate_to_cloud_agent` permission
+    /// request carries, so a client can recognize it (same pattern as
+    /// `interactiveTerminalTitlePrefix`) and eventually key a DISTINCT consent off it.
+    public static let delegateToCloudAgentTitlePrefix = "Delegate to cloud agent"
 
     // MARK: Dispatch
 

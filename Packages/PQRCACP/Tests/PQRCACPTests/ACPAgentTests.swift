@@ -600,6 +600,73 @@ struct ACPAgentTests {
         #expect((try? String(contentsOfFile: target, encoding: .utf8)) == "hello")
     }
 
+    // MARK: - WS3e: delegate_to_cloud_agent (cloud-CLI brokering) fail-closed gate
+
+    /// The gate order matters: `cloudAgentDelegationEnabled` is checked BEFORE the
+    /// harness lookup or any process spawn, so even `allowUngatedTools: true` (which
+    /// skips the phone permission card entirely) must NOT let the call through when
+    /// the operator's separate cloud-delegation switch is off (the default). Two
+    /// INDEPENDENT gates, neither implies the other.
+    @Test func delegateToCloudAgent_disabledByDefault_refusesBeforeSpawning() async throws {
+        let toolCall = LLMToolCall(
+            id: "d1", name: "delegate_to_cloud_agent",
+            arguments: "{\"harness\":\"claude-code\",\"task\":\"do a thing\"}")
+        let llm = MockLLMClient([
+            LLMResponse(content: "", toolCalls: [toolCall]),
+            LLMResponse(content: "done"),
+        ])
+        // allowUngatedTools ON: proves the DISTINCT cloudAgentDelegationEnabled gate
+        // isn't just a proxy for the standing mutating-tool gate.
+        let (agent, sink) = makeAgent(
+            llm: llm, config: AgentConfig(allowUngatedTools: true, cloudAgentDelegationEnabled: false))
+        _ = await agent.handle(line: #"{"jsonrpc":"2.0","id":0,"method":"initialize","params":{}}"#)
+        let sid = try #require(
+            try parse(
+                await agent.handle(
+                    line: #"{"jsonrpc":"2.0","id":1,"method":"session/new","params":{}}"#))[
+                "result"]?["sessionId"]?.stringValue)
+        _ = await agent.handle(
+            line:
+                "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"session/prompt\",\"params\":{\"sessionId\":\"\(sid)\",\"prompt\":[{\"type\":\"text\",\"text\":\"go\"}]}}"
+        )
+
+        let updates = await sink.updates()
+        let completed = updates.last { $0["sessionUpdate"]?.stringValue == "tool_call_update" }
+        #expect(completed?["status"]?.stringValue == "failed")
+        let errorText = completed?["content"]?.arrayValue?.first?["error"]?.stringValue
+        #expect(errorText?.contains("disabled") == true)
+    }
+
+    /// Enabled but an unknown/unsupported harness id ⇒ a clear error, no spawn attempt —
+    /// never silently falls back to SOME default harness.
+    @Test func delegateToCloudAgent_unknownHarness_isRejected() async throws {
+        let toolCall = LLMToolCall(
+            id: "d2", name: "delegate_to_cloud_agent",
+            arguments: "{\"harness\":\"not-a-real-harness\",\"task\":\"do a thing\"}")
+        let llm = MockLLMClient([
+            LLMResponse(content: "", toolCalls: [toolCall]),
+            LLMResponse(content: "done"),
+        ])
+        let (agent, sink) = makeAgent(
+            llm: llm, config: AgentConfig(allowUngatedTools: true, cloudAgentDelegationEnabled: true))
+        _ = await agent.handle(line: #"{"jsonrpc":"2.0","id":0,"method":"initialize","params":{}}"#)
+        let sid = try #require(
+            try parse(
+                await agent.handle(
+                    line: #"{"jsonrpc":"2.0","id":1,"method":"session/new","params":{}}"#))[
+                "result"]?["sessionId"]?.stringValue)
+        _ = await agent.handle(
+            line:
+                "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"session/prompt\",\"params\":{\"sessionId\":\"\(sid)\",\"prompt\":[{\"type\":\"text\",\"text\":\"go\"}]}}"
+        )
+
+        let updates = await sink.updates()
+        let completed = updates.last { $0["sessionUpdate"]?.stringValue == "tool_call_update" }
+        #expect(completed?["status"]?.stringValue == "failed")
+        let errorText = completed?["content"]?.arrayValue?.first?["error"]?.stringValue
+        #expect(errorText?.contains("unknown or unsupported") == true)
+    }
+
     // MARK: - Phase 1c: project-context injection
 
     @Test func contextFile_injectedAsLeadingSystemMessage() async throws {
