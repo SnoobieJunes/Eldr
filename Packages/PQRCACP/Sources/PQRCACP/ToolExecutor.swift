@@ -76,14 +76,23 @@ public struct ToolEnvironment: Sendable {
             || k.contains("PASSPHRASE") || k.hasSuffix("_KEY") || k.contains("_KEY_")
     }
 
+    /// Strip the agent's own long-term secrets (`secretEnvKeys` + `isOwnedSecretShaped`) from
+    /// an arbitrary environment. Shared by `shellEnvironment` (run_shell / open_terminal) and
+    /// the external-harness spawn seam (`StdioHarnessTransport`) so NO child the agent spawns —
+    /// a shell, a PTY, or a cloud CLI — ever inherits `ELDR_LLM_TOKEN` / `ELDR_ACP_METADATA_KEY`
+    /// / `SYBILCLAW_GATEWAY_TOKEN`. One definition so the two seams can't drift apart.
+    public static func scrubbingAgentSecrets(_ env: [String: String]) -> [String: String] {
+        var e = env
+        for key in e.keys where secretEnvKeys.contains(key) || isOwnedSecretShaped(key) {
+            e.removeValue(forKey: key)
+        }
+        return e
+    }
+
     /// The effective environment for a spawned shell: the base environment with the
     /// agent's secrets removed (see `secretEnvKeys`), plus the DEVELOPER_DIR override.
     var shellEnvironment: [String: String] {
-        var e = baseEnvironment
-        for key in e.keys
-        where Self.secretEnvKeys.contains(key) || Self.isOwnedSecretShaped(key) {
-            e.removeValue(forKey: key)
-        }
+        var e = Self.scrubbingAgentSecrets(baseEnvironment)
         if let dev = developerDir { e["DEVELOPER_DIR"] = dev }
         return e
     }
