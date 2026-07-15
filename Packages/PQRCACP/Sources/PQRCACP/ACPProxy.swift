@@ -71,14 +71,18 @@ public func runHarness(
     toolEnvironment: ToolEnvironment = .fromEnvironment(),
     config: AgentConfig = .fromEnvironment(),
     configDir: String? = nil,
-    streamingEnabled: Bool = true
+    streamingEnabled: Bool = true,
+    extraTools: (any ExtraToolProvider)? = nil
 ) async {
     switch descriptor.kind {
     case .builtIn:
         // Unchanged built-in path: run the in-process ACPAgent over the phone transport.
+        // `extraTools` (Phase D3 MCP chat-tool passthrough) is built-in-only — an external
+        // .stdioSpawn harness brings its own tools and never sees the phone's MCP seam.
         await runACPAgent(
             transport: client, llm: llm, toolEnvironment: toolEnvironment,
-            config: config, configDir: configDir, streamingEnabled: streamingEnabled)
+            config: config, configDir: configDir, streamingEnabled: streamingEnabled,
+            extraTools: extraTools)
 
     case .stdioSpawn:
         // Spawn the external harness and pipe the phone's verified stream both ways.

@@ -77,6 +77,17 @@ final class ConfigurationStore: ObservableObject {
     /// (`ELDR_ACP_CONTEXTGRAPH_AGENT`). Empty = derived from the session folder.
     @Published var contextGraphAgentName: String
 
+    // MARK: WS3b — cloud-CLI harness vendor keys (Keychain only, never the env file or
+    // a descriptor's static `env`). Huginn spawns `claude-code-acp`/`gemini` itself via
+    // `runHarness`, so it merges the key into a COPY of the descriptor's `env`
+    // (`HarnessDescriptor.withVendorKey`) at launch — the key never sits in `ELDR_*`
+    // where a `run_shell`/`open_terminal` child (or a prompt-injected local model)
+    // could read it. Empty = no key on file (the harness still launches, without one).
+    @Published var claudeCodeAPIKey: String
+    @Published var geminiAPIKey: String
+    private static let claudeCodeKeyAccount = "vendor-key-claude-code"
+    private static let geminiKeyAccount = "vendor-key-gemini-cli"
+
     // MARK: sybilclaw gateway (Huginn-only pref — NOT an eldr-acp env var)
     /// The port sybilclaw's gateway daemon listens on (default 18789). Used by the
     /// Connections panel's status probe (and, later, the gateway bridge). `eldr-acp`
@@ -142,6 +153,12 @@ final class ConfigurationStore: ObservableObject {
         sybilclawGatewayPort =
             (UserDefaults.standard.object(forKey: Self.gatewayPortKey) as? Int)
             ?? Self.defaultGatewayPort
+        claudeCodeAPIKey =
+            keychain.load(account: Self.claudeCodeKeyAccount)
+            .flatMap { String(data: $0, encoding: .utf8) } ?? ""
+        geminiAPIKey =
+            keychain.load(account: Self.geminiKeyAccount)
+            .flatMap { String(data: $0, encoding: .utf8) } ?? ""
 
         loaded = true
         // Debounced auto-save: any published change schedules one write 0.5s after the
@@ -160,6 +177,7 @@ final class ConfigurationStore: ObservableObject {
         // Huginn-only pref (no eldr-acp env var): persisted separately from the CLI files.
         UserDefaults.standard.set(sybilclawGatewayPort, forKey: Self.gatewayPortKey)
         saveTokenToKeychain()
+        saveVendorKeysToKeychain()
         writeEnvFile()
         writeFile(paths.toolsFile, contents: toolsFileContents())
         writeFile(paths.skillsFile, contents: skillsFileContents())
@@ -231,6 +249,36 @@ final class ConfigurationStore: ObservableObject {
         } else if let data = llmToken.data(using: .utf8) {
             try? keychain.save(data, account: Self.tokenAccount)
             try? launcherTokenKeychain.save(data, account: Self.tokenAccount)
+        }
+    }
+
+    /// WS3b: persist the cloud-CLI vendor keys to the Keychain (or delete when blank).
+    /// Data-protection only — unlike the LLM token, no launcher/file-keychain mirror:
+    /// Huginn spawns these harnesses itself (`runHarness`), so it already holds the
+    /// value in-process and merges it directly into the launch env; no external
+    /// process needs to read it back via `/usr/bin/security`.
+    private func saveVendorKeysToKeychain() {
+        saveOrDelete(claudeCodeAPIKey, account: Self.claudeCodeKeyAccount)
+        saveOrDelete(geminiAPIKey, account: Self.geminiKeyAccount)
+    }
+
+    private func saveOrDelete(_ value: String, account: String) {
+        if value.isEmpty {
+            keychain.delete(account: account)
+        } else if let data = value.data(using: .utf8) {
+            try? keychain.save(data, account: account)
+        }
+    }
+
+    /// WS3c seam: resolve a selectable harness by id with its vendor key merged in
+    /// (`HarnessDescriptor.withVendorKey`) — the single place a host asks "what do I
+    /// actually launch for this id". Returns nil for an unknown id.
+    func resolvedHarnessDescriptor(id: String) -> HarnessDescriptor? {
+        guard let descriptor = HarnessRegistry.descriptor(id: id) else { return nil }
+        switch descriptor.id {
+        case "claude-code": return descriptor.withVendorKey(claudeCodeAPIKey)
+        case "gemini-cli": return descriptor.withVendorKey(geminiAPIKey)
+        default: return descriptor
         }
     }
 

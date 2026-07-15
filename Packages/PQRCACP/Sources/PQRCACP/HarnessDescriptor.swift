@@ -51,6 +51,14 @@ public struct HarnessDescriptor: Sendable, Equatable, Identifiable {
     /// the launch commands are best-effort scaffolding data, not verified). The built-in and
     /// the locally-installed Xcode/OpenClaw launchers are not provisional.
     public let isProvisional: Bool
+    /// WS3b — the environment variable name this harness reads its vendor API key from
+    /// (e.g. `ANTHROPIC_API_KEY`), or nil for a harness that needs none (`.builtIn`, the
+    /// installed launchers, which bring their own model config). This is NOT the key
+    /// itself — `env` never carries a secret at rest in the static registry. The node
+    /// host looks the key up from ITS OWN Keychain by `id` and merges
+    /// `[vendorKeyEnvVar: key]` into a COPY of this descriptor's `env` at launch time
+    /// (see `withVendorKey`), so the secret exists only for the duration of one spawn.
+    public let vendorKeyEnvVar: String?
 
     public init(
         id: String,
@@ -59,7 +67,8 @@ public struct HarnessDescriptor: Sendable, Equatable, Identifiable {
         command: String = "",
         args: [String] = [],
         env: [String: String] = [:],
-        isProvisional: Bool = false
+        isProvisional: Bool = false,
+        vendorKeyEnvVar: String? = nil
     ) {
         self.id = id
         self.displayName = displayName
@@ -68,6 +77,22 @@ public struct HarnessDescriptor: Sendable, Equatable, Identifiable {
         self.args = args
         self.env = env
         self.isProvisional = isProvisional
+        self.vendorKeyEnvVar = vendorKeyEnvVar
+    }
+
+    /// WS3b — a copy of this descriptor with `key` merged into `env` under
+    /// `vendorKeyEnvVar`. No-op (returns self unchanged) when this harness declares no
+    /// vendor-key env var, or `key` is nil/empty (no key on file yet — the harness still
+    /// launches, just without one, so a missing Keychain entry fails open to "no key"
+    /// rather than blocking the launch). The caller is responsible for sourcing `key`
+    /// from ITS OWN Keychain — this type carries no secret storage itself.
+    public func withVendorKey(_ key: String?) -> HarnessDescriptor {
+        guard let envVar = vendorKeyEnvVar, let key, !key.isEmpty else { return self }
+        var merged = env
+        merged[envVar] = key
+        return HarnessDescriptor(
+            id: id, displayName: displayName, kind: kind, command: command, args: args,
+            env: merged, isProvisional: isProvisional, vendorKeyEnvVar: vendorKeyEnvVar)
     }
 
     /// The built-in EldrChat reference harness (bring-your-own-model). Convenience so the node
@@ -131,7 +156,8 @@ public enum HarnessRegistry {
             kind: .stdioSpawn,
             command: "claude-code-acp",
             args: [],
-            isProvisional: true),
+            isProvisional: true,
+            vendorKeyEnvVar: "ANTHROPIC_API_KEY"),
         // Codex: OpenAI's `codex` CLI, ACP/stdio subcommand.
         HarnessDescriptor(
             id: "codex",
@@ -147,7 +173,8 @@ public enum HarnessRegistry {
             kind: .stdioSpawn,
             command: "gemini",
             args: ["--experimental-acp"],
-            isProvisional: true),
+            isProvisional: true,
+            vendorKeyEnvVar: "GEMINI_API_KEY"),
         // OpenCode: the `opencode` CLI's ACP/agent stdio mode.
         HarnessDescriptor(
             id: "opencode",

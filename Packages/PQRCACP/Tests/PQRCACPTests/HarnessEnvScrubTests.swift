@@ -28,4 +28,37 @@ struct HarnessEnvScrubTests {
         #expect(scrubbed["ANTHROPIC_API_KEY"] == "vendor-key")
         #expect(scrubbed["PATH"] == "/usr/bin:/bin")
     }
+
+    // WS3b — `HarnessDescriptor.withVendorKey`: the registry itself carries no secret
+    // (`env` starts empty for claude-code/gemini-cli); the host merges a key from ITS
+    // OWN Keychain in at launch. Prove the merge is correct and the no-op cases are
+    // actually no-ops (never invent an env var, never write an empty/nil key).
+    @Test func withVendorKey_mergesUnderTheDeclaredEnvVar() {
+        let claudeCode = HarnessRegistry.descriptor(id: "claude-code")!
+        let launched = claudeCode.withVendorKey("sk-ant-test123")
+        #expect(launched.env["ANTHROPIC_API_KEY"] == "sk-ant-test123")
+        // Everything else about the descriptor is untouched.
+        #expect(launched.id == claudeCode.id)
+        #expect(launched.command == claudeCode.command)
+    }
+
+    @Test func withVendorKey_geminiUsesItsOwnEnvVar() {
+        let geminiCLI = HarnessRegistry.descriptor(id: "gemini-cli")!
+        let launched = geminiCLI.withVendorKey("gm-test456")
+        #expect(launched.env["GEMINI_API_KEY"] == "gm-test456")
+        #expect(launched.env["ANTHROPIC_API_KEY"] == nil)
+    }
+
+    @Test func withVendorKey_nilOrEmptyKeyIsANoOp() {
+        let claudeCode = HarnessRegistry.descriptor(id: "claude-code")!
+        #expect(claudeCode.withVendorKey(nil).env.isEmpty)
+        #expect(claudeCode.withVendorKey("").env.isEmpty)
+    }
+
+    @Test func withVendorKey_harnessWithNoDeclaredEnvVarIsANoOp() {
+        // The built-in harness and the installed launchers declare no vendor-key env
+        // var — a key must never be silently invented an env slot for them.
+        let builtIn = HarnessDescriptor.builtIn
+        #expect(builtIn.withVendorKey("some-key").env.isEmpty)
+    }
 }
