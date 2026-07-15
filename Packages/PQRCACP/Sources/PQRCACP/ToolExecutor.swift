@@ -303,11 +303,10 @@ public struct ToolExecutor: Sendable {
         case "write_file", "edit_file": return "edit"
         // run_shell and open_terminal both EXECUTE on the node → the `execute` ToolKind,
         // which the phone's allowlist (`PersonaRuntime.isMutatingACPToolKind`) treats as
-        // mutating. open_terminal carries the stronger phone-side gate (the standing
-        // autonomous-changes consent, no allow-once) because an open-ended interactive
-        // shell can't be meaningfully approved per-keystroke — that distinction is made
-        // phone-side off the tool TITLE (`isInteractiveTerminalTitle`), since the ACP
-        // ToolKind vocabulary has no finer-grained value.
+        // mutating. Both route through the SAME allow-once/always/deny prompt
+        // (`PersonaRuntime.decidePermission`) — the standing autonomous-changes consent
+        // still skips the prompt, but without it the human is asked per request, same as
+        // any other mutating tool. The node still re-checks C-1 (deny-on-timeout).
         case "run_shell", "open_terminal": return "execute"
         default: return "other"
         }
@@ -330,9 +329,10 @@ public struct ToolExecutor: Sendable {
         case "search": return "Search \"\(args["query"]?.stringValue ?? "")\""
         case "run_shell": return "Run: \(args["command"]?.stringValue ?? "")"
         case "open_terminal":
-            // The phone keys its STRONGER gate (standing autonomous-changes consent, no
-            // allow-once) off this exact prefix — `ACPTerminal.interactiveTerminalTitlePrefix`
-            // (iOS-available, the single source of truth) / `PersonaRuntime.isInteractiveTerminalTitle`.
+            // `ACPTerminal.interactiveTerminalTitlePrefix` (iOS-available, the single
+            // source of truth) — the exact prefix the title starts with, shown in the
+            // phone's permission card so the human can see it's an open-ended shell,
+            // not a one-shot command, before deciding allow-once/always/deny.
             let cmd = args["command"]?.stringValue ?? ""
             return cmd.isEmpty
                 ? interactiveTerminalTitlePrefix

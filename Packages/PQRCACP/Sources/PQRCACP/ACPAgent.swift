@@ -236,6 +236,12 @@ public actor ACPAgent {
                 "audio": .bool(false),
                 "embeddedContext": .bool(true),
             ]),
+            // The silent-bypass signal: whether THIS node runs mutating tools without a
+            // phone-side prompt (`ELDR_ACP_ALLOW_UNGATED_TOOLS` / the Huginn "Run tools
+            // without asking permission" toggle). Non-standard ACP field, `eldr`-prefixed
+            // so a spec-compliant client just ignores it. Without this the phone has no
+            // way to know it's being silently bypassed — see WS2.
+            "eldrAllowUngatedTools": .bool(config.allowUngatedTools),
         ]
         // Advertise skills here too (in addition to the post-session/new
         // available_commands_update), so a client that reads commands at initialize
@@ -629,11 +635,12 @@ public actor ACPAgent {
         // Phase D4: `open_terminal` is NOT run by the per-turn `ToolExecutor` (a value
         // type can't own a long-lived process). The agent intercepts it and spawns a
         // persistent `PTYProcess` whose output streams to the phone as `terminal_output`
-        // session/updates. The phone has ALREADY gated this through its standing
-        // autonomous-changes consent (the `open_terminal` tool_call carried the `execute`
-        // kind + the interactive-terminal title, and `requestPermission` above returned
-        // true only if the owner consented). The node STILL re-checked C-1 there, so by
-        // the time we reach this line the open-ended shell was explicitly authorized.
+        // session/updates. The phone has ALREADY gated this — the `open_terminal`
+        // tool_call carried the `execute` kind + the interactive-terminal title, and
+        // `requestPermission` above returned true only if the owner allowed it (standing
+        // autonomous-changes consent, or an explicit allow-once/always via the prompt).
+        // The node STILL re-checked C-1 there, so by the time we reach this line the
+        // open-ended shell was explicitly authorized.
         let result: ToolResult
         if name == ToolExecutor.openTerminalTool {
             result = await openInteractiveTerminal(

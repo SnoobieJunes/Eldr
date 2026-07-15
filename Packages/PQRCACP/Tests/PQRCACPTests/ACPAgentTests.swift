@@ -77,6 +77,21 @@ struct ACPAgentTests {
         #expect(result["agentInfo"]?["name"]?.stringValue == "eldr-acp")
         // We don't persist sessions.
         #expect(result["agentCapabilities"]?["loadSession"]?.boolValue == false)
+        // WS2 — the silent-bypass indicator: DEFAULT config never runs tools ungated, and
+        // the node must say so honestly at initialize (the phone has no other way to know).
+        #expect(result["agentCapabilities"]?["eldrAllowUngatedTools"]?.boolValue == false)
+    }
+
+    /// WS2 — when the node's `allowUngatedTools` override IS on (the Mac-side "run tools
+    /// without asking" escape hatch), `initialize` must say so, so the phone can show its
+    /// silent-bypass banner instead of trusting a prompt that will never come.
+    @Test func initialize_advertisesUngatedToolsWhenConfigured() async throws {
+        let (agent, _) = makeAgent(
+            llm: EchoLLMClient(), config: AgentConfig(allowUngatedTools: true))
+        let response = try parse(
+            await agent.handle(
+                line: #"{"jsonrpc":"2.0","id":0,"method":"initialize","params":{}}"#))
+        #expect(response["result"]?["agentCapabilities"]?["eldrAllowUngatedTools"]?.boolValue == true)
     }
 
     // MARK: D2 — vision capability gate + image forwarding

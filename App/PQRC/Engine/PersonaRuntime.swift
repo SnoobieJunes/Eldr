@@ -54,6 +54,10 @@ enum RuntimeEvent: Sendable {
     /// (`available_commands_update`). Drives the quick-action chip row in the
     /// interactive-terminal view. Re-sent in full on each change.
     case acpAvailableCommands(conversationID: String, commands: [String])
+    /// WS2 — the node's `allowUngatedTools` state, advertised at `initialize`: `true`
+    /// means it runs mutating tools WITHOUT a phone-side prompt. Drives the persistent
+    /// silent-bypass banner in the conversation.
+    case acpUngatedToolsAdvertised(conversationID: String, allowed: Bool)
 }
 
 /// One configured relay's URL paired with its current connection health.
@@ -397,6 +401,9 @@ actor PersonaRuntime {
                 case .availableCommands(let commands):
                     plansContinuation?.yield(
                         .acpAvailableCommands(conversationID: nodeHex, commands: commands))
+                case .ungatedToolsAdvertised(let allowed):
+                    plansContinuation?.yield(
+                        .acpUngatedToolsAdvertised(conversationID: nodeHex, allowed: allowed))
                 case .assistantText, .toolCall, .toolCallUpdate:
                     break  // folded into the reply message; not a live UI signal here
                 }
@@ -454,30 +461,6 @@ actor PersonaRuntime {
             AppSession.setAutonomousChangesConsent(true, nodeID: nodeHex, siloID: silo)
         }
         return decision != .deny
-    }
-
-    /// Phase D4 — the GATE for opening an interactive PTY terminal on the node (the
-    /// project's highest-risk surface: a persistent interactive shell on the user's Mac,
-    /// driven from the phone). Unlike `decidePermission` for one-shot mutating tools,
-    /// there is NO per-action allow-once path: an open-ended shell can't be meaningfully
-    /// approved one keystroke at a time, so it requires the SAME standing
-    /// `autonomousChangesConsent` the user explicitly opted into (Settings ▸ the node's
-    /// "autonomous changes" toggle). With that consent OFF, PTY creation FAILS CLOSED — no
-    /// terminal is ever opened. `nonisolated static` + pure so the `@Sendable` permission
-    /// handler can call it without hopping the actor (matching `isMutatingACPToolKind`).
-    /// The node independently re-checks C-1 (deny-on-timeout) and keeps its own cwd jail,
-    /// so this is the phone-owned last brake on the escape hatch, not the only one.
-    nonisolated static func decideInteractivePTY(nodeHex: String, silo: String) -> Bool {
-        AppSession.autonomousChangesConsent(nodeID: nodeHex, siloID: silo)
-    }
-
-    /// Whether an ACP permission request's `title` is an interactive-PTY (`open_terminal`)
-    /// request — matched against `ACPTerminal.interactiveTerminalTitlePrefix` (iOS-available,
-    /// the same prefix the node attaches to every such request). The ACP ToolKind
-    /// (`execute`) can't distinguish it from `run_shell`, so the title is the signal that
-    /// routes it to the stronger `decideInteractivePTY` gate. `nonisolated static` + pure.
-    nonisolated static func isInteractiveTerminalTitle(_ title: String) -> Bool {
-        title.hasPrefix(ACPTerminal.interactiveTerminalTitlePrefix)
     }
 
     /// (Phase 3 — intelligent task routing.) Keep the AI-selection policy in sync with the

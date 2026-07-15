@@ -24,41 +24,7 @@ import Testing
 @Suite("Phase D4 — interactive terminal gate (phone side)", .serialized)
 struct ACPInteractiveTerminalGateTests {
 
-    // MARK: - (1) Pure decision logic
-
-    /// The interactive-PTY gate keys ONLY off the standing autonomous-changes consent —
-    /// no allow-once, no prompt. Off ⇒ false (fail closed); on ⇒ true.
-    @Test func decideInteractivePTY_requiresStandingConsent() {
-        let node = "deadbeef-pty-gate-\(UUID().uuidString.prefix(6))"
-        AppSession.setAutonomousChangesConsent(false, nodeID: node, siloID: "")
-        #expect(
-            PersonaRuntime.decideInteractivePTY(nodeHex: node, silo: "") == false,
-            "with autonomous-changes consent OFF, opening an interactive shell must FAIL CLOSED")
-
-        AppSession.setAutonomousChangesConsent(true, nodeID: node, siloID: "")
-        #expect(
-            PersonaRuntime.decideInteractivePTY(nodeHex: node, silo: "") == true,
-            "with the standing consent ON, the interactive shell is allowed")
-        AppSession.setAutonomousChangesConsent(false, nodeID: node, siloID: "")
-    }
-
-    /// The phone recognizes an interactive-PTY request purely from the ACP `title` the
-    /// node attaches (the `execute` ToolKind is too coarse). The matcher must accept the
-    /// title the node actually produces for `open_terminal`, and reject a `run_shell` one.
-    @Test func isInteractiveTerminalTitle_matchesNodeTitle_notRunShell() {
-        // The exact prefix the node sends (single source of truth, iOS-available).
-        #expect(
-            PersonaRuntime.isInteractiveTerminalTitle(
-                ACPTerminal.interactiveTerminalTitlePrefix))
-        #expect(
-            PersonaRuntime.isInteractiveTerminalTitle(
-                "\(ACPTerminal.interactiveTerminalTitlePrefix): python3"))
-        // A one-shot run_shell title must NOT trip the stronger gate (it has its own).
-        #expect(!PersonaRuntime.isInteractiveTerminalTitle("Run: ls -la"))
-        #expect(!PersonaRuntime.isInteractiveTerminalTitle("Write A.swift"))
-    }
-
-    // MARK: - (2) End-to-end over the real relay-ACP path
+    // MARK: - End-to-end over the real relay-ACP path
 
     private func makeRuntime(_ name: String, seed: UInt64, relay: LocalRelaySimulator, ais: [TetheredAI])
         async -> PersonaRuntime

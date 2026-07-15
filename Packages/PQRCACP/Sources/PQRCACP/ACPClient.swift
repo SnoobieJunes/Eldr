@@ -43,6 +43,10 @@ public enum ACPUIEvent: Sendable, Equatable {
     case toolCallUpdate(id: String, status: String, text: String?, isError: Bool)
     /// The agent advertised its slash-commands for the session.
     case availableCommands([String])
+    /// The node's `allowUngatedTools` state, advertised at `initialize` (the
+    /// silent-bypass indicator). `true` means the node runs mutating tools WITHOUT a
+    /// phone-side prompt — the client must surface this loudly, not silently trust it.
+    case ungatedToolsAdvertised(Bool)
     /// The agent reported its plan for the turn (a checklist). Re-sent in full on
     /// each change, so the latest `.plan` is the current state of every step.
     case plan([ACPPlanEntry])

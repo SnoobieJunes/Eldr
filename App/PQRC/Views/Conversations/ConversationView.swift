@@ -42,6 +42,11 @@ struct ConversationView: View {
     /// changes it (it lives in UserDefaults, not @Observable state).
     @State private var aiSummary: (mode: String, isRemote: Bool, firewallOn: Bool) =
         ("active", false, true)
+    /// WS2 — mirrors my own standing autonomous-changes consent (it lives in
+    /// UserDefaults, not @Observable state), refreshed on appear like `aiSummary`.
+    /// Combined with `model.acpNodeUngatedByConversation` (which IS observable) to
+    /// drive the silent-bypass banner.
+    @State private var codingAutonomyLocal = false
 
     /// @-mention autocomplete (feature 6): all candidates for this chat (my AIs +
     /// people + their AIs), and the filtered subset shown for the active @token.
@@ -56,6 +61,13 @@ struct ConversationView: View {
     /// checklist's visibility). Reads the same local tag the wrench icon uses.
     private var isCodingAgent: Bool {
         model.conversations.first { $0.id == conversationID }?.isCodingAgent ?? false
+    }
+
+    /// WS2 — the silent-bypass indicator: mutating tools on this node run WITHOUT a
+    /// phone-side prompt, from either my own standing consent or the node's own
+    /// `allowUngatedTools` override.
+    private var silentBypassActive: Bool {
+        codingAutonomyLocal || model.acpNodeUngatedByConversation[conversationID] == true
     }
 
     private var isGroup: Bool {
@@ -104,6 +116,31 @@ struct ConversationView: View {
             // views, so their frequent churn (esp. per-chunk terminal output) re-renders only the
             // slot — not this VStack and its message `LazyVStack`. Same reading-width cap.
             if isCodingAgent {
+                // WS2 — the silent-bypass indicator: the actual fix for "prompts aren't
+                // working." The prompt itself is already fail-closed; the real gap was
+                // that a standing consent (mine) or a Mac-side override (the node's own
+                // "run tools without asking" toggle, invisible to the phone until now)
+                // could skip it SILENTLY. Persistent while either is true; tapping clears
+                // MY consent (the node-side override, if that's the cause, still needs
+                // the node's own toggle flipped — Huginn Configuration).
+                if silentBypassActive {
+                    Button {
+                        codingAutonomyLocal = false
+                        model.setCodingAutonomy(false, nodeHex: conversationID)
+                    } label: {
+                        Label(
+                            "This AI runs tools without asking — tap to require approval",
+                            systemImage: "lock.open.trianglebadge.exclamationmark")
+                            .font(.callout.weight(.medium))
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                    }
+                    .buttonStyle(.plain)
+                    .foregroundStyle(.white)
+                    .padding(.vertical, 8)
+                    .padding(.horizontal, 12)
+                    .background(.orange)
+                    .accessibilityIdentifier("silent-bypass-banner")
+                }
                 ACPPlanSlot(model: model, conversationID: conversationID)
                 ACPTerminalSlot(model: model, conversationID: conversationID)
             }
@@ -152,6 +189,7 @@ struct ConversationView: View {
                 largePaste = String(repeating: "PQRC large paste demo line.\n", count: 8000)
             }
             aiSummary = model.primaryAIContextSummary(conversationID)
+            codingAutonomyLocal = model.codingAutonomy(nodeHex: conversationID)
             // Refresh the agent-bubble type badges in case the AI config changed.
             model.refreshAITypes()
             scheduleVisibilityRefresh(immediate: true)

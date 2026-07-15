@@ -92,6 +92,10 @@ public struct ACPSessionInfo: Sendable {
     public let agentName: String?
     public let agentVersion: String?
     public let availableCommands: [String]
+    /// The node's `allowUngatedTools` state (the silent-bypass indicator) — `true` means
+    /// mutating tools run there WITHOUT a phone-side prompt. Defaults false when the
+    /// node doesn't advertise the field (older agent build).
+    public let ungatedToolsAllowed: Bool
 }
 
 public enum ACPClientError: Error, Sendable, Equatable {
@@ -244,6 +248,8 @@ public actor ACPClientDriver {
         let agentName = initResult["agentInfo"]?["name"]?.stringValue
         let agentVersion = initResult["agentInfo"]?["version"]?.stringValue
         var commands = Self.commandNames(initResult["agentCapabilities"]?["availableCommands"])
+        let ungatedToolsAllowed =
+            initResult["agentCapabilities"]?["eldrAllowUngatedTools"]?.boolValue ?? false
 
         // session/new → the session id we prompt against. Phase D3: when the owner
         // opted into sharing chat context with this node, advertise a non-empty
@@ -271,7 +277,7 @@ public actor ACPClientDriver {
         if commands.isEmpty { commands = [] }
         return ACPSessionInfo(
             sessionId: sid, agentName: agentName, agentVersion: agentVersion,
-            availableCommands: commands)
+            availableCommands: commands, ungatedToolsAllowed: ungatedToolsAllowed)
     }
 
     /// Send one `session/prompt` and return its `stopReason` (e.g. `end_turn`,
