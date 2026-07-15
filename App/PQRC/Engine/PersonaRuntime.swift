@@ -50,6 +50,10 @@ enum RuntimeEvent: Sendable {
     /// Phase D4 — an interactive terminal ended (child exited or killed via Stop /
     /// fail-closed teardown). The UI removes the terminal view.
     case acpTerminalClosed(conversationID: String, terminalID: String, exitCode: Int?)
+    /// The node advertised its slash-commands/skills for the session
+    /// (`available_commands_update`). Drives the quick-action chip row in the
+    /// interactive-terminal view. Re-sent in full on each change.
+    case acpAvailableCommands(conversationID: String, commands: [String])
 }
 
 /// One configured relay's URL paired with its current connection health.
@@ -390,7 +394,10 @@ actor PersonaRuntime {
                     plansContinuation?.yield(
                         .acpTerminalClosed(
                             conversationID: nodeHex, terminalID: terminalId, exitCode: exitCode))
-                case .assistantText, .toolCall, .toolCallUpdate, .availableCommands:
+                case .availableCommands(let commands):
+                    plansContinuation?.yield(
+                        .acpAvailableCommands(conversationID: nodeHex, commands: commands))
+                case .assistantText, .toolCall, .toolCallUpdate:
                     break  // folded into the reply message; not a live UI signal here
                 }
             },

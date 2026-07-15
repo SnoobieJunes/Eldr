@@ -34,6 +34,7 @@ struct ACPTerminalView: View {
             if terminal.closed {
                 closedFooter
             } else {
+                chipRow
                 stdinRow
             }
         }
@@ -122,6 +123,49 @@ struct ACPTerminalView: View {
         guard lastReportedSize?.cols != cols || lastReportedSize?.rows != rows else { return }  // L2: only on actual change
         lastReportedSize = (cols, rows)
         Task { await model.resizeACPTerminal(cols: cols, rows: rows, conversationID: conversationID) }
+    }
+
+    /// A curated set of common shell commands, always offered regardless of what the
+    /// node advertises — the node's `available_commands_update` (skills like `/spec`)
+    /// may be empty or sparse, but "build/test/status" are useful in any shell.
+    private static let curatedCommands = ["build", "test", "git status", "git diff", "ls", "clear"]
+
+    /// WS1 — quick-action chips: the curated set above, followed by whatever the node
+    /// advertised for this session (`available_commands_update`, e.g. skills), followed
+    /// by a `^Z` control chip. Each chip is just a shortcut for typing the same text /
+    /// control byte into the live shell — same `sendACPTerminalInput`/`Control` paths
+    /// the stdin field and ^C/^D buttons already use.
+    private var chipRow: some View {
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: 6) {
+                ForEach(Self.curatedCommands, id: \.self) { cmd in
+                    commandChip(cmd)
+                }
+                ForEach(model.acpCommandsByConversation[conversationID] ?? [], id: \.self) { cmd in
+                    commandChip(cmd)
+                }
+                Button {
+                    Task { await model.sendACPTerminalControl("\u{1A}", conversationID: conversationID) }
+                } label: {
+                    Text("^Z").font(.caption.weight(.bold).monospaced())
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+                .accessibilityLabel("Send suspend (Control-Z)")
+                .accessibilityIdentifier("acp-terminal-ctrl-z")
+            }
+        }
+    }
+
+    private func commandChip(_ command: String) -> some View {
+        Button {
+            Task { await model.sendACPTerminalInput(command, conversationID: conversationID) }
+        } label: {
+            Text(command).font(.caption.monospaced())
+        }
+        .buttonStyle(.bordered)
+        .controlSize(.small)
+        .accessibilityIdentifier("acp-terminal-chip-\(command)")
     }
 
     private var stdinRow: some View {
