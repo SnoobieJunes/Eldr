@@ -173,12 +173,17 @@ public final class PTYProcess: @unchecked Sendable {
         source.setEventHandler {
             var buffer = [UInt8](repeating: 0, count: 4096)
             let n = buffer.withUnsafeMutableBytes { read(fd, $0.baseAddress, 4096) }
+            let err = errno  // capture immediately: nothing below reads before this
             if n > 0 {
                 cont.yield(Data(buffer[0..<n]))
+            } else if n < 0 && (err == EINTR || err == EAGAIN) {
+                // Transient, NOT end-of-stream: a signal interrupted the read (EINTR) or no
+                // data was actually ready (EAGAIN). Return and let the read source fire
+                // again — finishing here would truncate a still-live terminal.
+                return
             } else {
-                // n == 0 → EOF (child exited / we closed the fd). n < 0 with EAGAIN is not
-                // possible for a blocking fd under a read source; any other negative is a
-                // hard error. Either way the stream is done.
+                // n == 0 → real EOF (child exited / we closed the fd); any other negative is
+                // a hard error. Either way the stream is done.
                 cont.finish()
             }
         }
@@ -256,11 +261,20 @@ public final class PTYProcess: @unchecked Sendable {
         // with the group, so nothing is orphaned.
         kill(-pid, SIGTERM)
         kill(-pid, SIGKILL)
-        // Reap the zombie so the child is fully gone (non-blocking; the kill above already
-        // delivered SIGKILL, and we don't want to block teardown if it lingers a tick —
-        // WNOHANG plus the SIGKILL is enough to prevent an orphan).
+        // Reap the child so it doesn't linger as a zombie. SIGKILL is delivered
+        // asynchronously, so an immediate WNOHANG usually returns 0 (not dead YET). Poll a
+        // few times with a 1 ms sleep: a killed child we own dies in well under a
+        // millisecond, so this reaps it in the common case — while staying BOUNDED. A child
+        // wedged in an uninterruptible (D-state) kernel wait can't be reaped until it leaves
+        // that state, and teardown must not block on it, so we give up after the cap (≤50 ms)
+        // and leave at most one short-lived zombie — the same worst case as before, but now
+        // hit only in that pathological case instead of routinely.
         var status: Int32 = 0
-        waitpid(pid, &status, WNOHANG)
+        for _ in 0..<50 {
+            let r = waitpid(pid, &status, WNOHANG)
+            if r != 0 { break }  // r == pid: reaped. r < 0 (ECHILD): already gone / no child.
+            usleep(1000)  // 1 ms; ≤ 50 ms total
+        }
 
         // Cancel the read source → its cancel handler closes the master fd (exactly once).
         readSource.cancel()

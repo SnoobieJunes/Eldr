@@ -187,7 +187,7 @@ public actor ACPAgent {
                 // Fail-closed: a cancel also KILLS every interactive terminal owned by
                 // this session — an open-ended shell must never outlive the turn that was
                 // cancelled (no orphaned interactive shell on the Mac).
-                terminateTerminals(forSession: sid)
+                await terminateTerminals(forSession: sid)
             }
         case "terminal/input":
             // Phase D4 — write stdin to a live PTY. Best-effort; a write to a terminal
@@ -769,25 +769,24 @@ public actor ACPAgent {
     }
 
     /// Fail-closed: kill every interactive terminal owned by `sessionId` (a session/cancel
-    /// landed). No PTY may outlive a cancelled turn.
-    private func terminateTerminals(forSession sessionId: String) {
-        for (id, live) in terminals where live.sessionId == sessionId {
-            live.process.terminate()
-            live.pump.cancel()
-            terminals.removeValue(forKey: id)
-        }
+    /// landed). No PTY may outlive a cancelled turn. Routes through `finalizeTerminal` so the
+    /// phone gets a `terminal_closed` for each — `finalizeTerminal` kills the child FIRST
+    /// (synchronously) and only then notifies, so a slow/dead connection can't delay the kill
+    /// or orphan a shell. The `terminals` snapshot is taken before iterating because
+    /// `finalizeTerminal` mutates the map.
+    private func terminateTerminals(forSession sessionId: String) async {
+        let ids = terminals.filter { $0.value.sessionId == sessionId }.map(\.key)
+        for id in ids { await finalizeTerminal(id, exitCode: nil) }
     }
 
     /// Fail-closed teardown: terminate EVERY live interactive terminal (the agent is
     /// shutting down / the transport dropped). Public so the node host can call it when
     /// the owner-verified stream closes — an interactive shell must never survive the
-    /// session that authorized it. Idempotent.
-    public func terminateAllTerminals() {
-        for (_, live) in terminals {
-            live.process.terminate()
-            live.pump.cancel()
-        }
-        terminals.removeAll()
+    /// session that authorized it. Idempotent. Like `terminateTerminals`, each terminal
+    /// goes through `finalizeTerminal` (child killed first, then a best-effort
+    /// `terminal_closed`), so the kill never waits on the notify.
+    public func terminateAllTerminals() async {
+        for id in Array(terminals.keys) { await finalizeTerminal(id, exitCode: nil) }
     }
 
     /// Test-only: how many interactive terminals are currently live.
