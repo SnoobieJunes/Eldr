@@ -55,6 +55,21 @@ struct ConfigurationView: View {
                 healthRow
             }
 
+            Section("Cloud coding agents") {
+                LabeledContent("Claude Code API key") {
+                    SecureField("sk-ant-…", text: $store.claudeCodeAPIKey)
+                        .textFieldStyle(.roundedBorder)
+                }
+                LabeledContent("Gemini API key") {
+                    SecureField("(leave blank if unused)", text: $store.geminiAPIKey)
+                        .textFieldStyle(.roundedBorder)
+                }
+                Text(
+                    "Only used when Bridge's \"Cloud coding agent\" picker selects that CLI. Each key is injected ONLY into that CLI's own process — never this app's shell, never eldr-acp's environment."
+                )
+                .font(.caption).foregroundStyle(.secondary)
+            }
+
             connectionsSection
 
             Section("Context budget") {

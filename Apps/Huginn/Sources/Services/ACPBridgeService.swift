@@ -288,6 +288,20 @@ final class ACPBridgeService: ObservableObject {
         }
     }
 
+    /// WS3c — which backend answers the phone's REMOTE-drive session over the relay
+    /// (`ACPRelayHost`): the built-in `eldr-acp` (default) or a `HarnessRegistry` id for
+    /// an external cloud CLI (`claude-code`, `gemini-cli`) whose vendor key comes from
+    /// the Keychain (Settings ▸ Cloud coding agents), never this app's general env.
+    /// DISTINCT from `responder`, which only picks what drafts a reply in the Mac's own
+    /// read-only watch-along chat mirror — a completely separate feature.
+    @Published var relayHarnessID: String = ConfigurationStore.selectedRelayHarnessID() {
+        didSet {
+            UserDefaults.standard.set(relayHarnessID, forKey: ConfigurationStore.relayHarnessIDKey)
+            // Re-wire the live relay host immediately if it's already serving.
+            if messenger != nil { refreshRelayACPHost() }
+        }
+    }
+
     // Per-message-type opt-in — OFF by default (the user chooses to share).
     @Published var shareToolCalls = false
     @Published var shareBuildResults = false
@@ -823,15 +837,23 @@ final class ACPBridgeService: ObservableObject {
     /// Stand up the relay ACP host over `messenger`: serve the FULL ACP protocol to the
     /// OWNER's phone over the relay (remote drive), with the C-3 gate admitting ONLY the
     /// owner's frames and the permission gate left fail-closed. No-op (fail-closed) unless
-    /// an owner is pinned AND a usable LLM is configured — without an owner there is no
-    /// gate target, and without a model the agent can't answer. Idempotent. The host's
+    /// an owner is pinned AND a usable backend is configured — without an owner there is
+    /// no gate target; without a model there is nothing to answer with UNLESS
+    /// `relayHarnessID` (WS3c) selects an external cloud CLI, which brings its own model
+    /// and needs no local LLM URL. Idempotent. The host's
     /// publish seam is `messenger.send(framed, to: owner)`; its inbound is fed by
     /// `handleMessengerEvent`'s ACP-frame routing.
     private func startRelayACPHost(messenger: PQRCMessenger) {
         guard relayHost == nil, let ownerIdentityHex else { return }
         let llmConfig = Self.relayHostLLMConfig()
-        // No usable endpoint (empty URL) ⇒ don't serve a dead agent over the relay.
-        guard !llmConfig.url.isEmpty else { return }
+        // WS3c: resolve the selected backend FIRST — an external cloud CLI brings its
+        // own model, so the built-in LLM-URL check below must not fail-closed a
+        // deliberately-selected cloud harness just because no local LLM is configured.
+        let descriptor =
+            ConfigurationStore.resolvedHarnessDescriptor(id: relayHarnessID) ?? .builtIn
+        // No usable endpoint (empty URL) ⇒ don't serve a dead built-in agent over the
+        // relay. Only applies to `.builtIn` — a `.stdioSpawn` harness needs no local URL.
+        guard descriptor.kind != .builtIn || !llmConfig.url.isEmpty else { return }
         DiagnosticsLog.shared.post(
             .node, .info, "Relay ACP host starting",
             "owner=\(ownerIdentityHex.prefix(12))… · LLM=\(llmConfig.url) · model=\(llmConfig.model)")
@@ -851,6 +873,7 @@ final class ACPBridgeService: ObservableObject {
             toolEnvironment: toolEnvironment,
             config: relayConfig,
             streamingEnabled: relayHostStreamingEnabled,
+            descriptor: descriptor,
             publish: { [weak messenger] framed in
                 // The transport's send seam: publish ONE framed chunk to the owner as an
                 // ordinary PQRC message. participant_type stays .human — the frame is the

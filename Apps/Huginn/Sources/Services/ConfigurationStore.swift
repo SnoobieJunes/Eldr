@@ -274,12 +274,34 @@ final class ConfigurationStore: ObservableObject {
     /// (`HarnessDescriptor.withVendorKey`) — the single place a host asks "what do I
     /// actually launch for this id". Returns nil for an unknown id.
     func resolvedHarnessDescriptor(id: String) -> HarnessDescriptor? {
+        Self.resolvedHarnessDescriptor(id: id, keychain: keychain)
+    }
+
+    /// Static counterpart, for a caller that doesn't hold a live `ConfigurationStore`
+    /// instance (mirrors `ACPBridgeService.llmTokenEnvironment()`'s pattern of reading
+    /// the Keychain directly via the default `KeychainBox()` — same service/account
+    /// convention, so it sees whatever the instance last saved).
+    static func resolvedHarnessDescriptor(
+        id: String, keychain: KeychainBox = KeychainBox()
+    ) -> HarnessDescriptor? {
         guard let descriptor = HarnessRegistry.descriptor(id: id) else { return nil }
+        let account: String
         switch descriptor.id {
-        case "claude-code": return descriptor.withVendorKey(claudeCodeAPIKey)
-        case "gemini-cli": return descriptor.withVendorKey(geminiAPIKey)
+        case "claude-code": account = claudeCodeKeyAccount
+        case "gemini-cli": account = geminiKeyAccount
         default: return descriptor
         }
+        let key = keychain.load(account: account).flatMap { String(data: $0, encoding: .utf8) }
+        return descriptor.withVendorKey(key)
+    }
+
+    /// WS3c: which harness answers the phone's REMOTE-drive session over the relay
+    /// (`ACPRelayHost` — distinct from the watch-along `Responder`, which only picks
+    /// what drafts a reply in the Mac's own read-only chat mirror). A Huginn-only pref
+    /// (UserDefaults, like `sybilclawGatewayPort`) — not an eldr-acp env var.
+    static let relayHarnessIDKey = "relayHarnessID"
+    static func selectedRelayHarnessID() -> String {
+        UserDefaults.standard.string(forKey: relayHarnessIDKey) ?? HarnessDescriptor.builtIn.id
     }
 
     /// `export KEY='value'` with POSIX single-quote escaping so any URL/token/path is

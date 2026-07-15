@@ -207,6 +207,24 @@ struct BridgeView: View {
                         : "eldr-acp: the owner drives our agent (its own configured LLM) — works even without sybilclaw."
                 )
                 .font(.caption2).foregroundStyle(.secondary)
+
+                Divider()
+                // WS3c — DISTINCT from "Mac-side responder" above: this picks what
+                // answers the phone's REMOTE-drive session (full tool-calling ACP,
+                // permission cards and all), not what drafts into the watch-along mirror.
+                Picker("Cloud coding agent", selection: $bridge.relayHarnessID) {
+                    Text("Built-in (eldr-acp)").tag("eldr-acp")
+                    Text("Claude Code").tag("claude-code")
+                    Text("Gemini CLI").tag("gemini-cli")
+                }
+                .pickerStyle(.segmented)
+                .accessibilityIdentifier("bridge-relay-harness")
+                Text(
+                    bridge.relayHarnessID == "eldr-acp"
+                        ? "The phone's remote-drive session (full tool access, every action a permission card) runs our built-in agent."
+                        : "PROVISIONAL: spawns the installed CLI directly — its vendor key (Settings ▸ Cloud coding agents) is injected ONLY into that process, never this app's shell. Its every file/shell action still surfaces as a permission card on your phone. Not yet verified against the real CLI on this Mac."
+                )
+                .font(.caption2).foregroundStyle(.secondary)
             }
             .padding(4)
         }
