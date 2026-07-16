@@ -79,6 +79,11 @@ struct ACPAgentTests {
         // We require NO auth.
         #expect(result["authMethods"]?.arrayValue?.isEmpty == true)
         #expect(result["agentInfo"]?["name"]?.stringValue == "eldr-acp")
+        // A4: version + build stamp are readable so a client can flag a stale CLI.
+        let advertisedVersion = try #require(result["agentInfo"]?["version"]?.stringValue)
+        #expect(!advertisedVersion.isEmpty)
+        #expect(advertisedVersion == ACPAgent.agentVersion)
+        #expect(result["agentInfo"]?["build"]?.stringValue == ACPAgent.agentBuild)
         // We don't persist sessions.
         #expect(result["agentCapabilities"]?["loadSession"]?.boolValue == false)
         // WS2 — the silent-bypass indicator: DEFAULT config never runs tools ungated, and

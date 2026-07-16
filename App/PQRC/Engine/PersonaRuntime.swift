@@ -3254,6 +3254,35 @@ actor PersonaRuntime {
             return
         }
 
+        // A1 — a chat-bridge PERMISSION request from the paired Mac node
+        // (`ACPPermissionChannel`): its My-AI-chat agent wants to run a mutating tool
+        // and needs the owner's Allow / Always / Deny. Routed through the SAME
+        // `decidePermission` ladder as the phone-driven coding path (standing
+        // autonomous-changes consent → allow; else the approval card; no asker →
+        // deny), then answered with a response frame. Serviced ONLY for a paired
+        // `coding_agent` contact; like MCP frames, a recognized frame is ALWAYS
+        // swallowed (control channel, never chat) — an unpaired sender's frame is
+        // dropped unanswered, so their tool call just times out to deny on the node
+        // and they learn nothing. The decision runs on its own Task so a human
+        // prompt can never stall the receive pump.
+        if ACPPermissionChannel.isFrame(body.text) {
+            if let request = ACPPermissionChannel.parseRequest(body.text),
+                contactType(senderHex) == "coding_agent"
+            {
+                let silo = siloID
+                Task { [weak self] in
+                    guard let self else { return }
+                    let allowed = await self.decidePermission(
+                        nodeHex: senderHex, silo: silo,
+                        title: request.title, kind: request.kind)
+                    let frame = ACPPermissionChannel.responseFrame(
+                        id: request.id, allowed: allowed)
+                    try? await self.sendRelayACPFrame(frame, to: senderHex)
+                }
+            }
+            return
+        }
+
         // Relay-carried ACP frame (ACPRouterplan Phase 3): an ACP line from the
         // owner's consented `coding_agent` node, riding the message mesh. Route it to
         // that node's transport and RETURN — it is the ACP control channel, NEVER a

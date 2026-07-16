@@ -592,10 +592,12 @@ struct ExecutableVersionTests {
             return
         }
         let output = try capture(binary, ["--version"])
+        // A4: the flag prints the full version+build summary (staleness seam).
         #expect(
             output.trimmingCharacters(in: .whitespacesAndNewlines)
-                == "eldr-acp/\(ACPAgent.agentVersion)")
-        #expect(output.contains("eldr-acp/0.1.0"))
+                == ACPAgent.agentVersionSummary)
+        #expect(output.contains("eldr-acp/\(ACPAgent.agentVersion)"))
+        #expect(output.contains("build \(ACPAgent.agentBuild)"))
     }
 
     @Test func versionConstantIsSourceOfTruth() {

@@ -31,6 +31,13 @@ final class ConfigurationStore: ObservableObject {
     @Published var maxReadFileBytes: Int
     @Published var maxHistoryTurns: Int
     @Published var maxContextChars: Int
+    /// A2: how many of the most-recent tool results stay verbatim in history; older
+    /// ones are stubbed to one line (`ELDR_ACP_TOOL_RESULT_KEEP`). Default 4.
+    @Published var toolResultKeepVerbatim: Int
+    /// A2: spill an oversized tool result to a jail-inside file so the model can page
+    /// the rest via read_file, instead of losing it to truncation
+    /// (`ELDR_ACP_TOOL_RESULT_SPILL`). Default on.
+    @Published var toolResultSpillEnabled: Bool
 
     // MARK: Agent limits (env file) — all 0 = unlimited (the engine's default).
     /// Cap on the agent's tool-call loop (`ELDR_ACP_MAX_ITERATIONS`).
@@ -157,6 +164,8 @@ final class ConfigurationStore: ObservableObject {
         maxReadFileBytes = agent.maxReadFileBytes == Int.max ? 0 : agent.maxReadFileBytes
         maxHistoryTurns = agent.maxHistoryTurns
         maxContextChars = agent.maxContextChars
+        toolResultKeepVerbatim = agent.toolResultKeepVerbatim
+        toolResultSpillEnabled = agent.toolResultSpillEnabled
         maxAgentSteps = agent.maxIterations
         shellTimeoutSeconds = Int(agent.shellTimeoutSeconds)
         llmTimeoutSeconds = Int(llm.requestTimeoutSeconds)
@@ -235,6 +244,9 @@ final class ConfigurationStore: ObservableObject {
             export("ELDR_ACP_MAX_READ_FILE_BYTES", String(maxReadFileBytes)),
             export("ELDR_ACP_MAX_HISTORY_TURNS", String(maxHistoryTurns)),
             export("ELDR_ACP_MAX_CONTEXT_CHARS", String(maxContextChars)),
+            // A2: tool-result aging (verbatim-keep count) + spill-to-file.
+            export("ELDR_ACP_TOOL_RESULT_KEEP", String(toolResultKeepVerbatim)),
+            export("ELDR_ACP_TOOL_RESULT_SPILL", toolResultSpillEnabled ? "1" : "0"),
             // Agent limits — 0 = unlimited (the engine's `fromEnvironment` default).
             export("ELDR_ACP_MAX_ITERATIONS", String(maxAgentSteps)),
             export("ELDR_ACP_SHELL_TIMEOUT", String(shellTimeoutSeconds)),
@@ -379,6 +391,8 @@ final class ConfigurationStore: ObservableObject {
             maxReadFileBytes: maxReadFileBytes,
             maxHistoryTurns: maxHistoryTurns,
             maxContextChars: maxContextChars,
+            toolResultKeepVerbatim: toolResultKeepVerbatim,
+            toolResultSpillEnabled: toolResultSpillEnabled,
             toolAllowlist: enabledTools.count >= ConfigurationStore.allToolNames.count
                 ? [] : ConfigurationStore.allToolNames.filter { enabledTools.contains($0) },
             promptPreamble: promptPreamble.isEmpty ? nil : promptPreamble,
@@ -396,6 +410,26 @@ final class ConfigurationStore: ObservableObject {
             shellTimeoutSeconds: Double(shellTimeoutSeconds),
             allowUngatedTools: allowUngatedTools,
             visionEnabled: visionEnabled)
+    }
+
+    // MARK: - A4: agent version (staleness seam)
+
+    /// The version THIS app was built against — the baseline a later staleness check
+    /// (WS-B3) compares the installed binary to. Reads the PQRCACP constant directly so
+    /// the two can never drift.
+    static var expectedAgentVersion: String { ACPAgent.agentVersionSummary }
+
+    /// The version reported by the INSTALLED `~/.local/bin/eldr-acp` (its `--version`
+    /// output). nil when the binary is missing or won't run. The spawn happens off the
+    /// main thread inside `ProcessRunner`. WS-B3 will diff this against
+    /// `expectedAgentVersion` to flag (and offer to reinstall) a stale CLI — out of
+    /// scope here; this just makes the installed version readable.
+    func installedAgentVersion() async -> String? {
+        let binary = paths.installedBinary
+        guard FileManager.default.isExecutableFile(atPath: binary) else { return nil }
+        let (out, exit) = await ProcessRunner.run(binary, ["--version"])
+        let trimmed = out.trimmingCharacters(in: .whitespacesAndNewlines)
+        return (exit == 0 && !trimmed.isEmpty) ? trimmed : nil
     }
 
     // MARK: - Env-file parsing (the inverse of writeEnvFile)
@@ -445,6 +479,9 @@ struct ConfigPaths: Sendable {
     var logFile: String { join(configDir, "eldr-acp.log") }
     var eventsFile: String { join(configDir, "events.jsonl") }
     var projectsDir: String { join(configDir, "projects") }
+    /// WS-MLX: the managed MLX area (private Python venv, server log, fine-tune
+    /// configs) — kept beside the agent config so it's one visible, debuggable place.
+    var mlxDir: String { join(configDir, "mlx") }
 
     var installedBinary: String { join(binDir, "eldr-acp") }
     var launcher: String { join(binDir, "eldr-acp-xcode") }

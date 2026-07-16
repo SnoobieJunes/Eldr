@@ -1,4 +1,5 @@
 import Foundation
+import PQRCACP
 import Testing
 
 @testable import Huginn
@@ -61,6 +62,55 @@ struct LLMTokenAtRestTests {
         store.llmToken = ""
         store.save()
         #expect(kc.load(account: "llm-token") == nil)  // cleared, not left behind
+    }
+}
+
+// A2 — the tool-result aging + spill knobs round-trip through the env file, and A4 —
+// the agent-version staleness seam is readable from the store.
+@Suite("A2/A4: tool-result knobs + agent version")
+struct ToolResultKnobsAndVersionTests {
+    @MainActor
+    @Test func agingAndSpillKnobsRoundTripThroughEnvFile() {
+        let tmp = (NSTemporaryDirectory() as NSString).appendingPathComponent(
+            "eldr-a2-\(UUID().uuidString)")
+        let paths = ConfigPaths(configDir: tmp, binDir: tmp)
+        let kc = KeychainBox(service: "test-a2-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(atPath: tmp) }
+
+        let store = ConfigurationStore(paths: paths, keychain: kc)
+        store.toolResultKeepVerbatim = 7
+        store.toolResultSpillEnabled = false
+        store.save()
+
+        // The env file carries both knobs…
+        let env = (try? String(contentsOfFile: paths.envFile, encoding: .utf8)) ?? ""
+        #expect(env.contains("ELDR_ACP_TOOL_RESULT_KEEP='7'"))
+        #expect(env.contains("ELDR_ACP_TOOL_RESULT_SPILL='0'"))
+
+        // …and a fresh store re-reads them through AgentConfig's own parser.
+        let reloaded = ConfigurationStore(paths: paths, keychain: kc)
+        #expect(reloaded.toolResultKeepVerbatim == 7)
+        #expect(reloaded.toolResultSpillEnabled == false)
+        #expect(reloaded.agentConfig.toolResultKeepVerbatim == 7)
+        #expect(reloaded.agentConfig.toolResultSpillEnabled == false)
+    }
+
+    @MainActor
+    @Test func expectedAgentVersionIsNonEmptyAndMatchesPackageConstant() {
+        #expect(!ConfigurationStore.expectedAgentVersion.isEmpty)
+        #expect(ConfigurationStore.expectedAgentVersion == ACPAgent.agentVersionSummary)
+    }
+
+    @MainActor
+    @Test func installedAgentVersionNilWhenBinaryAbsent() async {
+        let tmp = (NSTemporaryDirectory() as NSString).appendingPathComponent(
+            "eldr-a4-\(UUID().uuidString)")
+        let store = ConfigurationStore(
+            paths: ConfigPaths(configDir: tmp, binDir: tmp),
+            keychain: KeychainBox(service: "test-a4-\(UUID().uuidString)"))
+        // No binary installed under binDir → nil, not a crash.
+        let version = await store.installedAgentVersion()
+        #expect(version == nil)
     }
 }
 

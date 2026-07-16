@@ -21,12 +21,14 @@ final class DiagnosticsLog: ObservableObject {
         case llm = "LLM"
         case acp = "ACP"
         case node = "Node"
+        case mlx = "MLX"
         var id: String { rawValue }
         var symbol: String {
             switch self {
             case .llm: return "brain"
             case .acp: return "wrench.and.screwdriver"
             case .node: return "antenna.radiowaves.left.and.right"
+            case .mlx: return "memorychip"
             }
         }
     }

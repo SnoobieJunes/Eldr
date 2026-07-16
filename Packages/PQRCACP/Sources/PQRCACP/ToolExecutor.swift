@@ -144,12 +144,17 @@ public struct ToolExecutor: Sendable {
     /// Wall-clock cap (seconds) for a single `run_shell` / search child process.
     /// 0 = unlimited (no watchdog) — a real build/test legitimately runs for minutes.
     let shellTimeoutSeconds: TimeInterval
+    /// A2: when a result is over `maxResultBytes`, ALSO spill the whole thing to a
+    /// jail-inside file (`<workdir>/.eldr/tool-results/`) so the model can `read_file`
+    /// the part truncation dropped. Default off here (the agent layer opts in via
+    /// `AgentConfig.toolResultSpillEnabled`), so a bare executor never touches disk.
+    let spillOversizedResults: Bool
 
     public init(
         capabilities: ClientCapabilities, environment: ToolEnvironment,
         connection: ClientConnection?, sessionId: String, outputByteLimit: Int = 64 * 1024,
         maxResultBytes: Int = Int.max, maxReadFileBytes: Int = Int.max,
-        shellTimeoutSeconds: TimeInterval = 0
+        shellTimeoutSeconds: TimeInterval = 0, spillOversizedResults: Bool = false
     ) {
         self.capabilities = capabilities
         self.environment = environment
@@ -159,6 +164,7 @@ public struct ToolExecutor: Sendable {
         self.maxResultBytes = maxResultBytes
         self.maxReadFileBytes = maxReadFileBytes
         self.shellTimeoutSeconds = max(0, shellTimeoutSeconds)
+        self.spillOversizedResults = spillOversizedResults
     }
 
     /// The built-in tools' names, in advertise order. The single source of truth for
@@ -406,15 +412,67 @@ public struct ToolExecutor: Sendable {
         // Context-window guard: every tool result fed back to the model is bounded.
         // (Shell already capped its CAPTURE at outputByteLimit; this trims further
         // for the prompt, and is the ONLY cap for read_file/list_dir.)
-        return capped(result)
+        return capped(result, tool: tool)
     }
 
     /// Head+tail truncate an over-budget result for the model, preserving the error
     /// flag and noting the elision. A no-op when the result already fits.
-    private func capped(_ result: ToolResult) -> ToolResult {
-        let trimmed = ContextBudget.truncate(result.text, maxBytes: maxResultBytes)
-        guard trimmed.utf8.count != result.text.utf8.count else { return result }
-        return ToolResult(text: trimmed, isError: result.isError)
+    ///
+    /// A2 spill-to-file: when the result is over budget AND spilling is enabled, the
+    /// WHOLE result is first written to a jail-inside file and the model is handed the
+    /// head+tail PLUS that path — so it can `read_file` the elided middle instead of
+    /// losing it. The returned text still fits `maxResultBytes` (the spill note's bytes
+    /// are reserved out of the budget), so this never re-inflates the window.
+    private func capped(_ result: ToolResult, tool: String) -> ToolResult {
+        let originalBytes = result.text.utf8.count
+        guard maxResultBytes != Int.max, originalBytes > maxResultBytes else { return result }
+
+        // Optionally spill the full result so nothing is truly lost. The destination
+        // (and so the note's exact size) is chosen BEFORE anything is written: a
+        // budget too small to even carry the note skips the spill entirely, so no
+        // orphaned file the model is never told about is left behind.
+        var spillNote = ""
+        if spillOversizedResults, let rel = spillDestination(tool: tool) {
+            let note =
+                "\n[full \(originalBytes)-byte result saved to \(rel) — read_file it to see the elided part]\n"
+            if maxResultBytes - note.utf8.count > 0, spill(result.text, toRelative: rel) {
+                spillNote = note
+            }
+        }
+        // The note's bytes are reserved out of the budget, so head+tail+note still fits.
+        let textBudget = maxResultBytes - spillNote.utf8.count
+        let trimmed = ContextBudget.truncate(result.text, maxBytes: textBudget)
+        return ToolResult(text: trimmed + spillNote, isError: result.isError)
+    }
+
+    /// A2: the jail-inside directory (relative to the workdir) oversized tool results
+    /// spill into. Kept under a dot-dir so it's out of the way and easy to `.gitignore`.
+    static let spillDirRelative = ".eldr/tool-results"
+
+    /// Pick a fresh spill destination under `<workdir>/.eldr/tool-results/`, RELATIVE
+    /// to the workdir (what the model passes to `read_file`). nil when the resolved
+    /// path would land outside the jail (e.g. `.eldr` replaced by an outbound symlink).
+    private func spillDestination(tool: String) -> String? {
+        let safeTool = tool.filter { $0.isLetter || $0.isNumber || $0 == "_" }
+        let name = safeTool.isEmpty ? "result" : safeTool
+        let rel = "\(Self.spillDirRelative)/\(name)-\(UUID().uuidString.prefix(8)).txt"
+        return jailedPath(rel) == nil ? nil : rel
+    }
+
+    /// Write the full `text` to the chosen destination. Best-effort: false on any
+    /// failure (the caller then omits the note) — spilling never fails the tool. The
+    /// path is run through `jailedPath` so it can only ever land inside the jail.
+    private func spill(_ text: String, toRelative rel: String) -> Bool {
+        guard let abs = jailedPath(rel) else { return false }
+        let dir = (abs as NSString).deletingLastPathComponent
+        do {
+            try FileManager.default.createDirectory(
+                atPath: dir, withIntermediateDirectories: true)
+            try Data(text.utf8).write(to: URL(fileURLWithPath: abs))
+            return true
+        } catch {
+            return false
+        }
     }
 
     // MARK: Path resolution

@@ -76,3 +76,67 @@ struct ProjectMemoryDocTests {
         #expect(ProjectMemoryDoc(parsing: text) == doc)
     }
 }
+
+// A3: ProjectContext.read discovery chain — ELDR_ACP_CONTEXT_FILE > eldr.md > AGENTS.md.
+@Suite("ProjectContext.read AGENTS.md discovery")
+struct ProjectContextAgentsDiscoveryTests {
+
+    /// A throwaway (configDir, cwd) sandbox, cleaned up by the caller's `defer`.
+    private func sandbox() -> (configDir: String, cwd: String) {
+        let base = (NSTemporaryDirectory() as NSString).appendingPathComponent(
+            "eldr-agents-\(UUID().uuidString)")
+        let configDir = (base as NSString).appendingPathComponent("config")
+        let cwd = (base as NSString).appendingPathComponent("proj")
+        try? FileManager.default.createDirectory(atPath: cwd, withIntermediateDirectories: true)
+        return (configDir, cwd)
+    }
+
+    private func writeEldrMd(_ text: String, configDir: String, cwd: String) throws {
+        let path = ProjectContext.memoryPath(configDir: configDir, cwd: cwd)
+        try FileManager.default.createDirectory(
+            atPath: (path as NSString).deletingLastPathComponent, withIntermediateDirectories: true)
+        try Data(text.utf8).write(to: URL(fileURLWithPath: path))
+    }
+
+    private func writeAgentsMd(_ text: String, cwd: String) throws {
+        try Data(text.utf8).write(to: URL(fileURLWithPath: ProjectContext.agentsPath(cwd: cwd)))
+    }
+
+    @Test func eldrMdBeatsAgentsMd() throws {
+        let (configDir, cwd) = sandbox()
+        defer { try? FileManager.default.removeItem(atPath: (cwd as NSString).deletingLastPathComponent) }
+        try writeEldrMd("FROM ELDR.MD", configDir: configDir, cwd: cwd)
+        try writeAgentsMd("FROM AGENTS.MD", cwd: cwd)
+
+        let read = ProjectContext.read(explicitPath: nil, configDir: configDir, cwd: cwd)
+        #expect(read == "FROM ELDR.MD")
+    }
+
+    @Test func agentsMdUsedWhenEldrMdAbsent() throws {
+        let (configDir, cwd) = sandbox()
+        defer { try? FileManager.default.removeItem(atPath: (cwd as NSString).deletingLastPathComponent) }
+        // No eldr.md written; only the repo-root AGENTS.md.
+        try writeAgentsMd("FROM AGENTS.MD", cwd: cwd)
+
+        let read = ProjectContext.read(explicitPath: nil, configDir: configDir, cwd: cwd)
+        #expect(read == "FROM AGENTS.MD")
+    }
+
+    @Test func explicitPathBeatsBoth() throws {
+        let (configDir, cwd) = sandbox()
+        defer { try? FileManager.default.removeItem(atPath: (cwd as NSString).deletingLastPathComponent) }
+        try writeEldrMd("FROM ELDR.MD", configDir: configDir, cwd: cwd)
+        try writeAgentsMd("FROM AGENTS.MD", cwd: cwd)
+        let explicit = (cwd as NSString).appendingPathComponent("custom-context.md")
+        try Data("FROM EXPLICIT".utf8).write(to: URL(fileURLWithPath: explicit))
+
+        let read = ProjectContext.read(explicitPath: explicit, configDir: configDir, cwd: cwd)
+        #expect(read == "FROM EXPLICIT")
+    }
+
+    @Test func nilWhenNoneExist() throws {
+        let (configDir, cwd) = sandbox()
+        defer { try? FileManager.default.removeItem(atPath: (cwd as NSString).deletingLastPathComponent) }
+        #expect(ProjectContext.read(explicitPath: nil, configDir: configDir, cwd: cwd) == nil)
+    }
+}

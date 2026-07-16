@@ -85,8 +85,12 @@ struct ConfigurationView: View {
                 Stepper(
                     "Max context chars: \(store.maxContextChars)",
                     value: $store.maxContextChars, in: 0...262_144, step: 4096)
+                Stepper(
+                    "Keep tool results verbatim: \(store.toolResultKeepVerbatim)",
+                    value: $store.toolResultKeepVerbatim, in: 0...32)
+                Toggle("Spill oversized tool results to a file", isOn: $store.toolResultSpillEnabled)
                 Text(
-                    "0 means unbounded. Smaller models need tighter budgets so a big file read can't flood the window. \"Max file read\" stops a huge file from running the agent out of memory before it's even trimmed."
+                    "0 means unbounded. Smaller models need tighter budgets so a big file read can't flood the window. \"Max file read\" stops a huge file from running the agent out of memory before it's even trimmed. \"Keep tool results verbatim\" holds that many recent tool outputs in full and stubs older ones to one line. \"Spill\" saves an over-budget result to .eldr/tool-results/ so the agent can read the rest back instead of losing it to truncation."
                 )
                 .font(.caption).foregroundStyle(.secondary)
             }

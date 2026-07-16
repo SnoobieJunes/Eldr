@@ -43,11 +43,20 @@ public struct ACPClientHandler: Sendable {
     /// Decide a mutating tool's permission request. Default: DENY (fail closed).
     /// Reads never reach this (they request no permission), so a deny-default costs
     /// no capability — it forces every driver of a MUTATING agent to opt into a real
-    /// approval path explicitly (the cardinal rule, SPEC §0). Production already does:
-    /// the read-only chat bridge passes `{ _,_ in false }` and the phone-driven coding
-    /// path passes `PersonaRuntime.decidePermission`. An allow-all default was a footgun
-    /// a future caller could inherit silently.
+    /// approval path explicitly (the cardinal rule, SPEC §0). Production does: the
+    /// phone-driven coding path passes `PersonaRuntime.decidePermission`, and the
+    /// chat bridge (A1) routes to the owner's phone over `ACPPermissionChannel` —
+    /// falling back to this deny default only when no route to the owner exists.
+    /// An allow-all default was a footgun a future caller could inherit silently.
     public var requestPermission: @Sendable (_ title: String, _ kind: String) async -> Bool
+    /// A1 — tool-advertising honesty: whether this client can actually surface a
+    /// permission prompt to a human (directly or by routing to the owner's phone).
+    /// Declared to the agent at `session/new` (`eldrCanPrompt`); when false, the
+    /// agent filters mutating tools from the ADVERTISED set for that session (and
+    /// says where they are available) instead of letting the model call tools whose
+    /// every request would bounce off the deny default. Default true — every
+    /// existing caller advertises/behaves exactly as before.
+    public var canPromptPermissions: Bool
     /// Serve a client-side file read (only reached if fs caps are advertised); nil →
     /// tell the agent to fall back to its own filesystem. Default: nil.
     public var readTextFile: @Sendable (_ path: String) async -> String?
@@ -69,6 +78,7 @@ public struct ACPClientHandler: Sendable {
         onTerminalOutput: @escaping @Sendable (String, String) async -> Void = { _, _ in },
         onTerminalClosed: @escaping @Sendable (String, Int?) async -> Void = { _, _ in },
         requestPermission: @escaping @Sendable (String, String) async -> Bool = { _, _ in false },
+        canPromptPermissions: Bool = true,
         readTextFile: @escaping @Sendable (String) async -> String? = { _ in nil },
         writeTextFile: @escaping @Sendable (String, String) async -> Bool = { _, _ in false }
     ) {
@@ -81,6 +91,7 @@ public struct ACPClientHandler: Sendable {
         self.onTerminalOutput = onTerminalOutput
         self.onTerminalClosed = onTerminalClosed
         self.requestPermission = requestPermission
+        self.canPromptPermissions = canPromptPermissions
         self.readTextFile = readTextFile
         self.writeTextFile = writeTextFile
     }
@@ -266,6 +277,12 @@ public actor ACPClientDriver {
             ])
             : .array([])
         var newParams: [String: JSONValue] = ["mcpServers": mcpServers]
+        // A1 — tool-advertising honesty: declare whether THIS client can surface a
+        // permission prompt (see `ACPClientHandler.canPromptPermissions`). Only the
+        // degenerate `false` is emitted; absent means true, so older agents and every
+        // existing wire capture stay byte-identical. `eldr`-prefixed, non-standard —
+        // a spec-compliant foreign agent just ignores it.
+        if !handler.canPromptPermissions { newParams["eldrCanPrompt"] = .bool(false) }
         if let cwd { newParams["cwd"] = .string(cwd) }
         let newResult = try await request(method: "session/new", params: .object(newParams))
         guard let sid = newResult["sessionId"]?.stringValue else {

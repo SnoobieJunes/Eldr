@@ -17,6 +17,13 @@ struct LogLine: Identifiable, Equatable, Sendable {
 /// classified for color-coding. Uses a `DispatchSourceFileSystemObject` on the
 /// file descriptor (write/extend → read the delta; rename/delete → reopen, handling
 /// log rotation). The app stops/starts it with window visibility.
+///
+/// The source delivers on the MAIN queue: this class is @MainActor, so its event
+/// handler closure is @MainActor-inferred, and Swift 6's dynamic isolation check
+/// SIGTRAPs (`dispatch_assert_queue_fail`) if a background queue invokes it — the
+/// crash the MLX server pane hit the first time it wrote to a tailed log
+/// (2026-07-17 crash report; regression: `LogTailerTests`). Events are rare and
+/// the handler is tiny, so main-queue delivery costs nothing.
 @MainActor
 final class LogTailer: ObservableObject {
 
@@ -30,7 +37,6 @@ final class LogTailer: ObservableObject {
     private var handle: FileHandle?
     private var offset: UInt64 = 0
     private var nextID = 0
-    private let queue = DispatchQueue(label: "chat.eldr.configurator.logtailer")
 
     init(path: String) { self.path = path }
 
@@ -83,7 +89,7 @@ final class LogTailer: ObservableObject {
 
         let src = DispatchSource.makeFileSystemObjectSource(
             fileDescriptor: h.fileDescriptor, eventMask: [.write, .extend, .rename, .delete],
-            queue: queue)
+            queue: .main)
         // Pin the handle this source watches so the event/cancel closures can't
         // touch a freshly-reopened handle after a rotation (the old bug: an async
         // `self.handle = nil` from the stale cancel handler nilled the NEW handle and

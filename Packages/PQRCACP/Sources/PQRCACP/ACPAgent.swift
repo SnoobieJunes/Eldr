@@ -21,6 +21,19 @@ import Foundation
 public actor ACPAgent {
     public static let agentName = "eldr-acp"
     public static let agentVersion = "0.1.0"
+    /// A4: a build stamp for STALENESS detection. The installed `~/.local/bin/eldr-acp`
+    /// can drift a month behind the source; comparing this against the value a freshly
+    /// built agent reports is how a UI (Huginn/Xcode, later WS-B3) flags a stale CLI.
+    /// SPM has no clean build-time date/commit injection, so it's a compile-time
+    /// constant bumped per build/release (DEVIATIONS A2/A4 `[tech-debt]`).
+    public static let agentBuild = "2026-07-17"
+    /// A4: the single, parseable version line reported EVERYWHERE the version surfaces —
+    /// `eldr-acp --version`, the ACP `initialize` response (`agentInfo.version`+`build`),
+    /// and Huginn's read-back. Keep the `eldr-acp/<semver>` prefix stable so a parser
+    /// (WS-B3) can split on it.
+    public static var agentVersionSummary: String {
+        "\(agentName)/\(agentVersion) (build \(agentBuild))"
+    }
     /// ACP MAJOR protocol version we speak (a single integer; see spec). Defined on the
     /// iOS-available client driver so the phone path can reference it without pulling in
     /// this macOS-only agent; mirrored here to keep the agent's call sites unchanged.
@@ -89,6 +102,11 @@ public actor ACPAgent {
     /// context, so this gate keeps the MCP-passthrough path inert otherwise (and
     /// inert entirely when `extraTools` is nil).
     private var sessionsWithMCP: Set<String> = []
+    /// A1 — sessions whose client declared `eldrCanPrompt:false` at `session/new`:
+    /// no human can answer a permission prompt there, so mutating tools are filtered
+    /// from the ADVERTISED set and a system-prompt line says where they ARE
+    /// available. Advertising-honesty only; the C-1 permission gate is unchanged.
+    private var sessionsWithoutPromptCapableClient: Set<String> = []
     /// Phase D4 — live INTERACTIVE terminals (PTYs), by `terminalId`. The persistent
     /// interactive shell `open_terminal` spawns lives HERE (on the actor), not in the
     /// per-turn `ToolExecutor` value. Each entry carries the process and the task
@@ -181,8 +199,21 @@ public actor ACPAgent {
         case "initialize": return initializeResult(params: params)
         case "session/new": return await newSessionResult(params: params)
         case "session/prompt": return try await promptResult(params: params)
-        // session/load and authenticate are intentionally not implemented — we
-        // require no auth and advertise loadSession:false (see initialize).
+        // WS0: `authenticate` succeeds as a no-op. We require no auth (initialize
+        // advertises `authMethods: []`), but Xcode 27's newer ACP seed can still
+        // exercise the call while resolving an agent's auth state — and the previous
+        // `-32601` was indistinguishable from "this agent needs auth I can't provide"
+        // (`Gateway.Error Code=6` / "This provider requires authentication").
+        // Answering success is spec-compliant for a no-auth agent and unblocks it.
+        case "authenticate": return .object([:])
+        // WS0: newer-spec session mutators we have no state for. The spec allows a
+        // null/empty response; a benign success keeps a newer client (Xcode 27's
+        // Logout/SetSessionModel-era stack) from treating the whole agent as broken
+        // over an optional feature. We change no behavior — there is exactly one
+        // mode/model, so "set" trivially holds.
+        case "session/set_mode", "session/set_model": return .object([:])
+        // session/load is intentionally not implemented — we advertise
+        // loadSession:false (see initialize), so a conforming client never calls it.
         default: throw RPCError(code: -32601, message: "Method not found: \(method)")
         }
     }
@@ -261,9 +292,12 @@ public actor ACPAgent {
         return .object([
             "protocolVersion": .int(version),
             "agentCapabilities": .object(agentCapabilities),
+            // A4: `version` stays the bare semver (unchanged) for existing clients; the
+            // added `build` stamp lets a client flag a stale installed CLI (WS-B3).
             "agentInfo": .object([
                 "name": .string(Self.agentName),
                 "version": .string(Self.agentVersion),
+                "build": .string(Self.agentBuild),
             ]),
             // We require NO authentication: empty authMethods.
             "authMethods": .array([]),
@@ -285,6 +319,15 @@ public actor ACPAgent {
         // provider) keeps the passthrough path fully inert.
         if Self.advertisesMCPServers(params["mcpServers"]) {
             sessionsWithMCP.insert(sessionId)
+        }
+        // A1 — tool-advertising honesty: a client that declares it CANNOT surface a
+        // permission prompt (`eldrCanPrompt:false` — e.g. the chat bridge with no
+        // route to the owner's phone) gets no mutating tools ADVERTISED this session
+        // (see runTurn). Absent/true means the client can prompt (older clients
+        // included). The C-1 gate itself is untouched — this only stops the model
+        // being offered tools whose every request would bounce off a deny.
+        if params["eldrCanPrompt"]?.boolValue == false {
+            sessionsWithoutPromptCapableClient.insert(sessionId)
         }
         // Resolve this project's persistent context (explicit ELDR_ACP_CONTEXT_FILE,
         // else the auto-discovered per-project eldr.md). Stored once; prepended to
@@ -408,7 +451,8 @@ public actor ACPAgent {
             connection: connection, sessionId: sessionId,
             maxResultBytes: config.maxToolResultBytes,
             maxReadFileBytes: config.maxReadFileBytes,
-            shellTimeoutSeconds: config.shellTimeoutSeconds)
+            shellTimeoutSeconds: config.shellTimeoutSeconds,
+            spillOversizedResults: config.toolResultSpillEnabled)
         var tools = ToolExecutor.toolDefinitions(allowlist: config.toolAllowlist)
         // WS3e: delegation is advertised ONLY when the operator's hard off-switch is on.
         // A disabled node must not tempt its model with a tool that always refuses (a
@@ -416,6 +460,18 @@ public actor ACPAgent {
         // refuses a hallucinated call as defense-in-depth.
         if !config.cloudAgentDelegationEnabled {
             tools.removeAll { $0.name == ToolExecutor.delegateToCloudAgentTool }
+        }
+        // A1 — the degenerate case of tool-advertising honesty: this session's client
+        // declared it cannot present a permission prompt (`eldrCanPrompt:false`), so
+        // every mutating tool would bounce off C-1's deny. Don't advertise them — a
+        // coding-tuned model would otherwise burn turns retrying — and tell the model
+        // where they ARE available (system line below). `allowUngatedTools` (the
+        // explicit operator escape hatch for trusted prompt-less clients) keeps the
+        // full set: with the gate off, nothing bounces.
+        let mutatingToolsFiltered =
+            sessionsWithoutPromptCapableClient.contains(sessionId) && !config.allowUngatedTools
+        if mutatingToolsFiltered {
+            tools.removeAll { ToolExecutor.needsPermission($0.name) }
         }
         // Phase D3: merge the phone's MCP chat tools into the advertised set, but
         // ONLY when this session opted in (`mcpServers` advertised) AND a provider is
@@ -440,6 +496,23 @@ public actor ACPAgent {
             LLMMessage(
                 role: .system,
                 content: Self.systemPrompt(cwd: cwd, config: config, skill: skill)))
+        // A1 — when mutating tools were filtered above, say so up front (part of the
+        // anchored leading-system run, so ContextBudget.trim never drops it). The
+        // model then answers "I can't change files here, use the coding-agent chat"
+        // instead of hallucinating tool calls it wasn't offered.
+        if mutatingToolsFiltered {
+            messages.append(
+                LLMMessage(
+                    role: .system,
+                    content: """
+                        This session is read-only: tools that modify files or run \
+                        commands (write_file, edit_file, run_shell, open_terminal, \
+                        delegate_to_cloud_agent) are unavailable because this chat \
+                        cannot present approval prompts. If the user asks for changes, \
+                        tell them to use their phone-driven coding-agent chat (the \
+                        paired node conversation), where each action can be approved.
+                        """))
+        }
         // contextgraph (optional): assemble prior context via graph/tag retrieval
         // ahead of the local sliding window. Part of the anchored leading-system
         // run, so ContextBudget.trim never drops it. Unreachable → nil → fall back.
@@ -475,7 +548,8 @@ public actor ACPAgent {
             // long tool loop (and the large results it accumulates) can't outgrow
             // the window. The system prompt + the task are always preserved.
             let outgoing = ContextBudget.trim(
-                messages, maxTurns: config.maxHistoryTurns, maxChars: config.maxContextChars)
+                messages, maxTurns: config.maxHistoryTurns, maxChars: config.maxContextChars,
+                keepRecentToolResults: config.toolResultKeepVerbatim)
 
             // One model call, raced against a timeout and against an in-flight
             // session/cancel so a hung model or a mid-generation cancel aborts the

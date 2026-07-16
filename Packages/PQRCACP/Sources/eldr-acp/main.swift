@@ -31,7 +31,9 @@ actor InFlight {
 struct EldrACPMain {
     static func main() async {
         if CommandLine.arguments.contains("--version") {
-            print("eldr-acp/\(ACPAgent.agentVersion)")
+            // A4: full version+build line (staleness seam) — Huginn/Xcode read this back
+            // and compare it to the version they were built against.
+            print(ACPAgent.agentVersionSummary)
             return
         }
 

@@ -124,6 +124,16 @@ struct AgentRunTimeout: Error {}
 struct ACPDriverAgentRunner: BridgeAgentRunner {
     let executableURL: URL
     var environmentOverrides: [String: String] = [:]
+    /// A1 — routes a mutating tool's permission request to the OWNER'S PHONE
+    /// (`ACPBridgeService.requestPhonePermission` → `ACPPermissionChannel` →
+    /// `PersonaRuntime.decidePermission` → the approval card) and returns the
+    /// verdict. nil ⇒ no route to an owner exists; the runner then declares
+    /// `eldrCanPrompt:false` so the agent doesn't advertise mutating tools at all,
+    /// and the deny-default fails any stray request closed. This supersedes the
+    /// CR-1 "My AI chat is read-only" stance (DEVIATIONS A1): the chat is no longer
+    /// read-only, but every mutation is still owner-approved — CR-1's actual threat
+    /// (prompt-injected UNATTENDED shell during an owner window) stays blocked.
+    var permissionResponder: (@Sendable (_ title: String, _ kind: String) async -> Bool)? = nil
 
     // eldr-acp spawns a fresh, stateless process per run, so Huginn supplies cross-turn
     // memory: `context.priorContext` (the decrypted, capped transcript) is injected as an
@@ -133,30 +143,22 @@ struct ACPDriverAgentRunner: BridgeAgentRunner {
     // isn't needed: eldr-acp owns its own ephemeral workspace, and Huginn owns the transcript.
     func run(prompt: String, workdir: String?, context: ConversationContext) async throws -> String {
         let collected = AgentAnswerCollector()
-        // CR-1: this watch-along / Mac-responder runner has no interactive client to
-        // approve a mutating tool, so the default `requestPermission` ({ _,_ in true })
-        // AUTO-APPROVED run_shell / write_file / edit_file UNATTENDED — an owner-window-open
-        // + prompt-injected task could run arbitrary shell on the Mac. This path is a
-        // chat-participant / drafting role that needs only file READS for context, and
-        // reads never request permission, so DENY every permission request (which denies
-        // exactly the mutating tools). Real mutating work goes through the phone-driven
-        // relay-ACP path (ACPRelayHost), which routes each request to the owner's phone
-        // for an explicit Allow / Deny.
+        // A1: mutating tools are permission-gated through the owner's phone (the
+        // responder above) instead of hard-denied. No responder ⇒ deny (fail closed)
+        // AND declare the session prompt-less so those tools aren't advertised.
         let handler = ACPClientHandler(
             onAgentMessageChunk: { await collected.append($0) },
-            requestPermission: { _, _ in false })
+            requestPermission: permissionResponder ?? { _, _ in false },
+            canPromptPermissions: permissionResponder != nil)
         var env = environmentOverrides
         env["ELDR_ACP_STREAM"] = "0"  // need the complete message to scrub it (§10)
-        // CR-1 (cont.): since this chat/drafting path DENIES every mutating tool (the
-        // handler above), advertise ONLY the READ-ONLY tools to the model. A
-        // coding-tuned local model would otherwise keep calling run_shell / write_file,
-        // each one bounced by the deny — wasting turns and surfacing confusing "tool
-        // denied" noise in the user's LLM server (LM Studio). Reads never request
-        // permission, so this loses no capability here, and it overrides the env-file
-        // `tools` allowlist for THIS path only (the env var wins; AgentConfig §tools).
-        // The phone-driven coding-agent path (ACPRelayHost) keeps the user's full tool
-        // set and routes each mutating request to the phone for Allow / Deny.
-        env["ELDR_ACP_TOOLS"] = "read_file,list_dir"
+        // A1 hard rule: the spawned agent must ASK for every mutating tool on THIS
+        // path, even when the operator's env file sets ELDR_ACP_ALLOW_UNGATED_TOOLS=1
+        // (that toggle exists for trusted prompt-less clients like a hand-driven
+        // Xcode). This runner is reachable by any chat message during an owner window,
+        // so ungated execution here would be exactly the CR-1 hole: prompt-injected
+        // unattended shell on the Mac. Forcing 0 keeps every mutation owner-approved.
+        env["ELDR_ACP_ALLOW_UNGATED_TOOLS"] = "0"
         // Cross-turn memory: prior transcript as an in-memory system-prompt preamble. Never
         // written to disk (SPEC §3.4) — it lives only in this child process's environment.
         if let preamble = context.priorContext, !preamble.isEmpty {
@@ -611,7 +613,13 @@ final class ACPBridgeService: ObservableObject {
                 // on-disk env file, C-8) so it seals events.jsonl + reads sealed eldr.md.
                 if let metadataKeyB64 { env["ELDR_ACP_METADATA_KEY"] = metadataKeyB64 }
                 agentRunner = ACPDriverAgentRunner(
-                    executableURL: executable, environmentOverrides: env)
+                    executableURL: executable, environmentOverrides: env,
+                    // A1: mutating tools in the chat bridge are gated through the
+                    // owner's phone (approval card), not hard-denied. The responder
+                    // fails closed on its own when no owner/messenger is live.
+                    permissionResponder: { [weak self] title, kind in
+                        await self?.requestPhonePermission(title: title, kind: kind) ?? false
+                    })
             }
         case .sybilclaw:
             agentRunner = SybilclawAgentRunner(
@@ -826,10 +834,65 @@ final class ACPBridgeService: ObservableObject {
         nodeTask?.cancel()
         nodeTask = nil
         stopRelayACPHost()
+        // A1 hygiene: the permission route to the phone just went away — resolve every
+        // still-awaiting request with DENY so no agent turn is left parked (its own
+        // C-1/timeout would eventually deny too; this is immediate + explicit).
+        failAllPhonePermissions()
         let messenger = self.messenger
         self.messenger = nil
         Task { await messenger?.stop() }
         messaging = UnpairedMessaging()
+    }
+
+    // MARK: A1 — chat-bridge permission routing (node → owner's phone)
+
+    /// In-flight owner-phone permission requests, keyed by the request id minted in
+    /// `requestPhonePermission`. Resolved by the owner's `ACPPermissionChannel`
+    /// response frame (`handleMessengerEvent`), by the deny timeout, or by teardown.
+    private var pendingPhonePermissions: [String: CheckedContinuation<Bool, Never>] = [:]
+
+    /// How long to wait for the owner's answer before denying. Mirrors the agent's
+    /// C-1 default (120 s deny-on-timeout) — and is the ONLY brake when the operator's
+    /// env sets `ELDR_ACP_PERMISSION_TIMEOUT=0` (agent waits forever).
+    static let phonePermissionTimeoutSeconds: Double = 120
+
+    /// A1 — ask the OWNER'S PHONE to approve one mutating tool call from the chat
+    /// bridge's spawned agent. Sends an `ACPPermissionChannel` request frame to the
+    /// pinned owner over the E2EE mesh and awaits the response frame. FAIL CLOSED:
+    /// no messenger, no pinned owner, a send failure, or no answer within
+    /// `phonePermissionTimeoutSeconds` ⇒ false (denied).
+    func requestPhonePermission(title: String, kind: String) async -> Bool {
+        guard let messenger, let owner = ownerIdentityHex else { return false }
+        let id = UUID().uuidString
+        let frame = ACPPermissionChannel.requestFrame(id: id, title: title, kind: kind)
+        let sentAt = Int64(Date().timeIntervalSince1970)
+        return await withCheckedContinuation { continuation in
+            pendingPhonePermissions[id] = continuation
+            Task { [weak self] in
+                // Transport is the same ratcheted mesh as chat; a failed send just
+                // leaves the timeout to deny.
+                try? await messenger.send(MessageBody(text: frame, sentAt: sentAt), to: owner)
+                try? await Task.sleep(
+                    nanoseconds: UInt64(Self.phonePermissionTimeoutSeconds * 1_000_000_000))
+                self?.resolvePhonePermission(id: id, allowed: false)
+            }
+        }
+    }
+
+    /// Resolve one pending phone-permission request. Idempotent — the first resolver
+    /// (owner's answer, timeout, teardown) wins; later calls are no-ops, so a late
+    /// answer after the deny timeout can never resurrect a denied tool call.
+    private func resolvePhonePermission(id: String, allowed: Bool) {
+        guard let continuation = pendingPhonePermissions.removeValue(forKey: id) else { return }
+        continuation.resume(returning: allowed)
+    }
+
+    /// Deny + drop every in-flight phone-permission request (teardown hygiene —
+    /// never strand a continuation).
+    private func failAllPhonePermissions() {
+        let doomed = pendingPhonePermissions.values
+        pendingPhonePermissions.removeAll()
+        for continuation in doomed { continuation.resume(returning: false) }
     }
 
     // MARK: Relay-carried ACP host (Phase 3 LIVE node side)
@@ -921,6 +984,18 @@ final class ACPBridgeService: ObservableObject {
                 bridgeState = .paired(contactName: shortHex(contact.identityHex))
             }
         case .message(let received):
+            // A1 — the owner's answer to a chat-bridge permission request
+            // (`ACPPermissionChannel`). ALWAYS swallowed (a control frame, never chat);
+            // honored only from the pinned owner — anyone else's frame resolves
+            // nothing (fail closed: the pending request just times out to deny).
+            if ACPPermissionChannel.isFrame(received.body.text) {
+                if received.senderIdentityHex == ownerIdentityHex,
+                    let response = ACPPermissionChannel.parseResponse(received.body.text)
+                {
+                    resolvePhonePermission(id: response.id, allowed: response.allowed)
+                }
+                return
+            }
             // Relay-carried ACP frame? Route it to the relay host (Phase 3 LIVE node
             // side) and STOP — an ACP frame is the node↔owner control channel, never a
             // chat message: it must not become a watch-along prompt or a paired
