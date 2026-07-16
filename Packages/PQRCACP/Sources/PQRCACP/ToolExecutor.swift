@@ -369,8 +369,8 @@ public struct ToolExecutor: Sendable {
                 ? interactiveTerminalTitlePrefix
                 : "\(interactiveTerminalTitlePrefix): \(cmd)"
         case "delegate_to_cloud_agent":
-            // WS3f will key its own distinct consent off this exact prefix, mirroring
-            // how the phone recognizes `interactiveTerminalTitlePrefix` today.
+            // WS3f keys its distinct consent + live indicator off this exact prefix
+            // (`ACPCloudDelegation.delegateTitlePrefix`, iOS-available).
             let harness = args["harness"]?.stringValue ?? "?"
             let task = args["task"]?.stringValue ?? ""
             let truncated = task.count > 80 ? "\(task.prefix(80))…" : task
@@ -385,9 +385,10 @@ public struct ToolExecutor: Sendable {
     public static let interactiveTerminalTitlePrefix = ACPTerminal.interactiveTerminalTitlePrefix
 
     /// WS3e/3f — the stable title prefix every `delegate_to_cloud_agent` permission
-    /// request carries, so a client can recognize it (same pattern as
-    /// `interactiveTerminalTitlePrefix`) and eventually key a DISTINCT consent off it.
-    public static let delegateToCloudAgentTitlePrefix = "Delegate to cloud agent"
+    /// request carries. Re-exported from the iOS-available `ACPCloudDelegation` (the
+    /// single source of truth shared with the phone's gate) so node-side call sites
+    /// stay terse, mirroring `interactiveTerminalTitlePrefix`.
+    public static let delegateToCloudAgentTitlePrefix = ACPCloudDelegation.delegateTitlePrefix
 
     // MARK: Dispatch
 

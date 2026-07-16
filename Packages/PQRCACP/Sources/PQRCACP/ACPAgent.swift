@@ -830,9 +830,15 @@ public actor ACPAgent {
             },
             requestPermission: { [weak self] title, kind in
                 guard let self else { return false }  // agent gone → fail closed
+                // WS3f: `ACPCloudDelegation.delegatedActionTitlePrefix` — recognized
+                // phone-side for the DISTINCT cloud-delegation consent, but NOT for the
+                // live indicator (only the OUTER delegate_to_cloud_agent call brackets
+                // "a delegation is running"; this is one action within it).
                 return await self.requestPermission(
                     sessionId: sessionId, toolCallId: "delegate-\(UUID().uuidString)",
-                    title: "[\(descriptor.displayName)] \(title)", kind: kind)
+                    title:
+                        "\(ACPCloudDelegation.delegatedActionTitlePrefix) [\(descriptor.displayName)]: \(title)",
+                    kind: kind)
             })
         let driver = ACPClientDriver(transport: transport, handler: handler)
 

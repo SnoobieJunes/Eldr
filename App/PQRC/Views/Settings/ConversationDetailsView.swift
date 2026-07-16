@@ -36,6 +36,11 @@ struct ConversationDetailsView: View {
     /// agent create/modify files and run shell commands without asking each time.
     /// OFF by default — when off, the phone fails closed on every mutating tool.
     @State private var autonomousChanges = false
+    /// WS3f — per-node CLOUD-AGENT-DELEGATION consent: whether this paired Mac's local
+    /// model may hand tasks to an external cloud CLI (`delegate_to_cloud_agent`, WS3e)
+    /// without a per-request prompt. OFF by default. DISTINCT from `autonomousChanges`
+    /// — a different trust boundary (a cloud vendor now reads the project too).
+    @State private var cloudAgentDelegation = false
     /// Per-node REMOTE DEV-CONTROL consent (ACPRouterplan Phase 3): whether the phone may
     /// drive this paired Mac node's ACP agent over the relay at all. OFF by default — the
     /// relay path is inert until this is on.
@@ -66,6 +71,7 @@ struct ConversationDetailsView: View {
         guard remoteDevControl else { return "Off — not driving this Mac agent" }
         var parts = ["Driving this Mac agent"]
         parts.append(autonomousChanges ? "autonomous changes ON" : "asks before each change")
+        if cloudAgentDelegation { parts.append("cloud delegation ON") }
         if shareChatContext { parts.append("chat context shared") }
         return parts.joined(separator: " · ")
     }
@@ -266,6 +272,29 @@ struct ConversationDetailsView: View {
                                 .foregroundStyle(autonomousChanges ? AnyShapeStyle(.orange) : AnyShapeStyle(.secondary))
                                 .accessibilityIdentifier("acp-autonomous-changes-status")
 
+                            Toggle(
+                                "Allow a cloud agent to run on your Mac",
+                                isOn: $cloudAgentDelegation
+                            )
+                            .accessibilityIdentifier("acp-cloud-agent-delegation")
+                            .disabled(!remoteDevControl)
+                            .onChange(of: cloudAgentDelegation) { _, newValue in
+                                // Per-node, per-silo — the conversationID IS the node's hex.
+                                AppSession.setCloudAgentDelegationConsent(
+                                    newValue, nodeID: conversationID, siloID: model.siloID)
+                            }
+                            Label(
+                                cloudAgentDelegation
+                                    ? "ON — this agent may hand tasks to a cloud CLI (Claude Code / Gemini CLI) without asking each time. That CLI's own file/shell actions still ask on your phone; this chat is raw (no egress firewall) and a cloud agent can read your project and talk to its vendor."
+                                    : "OFF — each delegation request prompts you here (Allow once / Allow always / Deny), distinct from the toggle above.",
+                                systemImage: cloudAgentDelegation
+                                    ? "cloud.fill" : "lock.shield")
+                                .font(.caption)
+                                .foregroundStyle(
+                                    cloudAgentDelegation ? AnyShapeStyle(.purple) : AnyShapeStyle(.secondary)
+                                )
+                                .accessibilityIdentifier("acp-cloud-agent-delegation-status")
+
                             Toggle("Share my chat context with this agent", isOn: $shareChatContext)
                                 .accessibilityIdentifier("acp-share-chat-context")
                                 .disabled(!remoteDevControl)
@@ -369,6 +398,8 @@ struct ConversationDetailsView: View {
                 blocked = info.blocked
                 isCodingAgent = await model.runtime.contactType(conversationID) == "coding_agent"
                 autonomousChanges = AppSession.autonomousChangesConsent(
+                    nodeID: conversationID, siloID: model.siloID)
+                cloudAgentDelegation = AppSession.cloudAgentDelegationConsent(
                     nodeID: conversationID, siloID: model.siloID)
                 remoteDevControl = AppSession.remoteDevControlConsent(
                     nodeID: conversationID, siloID: model.siloID)

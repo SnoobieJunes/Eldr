@@ -141,6 +141,23 @@ struct ConversationView: View {
                     .background(.orange)
                     .accessibilityIdentifier("silent-bypass-banner")
                 }
+                // WS3f — the live "cloud agent running" indicator: while
+                // delegate_to_cloud_agent's outer tool_call is pending/in_progress, the
+                // honest disclosure the plan calls for — this isn't a vague "AI is
+                // working" spinner, it names exactly what's different about this turn
+                // (a third party now has the project + a network path).
+                if let delegation = model.acpCloudDelegationByConversation[conversationID] {
+                    Label(
+                        "Cloud agent running: \(delegation.harness) can read your project and talk to its vendor",
+                        systemImage: "cloud.fill")
+                        .font(.callout.weight(.medium))
+                        .foregroundStyle(.white)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(.vertical, 8)
+                        .padding(.horizontal, 12)
+                        .background(.purple)
+                        .accessibilityIdentifier("cloud-delegation-banner")
+                }
                 ACPPlanSlot(model: model, conversationID: conversationID)
                 ACPTerminalSlot(model: model, conversationID: conversationID)
             }
