@@ -63,3 +63,40 @@ struct LLMTokenAtRestTests {
         #expect(kc.load(account: "llm-token") == nil)  // cleared, not left behind
     }
 }
+
+@Suite("resolvedHarnessDescriptor merges the A2A bearer token, leaves others untouched")
+struct ResolvedHarnessDescriptorA2ATests {
+    @MainActor
+    @Test func mergesBearerTokenForA2ARemoteDescriptor() {
+        let kc = KeychainBox(service: "test-a2a-\(UUID().uuidString)")
+        defer { kc.delete(account: "vendor-a2a-bearer-a2a-local-sample") }
+
+        // No token on file yet: the descriptor still resolves, unauthenticated.
+        let bare = ConfigurationStore.resolvedHarnessDescriptor(id: "a2a-local-sample", keychain: kc)
+        #expect(bare?.a2aBearerToken == nil)
+
+        let store = ConfigurationStore(
+            paths: ConfigPaths(configDir: NSTemporaryDirectory(), binDir: NSTemporaryDirectory()),
+            keychain: kc)
+        store.setA2ABearerToken("secret-bearer-canary", for: "a2a-local-sample")
+        #expect(store.a2aBearerToken(for: "a2a-local-sample") == "secret-bearer-canary")
+
+        let resolved = ConfigurationStore.resolvedHarnessDescriptor(id: "a2a-local-sample", keychain: kc)
+        #expect(resolved?.a2aBearerToken == "secret-bearer-canary")
+        #expect(resolved?.kind == .a2aRemote)
+    }
+
+    @MainActor
+    @Test func leavesStdioSpawnDescriptorsUntouchedByBearerLogic() {
+        let kc = KeychainBox(service: "test-a2a-b-\(UUID().uuidString)")
+        defer {
+            kc.delete(account: "vendor-key-claude-code")
+            kc.delete(account: "vendor-a2a-bearer-claude-code")
+        }
+        try? kc.save(Data("sk-ant-canary".utf8), account: "vendor-key-claude-code")
+
+        let resolved = ConfigurationStore.resolvedHarnessDescriptor(id: "claude-code", keychain: kc)
+        #expect(resolved?.env["ANTHROPIC_API_KEY"] == "sk-ant-canary")
+        #expect(resolved?.a2aBearerToken == nil)  // never merged for a non-a2a descriptor
+    }
+}

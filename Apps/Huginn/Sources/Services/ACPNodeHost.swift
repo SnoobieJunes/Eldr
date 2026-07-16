@@ -1,3 +1,4 @@
+import A2AHarness
 import Foundation
 import PQRCACP
 import PQRCCore
@@ -130,7 +131,7 @@ public actor ACPNodeHost {
             await runHarness(
                 descriptor: descriptor, client: transport, llm: llm,
                 toolEnvironment: toolEnvironment, config: config, configDir: configDir,
-                streamingEnabled: streamingEnabled)
+                streamingEnabled: streamingEnabled, factory: A2AHarnessFactory())
             await self.markStopped()
         }
     }

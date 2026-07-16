@@ -15,6 +15,14 @@
 		BB0000000000000000000106 /* PQRCCore in Frameworks */ = {isa = PBXBuildFile; productRef = BB0000000000000000000206 /* PQRCCore */; };
 		BB0000000000000000000107 /* PQRCAgent in Frameworks */ = {isa = PBXBuildFile; productRef = BB0000000000000000000207 /* PQRCAgent */; };
 		BB0000000000000000000108 /* PQRCAgent in Frameworks */ = {isa = PBXBuildFile; productRef = BB0000000000000000000208 /* PQRCAgent */; };
+		BB0000000000000000000109 /* A2ACore in Frameworks */ = {isa = PBXBuildFile; productRef = BB0000000000000000000209 /* A2ACore */; };
+		BB000000000000000000010A /* A2AServer in Frameworks */ = {isa = PBXBuildFile; productRef = BB000000000000000000020A /* A2AServer */; };
+		BB000000000000000000010B /* A2AHTTPServer in Frameworks */ = {isa = PBXBuildFile; productRef = BB000000000000000000020B /* A2AHTTPServer */; };
+		BB000000000000000000010C /* A2AHarness in Frameworks */ = {isa = PBXBuildFile; productRef = BB000000000000000000020C /* A2AHarness */; };
+		BB000000000000000000010D /* A2ACore in Frameworks */ = {isa = PBXBuildFile; productRef = BB000000000000000000020D /* A2ACore */; };
+		BB000000000000000000010E /* A2AServer in Frameworks */ = {isa = PBXBuildFile; productRef = BB000000000000000000020E /* A2AServer */; };
+		BB000000000000000000010F /* A2AHTTPServer in Frameworks */ = {isa = PBXBuildFile; productRef = BB000000000000000000020F /* A2AHTTPServer */; };
+		BB0000000000000000000110 /* A2AHarness in Frameworks */ = {isa = PBXBuildFile; productRef = BB0000000000000000000210 /* A2AHarness */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -61,6 +69,10 @@
 				BB0000000000000000000102 /* PQRCNostr in Frameworks */,
 				BB0000000000000000000103 /* PQRCCore in Frameworks */,
 				BB0000000000000000000107 /* PQRCAgent in Frameworks */,
+				BB0000000000000000000109 /* A2ACore in Frameworks */,
+				BB000000000000000000010A /* A2AServer in Frameworks */,
+				BB000000000000000000010B /* A2AHTTPServer in Frameworks */,
+				BB000000000000000000010C /* A2AHarness in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -72,6 +84,10 @@
 				BB0000000000000000000105 /* PQRCNostr in Frameworks */,
 				BB0000000000000000000106 /* PQRCCore in Frameworks */,
 				BB0000000000000000000108 /* PQRCAgent in Frameworks */,
+				BB000000000000000000010D /* A2ACore in Frameworks */,
+				BB000000000000000000010E /* A2AServer in Frameworks */,
+				BB000000000000000000010F /* A2AHTTPServer in Frameworks */,
+				BB0000000000000000000110 /* A2AHarness in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -125,6 +141,10 @@
 				BB0000000000000000000202 /* PQRCNostr */,
 				BB0000000000000000000203 /* PQRCCore */,
 				BB0000000000000000000207 /* PQRCAgent */,
+				BB0000000000000000000209 /* A2ACore */,
+				BB000000000000000000020A /* A2AServer */,
+				BB000000000000000000020B /* A2AHTTPServer */,
+				BB000000000000000000020C /* A2AHarness */,
 			);
 			productName = Huginn;
 			productReference = BB0000000000000000000701 /* Huginn.app */;
@@ -151,6 +171,10 @@
 				BB0000000000000000000205 /* PQRCNostr */,
 				BB0000000000000000000206 /* PQRCCore */,
 				BB0000000000000000000208 /* PQRCAgent */,
+				BB000000000000000000020D /* A2ACore */,
+				BB000000000000000000020E /* A2AServer */,
+				BB000000000000000000020F /* A2AHTTPServer */,
+				BB0000000000000000000210 /* A2AHarness */,
 			);
 			productName = HuginnTests;
 			productReference = BB0000000000000000000702 /* HuginnTests.xctest */;
@@ -189,6 +213,7 @@
 				BB0000000000000000000C02 /* XCLocalSwiftPackageReference "../../Packages/PQRCNostr" */,
 				BB0000000000000000000C03 /* XCLocalSwiftPackageReference "../../Packages/PQRCCore" */,
 				BB0000000000000000000C04 /* XCLocalSwiftPackageReference "../../Packages/PQRCAgent" */,
+				BB0000000000000000000C05 /* XCLocalSwiftPackageReference "../../Packages/SwiftA2A" */,
 			);
 			preferredProjectObjectVersion = 77;
 			productRefGroup = BB0000000000000000000602 /* Products */;
@@ -470,6 +495,10 @@
 			isa = XCLocalSwiftPackageReference;
 			relativePath = ../../Packages/PQRCAgent;
 		};
+		BB0000000000000000000C05 /* XCLocalSwiftPackageReference "../../Packages/SwiftA2A" */ = {
+			isa = XCLocalSwiftPackageReference;
+			relativePath = ../../Packages/SwiftA2A;
+		};
 /* End XCLocalSwiftPackageReference section */
 
 /* Begin XCSwiftPackageProductDependency section */
@@ -504,6 +533,38 @@
 		BB0000000000000000000208 /* PQRCAgent */ = {
 			isa = XCSwiftPackageProductDependency;
 			productName = PQRCAgent;
+		};
+		BB0000000000000000000209 /* A2ACore */ = {
+			isa = XCSwiftPackageProductDependency;
+			productName = A2ACore;
+		};
+		BB000000000000000000020A /* A2AServer */ = {
+			isa = XCSwiftPackageProductDependency;
+			productName = A2AServer;
+		};
+		BB000000000000000000020B /* A2AHTTPServer */ = {
+			isa = XCSwiftPackageProductDependency;
+			productName = A2AHTTPServer;
+		};
+		BB000000000000000000020C /* A2AHarness */ = {
+			isa = XCSwiftPackageProductDependency;
+			productName = A2AHarness;
+		};
+		BB000000000000000000020D /* A2ACore */ = {
+			isa = XCSwiftPackageProductDependency;
+			productName = A2ACore;
+		};
+		BB000000000000000000020E /* A2AServer */ = {
+			isa = XCSwiftPackageProductDependency;
+			productName = A2AServer;
+		};
+		BB000000000000000000020F /* A2AHTTPServer */ = {
+			isa = XCSwiftPackageProductDependency;
+			productName = A2AHTTPServer;
+		};
+		BB0000000000000000000210 /* A2AHarness */ = {
+			isa = XCSwiftPackageProductDependency;
+			productName = A2AHarness;
 		};
 /* End XCSwiftPackageProductDependency section */
 	};

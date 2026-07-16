@@ -26,17 +26,21 @@ struct ACPAgentTests {
     }
 
     /// A scripted LLM: returns a queued response per `complete` call. Records the
-    /// messages it was given so tests can assert tool results were fed back.
+    /// messages AND the advertised tool definitions it was given so tests can assert
+    /// both what was fed back and what the model was offered.
     actor MockLLMClient: LLMClient {
         private var queue: [LLMResponse]
         private(set) var receivedMessages: [[LLMMessage]] = []
+        private(set) var receivedTools: [[LLMTool]] = []
         init(_ responses: [LLMResponse]) { self.queue = responses }
         func complete(messages: [LLMMessage], tools: [LLMTool]) async throws -> LLMResponse {
             receivedMessages.append(messages)
+            receivedTools.append(tools)
             if queue.isEmpty { return LLMResponse(content: "(no more scripted responses)") }
             return queue.removeFirst()
         }
         func calls() -> [[LLMMessage]] { receivedMessages }
+        func toolsSeen() -> [[LLMTool]] { receivedTools }
     }
 
     // MARK: Harness
@@ -665,6 +669,37 @@ struct ACPAgentTests {
         #expect(completed?["status"]?.stringValue == "failed")
         let errorText = completed?["content"]?.arrayValue?.first?["error"]?.stringValue
         #expect(errorText?.contains("unknown or unsupported") == true)
+    }
+
+    /// A disabled node must not even ADVERTISE delegate_to_cloud_agent to its model —
+    /// offering a tool that always refuses just burns a weak model's turns. Enabled ⇒
+    /// advertised; disabled (default) ⇒ absent. (The runOneTool guard independently
+    /// refuses a hallucinated call either way — see the tests above.)
+    @Test func delegateTool_advertisedOnlyWhenDelegationEnabled() async throws {
+        func toolsOffered(config: AgentConfig) async throws -> [String] {
+            let llm = MockLLMClient([LLMResponse(content: "ok")])
+            let (agent, _) = makeAgent(llm: llm, config: config)
+            _ = await agent.handle(
+                line: #"{"jsonrpc":"2.0","id":0,"method":"initialize","params":{}}"#)
+            let sid = try #require(
+                try parse(
+                    await agent.handle(
+                        line: #"{"jsonrpc":"2.0","id":1,"method":"session/new","params":{}}"#))[
+                    "result"]?["sessionId"]?.stringValue)
+            _ = await agent.handle(
+                line:
+                    "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"session/prompt\",\"params\":{\"sessionId\":\"\(sid)\",\"prompt\":[{\"type\":\"text\",\"text\":\"hi\"}]}}"
+            )
+            return try #require(await llm.toolsSeen().first).map(\.name)
+        }
+
+        let defaultTools = try await toolsOffered(config: .default)
+        #expect(!defaultTools.contains("delegate_to_cloud_agent"))
+        #expect(defaultTools.contains("run_shell"))  // the filter removed ONLY delegation
+
+        let enabledTools = try await toolsOffered(
+            config: AgentConfig(cloudAgentDelegationEnabled: true))
+        #expect(enabledTools.contains("delegate_to_cloud_agent"))
     }
 
     // MARK: - Phase 1c: project-context injection

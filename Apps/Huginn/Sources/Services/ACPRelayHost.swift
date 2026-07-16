@@ -1,3 +1,4 @@
+import A2AHarness
 import Foundation
 import PQRCACP
 import PQRCCore
@@ -160,7 +161,7 @@ final class ACPRelayHost {
             await runHarness(
                 descriptor: descriptor, client: transport, llm: llm,
                 toolEnvironment: toolEnvironment, config: config, configDir: configDir,
-                streamingEnabled: streamingEnabled)
+                streamingEnabled: streamingEnabled, factory: A2AHarnessFactory())
             self.markStopped()
         }
     }

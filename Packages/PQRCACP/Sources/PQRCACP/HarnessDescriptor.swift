@@ -24,6 +24,12 @@ public enum HarnessKind: Sendable, Equatable {
     /// pipes the phone's verified, decrypted ACP line-stream to/from its stdin/stdout with
     /// `runACPProxy`.
     case stdioSpawn
+    /// An Agent2Agent (A2A) v1.0 agent reached over HTTPS JSON-RPC — no subprocess. `runHarness`
+    /// builds its `ACPTransport` via `A2AACPBridge` (the `A2AHarness` target, which is the only
+    /// place in this package that depends on `SwiftA2A`; `PQRCACP` itself stays dependency-free
+    /// — see `HarnessTransportFactory.swift`). The bridge translates ACP `session/prompt` turns
+    /// into A2A `message/send`/`message/stream` calls against the agent named by `a2aCardURL`.
+    case a2aRemote
 }
 
 /// A data-only description of one selectable ACP backend. The `command`/`args`/`env` shape
@@ -59,6 +65,16 @@ public struct HarnessDescriptor: Sendable, Equatable, Identifiable {
     /// `[vendorKeyEnvVar: key]` into a COPY of this descriptor's `env` at launch time
     /// (see `withVendorKey`), so the secret exists only for the duration of one spawn.
     public let vendorKeyEnvVar: String?
+    /// `.a2aRemote` only: the agent-card URL (e.g.
+    /// `https://host/.well-known/agent-card.json`) `A2AACPBridge` resolves to discover the
+    /// agent's JSON-RPC endpoint and capabilities. `nil` for every other kind.
+    public let a2aCardURL: String?
+    /// `.a2aRemote` only, and NEVER set in the static registry — mirrors `vendorKeyEnvVar` /
+    /// `withVendorKey`'s launch-scoped-secret pattern, not env-var-name-as-data: this field
+    /// carries the bearer token ITSELF, but only ever via a copy produced by `withBearerToken`
+    /// at launch time. The node host sources the token from its OWN Keychain by `id`, exactly
+    /// as it does for `vendorKeyEnvVar`; this descriptor type carries no secret storage.
+    public let a2aBearerToken: String?
 
     public init(
         id: String,
@@ -68,7 +84,9 @@ public struct HarnessDescriptor: Sendable, Equatable, Identifiable {
         args: [String] = [],
         env: [String: String] = [:],
         isProvisional: Bool = false,
-        vendorKeyEnvVar: String? = nil
+        vendorKeyEnvVar: String? = nil,
+        a2aCardURL: String? = nil,
+        a2aBearerToken: String? = nil
     ) {
         self.id = id
         self.displayName = displayName
@@ -78,6 +96,8 @@ public struct HarnessDescriptor: Sendable, Equatable, Identifiable {
         self.env = env
         self.isProvisional = isProvisional
         self.vendorKeyEnvVar = vendorKeyEnvVar
+        self.a2aCardURL = a2aCardURL
+        self.a2aBearerToken = a2aBearerToken
     }
 
     /// WS3b — a copy of this descriptor with `key` merged into `env` under
@@ -92,7 +112,22 @@ public struct HarnessDescriptor: Sendable, Equatable, Identifiable {
         merged[envVar] = key
         return HarnessDescriptor(
             id: id, displayName: displayName, kind: kind, command: command, args: args,
-            env: merged, isProvisional: isProvisional, vendorKeyEnvVar: vendorKeyEnvVar)
+            env: merged, isProvisional: isProvisional, vendorKeyEnvVar: vendorKeyEnvVar,
+            a2aCardURL: a2aCardURL, a2aBearerToken: a2aBearerToken)
+    }
+
+    /// A copy of this descriptor with `token` merged in as `a2aBearerToken`, mirroring
+    /// `withVendorKey`'s launch-scoped-secret pattern for `.a2aRemote`. No-op (returns self
+    /// unchanged) for any other `kind`, or when `token` is nil/empty (the bridge still
+    /// connects, just unauthenticated — a missing credential fails open to "no auth" rather
+    /// than blocking the delegation, same policy as `withVendorKey`). The caller sources
+    /// `token` from ITS OWN Keychain by `id`; this type carries no secret storage itself.
+    public func withBearerToken(_ token: String?) -> HarnessDescriptor {
+        guard kind == .a2aRemote, let token, !token.isEmpty else { return self }
+        return HarnessDescriptor(
+            id: id, displayName: displayName, kind: kind, command: command, args: args,
+            env: env, isProvisional: isProvisional, vendorKeyEnvVar: vendorKeyEnvVar,
+            a2aCardURL: a2aCardURL, a2aBearerToken: token)
     }
 
     /// The built-in EldrChat reference harness (bring-your-own-model). Convenience so the node
@@ -215,6 +250,18 @@ public enum HarnessRegistry {
             command: "cursor-agent",
             args: ["acp"],
             isProvisional: true),
+
+        // ── A2A (still PROVISIONAL — one example entry for interop testing). ──
+        // Targets the a2aproject/a2a-samples "helloworld" reference agent
+        // (https://github.com/a2aproject/a2a-samples) run locally on the default sample
+        // port — NOT a real vendor. Confirms the `.a2aRemote` seam end-to-end against a
+        // known-good agent card before any real A2A provider is registered.
+        HarnessDescriptor(
+            id: "a2a-local-sample",
+            displayName: "A2A Agent (local sample)",
+            kind: .a2aRemote,
+            isProvisional: true,
+            a2aCardURL: "http://127.0.0.1:9999/.well-known/agent-card.json"),
     ]
 
     /// Look up a descriptor by its stable `id` (router selection / restore).

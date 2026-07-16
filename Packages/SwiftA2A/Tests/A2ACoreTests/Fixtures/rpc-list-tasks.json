@@ -1,0 +1,11 @@
+{
+  "jsonrpc": "2.0",
+  "id": 3,
+  "method": "ListTasks",
+  "params": {
+    "contextId": "context-uuid",
+    "status": "TASK_STATE_WORKING",
+    "pageSize": 50,
+    "pageToken": "cursor-token"
+  }
+}

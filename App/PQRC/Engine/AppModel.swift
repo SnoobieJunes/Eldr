@@ -843,15 +843,6 @@ final class AppModel {
         if !on { Task { await stopACPTerminal(conversationID: nodeHex) } }
     }
 
-    /// WS2 — the silent-bypass indicator: true whenever mutating tools on this node run
-    /// WITHOUT a phone-side prompt, from EITHER cause — my own standing autonomous-changes
-    /// consent, OR the node itself reporting `allowUngatedTools` (a Mac-side override the
-    /// phone can't otherwise see). Either one alone is enough for tools to run silently, so
-    /// the banner must fire on either, not just mine.
-    func silentBypassActive(nodeHex: String) -> Bool {
-        codingAutonomy(nodeHex: nodeHex) || acpNodeUngatedByConversation[nodeHex] == true
-    }
-
     /// Rebuild the `agentName -> backend type` cache from the persisted AI config.
     /// Cheap; call on conversation appear so a bubble badge reflects Settings edits.
     func refreshAITypes() {

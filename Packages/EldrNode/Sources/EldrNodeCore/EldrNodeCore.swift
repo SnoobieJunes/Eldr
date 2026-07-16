@@ -1,3 +1,4 @@
+import A2AHarness
 import Foundation
 import PQRCACP
 import PQRCCore
@@ -178,7 +179,8 @@ public actor EldrNodeCore {
             await runHarness(
                 descriptor: descriptor, client: transport, llm: llm,
                 toolEnvironment: toolEnvironment, config: config, configDir: nil,
-                streamingEnabled: streamingEnabled, extraTools: mcpClient)
+                streamingEnabled: streamingEnabled, extraTools: mcpClient,
+                factory: A2AHarnessFactory())
         }
 
         // Begin the messenger's single event stream and consume it as the SOLE consumer.

@@ -1,0 +1,9 @@
+{
+  "supportedInterfaces": [
+    {
+      "url": "wss://agent.example.com/a2a/websocket",
+      "protocolBinding": "https://example.com/bindings/websocket/v1",
+      "protocolVersion": "1.0"
+    }
+  ]
+}

@@ -236,7 +236,7 @@ struct ACPProxyTests {
 
         let provisional = Set(
             HarnessRegistry.all.filter { $0.isProvisional }.map { $0.id })
-        #expect(provisional == ["codex", "opencode", "cursor"])
+        #expect(provisional == ["codex", "opencode", "cursor", "a2a-local-sample"])
         // Installed/built-in/WS3d-verified are confirmed, not provisional.
         #expect(HarnessRegistry.descriptor(id: "xcode-acp")?.isProvisional == false)
         #expect(HarnessRegistry.descriptor(id: "openclaw")?.isProvisional == false)

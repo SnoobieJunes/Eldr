@@ -60,6 +60,12 @@ public actor ACPAgent {
     /// context" opt-in; see `sessionsWithMCP`). PQRCACP stays MCP-knowledge-free: the
     /// provider is the seam, and the MCP/relay wiring lives in its implementation.
     private let extraTools: (any ExtraToolProvider)?
+    /// WS3g — builds the `ACPTransport` `delegateToCloudAgent` proxies through, for any
+    /// harness kind that isn't `.builtIn`. Defaults to `DefaultHarnessTransportFactory`
+    /// (`.stdioSpawn` only, keeping this target dependency-free); the node injects
+    /// `A2AHarness`'s factory when `.a2aRemote` delegation should also work. See
+    /// `HarnessTransportFactory.swift`.
+    private let harnessTransportFactory: any HarnessTransportFactory
 
     /// Negotiated at `initialize`. Defaults to "everything off" until then (so a
     /// stray prompt before initialize still works via Foundation fallbacks).
@@ -108,7 +114,8 @@ public actor ACPAgent {
         streamingEnabled: Bool = true,
         requestTimeoutSeconds: Double = 0,
         contextGraph: (any ContextGraphAssembling)? = nil,
-        extraTools: (any ExtraToolProvider)? = nil
+        extraTools: (any ExtraToolProvider)? = nil,
+        harnessTransportFactory: any HarnessTransportFactory = DefaultHarnessTransportFactory()
     ) {
         self.connection = connection
         self.llm = llm
@@ -119,6 +126,7 @@ public actor ACPAgent {
         self.streamingEnabled = streamingEnabled
         self.requestTimeoutSeconds = max(0, requestTimeoutSeconds)
         self.extraTools = extraTools
+        self.harnessTransportFactory = harnessTransportFactory
         self.skills = AgentSkillSet.from(config: config)
         // Build the real client from config when enabled and not injected (tests
         // inject a stub so they stay network-free).
@@ -402,6 +410,13 @@ public actor ACPAgent {
             maxReadFileBytes: config.maxReadFileBytes,
             shellTimeoutSeconds: config.shellTimeoutSeconds)
         var tools = ToolExecutor.toolDefinitions(allowlist: config.toolAllowlist)
+        // WS3e: delegation is advertised ONLY when the operator's hard off-switch is on.
+        // A disabled node must not tempt its model with a tool that always refuses (a
+        // weak local model would burn turns retrying it); the `runOneTool` gate still
+        // refuses a hallucinated call as defense-in-depth.
+        if !config.cloudAgentDelegationEnabled {
+            tools.removeAll { $0.name == ToolExecutor.delegateToCloudAgentTool }
+        }
         // Phase D3: merge the phone's MCP chat tools into the advertised set, but
         // ONLY when this session opted in (`mcpServers` advertised) AND a provider is
         // wired. The provider's `toolDefinitions()` lazily handshakes over the relay;
@@ -790,6 +805,9 @@ public actor ACPAgent {
     /// turn uses — so its actions surface as permission cards on the phone too, never
     /// auto-approved just because the parent call was. A distinct `toolCallId` per
     /// delegated request keeps it from colliding with the outer turn's own id.
+    /// A `session/cancel` on the outer session terminates the delegated CLI promptly
+    /// (the prompt is raced against the cancel poll below) — no delegated process may
+    /// outlive the turn that authorized it, same rule as `terminateTerminals` for PTYs.
     private func delegateToCloudAgent(
         sessionId: String, args: JSONValue, cwd: String
     ) async -> ToolResult {
@@ -805,16 +823,17 @@ public actor ACPAgent {
         guard let task = args["task"]?.stringValue, !task.isEmpty else {
             return ToolResult(text: "delegate_to_cloud_agent: missing 'task'.", isError: true)
         }
-        guard let descriptor = HarnessRegistry.descriptor(id: harnessID), descriptor.kind == .stdioSpawn
+        guard let descriptor = HarnessRegistry.descriptor(id: harnessID),
+            descriptor.kind == .stdioSpawn || descriptor.kind == .a2aRemote
         else {
             return ToolResult(
                 text: "delegate_to_cloud_agent: unknown or unsupported harness \"\(harnessID)\".",
                 isError: true)
         }
 
-        let transport = StdioHarnessTransport(descriptor: descriptor)
+        let transport: any ACPTransport
         do {
-            try transport.start()
+            transport = try harnessTransportFactory.makeTransport(for: descriptor)
         } catch {
             return ToolResult(
                 text:
@@ -844,13 +863,52 @@ public actor ACPAgent {
 
         do {
             _ = try await driver.start(cwd: cwd)
-            let stopReason = try await driver.prompt(task)
+        } catch {
             transport.close()
+            return ToolResult(
+                text:
+                    "delegate_to_cloud_agent: \(descriptor.displayName) failed: \(Self.describe(error))",
+                isError: true)
+        }
+
+        // Race the delegated turn against a session/cancel, mirroring `runModelCall`'s
+        // cancel poll: the phone's cancel must terminate the spawned CLI promptly — the
+        // same fail-closed rule `terminateTerminals` enforces for PTYs — never wait out
+        // a delegated turn that could run for minutes. On cancel, closing the transport
+        // kills the child process, which finishes the driver's inbound stream and
+        // unblocks the losing prompt racer via `failAll` (drained by the group).
+        enum DelegationOutcome { case finished(String), cancelled, failed(Error) }
+        let outcome = await withTaskGroup(of: DelegationOutcome.self) { group -> DelegationOutcome in
+            group.addTask {
+                do { return .finished(try await driver.prompt(task)) } catch {
+                    return .failed(error)
+                }
+            }
+            group.addTask { [weak self] in
+                while !Task.isCancelled {
+                    if await self?.isCancelled(sessionId) ?? true { return .cancelled }
+                    do { try await Task.sleep(nanoseconds: 50_000_000) } catch { break }
+                }
+                return .cancelled
+            }
+            let first = await group.next() ?? .cancelled
+            if case .cancelled = first { transport.close() }
+            group.cancelAll()
+            return first
+        }
+        transport.close()
+
+        switch outcome {
+        case .finished(let stopReason):
             return ToolResult(
                 text: await accumulator.result(stopReason: stopReason),
                 isError: stopReason == "refusal")
-        } catch {
-            transport.close()
+        case .cancelled:
+            return ToolResult(
+                text:
+                    "delegate_to_cloud_agent: cancelled — the delegated \(descriptor.displayName) process was terminated.",
+                isError: true)
+        case .failed(let error):
             return ToolResult(
                 text:
                     "delegate_to_cloud_agent: \(descriptor.displayName) failed: \(Self.describe(error))",

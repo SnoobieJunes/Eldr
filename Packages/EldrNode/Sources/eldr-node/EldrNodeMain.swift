@@ -130,7 +130,13 @@ struct EldrNodeMain {
             // wraps — see `HarnessDescriptor.withVendorKey`).
             let responder = arguments["responder"]?.nonEmpty?.lowercased() ?? "sybilclaw"
             let gatewayPort = arguments["gateway-port"]?.nonEmpty.flatMap { Int($0) } ?? 18789
-            let cloudHarness = HarnessRegistry.descriptor(id: responder)
+            // Only a `.stdioSpawn` registry hit is an EXTERNAL cloud harness. "eldr-acp"
+            // is in the registry too — as `.builtIn` — and must keep taking the built-in
+            // path below (status line and all), not the cloud-harness one.
+            let registryHit = HarnessRegistry.descriptor(id: responder)
+            let cloudHarness =
+                (registryHit?.kind == .stdioSpawn || registryHit?.kind == .a2aRemote)
+                ? registryHit : nil
             let useSybilclaw = cloudHarness == nil && !["eldr-acp", "eldracp", "acp"].contains(responder)
             let llm: any LLMClient =
                 useSybilclaw
@@ -139,7 +145,11 @@ struct EldrNodeMain {
                         port: gatewayPort, token: env["SYBILCLAW_GATEWAY_TOKEN"]))
                 : OpenAICompatibleLLMClient(config: llmConfig)
             let harnessDescriptor: HarnessDescriptor
-            if let cloudHarness {
+            if let cloudHarness, cloudHarness.kind == .a2aRemote {
+                let bearerToken = NodeKeychain().load(account: a2aBearerAccount(for: cloudHarness.id))
+                    .flatMap { String(data: $0, encoding: .utf8) }
+                harnessDescriptor = cloudHarness.withBearerToken(bearerToken)
+            } else if let cloudHarness {
                 let vendorKey = NodeKeychain().load(account: vendorKeyAccount(for: cloudHarness.id))
                     .flatMap { String(data: $0, encoding: .utf8) }
                 harnessDescriptor = cloudHarness.withVendorKey(vendorKey)
@@ -155,7 +165,12 @@ struct EldrNodeMain {
             print("  owner:    \(hexPrefix(ownerIdentityHex)) (C-3 gate target)")
             print("  node id:  \(hexPrefix(nodeIdentityHex))")
             print("  workdir:  \(workdir) (C-2 jail)")
-            if let cloudHarness {
+            if let cloudHarness, cloudHarness.kind == .a2aRemote {
+                let hasToken = harnessDescriptor.a2aBearerToken?.isEmpty == false
+                print(
+                    "  responder: \(cloudHarness.displayName) (A2A: \(cloudHarness.a2aCardURL ?? "?")) — bearer token \(hasToken ? "loaded" : "MISSING, import with --import-vendor-key \(cloudHarness.id)")"
+                )
+            } else if let cloudHarness {
                 let hasKey = !(harnessDescriptor.env[cloudHarness.vendorKeyEnvVar ?? ""] ?? "").isEmpty
                 print(
                     "  responder: \(cloudHarness.displayName) (\(cloudHarness.command)) — vendor key \(hasKey ? "loaded" : "MISSING, import with --import-vendor-key \(cloudHarness.id)")"
@@ -234,6 +249,14 @@ struct EldrNodeMain {
         "node-vendor-key-\(harnessID)"
     }
 
+    /// `.a2aRemote` counterpart to `vendorKeyAccount`: the Keychain account a harness's A2A
+    /// bearer token is seeded into by `--import-vendor-key <id>` (same CLI flag — the mode
+    /// picks the right account by looking up the descriptor's `kind`) and read back at serve
+    /// time via `HarnessDescriptor.withBearerToken`.
+    static func a2aBearerAccount(for harnessID: String) -> String {
+        "node-a2a-bearer-\(harnessID)"
+    }
+
     // MARK: - Headless provisioning modes (exit after running)
 
     /// Read the LLM token from STDIN and store it in the node Keychain. Never logs the
@@ -273,8 +296,13 @@ struct EldrNodeMain {
                     .utf8))
             exit(2)
         }
+        // Route to the A2A bearer account when the id names an `.a2aRemote` descriptor, else
+        // the vendor-key account (`.stdioSpawn`) — same CLI surface, correct storage either way.
+        let account =
+            HarnessRegistry.descriptor(id: harnessID)?.kind == .a2aRemote
+            ? a2aBearerAccount(for: harnessID) : vendorKeyAccount(for: harnessID)
         do {
-            try NodeKeychain().save(Data(key.utf8), account: vendorKeyAccount(for: harnessID))
+            try NodeKeychain().save(Data(key.utf8), account: account)
             FileHandle.standardError.write(Data(
                 "eldr-node: vendor key for \(harnessID) imported to the Keychain.\n".utf8))
         } catch {

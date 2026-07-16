@@ -94,6 +94,24 @@ final class ConfigurationStore: ObservableObject {
     private static let claudeCodeKeyAccount = "vendor-key-claude-code"
     private static let geminiKeyAccount = "vendor-key-gemini-cli"
 
+    /// `.a2aRemote` bearer tokens — ONE per descriptor id (unlike the fixed claude/gemini
+    /// scalars above, a node can select among several `.a2aRemote` descriptors), mirroring
+    /// `withVendorKey`'s launch-scoped-secret pattern for `withBearerToken`. Read/written via
+    /// `a2aBearerToken(for:)` / `setA2ABearerToken(_:for:)`, bound by the UI through a local
+    /// `@State` (see `BridgeView`) — same Keychain storage flow as the vendor keys.
+    private static func a2aBearerAccount(for descriptorID: String) -> String {
+        "vendor-a2a-bearer-\(descriptorID)"
+    }
+
+    func a2aBearerToken(for descriptorID: String) -> String {
+        keychain.load(account: Self.a2aBearerAccount(for: descriptorID))
+            .flatMap { String(data: $0, encoding: .utf8) } ?? ""
+    }
+
+    func setA2ABearerToken(_ token: String, for descriptorID: String) {
+        saveOrDelete(token, account: Self.a2aBearerAccount(for: descriptorID))
+    }
+
     // MARK: sybilclaw gateway (Huginn-only pref — NOT an eldr-acp env var)
     /// The port sybilclaw's gateway daemon listens on (default 18789). Used by the
     /// Connections panel's status probe (and, later, the gateway bridge). `eldr-acp`
@@ -296,6 +314,11 @@ final class ConfigurationStore: ObservableObject {
         id: String, keychain: KeychainBox = KeychainBox()
     ) -> HarnessDescriptor? {
         guard let descriptor = HarnessRegistry.descriptor(id: id) else { return nil }
+        if descriptor.kind == .a2aRemote {
+            let token = keychain.load(account: a2aBearerAccount(for: descriptor.id))
+                .flatMap { String(data: $0, encoding: .utf8) }
+            return descriptor.withBearerToken(token)
+        }
         let account: String
         switch descriptor.id {
         case "claude-code": account = claudeCodeKeyAccount
