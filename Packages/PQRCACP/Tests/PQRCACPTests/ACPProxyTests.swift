@@ -223,8 +223,10 @@ struct ACPProxyTests {
     }
 
     // 3b ─ Kind/provisional discipline: every non-built-in is a `.stdioSpawn` with a non-empty
-    // command; the five Phase-2 placeholders are flagged provisional (commands to confirm),
-    // while the built-in and the two installed launchers are NOT.
+    // command; the three remaining Phase-2 placeholders are flagged provisional (commands to
+    // confirm), while the built-in, the two installed launchers, AND claude-code/gemini-cli
+    // (WS3d — confirmed against the real installed binaries, see HarnessDescriptor.swift) are
+    // NOT.
     @Test func descriptorKindsAndProvisionalFlagsAreConsistent() {
         for descriptor in HarnessRegistry.all where descriptor.kind == .stdioSpawn {
             #expect(!descriptor.command.isEmpty, "\(descriptor.id) has empty command")
@@ -234,10 +236,12 @@ struct ACPProxyTests {
 
         let provisional = Set(
             HarnessRegistry.all.filter { $0.isProvisional }.map { $0.id })
-        #expect(provisional == ["claude-code", "codex", "gemini-cli", "opencode", "cursor"])
-        // Installed/built-in are confirmed, not provisional.
+        #expect(provisional == ["codex", "opencode", "cursor"])
+        // Installed/built-in/WS3d-verified are confirmed, not provisional.
         #expect(HarnessRegistry.descriptor(id: "xcode-acp")?.isProvisional == false)
         #expect(HarnessRegistry.descriptor(id: "openclaw")?.isProvisional == false)
         #expect(HarnessRegistry.descriptor(id: "eldr-acp")?.isProvisional == false)
+        #expect(HarnessRegistry.descriptor(id: "claude-code")?.isProvisional == false)
+        #expect(HarnessRegistry.descriptor(id: "gemini-cli")?.isProvisional == false)
     }
 }

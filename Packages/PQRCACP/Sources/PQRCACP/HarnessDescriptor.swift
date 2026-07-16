@@ -108,15 +108,35 @@ public struct HarnessDescriptor: Sendable, Equatable, Identifiable {
 /// descriptors with no architecture change." A real Phase-2 integration adds an entry here
 /// (and confirms its `command`); nothing else in the proxy/transport path changes.
 ///
-/// IMPORTANT — the `.stdioSpawn` commands below are of two confidences:
+/// IMPORTANT — the `.stdioSpawn` commands below are of three confidences:
 ///   • NOT provisional — `eldr-acp-xcode` / `eldr-acp-openclaw`: the launchers the
 ///     Huginn actually installs into `~/.local/bin` (see `ConfigPaths.launcher`
 ///     / `.openClawLauncher`). These exist on this machine today.
-///   • Provisional (`isProvisional: true`) — Claude Code, Codex, Gemini CLI, OpenCode,
-///     Cursor: SCAFFOLDING DATA. The commands/args are the tools' *conventional* ACP launch
-///     invocations and MUST be confirmed against each installed tool before Phase-2 wiring;
-///     they are NOT verified here (none of these harnesses is installed). They exist so the
-///     registry is the drop-in point.
+///   • NOT provisional (WS3d, verified) — Claude Code, Gemini CLI: `command`+`args`
+///     confirmed by actually installing each (`npm install -g
+///     @zed-industries/claude-code-acp @google/gemini-cli`) and driving a REAL
+///     `initialize` handshake through the exact production path (`runHarness` →
+///     `StdioHarnessTransport`), not just a hand-typed shell probe — both returned a
+///     well-formed ACP `initialize` result. What's still UNVERIFIED: an actual
+///     `session/prompt` (needs a real vendor credential — `claude /login` or
+///     `ANTHROPIC_API_KEY` / `GEMINI_API_KEY` — neither obtained here) and the
+///     `@zed-industries/claude-code-acp` package is npm-flagged DEPRECATED in favor
+///     of `@agentclientprotocol/claude-agent-acp`, whose bin is named
+///     `claude-agent-acp` (not `claude-code-acp`) — if the operator installs the
+///     successor instead, this descriptor's `command` must be updated to match.
+///     OPERATIONAL CAVEAT (the actual blocker in practice): `npm install -g` under
+///     nvm lands the binary in `~/.nvm/versions/node/<v>/bin`, which is NOT on a
+///     GUI-launched Huginn.app's (or launchd-spawned eldr-node's) default PATH —
+///     confirmed by spawning with the system default PATH (`/etc/paths` +
+///     `/etc/paths.d`, no `~/.local/bin`/nvm) and getting `No such file or
+///     directory`. A bare command name here only resolves if the operator installs
+///     via a PATH-visible method (Homebrew, system Node) or the node's own PATH is
+///     extended — this is a real per-Mac setup step, not a code bug.
+///   • Still provisional (`isProvisional: true`) — Codex, OpenCode, Cursor:
+///     SCAFFOLDING DATA. The commands/args are the tools' *conventional* ACP launch
+///     invocations and MUST be confirmed against each installed tool before Phase-2
+///     wiring; they are NOT verified here (none of these harnesses is installed).
+///     They exist so the registry is the drop-in point.
 public enum HarnessRegistry {
     /// `~/.local/bin/<name>` — where the Configurator installs the launchers (mirrors
     /// `ConfigPaths.binDir`). Resolved per-user so the descriptors point at the real scripts.
@@ -148,16 +168,29 @@ public enum HarnessRegistry {
             kind: .stdioSpawn,
             command: localBin("eldr-acp-openclaw")),
 
-        // ── Phase-2 placeholders (PROVISIONAL — commands are defaults to confirm). ──
-        // Claude Code: Anthropic's CLI exposes an ACP server mode.
+        // ── WS3d-verified: command+args confirmed against the real installed binary. ──
+        // Claude Code: the `@zed-industries/claude-code-acp` ACP adapter (npm-deprecated in
+        // favor of `@agentclientprotocol/claude-agent-acp`, bin `claude-agent-acp` — update
+        // `command` if/when the operator installs the successor instead).
         HarnessDescriptor(
             id: "claude-code",
             displayName: "Claude Code",
             kind: .stdioSpawn,
             command: "claude-code-acp",
             args: [],
-            isProvisional: true,
+            isProvisional: false,
             vendorKeyEnvVar: "ANTHROPIC_API_KEY"),
+        // Gemini CLI: Google's `@google/gemini-cli`, ACP mode over stdio.
+        HarnessDescriptor(
+            id: "gemini-cli",
+            displayName: "Gemini CLI",
+            kind: .stdioSpawn,
+            command: "gemini",
+            args: ["--experimental-acp"],
+            isProvisional: false,
+            vendorKeyEnvVar: "GEMINI_API_KEY"),
+
+        // ── Phase-2 placeholders (still PROVISIONAL — commands are defaults to confirm). ──
         // Codex: OpenAI's `codex` CLI, ACP/stdio subcommand.
         HarnessDescriptor(
             id: "codex",
@@ -166,15 +199,6 @@ public enum HarnessRegistry {
             command: "codex",
             args: ["acp"],
             isProvisional: true),
-        // Gemini CLI: Google's `gemini` CLI run as an ACP experiment/server over stdio.
-        HarnessDescriptor(
-            id: "gemini-cli",
-            displayName: "Gemini CLI",
-            kind: .stdioSpawn,
-            command: "gemini",
-            args: ["--experimental-acp"],
-            isProvisional: true,
-            vendorKeyEnvVar: "GEMINI_API_KEY"),
         // OpenCode: the `opencode` CLI's ACP/agent stdio mode.
         HarnessDescriptor(
             id: "opencode",

@@ -222,7 +222,7 @@ struct BridgeView: View {
                 Text(
                     bridge.relayHarnessID == "eldr-acp"
                         ? "The phone's remote-drive session (full tool access, every action a permission card) runs our built-in agent."
-                        : "PROVISIONAL: spawns the installed CLI directly — its vendor key (Settings ▸ Cloud coding agents) is injected ONLY into that process, never this app's shell. Its every file/shell action still surfaces as a permission card on your phone. Not yet verified against the real CLI on this Mac."
+                        : "Spawns the installed CLI directly (npm install -g @zed-industries/claude-code-acp or @google/gemini-cli — must be on THIS app's PATH, which an nvm-only install usually isn't). Its vendor key (Settings ▸ Cloud coding agents) is injected ONLY into that process, never this app's shell. Its every file/shell action still surfaces as a permission card on your phone. Launch handshake verified (WS3d); an actual delegated task needs a real vendor login/API key, not tested here."
                 )
                 .font(.caption2).foregroundStyle(.secondary)
             }
