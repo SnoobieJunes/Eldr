@@ -130,6 +130,70 @@ final class InstallerService: ObservableObject {
         try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: path)
     }
 
+    // MARK: - WS-B3: source-freshness staleness (Status section)
+    //
+    // Separate from `refreshState()`'s bundled-vs-installed VERSION comparison above,
+    // which only fires if `ACPAgent.agentVersion` was bumped — it's a static "0.1.0"
+    // string, so an ordinary source edit + rebuild leaves it unchanged. This compares
+    // FILE TIMES instead: is the installed `~/.local/bin/eldr-acp` older than the
+    // newest edit under Packages/PQRCACP/Sources? That catches the case that actually
+    // bites during development — "I edited the agent, did I reinstall?" — regardless
+    // of version bumps.
+    //
+    // Chosen over "newest commit touching Packages/PQRCACP" (the other option on the
+    // table): no `git` invocation or working-tree assumptions, and it reflects
+    // uncommitted local edits too, which a commit-log-based check would miss entirely
+    // during exactly the workflow this exists to catch.
+
+    /// The checkout root this file was compiled from. Huginn is a companion dev tool
+    /// built directly from this monorepo — never relocated or shipped standalone (see
+    /// CLAUDE.md's repository layout) — so `#filePath`'s compile-time absolute path
+    /// reliably locates `Packages/PQRCACP/Sources` without a user-configured setting.
+    /// If the checkout is ever moved after building, this resolves to a stale/
+    /// nonexistent path and `newestPQRCACPSourceDate()` returns nil (fail-soft — the
+    /// Status row just hides the staleness warning rather than showing a wrong one).
+    private nonisolated static var repoRootFromCompiledPath: String {
+        var url = URL(fileURLWithPath: #filePath)
+        // InstallerService.swift → Services → Sources → Huginn → Apps → repo root
+        for _ in 0..<5 { url.deleteLastPathComponent() }
+        return url.path
+    }
+
+    /// Newest file-modification date among Packages/PQRCACP/Sources files — the
+    /// staleness baseline. nil if the checkout can't be found there (e.g. a relocated
+    /// build) or the directory is empty/unreadable.
+    nonisolated static func newestPQRCACPSourceDate(fileManager: FileManager = .default) -> Date? {
+        let dir = (repoRootFromCompiledPath as NSString)
+            .appendingPathComponent("Packages/PQRCACP/Sources")
+        guard
+            let enumerator = fileManager.enumerator(
+                at: URL(fileURLWithPath: dir, isDirectory: true),
+                includingPropertiesForKeys: [.contentModificationDateKey],
+                options: [.skipsHiddenFiles])
+        else { return nil }
+        var newest: Date?
+        for case let fileURL as URL in enumerator {
+            guard
+                let values = try? fileURL.resourceValues(forKeys: [.contentModificationDateKey]),
+                let date = values.contentModificationDate
+            else { continue }
+            if newest == nil || date > newest! { newest = date }
+        }
+        return newest
+    }
+
+    /// The installed binary's mtime (`~/.local/bin/eldr-acp`). nil when not installed.
+    func installedBinaryModificationDate() -> Date? {
+        (try? FileManager.default.attributesOfItem(atPath: paths.installedBinary))?[
+            .modificationDate] as? Date
+    }
+
+    /// Pure comparison, extracted so it's unit-testable with synthetic dates rather
+    /// than the real checkout/install state.
+    nonisolated static func isStale(installedDate: Date, newestSourceDate: Date) -> Bool {
+        installedDate < newestSourceDate
+    }
+
     enum InstallError: Error {
         case missingBundledBinary
         case encodingFailed

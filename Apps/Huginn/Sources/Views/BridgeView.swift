@@ -12,7 +12,10 @@ struct BridgeView: View {
     // WS-B2: owned by HuginnApp now (shared with the Relay tab) — was a private
     // @StateObject here.
     @EnvironmentObject private var bridge: ACPBridgeService
-    @StateObject private var a2aHost = A2AServerHost()
+    // WS-B3: owned by HuginnApp now (shared with the menu-bar StatusBarView's
+    // pending-approval badge + the notification observer) — was a private
+    // @StateObject here.
+    @EnvironmentObject private var a2aHost: A2AServerHost
     @State private var copied = false
     @State private var manualOwnerHex = ""
     @State private var a2aBearerField = ""
@@ -27,6 +30,7 @@ struct BridgeView: View {
                     .foregroundStyle(.secondary)
 
                 stateBox
+                tetherChip
                 if case .advertising = bridge.bridgeState { pairingBox }
                 if !bridge.activeConversations.isEmpty { conversationsBox }
                 if !bridge.activeConversations.isEmpty || bridge.ownerIdentityHex != nil {
@@ -145,6 +149,25 @@ struct BridgeView: View {
                 Spacer()
             }
             .padding(4)
+        }
+    }
+
+    /// WS-B3: `ACPBridgeService.relayACPServing` was published but never rendered
+    /// anywhere — this is the phone's REMOTE-drive session (the full ACP protocol
+    /// served over the relay by `ACPRelayHost`, distinct from the watch-along mirror
+    /// above). A live chip so "is my phone actually able to drive this agent right
+    /// now?" has an answer without checking logs.
+    private var tetherChip: some View {
+        HStack(spacing: 8) {
+            Image(systemName: bridge.relayACPServing ? "cable.connector" : "cable.connector.slash")
+                .foregroundStyle(bridge.relayACPServing ? .green : .secondary)
+            Text(
+                bridge.relayACPServing
+                    ? "Tethered — your phone can drive this agent remotely over the relay"
+                    : "Not tethered — pin an owner + configure a model to serve the phone's remote-drive session"
+            )
+            .font(.caption).foregroundStyle(.secondary)
+            Spacer()
         }
     }
 

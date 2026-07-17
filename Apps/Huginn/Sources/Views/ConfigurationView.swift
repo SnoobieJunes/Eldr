@@ -1,3 +1,4 @@
+import PQRCNostr
 import SwiftUI
 
 /// The live configuration form. Every control is bound to a `ConfigurationStore`
@@ -5,10 +6,17 @@ import SwiftUI
 struct ConfigurationView: View {
     @EnvironmentObject private var store: ConfigurationStore
     @EnvironmentObject private var health: LLMHealthChecker
+    @EnvironmentObject private var installer: InstallerService
+    @EnvironmentObject private var bridge: ACPBridgeService
     @StateObject private var connections = ConnectionStatusProbe()
     @State private var acpxRegistered = false
     @State private var sybilclawRegistered = false
     @State private var showTour = false
+    // WS-B3: installed-CLI staleness (Status section).
+    @State private var installedCLIModDate: Date?
+    @State private var newestPQRCACPSourceDate: Date?
+    @State private var reinstalling = false
+    @State private var reinstallError: String?
 
     var body: some View {
         Form {
@@ -70,7 +78,7 @@ struct ConfigurationView: View {
                 .font(.caption).foregroundStyle(.secondary)
             }
 
-            connectionsSection
+            statusSection
 
             Section("Context budget") {
                 Stepper(
@@ -257,29 +265,19 @@ struct ConfigurationView: View {
         seconds == 0 ? "unlimited" : "\(seconds)s"
     }
 
-    // MARK: - Connections (answers "is the daemon running?" and "what port?")
+    // MARK: - Status (WS-B3: one consolidated view of every subsystem Huginn
+    // coordinates — gateway / LLM / ContextGraph / relay / installed CLI. Replaces the
+    // old "Connections" section, which only covered the gateway + the CLI's activity;
+    // the LLM/ContextGraph/relay indicators used to live ONLY in their own sections
+    // (still true for the detailed ones — this adds an at-a-glance summary of all
+    // five in one place, answering "is anything actually running?" without hopping
+    // across five different UI locations).
 
-    private var connectionsSection: some View {
-        Section("Connections") {
-            VStack(alignment: .leading, spacing: 4) {
-                HStack(spacing: 8) {
-                    Image(systemName: "bolt.horizontal.circle").foregroundStyle(.secondary)
-                    Text("eldr-acp agent")
-                    Spacer()
-                    Text("Spawned on demand").font(.caption).foregroundStyle(.secondary)
-                }
-                Text(agentActivityText).font(.caption).foregroundStyle(.secondary)
-            }
-            HStack(spacing: 8) {
-                Circle().fill(gatewayColor).frame(width: 8, height: 8)
-                Text("sybilclaw gateway")
-                Spacer()
-                Text(gatewayText).font(.caption).foregroundStyle(.secondary)
-                Button("Check") {
-                    Task { await connections.probeGateway(port: store.sybilclawGatewayPort) }
-                }
-                .controlSize(.small)
-            }
+    private var statusSection: some View {
+        Section("Status") {
+            statusRow(
+                color: gatewayColor, title: "sybilclaw gateway", detail: gatewayText
+            ) { Task { await connections.probeGateway(port: store.sybilclawGatewayPort) } }
             LabeledContent("Gateway port") {
                 TextField(
                     "18789", value: $store.sybilclawGatewayPort,
@@ -287,8 +285,24 @@ struct ConfigurationView: View {
                     .textFieldStyle(.roundedBorder)
                     .frame(maxWidth: 90)
             }
-            LabeledContent("Registered in acpx") { registrationStatus(acpxRegistered) }
-            LabeledContent("Registered in sybilclaw") { registrationStatus(sybilclawRegistered) }
+
+            Divider()
+            statusRow(color: healthColor, title: "Local LLM", detail: healthText) {
+                Task { await health.checkNow() }
+            }
+
+            Divider()
+            statusRow(
+                color: contextGraphStatusColor, title: "ContextGraph",
+                detail: contextGraphStatusText
+            ) { Task { await connections.probeContextGraph(urlString: store.contextGraphURL) } }
+
+            Divider()
+            statusRow(color: relayStatusColor, title: "Relay", detail: relayStatusText)
+
+            Divider()
+            cliStatusRows
+
             Text(
                 "eldr-acp speaks over stdio and has no port of its own — a harness (Xcode, OpenClaw, sybilclaw) launches it per session, so there is no background process of ours to watch. The gateway above is sybilclaw's own daemon (default :18789); the port here only tells this panel where to look. Register or re-register from the setup wizard."
             )
@@ -299,7 +313,30 @@ struct ConfigurationView: View {
             acpxRegistered = HarnessRegistration.isRegistered(path: store.paths.acpxGlobalConfig)
             sybilclawRegistered = HarnessRegistration.isRegistered(
                 path: store.paths.defaultSybilclawConfig)
+            installedCLIModDate = installer.installedBinaryModificationDate()
             await connections.probeGateway(port: store.sybilclawGatewayPort)
+            await connections.probeContextGraph(urlString: store.contextGraphURL)
+            // File-system scan off the main actor — cheap, but no reason to block it.
+            newestPQRCACPSourceDate = await Task.detached(priority: .utility) {
+                InstallerService.newestPQRCACPSourceDate()
+            }.value
+        }
+    }
+
+    /// One "is it up?" row shared by every Status subsystem: a dot, a label, the
+    /// current detail text, and an optional re-check action.
+    @ViewBuilder
+    private func statusRow(
+        color: Color, title: String, detail: String, action: (() -> Void)? = nil
+    ) -> some View {
+        HStack(spacing: 8) {
+            Circle().fill(color).frame(width: 8, height: 8)
+            Text(title)
+            Spacer()
+            Text(detail).font(.caption).foregroundStyle(.secondary)
+            if let action {
+                Button("Check", action: action).controlSize(.small)
+            }
         }
     }
 
@@ -321,6 +358,50 @@ struct ConfigurationView: View {
         }
     }
 
+    private var contextGraphStatusColor: Color {
+        switch connections.contextGraph {
+        case .up: return .green
+        case .down: return .orange
+        case .checking: return .yellow
+        case .unknown: return .secondary
+        }
+    }
+
+    private var contextGraphStatusText: String {
+        switch connections.contextGraph {
+        case .up: return "Running at \(store.contextGraphURL)"
+        case .down(let message): return message
+        case .checking: return "Checking…"
+        case .unknown: return "Not checked"
+        }
+    }
+
+    /// The bridge node's FIRST relay connection (typically the only one) — the same
+    /// live state the Relay tab's per-relay rows show (`bridge.relayConnections`).
+    private var relayStatusColor: Color {
+        guard let first = bridge.relayConnections.first else { return .secondary }
+        switch first.status {
+        case .connected: return .green
+        case .connecting: return .yellow
+        case .disconnected: return .secondary
+        case .failed: return .red
+        }
+    }
+
+    private var relayStatusText: String {
+        guard let first = bridge.relayConnections.first else {
+            if case .unpaired = bridge.bridgeState { return "Bridge not enabled" }
+            return "Not connected"
+        }
+        let host = URL(string: first.url)?.host ?? first.url
+        switch first.status {
+        case .connected: return "Connected — \(host)"
+        case .connecting: return "Connecting — \(host)"
+        case .disconnected: return "Disconnected — \(host)"
+        case .failed(let reason): return "\(host) — \(reason)"
+        }
+    }
+
     private var agentActivityText: String {
         let base = "Not a background daemon — it runs only while a harness is using it."
         guard let date = connections.lastAgentActivity else {
@@ -328,6 +409,85 @@ struct ConfigurationView: View {
         }
         let formatter = RelativeDateTimeFormatter()
         return base + " Last activity \(formatter.localizedString(for: date, relativeTo: Date()))."
+    }
+
+    // MARK: Installed CLI (mtime + staleness + one-click reinstall)
+
+    private var cliStatusRows: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 8) {
+                Image(systemName: "bolt.horizontal.circle").foregroundStyle(.secondary)
+                Text("eldr-acp (installed CLI)")
+                Spacer()
+                Text("Spawned on demand").font(.caption).foregroundStyle(.secondary)
+            }
+            Text(agentActivityText).font(.caption).foregroundStyle(.secondary)
+
+            if let installedCLIModDate {
+                Text(
+                    "Installed binary modified \(installedCLIModDate.formatted(date: .abbreviated, time: .shortened))"
+                )
+                .font(.caption).foregroundStyle(.secondary)
+            } else {
+                Text("Not installed — press Reinstall below or run the setup wizard.")
+                    .font(.caption).foregroundStyle(.orange)
+            }
+
+            if cliIsStale {
+                Label(
+                    "Older than the newest Packages/PQRCACP source changes — reinstall to pick them up.",
+                    systemImage: "exclamationmark.triangle.fill"
+                )
+                .font(.caption).foregroundStyle(.orange)
+            }
+
+            HStack {
+                Button {
+                    Task { await reinstallCLI() }
+                } label: {
+                    if reinstalling {
+                        ProgressView().controlSize(.small)
+                    } else {
+                        Text("Reinstall")
+                    }
+                }
+                .controlSize(.small)
+                .disabled(reinstalling)
+                Spacer()
+            }
+            if let reinstallError {
+                Text(reinstallError).font(.caption2).foregroundStyle(.red)
+            }
+
+            Divider()
+            LabeledContent("Registered in acpx") { registrationStatus(acpxRegistered) }
+            LabeledContent("Registered in sybilclaw") { registrationStatus(sybilclawRegistered) }
+        }
+    }
+
+    /// One-click reinstall, wired straight to the existing installer (the same path
+    /// the setup wizard uses): copies the bundled binary to `~/.local/bin`, rewrites
+    /// the launchers, and refreshes `installer.state`.
+    private func reinstallCLI() async {
+        reinstalling = true
+        reinstallError = nil
+        defer { reinstalling = false }
+        do {
+            try await installer.install()
+            installedCLIModDate = installer.installedBinaryModificationDate()
+        } catch {
+            reinstallError = "Reinstall failed: \(error.localizedDescription)"
+        }
+    }
+
+    /// Compares the installed binary's mtime to the newest Packages/PQRCACP/Sources
+    /// file mtime (see `InstallerService.newestPQRCACPSourceDate` for why mtime was
+    /// chosen over a git-log check). false while either side hasn't resolved yet, so
+    /// the warning never flashes on before the `.task` probes land.
+    private var cliIsStale: Bool {
+        guard let installedCLIModDate, let newestPQRCACPSourceDate else { return false }
+        return InstallerService.isStale(
+            installedDate: installedCLIModDate, newestSourceDate: newestPQRCACPSourceDate)
     }
 
     private func registrationStatus(_ on: Bool) -> some View {

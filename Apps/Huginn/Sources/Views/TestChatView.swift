@@ -6,7 +6,10 @@ import SwiftUI
 struct TestChatView: View {
     @EnvironmentObject private var store: ConfigurationStore
     @EnvironmentObject private var health: LLMHealthChecker
-    @StateObject private var session = TestChatSession()
+    // WS-B3: owned by HuginnApp now (shared with the menu-bar StatusBarView's
+    // pending-approval badge + the notification observer) — was a private
+    // @StateObject here.
+    @EnvironmentObject private var session: TestChatSession
     @State private var draft = ""
     /// Whether the raw-stream disclosure is expanded. Independent of the toggle that
     /// enables capture: the panel only appears when `session.showRawStream` is on, and
