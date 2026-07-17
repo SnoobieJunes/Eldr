@@ -22,6 +22,11 @@ final class DiagnosticsLog: ObservableObject {
         case acp = "ACP"
         case node = "Node"
         case mlx = "MLX"
+        /// WS-B2: relay connect/disconnect/error/EOSE/NIP-42 AUTH lifecycle events,
+        /// forwarded from `NostrWebSocketTransport.transportEvents()` by
+        /// `ACPBridgeService`. Distinct from `.node` (which covers the relay-carried
+        /// ACP host's own start/stop), so relay transport health is filterable on its own.
+        case relay = "Relay"
         var id: String { rawValue }
         var symbol: String {
             switch self {
@@ -29,6 +34,7 @@ final class DiagnosticsLog: ObservableObject {
             case .acp: return "wrench.and.screwdriver"
             case .node: return "antenna.radiowaves.left.and.right"
             case .mlx: return "memorychip"
+            case .relay: return "server.rack"
             }
         }
     }

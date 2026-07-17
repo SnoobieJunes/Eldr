@@ -128,6 +128,36 @@ struct ConformanceSuiteTests {
         }
     }
 
+    /// B2: `NostrWebSocketTransport.transportEvents()` reports connect/AUTH/EOSE
+    /// lifecycle events against a REAL loopback socket (the in-process
+    /// `LocalRelaySimulator` conformers all use the protocol's default no-op stream —
+    /// this is the one place the seam is actually exercised end to end). Feeds
+    /// Huginn's Relay tab + Inspector `.relay` category (B2). Same opt-in loopback
+    /// gate as `swapPoint_webSocketLoopbackConformance`.
+    @Test(.enabled(if: ProcessInfo.processInfo.environment["PQRC_LOOPBACK_TESTS"] == "1"))
+    func webSocketTransport_transportEventsEmitConnectAuthAndEOSE() async throws {
+        let relay = LocalRelaySimulator(url: "ws://127.0.0.1:0")
+        let server = NostrRelayServer(relay: relay, port: 0)  // ephemeral port
+        let port = try await server.start()
+        defer { Task { await server.stop() } }
+        let url = URL(string: "ws://127.0.0.1:\(port)")!
+        let transport = NostrWebSocketTransport(url: url)
+
+        let collector = TransportEventCollector()
+        await collector.attach(await transport.transportEvents())
+        await transport.connect()
+        // The relay challenges NIP-42 unprompted on connect (SPEC §9.1), so this alone
+        // proves .connecting + .connected + .authChallenge. Subscribing then drives an
+        // EOSE even with nothing stored.
+        _ = await transport.subscribe([NostrFilter(kinds: [1])])
+
+        let events = await collector.waitUntil(minimumCount: 4, timeoutMillis: 5000)
+        #expect(events.contains(.connecting))
+        #expect(events.contains(.connected))
+        #expect(events.contains(.authChallenge))
+        #expect(events.contains { if case .eose = $0 { return true } else { return false } })
+    }
+
     /// Acceptance gate against a deployed relay (e.g. wss://relay.lerants.com).
     /// Requires the relay to implement NIP-42 AUTH with anchor-relay kind-1059
     /// gating (SPEC §9.1) — a vanilla public relay will fail step 4, and that

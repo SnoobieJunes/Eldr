@@ -9,7 +9,9 @@ import SwiftUI
 /// PQRC E2EE stack. Agent messages always render as AI-authored (invariant 8).
 struct BridgeView: View {
     @EnvironmentObject private var store: ConfigurationStore
-    @StateObject private var bridge = ACPBridgeService()
+    // WS-B2: owned by HuginnApp now (shared with the Relay tab) — was a private
+    // @StateObject here.
+    @EnvironmentObject private var bridge: ACPBridgeService
     @StateObject private var a2aHost = A2AServerHost()
     @State private var copied = false
     @State private var manualOwnerHex = ""

@@ -70,6 +70,10 @@ public actor NostrWebSocketTransport: RelayTransport {
     /// they enforce — exactly what bit us). nil until learned.
     private var knownMaxContent: Int?
     private var nip11Attempted = false
+    /// B2 diagnostics seam: live subscribers to this transport's connection-lifecycle
+    /// events (Huginn's Relay tab / Inspector forward these into `DiagnosticsLog`'s
+    /// `.relay` category). Purely observational, keyed so multiple observers can attach.
+    private var eventContinuations: [UUID: AsyncStream<RelayTransportEvent>.Continuation] = [:]
 
     /// How long publish/authenticate wait for the relay before giving up.
     /// A dropped OK then surfaces as `publishDropped`, which the messenger's
@@ -118,6 +122,56 @@ public actor NostrWebSocketTransport: RelayTransport {
     public func currentStatus() async -> RelayStatus {
         if connectionBackoff { return .failed("Relay unreachable — retrying shortly") }
         return statusState
+    }
+
+    /// B2: a live stream of this transport's connection-lifecycle events. Each caller
+    /// gets its own stream (fan-out via a keyed continuation dictionary); the stream
+    /// ends when the caller stops consuming (normal `AsyncStream` teardown) — it is
+    /// NEVER the only reference keeping this actor's socket alive.
+    public func transportEvents() async -> AsyncStream<RelayTransportEvent> {
+        let id = UUID()
+        let (stream, continuation) = AsyncStream<RelayTransportEvent>.makeStream()
+        eventContinuations[id] = continuation
+        continuation.onTermination = { [weak self] _ in
+            Task { await self?.removeEventContinuation(id) }
+        }
+        return stream
+    }
+
+    private func removeEventContinuation(_ id: UUID) {
+        eventContinuations.removeValue(forKey: id)
+    }
+
+    /// Fan out one lifecycle event to every live subscriber, and log it (host only —
+    /// never event content; anything payload-adjacent like a subscription id or a
+    /// relay-supplied reason string is `.private` per CLAUDE.md invariant 12).
+    private func emit(_ event: RelayTransportEvent) {
+        for continuation in eventContinuations.values { continuation.yield(event) }
+        let host = url.host ?? "unknown"
+        switch event {
+        case .connecting:
+            Self.log.log("relay connecting host=\(host, privacy: .public)")
+        case .connected:
+            Self.log.log("relay connected host=\(host, privacy: .public)")
+        case .disconnected(let reason):
+            Self.log.log(
+                "relay disconnected host=\(host, privacy: .public) reason=\(reason ?? "-", privacy: .private)"
+            )
+        case .eose(let subscriptionID):
+            Self.log.log(
+                "relay EOSE host=\(host, privacy: .public) sub=\(subscriptionID, privacy: .private)")
+        case .authChallenge:
+            Self.log.log("relay AUTH challenge host=\(host, privacy: .public)")
+        case .authenticated:
+            Self.log.log("relay AUTH ok host=\(host, privacy: .public)")
+        case .authFailed(let reason):
+            Self.log.log(
+                "relay AUTH failed host=\(host, privacy: .public) reason=\(reason ?? "-", privacy: .private)"
+            )
+        case .error(let message):
+            Self.log.error(
+                "relay error host=\(host, privacy: .public) message=\(message, privacy: .private)")
+        }
     }
 
     /// Dial if needed and wait briefly for the receive loop to confirm a live
@@ -277,10 +331,26 @@ public actor NostrWebSocketTransport: RelayTransport {
                 tags: [["relay", url.absoluteString], ["challenge", challenge]],
                 content: ""
             ), randomSource: randomSource)
-        guard let socket else { throw NostrError.notAuthenticated }
+        guard let socket else {
+            emit(.authFailed(reason: "no socket"))
+            throw NostrError.notAuthenticated
+        }
         try await socket.send(.string(NostrWire.encode(.auth(authEvent))))
-        let ack = try await awaitOK(eventID: authEvent.id, timeoutError: .notAuthenticated)
-        guard ack.accepted else { throw NostrError.notAuthenticated }
+        let ack: PublishAck
+        do {
+            ack = try await awaitOK(eventID: authEvent.id, timeoutError: .notAuthenticated)
+        } catch {
+            // Either the response timeout fired or the socket dropped mid-handshake
+            // (teardown resolves pendingOKs with its own error) — both surface the
+            // same way here: no OK ever arrived.
+            emit(.authFailed(reason: "no response"))
+            throw error
+        }
+        guard ack.accepted else {
+            emit(.authFailed(reason: ack.message))
+            throw NostrError.notAuthenticated
+        }
+        emit(.authenticated)
     }
 
     // MARK: Socket lifecycle
@@ -296,6 +366,7 @@ public actor NostrWebSocketTransport: RelayTransport {
         let task = URLSession(configuration: configuration).webSocketTask(with: url)
         socket = task
         statusState = .connecting
+        emit(.connecting)
         task.resume()
         // Mac/Catalyst: assert "user-initiated work in progress" so App Nap
         // doesn't suspend this socket when the window loses focus but stays
@@ -355,8 +426,10 @@ public actor NostrWebSocketTransport: RelayTransport {
             let message = try await task.receive()
             // Any frame from the relay proves the socket is live: mark healthy
             // and reset the cooldown so the next failure backs off from scratch.
+            let wasConnected = statusState == .connected
             statusState = .connected
             backoffAttempt = 0
+            if !wasConnected { emit(.connected) }
             let text: String
             switch message {
             case .string(let value):
@@ -384,6 +457,7 @@ public actor NostrWebSocketTransport: RelayTransport {
                 .resume(returning: PublishAck(eventID: eventID, accepted: accepted, message: text))
         case .auth(let challenge):
             authChallenge = challenge
+            emit(.authChallenge)
             let waiters = challengeWaiters.values
             challengeWaiters.removeAll()
             for waiter in waiters { waiter.resume(returning: challenge) }
@@ -400,8 +474,10 @@ public actor NostrWebSocketTransport: RelayTransport {
             } else {
                 continuation?.finish()
             }
-        case .eose, .notice:
-            break  // EOSE handled by stream ordering; NOTICEs carry no state.
+        case .eose(let subscriptionID):
+            emit(.eose(subscriptionID: subscriptionID))
+        case .notice:
+            break  // NOTICEs carry no state.
         }
     }
 
@@ -417,8 +493,13 @@ public actor NostrWebSocketTransport: RelayTransport {
         // re-takes one. (Mac/Catalyst only; no-op elsewhere.)
         endVisibilityActivity()
         authChallenge = nil
-        if !(error is CancellationError) {
-            statusState = .failed(Self.describe(error))
+        if error is CancellationError {
+            emit(.disconnected(reason: nil))
+        } else {
+            let description = Self.describe(error)
+            statusState = .failed(description)
+            emit(.error(description))
+            emit(.disconnected(reason: description))
         }
         for (_, continuation) in pendingOKs { continuation.resume(throwing: error) }
         pendingOKs.removeAll()

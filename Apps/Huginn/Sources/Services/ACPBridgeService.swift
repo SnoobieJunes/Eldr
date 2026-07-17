@@ -233,6 +233,25 @@ final class ACPBridgeService: ObservableObject {
         var recipients: [String] { members.isEmpty ? [id] : members }
     }
 
+    /// WS-B2: one relay's live connection state for the Relay tab, keyed by its URL
+    /// string. Populated purely from `NostrWebSocketTransport.transportEvents()` — never
+    /// gates delivery, mirrors what's forwarded into `DiagnosticsLog`'s `.relay` category
+    /// so the same activity is visible in both the Relay tab and the Inspector.
+    struct RelayConnectionInfo: Identifiable, Equatable {
+        enum AuthState: Equatable {
+            case none
+            case challengeReceived
+            case authenticated
+            case failed(String)
+        }
+        var id: String { url }
+        let url: String
+        var status: RelayStatus = .disconnected
+        var lastEventAt: Date?
+        var eoseSeen = false
+        var authState: AuthState = .none
+    }
+
     @Published private(set) var bridgeState: BridgeState = .unpaired
     /// JSON for the QR code shown while advertising; nil when the bridge is off.
     @Published private(set) var pairingPayloadJSON: String?
@@ -304,6 +323,23 @@ final class ACPBridgeService: ObservableObject {
         }
     }
 
+    /// WS-B2: the persisted relay-URL override (Relay tab), loaded from the SAME
+    /// UserDefaults key `ConfigurationStore.relayURL` reads/writes so both surfaces
+    /// agree. Raw text — an invalid value (malformed URL, plaintext `ws://` off
+    /// loopback) is kept here as typed but never dialed; `effectivePreferredRelay`
+    /// is the gate. Persist-only on edit — reconnecting is an explicit action
+    /// (`setRelayURLOverride`/`connectToLocalRelay`), not a side effect of every
+    /// keystroke a bound text field would otherwise trigger.
+    @Published var relayURLOverride: String = ConfigurationStore.selectedRelayURL() {
+        didSet {
+            UserDefaults.standard.set(relayURLOverride, forKey: ConfigurationStore.relayURLKey)
+        }
+    }
+
+    /// WS-B2: live per-relay connection state for the Relay tab, forwarded from
+    /// `NostrWebSocketTransport.transportEvents()`. Keyed by relay URL string.
+    @Published private(set) var relayConnections: [RelayConnectionInfo] = []
+
     // Per-message-type opt-in — OFF by default (the user chooses to share).
     @Published var shareToolCalls = false
     @Published var shareBuildResults = false
@@ -313,7 +349,10 @@ final class ACPBridgeService: ObservableObject {
     private let keychain: KeychainBox
     private let keyAccount = "bridge-nostr-identity"
     private let serviceType: String
-    private let preferredRelay: String?
+    /// Explicit relay override from init — the test/injection seam. Non-nil ALWAYS
+    /// wins over the persisted `relayURLOverride` (tests construct this directly and
+    /// don't go through the UserDefaults-backed pref at all).
+    private let explicitPreferredRelay: String?
     private let clock: any Clock = SystemClock()
     private var messaging: BridgeMessaging
     /// The owner-authority oracle: verifies owner-signed windows/invites and answers
@@ -369,6 +408,15 @@ final class ACPBridgeService: ObservableObject {
     private var nodeTask: Task<Void, Never>?
     /// The relay the node publishes to / subscribes on. MUST match the phone's relay.
     static let defaultRelayURL = "wss://relay.lerants.com"
+    /// WS-B2: the local dev/demo `pqrc-relay`'s own default port (`PQRCRelayMain.swift`:
+    /// `--port` defaults to 7777) — the "Connect local relay" quick action targets this.
+    /// Plaintext `ws://` is fine here ONLY because 127.0.0.1 never leaves the box (SPEC
+    /// §0 — never downgrade transport to plaintext off-box; `ConfigurationStore.
+    /// validateRelayOverride` allows `ws://` for loopback hosts for exactly this reason).
+    static let localRelayURL = "ws://127.0.0.1:7777"
+    /// Tasks forwarding each live transport's `transportEvents()` into `relayConnections`
+    /// + `DiagnosticsLog`. Cancelled in `stopMessagingNode()`.
+    private var relayEventTasks: [Task<Void, Never>] = []
 
     /// The relay-carried ACP host (Phase 3 LIVE node side): serves the FULL ACP protocol
     /// to the OWNER's phone over the relay, so the phone can drive the agent REMOTELY.
@@ -394,7 +442,7 @@ final class ACPBridgeService: ObservableObject {
     ) {
         self.keychain = keychain
         self.serviceType = serviceType
-        self.preferredRelay = preferredRelay
+        self.explicitPreferredRelay = preferredRelay
         self.messaging = messaging
         self.ownerFilePath = configDir.map { ($0 as NSString).appendingPathComponent("owner") }
         self.workdirFilePath = configDir.map { ($0 as NSString).appendingPathComponent("workdir") }
@@ -405,6 +453,16 @@ final class ACPBridgeService: ObservableObject {
         self.conversationMemory = transcripts.map { ConversationMemory(directory: $0) }
         self.ownerIdentityHex = Self.loadOwner(from: ownerFilePath)
         self.agentWorkdir = Self.loadOwner(from: workdirFilePath)
+    }
+
+    /// WS-B2: the relay to actually dial — an explicit init override (tests) wins,
+    /// otherwise the persisted `relayURLOverride` IF it validates, otherwise nil (⇒
+    /// `Self.defaultRelayURL`). An invalid persisted override (malformed, or plaintext
+    /// `ws://` off loopback) is never trusted — falling back to the known-good default
+    /// is the fail-safe behavior (SPEC §0: never downgrade transport off-box).
+    private var effectivePreferredRelay: String? {
+        if let explicitPreferredRelay { return explicitPreferredRelay }
+        return ConfigurationStore.effectiveRelayURL(relayURLOverride)
     }
 
     /// Set (or clear) the project directory the agent's tools operate in, and persist it.
@@ -454,9 +512,10 @@ final class ACPBridgeService: ObservableObject {
         if link != nil || eventsTask != nil { disable() }
         do {
             let kp = try loadOrCreateKeypair()
-            pairingPayloadJSON = PairingPayload(pubkey: kp.publicKeyHex, relay: preferredRelay)
-                .jsonString()
-            pairingLink = Self.deepLink(pubkeyHex: kp.publicKeyHex, relay: preferredRelay)
+            pairingPayloadJSON = PairingPayload(
+                pubkey: kp.publicKeyHex, relay: effectivePreferredRelay
+            ).jsonString()
+            pairingLink = Self.deepLink(pubkeyHex: kp.publicKeyHex, relay: effectivePreferredRelay)
             let link = MultipeerNearbyLink(serviceType: serviceType)
             self.link = link
             bridgeState = .advertising
@@ -777,16 +836,21 @@ final class ACPBridgeService: ObservableObject {
             let identity = try loadOrCreatePQRCIdentity()
             let identityDH = try loadOrCreateIdentityDH()
             let prekeyManager = try await loadOrCreatePrekeyManager(identity: identity)
-            let relayURLs = overrideRelayURLs ?? [preferredRelay ?? Self.defaultRelayURL]
+            let relayURLs = overrideRelayURLs ?? [effectivePreferredRelay ?? Self.defaultRelayURL]
 
             let transports: [any RelayTransport]
             if let injectedTransports {
                 transports = injectedTransports
             } else {
+                // WS-B2: fresh live bring-up — start each relay's status row clean
+                // rather than carrying over a stale entry from a prior relay/session.
+                relayConnections.removeAll()
                 var built: [any RelayTransport] = []
                 for raw in relayURLs {
                     if let url = URL(string: raw) {
-                        built.append(await NostrWebSocketTransport(url: url).connect())
+                        let transport = NostrWebSocketTransport(url: url)
+                        subscribeToRelayEvents(transport, urlString: raw)
+                        built.append(await transport.connect())
                     }
                 }
                 transports = built
@@ -838,10 +902,120 @@ final class ACPBridgeService: ObservableObject {
         // still-awaiting request with DENY so no agent turn is left parked (its own
         // C-1/timeout would eventually deny too; this is immediate + explicit).
         failAllPhonePermissions()
+        for task in relayEventTasks { task.cancel() }
+        relayEventTasks.removeAll()
         let messenger = self.messenger
         self.messenger = nil
         Task { await messenger?.stop() }
         messaging = UnpairedMessaging()
+    }
+
+    // MARK: WS-B2 — relay-URL override + live per-relay status
+
+    /// Update the persisted relay-URL override (Relay tab). Persists immediately
+    /// (via `relayURLOverride`'s `didSet`) but does NOT reconnect on its own — a bound
+    /// text field would otherwise tear the node down on every keystroke. Call
+    /// `reconnectToConfiguredRelay()` (or use `connectToLocalRelay()`, which does both)
+    /// once the user is done editing.
+    func setRelayURLOverride(_ raw: String) {
+        relayURLOverride = raw
+    }
+
+    /// Quick action (Relay tab): point the override at the local dev/demo `pqrc-relay`
+    /// and reconnect immediately.
+    func connectToLocalRelay() {
+        relayURLOverride = Self.localRelayURL
+        reconnectToConfiguredRelay()
+    }
+
+    /// Tear down the live node (if any) and bring it back up against whatever
+    /// `effectivePreferredRelay` resolves to right now — the explicit action behind
+    /// manual relay-URL edits and the local-relay quick action. No-op if the node was
+    /// never started (nothing to reconnect; the next `enable()` picks up the override).
+    func reconnectToConfiguredRelay() {
+        guard messenger != nil else { return }
+        stopMessagingNode()
+        Task { [weak self] in await self?.startMessagingNode() }
+    }
+
+    /// Subscribe to one live transport's connection-lifecycle events and forward them
+    /// into `relayConnections` (the Relay tab) + `DiagnosticsLog`'s `.relay` category
+    /// (the Inspector). Fire-and-forget: the Task ends when the transport's stream
+    /// finishes (teardown) or `self` is freed; also cancelled explicitly in
+    /// `stopMessagingNode()` via `relayEventTasks`.
+    private func subscribeToRelayEvents(_ transport: NostrWebSocketTransport, urlString: String) {
+        upsertRelayConnection(urlString: urlString, status: .connecting)
+        let task = Task { [weak self] in
+            for await event in await transport.transportEvents() {
+                await self?.recordRelayEvent(event, urlString: urlString)
+            }
+        }
+        relayEventTasks.append(task)
+    }
+
+    private func upsertRelayConnection(
+        urlString: String, status: RelayStatus? = nil,
+        mutate: ((inout RelayConnectionInfo) -> Void)? = nil
+    ) {
+        if let index = relayConnections.firstIndex(where: { $0.url == urlString }) {
+            if let status { relayConnections[index].status = status }
+            mutate?(&relayConnections[index])
+        } else {
+            var info = RelayConnectionInfo(url: urlString)
+            if let status { info.status = status }
+            mutate?(&info)
+            relayConnections.append(info)
+        }
+    }
+
+    /// Apply one relay lifecycle event to `relayConnections` and mirror it into
+    /// `DiagnosticsLog`'s `.relay` category — host only, never event content (invariant 12).
+    private func recordRelayEvent(_ event: RelayTransportEvent, urlString: String) {
+        let host = URL(string: urlString)?.host ?? urlString
+        let now = Date()
+        switch event {
+        case .connecting:
+            upsertRelayConnection(urlString: urlString, status: .connecting) { $0.lastEventAt = now }
+            DiagnosticsLog.shared.post(.relay, .info, "Connecting", host)
+        case .connected:
+            upsertRelayConnection(urlString: urlString, status: .connected) { $0.lastEventAt = now }
+            DiagnosticsLog.shared.post(.relay, .success, "Connected", host)
+        case .disconnected(let reason):
+            upsertRelayConnection(
+                urlString: urlString, status: reason.map { .failed($0) } ?? .disconnected
+            ) {
+                $0.lastEventAt = now
+                $0.eoseSeen = false
+            }
+            DiagnosticsLog.shared.post(
+                .relay, reason == nil ? .info : .warn, "Disconnected",
+                reason.map { "\(host) — \($0)" } ?? host)
+        case .eose:
+            upsertRelayConnection(urlString: urlString) { $0.lastEventAt = now; $0.eoseSeen = true }
+            DiagnosticsLog.shared.post(.relay, .info, "EOSE", host)
+        case .authChallenge:
+            upsertRelayConnection(urlString: urlString) {
+                $0.lastEventAt = now
+                $0.authState = .challengeReceived
+            }
+            DiagnosticsLog.shared.post(.relay, .info, "AUTH challenge", host)
+        case .authenticated:
+            upsertRelayConnection(urlString: urlString) {
+                $0.lastEventAt = now
+                $0.authState = .authenticated
+            }
+            DiagnosticsLog.shared.post(.relay, .success, "AUTH ok", host)
+        case .authFailed(let reason):
+            upsertRelayConnection(urlString: urlString) {
+                $0.lastEventAt = now
+                $0.authState = .failed(reason ?? "unknown")
+            }
+            DiagnosticsLog.shared.post(
+                .relay, .error, "AUTH failed", reason.map { "\(host) — \($0)" } ?? host)
+        case .error(let message):
+            upsertRelayConnection(urlString: urlString) { $0.lastEventAt = now }
+            DiagnosticsLog.shared.post(.relay, .error, "Relay error", "\(host) — \(message)")
+        }
     }
 
     // MARK: A1 — chat-bridge permission routing (node → owner's phone)

@@ -10,6 +10,11 @@ struct HuginnApp: App {
     @StateObject private var store = ConfigurationStore()
     @StateObject private var health = LLMHealthChecker()
     @StateObject private var installer = InstallerService()
+    // WS-B2: lifted here (rather than owned by BridgeView) so the Relay tab
+    // (`RelayWizardView`) shares the SAME live node/relay state as the EldrChat Bridge
+    // tab — the "Connect local relay" quick action and the relay-status rows need to
+    // see (and reconnect) the actual running `ACPBridgeService`, not a second instance.
+    @StateObject private var bridge = ACPBridgeService()
 
     var body: some Scene {
         WindowGroup {
@@ -17,6 +22,7 @@ struct HuginnApp: App {
                 .environmentObject(store)
                 .environmentObject(health)
                 .environmentObject(installer)
+                .environmentObject(bridge)
                 // Open at a comfortable size and stay FREELY resizable up from the
                 // minimum (the content is flexible, so the window grows with the drag
                 // — same desktop treatment as the EldrChat app, not small-or-fullscreen).

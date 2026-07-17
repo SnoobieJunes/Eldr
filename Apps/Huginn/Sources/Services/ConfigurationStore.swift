@@ -379,6 +379,74 @@ final class ConfigurationStore: ObservableObject {
         UserDefaults.standard.string(forKey: relayHarnessIDKey) ?? HarnessDescriptor.builtIn.id
     }
 
+    // MARK: WS-B2 — relay URL override + validation
+    //
+    // Mirrors `relayHarnessID`'s shape exactly: the persisted VALUE lives on
+    // `ACPBridgeService.relayURLOverride` (a Huginn-only pref, NOT an eldr-acp env
+    // var — this only governs which Nostr relay the Configurator's OWN PQRC node
+    // dials), not on this store instance, so there's exactly one in-memory copy and no
+    // risk of `ConfigurationStore.save()` clobbering an edit the Relay tab just made
+    // with a stale cached value. `ConfigurationStore` only owns the UserDefaults key
+    // and the validation rule both surfaces share.
+
+    /// UserDefaults key `ACPBridgeService.relayURLOverride` reads/writes directly.
+    static let relayURLKey = "relayOverrideURL"
+
+    /// The persisted override, read fresh from UserDefaults (mirrors
+    /// `selectedRelayHarnessID()` / `sybilclawGatewayPort()` — a caller that doesn't
+    /// hold a live `ConfigurationStore` instance reads Huginn-only prefs this way so it
+    /// doesn't need to ride through SwiftUI's environment at `@StateObject`
+    /// construction time). Empty ⇒ no override saved yet.
+    static func selectedRelayURL() -> String {
+        UserDefaults.standard.string(forKey: relayURLKey) ?? ""
+    }
+
+    /// Reasons a relay-URL override is refused. The override is never silently repaired —
+    /// `validateRelayOverride` returns the failure so the UI can explain it, and callers
+    /// that just need "is there a USABLE override" fall back to the default relay instead.
+    enum RelayURLValidationError: Error, Equatable {
+        case invalidURL
+        case unsupportedScheme
+        /// `ws://` (plaintext) was given for a host that isn't loopback — SPEC §0's
+        /// cardinal rule (never downgrade transport to plaintext off-box) forbids this
+        /// unconditionally, even for a user-typed override.
+        case plaintextOffLoopback
+    }
+
+    /// Validate a relay-URL override. Empty (trimmed) input is valid and means "use the
+    /// default" (`.success(nil)`). A non-empty valid override returns `.success(url)`.
+    /// `ws://` is allowed ONLY when the host is loopback (127.0.0.0/8, `::1`, or
+    /// `localhost` — where a local `pqrc-relay` dev/demo instance runs plaintext);
+    /// every other host MUST be `wss://`.
+    static func validateRelayOverride(_ raw: String) -> Result<String?, RelayURLValidationError> {
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmed.isEmpty { return .success(nil) }
+        guard let url = URL(string: trimmed), let scheme = url.scheme?.lowercased(),
+            let host = url.host, !host.isEmpty
+        else { return .failure(.invalidURL) }
+        switch scheme {
+        case "wss":
+            return .success(trimmed)
+        case "ws":
+            return isLoopbackHost(host) ? .success(trimmed) : .failure(.plaintextOffLoopback)
+        default:
+            return .failure(.unsupportedScheme)
+        }
+    }
+
+    /// The validated override, or nil to fall back to the default relay — for a
+    /// caller that only cares "what do I actually dial", not why an invalid value was
+    /// refused (mirrors `validateRelayOverride`'s success case, dropping the error).
+    static func effectiveRelayURL(_ raw: String) -> String? {
+        if case .success(let value) = validateRelayOverride(raw) { return value }
+        return nil
+    }
+
+    private static func isLoopbackHost(_ host: String) -> Bool {
+        let h = host.lowercased()
+        return h == "localhost" || h == "127.0.0.1" || h == "::1" || h.hasPrefix("127.")
+    }
+
     /// `export KEY='value'` with POSIX single-quote escaping so any URL/token/path is
     /// safe to `source` in zsh.
     private func export(_ key: String, _ value: String) -> String {
