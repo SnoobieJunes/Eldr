@@ -127,6 +127,25 @@ final class ConfigurationStore: ObservableObject {
     static let gatewayPortKey = "sybilclawGatewayPort"
     static let defaultGatewayPort = 18789
 
+    // MARK: WS-B1 — Test Chat workspace + tool policy (Huginn-only prefs; NOT
+    // eldr-acp env vars — these only govern the in-app Test Chat harness).
+    /// The folder Test Chat's tools (read_file/write_file/run_shell) operate in.
+    /// Empty ⇒ Test Chat falls back to a throwaway scratch dir, same as before this
+    /// setting existed. Persisted to UserDefaults (like `sybilclawGatewayPort`), not
+    /// the CLI's env file. Seeded ONCE, the first time this store loads with no saved
+    /// value yet, from the Bridge's own "Agent project folder"
+    /// (`ACPBridgeService.agentWorkdir`, on disk at `<configDir>/workdir`) if that's
+    /// already set — most people configuring the Bridge want the same project in
+    /// Test Chat, and this saves them a second folder pick.
+    @Published var testChatWorkspacePath: String
+    /// When ON, Test Chat auto-grants every tool permission request (the old,
+    /// silent-only behavior — now visibly annotated in the transcript instead). When
+    /// OFF (the default), each mutating tool call waits for an explicit Approve/Deny
+    /// in the chat UI and fails closed (denied) on timeout or session teardown.
+    @Published var testChatAutoApprove: Bool
+    static let testChatWorkspaceKey = "testChatWorkspacePath"
+    static let testChatAutoApproveKey = "testChatAutoApprove"
+
     /// The four built-in tools, in advertise order (mirrors ToolExecutor.allToolNames).
     static let allToolNames = ["read_file", "write_file", "list_dir", "run_shell"]
     /// The built-in skill command names, in advertise order (mirrors PQRCACP's
@@ -187,6 +206,14 @@ final class ConfigurationStore: ObservableObject {
         sybilclawGatewayPort =
             (UserDefaults.standard.object(forKey: Self.gatewayPortKey) as? Int)
             ?? Self.defaultGatewayPort
+        // First load with nothing saved yet: seed from the Bridge's own workdir file
+        // rather than defaulting to empty (= scratch dir). Once a value is saved
+        // (even back to "", via the "Use scratch dir" action), that choice sticks.
+        testChatWorkspacePath =
+            UserDefaults.standard.string(forKey: Self.testChatWorkspaceKey)
+            ?? ConfigurationStore.loadTextFile(at: paths.workdirFile) ?? ""
+        testChatAutoApprove =
+            (UserDefaults.standard.object(forKey: Self.testChatAutoApproveKey) as? Bool) ?? false
         claudeCodeAPIKey =
             keychain.load(account: Self.claudeCodeKeyAccount)
             .flatMap { String(data: $0, encoding: .utf8) } ?? ""
@@ -208,8 +235,10 @@ final class ConfigurationStore: ObservableObject {
 
     func save() {
         guard loaded else { return }
-        // Huginn-only pref (no eldr-acp env var): persisted separately from the CLI files.
+        // Huginn-only prefs (no eldr-acp env var): persisted separately from the CLI files.
         UserDefaults.standard.set(sybilclawGatewayPort, forKey: Self.gatewayPortKey)
+        UserDefaults.standard.set(testChatWorkspacePath, forKey: Self.testChatWorkspaceKey)
+        UserDefaults.standard.set(testChatAutoApprove, forKey: Self.testChatAutoApproveKey)
         saveTokenToKeychain()
         saveVendorKeysToKeychain()
         writeEnvFile()
@@ -453,6 +482,15 @@ final class ConfigurationStore: ObservableObject {
         return env
     }
 
+    /// Read a small on-disk value file (trimmed, empty ⇒ nil) — mirrors
+    /// `ACPBridgeService`'s private `loadOwner(from:)`, used here just to seed
+    /// `testChatWorkspacePath` from the Bridge's `workdir` file on first load.
+    private static func loadTextFile(at path: String) -> String? {
+        guard let raw = try? String(contentsOfFile: path, encoding: .utf8) else { return nil }
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? nil : trimmed
+    }
+
     private static func unquote(_ s: String) -> String {
         guard s.count >= 2 else { return s }
         if s.hasPrefix("'") && s.hasSuffix("'") {
@@ -479,6 +517,10 @@ struct ConfigPaths: Sendable {
     var logFile: String { join(configDir, "eldr-acp.log") }
     var eventsFile: String { join(configDir, "events.jsonl") }
     var projectsDir: String { join(configDir, "projects") }
+    /// Same on-disk file `ACPBridgeService.setAgentWorkdir` writes/reads (its
+    /// `workdirFilePath`) — read-only from here, just to seed Test Chat's own
+    /// workspace default the first time it loads with nothing saved yet.
+    var workdirFile: String { join(configDir, "workdir") }
     /// WS-MLX: the managed MLX area (private Python venv, server log, fine-tune
     /// configs) — kept beside the agent config so it's one visible, debuggable place.
     var mlxDir: String { join(configDir, "mlx") }

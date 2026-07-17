@@ -7,11 +7,21 @@ enum TestChatEvent: Sendable {
     case toolCall(name: String, args: JSONValue)
     case toolResult(String, isError: Bool)
     case assistantMessage(String)
+    /// The agent is waiting on a `session/request_permission` answer. Only fired
+    /// when auto-approve is OFF — the UI renders it as a `PendingToolApproval` the
+    /// user can Approve/Deny. `requestID` is the JSON-RPC request id, echoed back
+    /// verbatim so `ClientConnection` can match the reply to the awaiting call.
+    case permissionRequested(requestID: JSONValue, toolCallId: String, title: String, kind: String)
+    /// A transcript annotation recording WHO/WHAT resolved a permission gate: a tool
+    /// was auto-approved (config on), the user approved/denied one, or a pending
+    /// request timed out (denied). Never a substitute for the real
+    /// `tool_call`/`tool_call_update` rows — just a visible audit note.
+    case approvalNote(String)
 }
 
 /// A flattened, identifiable chat row for SwiftUI.
 struct TestChatItem: Identifiable, Equatable {
-    enum Role: Equatable { case user, assistant, toolCall, toolResult }
+    enum Role: Equatable { case user, assistant, toolCall, toolResult, approvalNote }
     let id: Int
     var role: Role
     var text: String
@@ -22,11 +32,26 @@ struct TestChatItem: Identifiable, Equatable {
 
 /// Drives a real `ACPAgent` in-process so the user can exercise their LLM + tools
 /// without Xcode. A `NullClientConnection` sink captures the agent's `session/update`
-/// notifications as `TestChatEvent`s (rather than writing stdio) and auto-grants
-/// permission requests (there's no editor to prompt). Tools run in a throwaway
-/// scratch dir so the test chat never touches a real project.
+/// notifications as `TestChatEvent`s (rather than writing stdio). Tools run in a
+/// user-configurable workspace (`ConfigurationStore.testChatWorkspacePath`, seeded
+/// from the Bridge's "Agent project folder" if one is already set); with nothing
+/// configured, a throwaway scratch dir is minted on demand (stale ones left by
+/// earlier sessions are swept on init — nothing used to clean them up). Tool
+/// permission requests either auto-grant (visibly annotated in the transcript) or
+/// wait for an explicit Approve/Deny, per `ConfigurationStore.testChatAutoApprove` —
+/// see `EventSink`.
 @MainActor
 final class TestChatSession: ObservableObject {
+
+    /// One outstanding `session/request_permission` the agent is waiting on,
+    /// surfaced to the UI instead of being silently auto-granted.
+    struct PendingToolApproval: Identifiable, Equatable {
+        let id: UUID
+        let requestID: JSONValue
+        let toolCallId: String
+        let title: String
+        let kind: String
+    }
 
     @Published private(set) var items: [TestChatItem] = []
     @Published private(set) var isResponding = false
@@ -43,13 +68,25 @@ final class TestChatSession: ObservableObject {
     /// streams. Empty until a turn runs with `showRawStream` on. Reset at the start of
     /// each turn so the disclosure shows only the most recent reply's raw trace.
     @Published private(set) var rawStream = ""
+    /// The folder the agent's tools currently operate in — either the configured
+    /// workspace or (if none is set) a throwaway scratch dir. Published so the
+    /// header can show it before the first message is ever sent.
+    @Published private(set) var workdir = ""
+    /// Tool-permission requests waiting on the user (empty when auto-approve is on,
+    /// or when nothing is pending).
+    @Published private(set) var pendingApprovals: [PendingToolApproval] = []
 
     /// Pulled fresh each bootstrap so config edits take effect after `reset()`.
     /// `@MainActor`-isolated because the UI wires these to MainActor store state.
     var llmConfigProvider: @MainActor () -> LLMConfig = { LLMConfig.fromEnvironment([:]) }
     var agentConfigProvider: @MainActor () -> AgentConfig = { .default }
+    /// The configured Test Chat workspace path (`ConfigurationStore.testChatWorkspacePath`).
+    /// Empty ⇒ fall back to a throwaway scratch dir. Wired by `TestChatView`.
+    var workspaceProvider: @MainActor () -> String = { "" }
+    /// Whether to auto-grant tool permission requests
+    /// (`ConfigurationStore.testChatAutoApprove`). Wired by `TestChatView`.
+    var autoApproveProvider: @MainActor () -> Bool = { false }
 
-    private let workdir: String
     private var agent: ACPAgent?
     private var connection: ClientConnection?
     private var sink: EventSink?
@@ -61,12 +98,18 @@ final class TestChatSession: ObservableObject {
     private var streamContinuation: AsyncStream<TestChatEvent>.Continuation?
     private var nextItemID = 0
     private var rpcID = 100
+    /// A scratch dir minted on demand when no workspace is configured, reused for
+    /// the rest of THIS session object's life so the folder doesn't change out from
+    /// under a running tool loop; cleared on `reset()` so the next session mints its
+    /// own (mirrors the old per-`init()` UUID dir, just deferred until it's needed).
+    private var fallbackWorkdir: String?
+    /// Per-approval deny-on-timeout tasks, mirroring `ClientConnection.request(timeout:)`'s
+    /// own fail-closed bound — this one just keeps the UI honest (removes a stale
+    /// "pending" card once the agent side has already denied it on the same clock).
+    private var approvalTimeoutTasks: [UUID: Task<Void, Never>] = [:]
 
     init() {
-        workdir = (NSTemporaryDirectory() as NSString).appendingPathComponent(
-            "eldr-acp-testchat-\(UUID().uuidString)")
-        try? FileManager.default.createDirectory(
-            atPath: workdir, withIntermediateDirectories: true)
+        Self.cleanupStaleWorkspaces()
     }
 
     // MARK: - Public
@@ -74,13 +117,10 @@ final class TestChatSession: ObservableObject {
     func send(_ text: String) async {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty, !isResponding else { return }
-        // Claim the turn BEFORE the first `await` (bootstrap). The composer fires
-        // BOTH the TextField's `.onSubmit` AND the send button's
-        // `keyboardShortcut(.return)` on a single Return press, so two `send` tasks
-        // can arrive together; setting the flag here (not after bootstrap) makes the
-        // second one bail at the guard instead of running a second, concurrent
-        // session/prompt on the same agent actor — which duplicated every tool call
-        // and flooded the UI (the reported "blew up / froze").
+        // Claim the turn BEFORE the first `await` (bootstrap) so a second `send`
+        // call arriving while one is already in flight bails at the guard above
+        // instead of racing a second, concurrent session/prompt on the same agent
+        // actor.
         isResponding = true
         // Start a fresh raw capture for this turn (the disclosure shows the LAST turn).
         rawStream = ""
@@ -95,8 +135,30 @@ final class TestChatSession: ObservableObject {
         isResponding = false
     }
 
+    /// The user approved a pending tool call. Delivers `allow_once` back to the
+    /// agent and drops a visible transcript note. No-op if the request already
+    /// resolved (a timeout beat the click, or `reset()` tore the session down).
+    func approve(_ approval: PendingToolApproval) async {
+        await resolvePendingApproval(
+            approval, optionId: "allow_once", note: "Approved: \(approval.title)")
+    }
+
+    /// The user denied a pending tool call. Delivers `reject_once`; the tool call's
+    /// own `tool_call_update` then renders as failed.
+    func deny(_ approval: PendingToolApproval) async {
+        await resolvePendingApproval(
+            approval, optionId: "reject_once", note: "Denied: \(approval.title)")
+    }
+
+    /// Recompute the displayed workspace path from the current `workspaceProvider`
+    /// WITHOUT bootstrapping the agent, so the header shows the right folder before
+    /// the first message is sent (and immediately after the user changes it).
+    func refreshWorkdirDisplay() {
+        workdir = resolvedWorkdir()
+    }
+
     /// Tear down so the next `send` rebuilds with current config (e.g. after the user
-    /// edits the LLM URL or toggles echo).
+    /// edits the LLM URL, changes the workspace, or toggles echo/auto-approve).
     func reset() {
         // Finish the stream FIRST so the consumer's `for await` returns, then cancel
         // (cancellation alone doesn't terminate an AsyncStream loop). Otherwise each
@@ -105,6 +167,13 @@ final class TestChatSession: ObservableObject {
         streamContinuation = nil
         consumeTask?.cancel()
         consumeTask = nil
+        // Fail-closed teardown: any permission request still in flight on the OLD
+        // connection is answered with an error rather than silently dropped —
+        // `ACPAgent.requestPermission` treats any thrown error as a denial, so a
+        // reset mid-request never leaves a mutating tool defaulting to allow.
+        if let oldConnection = connection {
+            Task { await oldConnection.failAll(SessionTornDown()) }
+        }
         agent = nil
         connection = nil
         sink = nil
@@ -112,14 +181,21 @@ final class TestChatSession: ObservableObject {
         isResponding = false
         items.removeAll()
         rawStream = ""
+        for task in approvalTimeoutTasks.values { task.cancel() }
+        approvalTimeoutTasks.removeAll()
+        pendingApprovals.removeAll()
+        fallbackWorkdir = nil
+        workdir = resolvedWorkdir()
     }
 
     // MARK: - Agent bootstrap
 
     private func bootstrap() async {
         guard agent == nil else { return }
+        let workdir = resolvedWorkdir()
+        self.workdir = workdir
         let (stream, continuation) = AsyncStream<TestChatEvent>.makeStream()
-        let sink = EventSink(continuation)
+        let sink = EventSink(continuation, autoApprove: autoApproveProvider())
         let connection = ClientConnection(sink: sink)
         await sink.attach(connection)
 
@@ -179,6 +255,94 @@ final class TestChatSession: ObservableObject {
                     argsJSON: prettyJSON(args)))
         case .toolResult(let text, let isError):
             items.append(TestChatItem(id: id, role: .toolResult, text: text, isError: isError))
+        case .approvalNote(let text):
+            items.append(TestChatItem(id: id, role: .approvalNote, text: text))
+        case .permissionRequested(let requestID, let toolCallId, let title, let kind):
+            let approval = PendingToolApproval(
+                id: UUID(), requestID: requestID, toolCallId: toolCallId, title: title, kind: kind)
+            pendingApprovals.append(approval)
+            scheduleApprovalTimeout(approval)
+        }
+    }
+
+    // MARK: - Permission approvals
+
+    private func resolvePendingApproval(
+        _ approval: PendingToolApproval, optionId: String, note: String
+    ) async {
+        guard pendingApprovals.contains(where: { $0.id == approval.id }) else { return }
+        pendingApprovals.removeAll { $0.id == approval.id }
+        approvalTimeoutTasks[approval.id]?.cancel()
+        approvalTimeoutTasks[approval.id] = nil
+        await connection?.deliver(
+            response: Self.permissionResponse(id: approval.requestID, optionId: optionId))
+        append(.approvalNote(note))
+    }
+
+    /// Client-side mirror of `ClientConnection.request(timeout:)`'s own deny-on-timeout
+    /// (`ACPAgent.requestPermission` already fails closed there on its own clock) —
+    /// this just keeps the UI honest: without it, a request the agent side already
+    /// denied on timeout would still show as "pending" forever, inviting a click that
+    /// no longer does anything.
+    private func scheduleApprovalTimeout(_ approval: PendingToolApproval) {
+        let seconds = agentConfigProvider().permissionTimeoutSeconds
+        guard seconds > 0 else { return }
+        approvalTimeoutTasks[approval.id] = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: UInt64(seconds * 1_000_000_000))
+            self?.expirePendingApproval(approval)
+        }
+    }
+
+    private func expirePendingApproval(_ approval: PendingToolApproval) {
+        guard pendingApprovals.contains(where: { $0.id == approval.id }) else { return }
+        pendingApprovals.removeAll { $0.id == approval.id }
+        approvalTimeoutTasks[approval.id] = nil
+        append(.approvalNote("Timed out — denied: \(approval.title)"))
+        // Best-effort nudge in case ours fires marginally before the agent's own
+        // timeout; a no-op (guarded by the connection's own pending-id table) if the
+        // agent already resolved this request itself.
+        let response = Self.permissionResponse(id: approval.requestID, optionId: "reject_once")
+        let connection = self.connection
+        Task { await connection?.deliver(response: response) }
+    }
+
+    private static func permissionResponse(id: JSONValue, optionId: String) -> JSONValue {
+        .object([
+            "jsonrpc": .string("2.0"), "id": id,
+            "result": .object([
+                "outcome": .object([
+                    "outcome": .string("selected"), "optionId": .string(optionId),
+                ])
+            ]),
+        ])
+    }
+
+    // MARK: - Workspace
+
+    /// Resolve the folder the NEXT bootstrap's tools should operate in: the
+    /// configured workspace if one is set, else a throwaway scratch dir — minted
+    /// once and reused for the rest of this session object's life.
+    private func resolvedWorkdir() -> String {
+        let configured = workspaceProvider().trimmingCharacters(in: .whitespacesAndNewlines)
+        if !configured.isEmpty { return configured }
+        if let fallbackWorkdir { return fallbackWorkdir }
+        let fresh = (NSTemporaryDirectory() as NSString).appendingPathComponent(
+            "eldr-acp-testchat-\(UUID().uuidString)")
+        try? FileManager.default.createDirectory(atPath: fresh, withIntermediateDirectories: true)
+        fallbackWorkdir = fresh
+        return fresh
+    }
+
+    /// Best-effort sweep of scratch dirs earlier sessions left behind — nothing ever
+    /// removed them, so they accumulated in `$TMPDIR` indefinitely. Runs once per
+    /// session start; a locked/in-use leftover is simply skipped and swept next time.
+    /// Only ever touches its own "eldr-acp-testchat-*" prefix.
+    private static func cleanupStaleWorkspaces() {
+        let fm = FileManager.default
+        let tmp = NSTemporaryDirectory()
+        guard let entries = try? fm.contentsOfDirectory(atPath: tmp) else { return }
+        for name in entries where name.hasPrefix("eldr-acp-testchat-") {
+            try? fm.removeItem(atPath: (tmp as NSString).appendingPathComponent(name))
         }
     }
 
@@ -213,34 +377,50 @@ final class TestChatSession: ObservableObject {
     }
 }
 
+/// Resumes an in-flight `session/request_permission` when the session is torn down
+/// (`reset()`) mid-request — `ClientConnection.failAll` resumes it with this error,
+/// and `ACPAgent.requestPermission` treats ANY thrown error as a denial, so a torn-
+/// down session never leaves (or defaults) a mutating tool call open.
+private struct SessionTornDown: Error, Sendable {}
+
 /// A `NullClientConnection` sink: instead of writing JSON-RPC to stdio it parses the
-/// agent's outbound `session/update` notifications into `TestChatEvent`s and
-/// auto-grants any `session/request_permission` (no editor exists to prompt the user).
+/// agent's outbound `session/update` notifications into `TestChatEvent`s. Permission
+/// requests either auto-grant (when `autoApprove` is set, visibly annotated in the
+/// transcript) or are forwarded to the UI as a `permissionRequested` event for an
+/// explicit Approve/Deny — `TestChatSession` holds the `ClientConnection` directly
+/// and delivers that decision itself once the user answers.
 private actor EventSink: OutputSink {
     private let continuation: AsyncStream<TestChatEvent>.Continuation
     private var connection: ClientConnection?
+    /// Fixed for this sink's lifetime — read once from config at bootstrap; toggling
+    /// the setting rebuilds the session (`TestChatView`'s `.onChange`), which
+    /// constructs a fresh sink with the new value.
+    private let autoApprove: Bool
 
-    init(_ continuation: AsyncStream<TestChatEvent>.Continuation) {
+    init(_ continuation: AsyncStream<TestChatEvent>.Continuation, autoApprove: Bool) {
         self.continuation = continuation
+        self.autoApprove = autoApprove
     }
     func attach(_ connection: ClientConnection) { self.connection = connection }
 
     func write(line: String) async {
         guard let message = JSONValue.parse(line) else { return }
 
-        // Auto-grant permission requests so mutating tools don't hang the turn.
         if message["method"]?.stringValue == "session/request_permission",
             let id = message["id"]
         {
-            await connection?.deliver(
-                response: .object([
-                    "jsonrpc": .string("2.0"), "id": id,
-                    "result": .object([
-                        "outcome": .object([
-                            "outcome": .string("selected"), "optionId": .string("allow_once"),
-                        ])
-                    ]),
-                ]))
+            let toolCall = message["params"]?["toolCall"]
+            let title = toolCall?["title"]?.stringValue ?? "tool"
+            let kind = toolCall?["kind"]?.stringValue ?? ""
+            let toolCallId = toolCall?["toolCallId"]?.stringValue ?? ""
+            if autoApprove {
+                await connection?.deliver(response: Self.grantResponse(id: id))
+                continuation.yield(.approvalNote("Auto-approved: \(title)"))
+            } else {
+                continuation.yield(
+                    .permissionRequested(
+                        requestID: id, toolCallId: toolCallId, title: title, kind: kind))
+            }
             return
         }
 
@@ -268,5 +448,16 @@ private actor EventSink: OutputSink {
         default:
             break
         }
+    }
+
+    private static func grantResponse(id: JSONValue) -> JSONValue {
+        .object([
+            "jsonrpc": .string("2.0"), "id": id,
+            "result": .object([
+                "outcome": .object([
+                    "outcome": .string("selected"), "optionId": .string("allow_once"),
+                ])
+            ]),
+        ])
     }
 }
