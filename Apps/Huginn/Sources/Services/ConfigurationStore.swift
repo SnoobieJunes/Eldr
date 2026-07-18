@@ -127,6 +127,30 @@ final class ConfigurationStore: ObservableObject {
     static let gatewayPortKey = "sybilclawGatewayPort"
     static let defaultGatewayPort = 18789
 
+    /// WS-B5: which Gateway vendor is on the other end of `sybilclawGatewayPort` — the
+    /// cofounder's **sybilclaw** fork (the default; what every other gateway string in
+    /// this file assumed before this existed) or a **vanilla OpenClaw** install. The wire
+    /// protocol is IDENTICAL either way (same handshake, same `chat.send`/event stream —
+    /// see `SybilclawGatewayClient`), so this changes only labeling/captions and which
+    /// on-disk config the setup wizard's harness-registration step defaults to
+    /// (`ConfigPaths.defaultGatewayConfig(for:)`) — collapsing what used to be a
+    /// wizard-local, unpersisted `HarnessKindUI` choice AND a hardcoded "sybilclaw"
+    /// caption/registration-check elsewhere in this UI into ONE stored preference both
+    /// surfaces read.
+    enum GatewayFlavor: String, CaseIterable, Identifiable, Sendable {
+        case sybilclaw
+        case openClaw = "openclaw"
+        var id: String { rawValue }
+        var displayName: String {
+            switch self {
+            case .sybilclaw: return "sybilclaw"
+            case .openClaw: return "OpenClaw"
+            }
+        }
+    }
+    @Published var gatewayFlavor: GatewayFlavor
+    static let gatewayFlavorKey = "gatewayFlavor"
+
     // MARK: WS-B1 — Test Chat workspace + tool policy (Huginn-only prefs; NOT
     // eldr-acp env vars — these only govern the in-app Test Chat harness).
     /// The folder Test Chat's tools (read_file/write_file/run_shell) operate in.
@@ -206,6 +230,12 @@ final class ConfigurationStore: ObservableObject {
         sybilclawGatewayPort =
             (UserDefaults.standard.object(forKey: Self.gatewayPortKey) as? Int)
             ?? Self.defaultGatewayPort
+        // WS-B5: no prior key ever existed for this, so there is nothing to migrate —
+        // defaulting to `.sybilclaw` exactly matches every existing install's actual
+        // (previously unstated) assumption.
+        gatewayFlavor =
+            GatewayFlavor(rawValue: UserDefaults.standard.string(forKey: Self.gatewayFlavorKey) ?? "")
+            ?? .sybilclaw
         // First load with nothing saved yet: seed from the Bridge's own workdir file
         // rather than defaulting to empty (= scratch dir). Once a value is saved
         // (even back to "", via the "Use scratch dir" action), that choice sticks.
@@ -237,6 +267,7 @@ final class ConfigurationStore: ObservableObject {
         guard loaded else { return }
         // Huginn-only prefs (no eldr-acp env var): persisted separately from the CLI files.
         UserDefaults.standard.set(sybilclawGatewayPort, forKey: Self.gatewayPortKey)
+        UserDefaults.standard.set(gatewayFlavor.rawValue, forKey: Self.gatewayFlavorKey)
         UserDefaults.standard.set(testChatWorkspacePath, forKey: Self.testChatWorkspaceKey)
         UserDefaults.standard.set(testChatAutoApprove, forKey: Self.testChatAutoApproveKey)
         saveTokenToKeychain()
@@ -599,30 +630,38 @@ struct ConfigPaths: Sendable {
     /// script body as the Xcode launcher — client-agnostic.
     var openClawLauncher: String { join(binDir, "eldr-acp-openclaw") }
 
+    /// WS-B5: the two gateway-vendor config paths below used to each hand-roll this
+    /// same "home dir + subdir + filename" computation; collapsed to one helper so
+    /// there's exactly one place that builds a path under the user's home dir.
+    private func homeConfigPath(_ dir: String, _ file: String) -> String {
+        let home = FileManager.default.homeDirectoryForCurrentUser.path
+        return ((home as NSString).appendingPathComponent(dir) as NSString)
+            .appendingPathComponent(file)
+    }
+
     /// Default OpenClaw config file the agent is registered into (user-overridable
     /// in the wizard). OpenClaw loads ACP agents via its `acpx` plugin. Gateway-WATCHED.
-    var defaultOpenClawConfig: String {
-        let home = FileManager.default.homeDirectoryForCurrentUser.path
-        return ((home as NSString).appendingPathComponent(".config/openclaw") as NSString)
-            .appendingPathComponent("config.json")
-    }
+    var defaultOpenClawConfig: String { homeConfigPath(".config/openclaw", "config.json") }
 
     /// Default sybilclaw gateway config (`~/.sybilclaw/sybilclaw.json`). Gateway-WATCHED:
     /// editing it can hot-reload/restart a running gateway, so registration treats it
     /// crash-safely (see `HarnessRegistration`).
-    var defaultSybilclawConfig: String {
-        let home = FileManager.default.homeDirectoryForCurrentUser.path
-        return ((home as NSString).appendingPathComponent(".sybilclaw") as NSString)
-            .appendingPathComponent("sybilclaw.json")
+    var defaultSybilclawConfig: String { homeConfigPath(".sybilclaw", "sybilclaw.json") }
+
+    /// WS-B5: the ONE place that picks between the two paths above by
+    /// `ConfigurationStore.GatewayFlavor` — the setup wizard's harness step and any
+    /// other surface that needs "the gateway config for whatever flavor is configured"
+    /// go through this instead of re-deriving the choice themselves.
+    func defaultGatewayConfig(for flavor: ConfigurationStore.GatewayFlavor) -> String {
+        switch flavor {
+        case .sybilclaw: return defaultSybilclawConfig
+        case .openClaw: return defaultOpenClawConfig
+        }
     }
 
     /// acpx's OWN global config (`~/.acpx/config.json`). A running gateway does NOT watch
     /// this, so the agent COMMAND can be written here anytime without restarting anything.
-    var acpxGlobalConfig: String {
-        let home = FileManager.default.homeDirectoryForCurrentUser.path
-        return ((home as NSString).appendingPathComponent(".acpx") as NSString)
-            .appendingPathComponent("config.json")
-    }
+    var acpxGlobalConfig: String { homeConfigPath(".acpx", "config.json") }
 
     /// Production paths: `$ELDR_ACP_CONFIG_DIR`/`$XDG_CONFIG_HOME`/`~/.config/eldr-acp`
     /// for config (so the GUI and CLI agree), and `~/.local/bin` for the binaries.

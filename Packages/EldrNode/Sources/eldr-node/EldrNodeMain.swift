@@ -4,6 +4,7 @@ import Foundation
 import PQRCACP
 import PQRCCore
 import PQRCNostr
+import os
 
 /// `eldr-node` — the STANDALONE HEADLESS node (ACPRouterplan Phase 4: "run the host on
 /// another machine"). It loads/creates the node's PQRC identity from the macOS Keychain,
@@ -142,7 +143,12 @@ struct EldrNodeMain {
                 useSybilclaw
                 ? SybilclawLLMClient(
                     gateway: SybilclawGatewayClient(
-                        port: gatewayPort, token: env["SYBILCLAW_GATEWAY_TOKEN"]))
+                        port: gatewayPort, token: env["SYBILCLAW_GATEWAY_TOKEN"],
+                        userAgent: "eldr-node/0.1.0",
+                        // WS-B5: no diagnostics UI on the headless node — fold the client's
+                        // lifecycle events into the daemon's own OSLog stream (protocol/
+                        // connection state only; the client never hands this payload text).
+                        onEvent: { event in logGatewayEvent(event) }))
                 : OpenAICompatibleLLMClient(config: llmConfig)
             let harnessDescriptor: HarnessDescriptor
             if let cloudHarness, cloudHarness.kind == .a2aRemote {
@@ -406,6 +412,29 @@ struct EldrNodeMain {
     /// terse and consistent with inv. 12's "no payload-adjacent value in full".)
     private static func hexPrefix(_ hex: String) -> String {
         hex.count > 12 ? "\(hex.prefix(8))…\(hex.suffix(4))" : hex
+    }
+
+    /// WS-B5: the sybilclaw gateway client's lifecycle events, one OSLog line each.
+    /// `SybilclawGatewayEvent` carries no payload text by construction (invariant 12) —
+    /// only protocol/connection state and short, non-payload error descriptions — so
+    /// there's nothing to redact here.
+    private static let gatewayLog = Logger(subsystem: "chat.eldr.eldr-node", category: "gateway")
+
+    private static func logGatewayEvent(_ event: SybilclawGatewayEvent) {
+        switch event {
+        case .connecting(let host, let port):
+            gatewayLog.debug("connecting → \(host, privacy: .public):\(port, privacy: .public)")
+        case .connected:
+            gatewayLog.debug("connected")
+        case .disconnected(let reason):
+            gatewayLog.notice("disconnected: \(reason ?? "-", privacy: .public)")
+        case .turnStarted:
+            gatewayLog.debug("turn started")
+        case .turnSucceeded:
+            gatewayLog.debug("turn succeeded")
+        case .turnFailed(let reason):
+            gatewayLog.error("turn failed: \(reason, privacy: .public)")
+        }
     }
 
     /// Tiny `--flag value` parser — no ArgumentParser dependency, matching `pqrc-relay`

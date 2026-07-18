@@ -205,6 +205,11 @@ struct SetupWizardView: View {
                 harnessStatus = nil
                 harnessError = nil
                 deferredJSON = nil
+                // WS-B5: sybilclaw/OpenClaw is a GATEWAY VENDOR choice, not just a
+                // one-off registration target — persist it as the single `gatewayFlavor`
+                // pref the Connections panel's caption/labels also read, so picking it
+                // here doesn't get silently forgotten the moment the wizard closes.
+                if let flavor = newKind.gatewayFlavor { store.gatewayFlavor = flavor }
             }
 
             if harnessKind != .acpxOnly {
@@ -254,6 +259,10 @@ struct SetupWizardView: View {
             }
         }
         .onAppear {
+            // WS-B5: open on whatever gateway flavor is actually configured (the
+            // Connections panel's picker and this one now share ONE persisted pref),
+            // instead of always resetting to sybilclaw regardless of a prior choice.
+            harnessKind = HarnessKindUI(gatewayFlavor: store.gatewayFlavor)
             if harnessConfigPath.isEmpty { harnessConfigPath = defaultPath(for: harnessKind) }
         }
     }
@@ -310,11 +319,12 @@ struct SetupWizardView: View {
 
     private func defaultPath(for kind: HarnessKindUI) -> String {
         switch kind {
-        case .sybilclaw: return store.paths.defaultSybilclawConfig
-        case .openClaw: return store.paths.defaultOpenClawConfig
+        case .sybilclaw: return store.paths.defaultGatewayConfig(for: .sybilclaw)
+        case .openClaw: return store.paths.defaultGatewayConfig(for: .openClaw)
         case .acpxOnly: return store.paths.acpxGlobalConfig
         case .custom:
-            return harnessConfigPath.isEmpty ? store.paths.defaultSybilclawConfig : harnessConfigPath
+            return harnessConfigPath.isEmpty
+                ? store.paths.defaultGatewayConfig(for: .sybilclaw) : harnessConfigPath
         }
     }
 
@@ -360,4 +370,22 @@ struct SetupWizardView: View {
 /// The harness choices in the setup wizard's "Register" step.
 private enum HarnessKindUI: Hashable {
     case sybilclaw, openClaw, acpxOnly, custom
+
+    /// WS-B5: the subset of these choices that is actually a GATEWAY VENDOR pick
+    /// (`ConfigurationStore.GatewayFlavor`) — `.acpxOnly`/`.custom` are registration
+    /// TARGETS, not vendors, so they map to nil (leaves the persisted flavor untouched).
+    var gatewayFlavor: ConfigurationStore.GatewayFlavor? {
+        switch self {
+        case .sybilclaw: return .sybilclaw
+        case .openClaw: return .openClaw
+        case .acpxOnly, .custom: return nil
+        }
+    }
+
+    init(gatewayFlavor: ConfigurationStore.GatewayFlavor) {
+        switch gatewayFlavor {
+        case .sybilclaw: self = .sybilclaw
+        case .openClaw: self = .openClaw
+        }
+    }
 }

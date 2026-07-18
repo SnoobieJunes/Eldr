@@ -179,6 +179,21 @@ actor AgentAnswerCollector {
     func append(_ s: String) { value += s }
 }
 
+/// `BridgeAgentRunner` backed by sybilclaw's Gateway (the unified `PQRCACP.SybilclawGatewayClient`
+/// — WS-B5). Drop-in alternative to `ACPDriverAgentRunner`: the owner's inbound chat (already
+/// C-3-gated + redaction-wrapped by `handleInboundPrompt`) is answered by sybilclaw's own
+/// assistant instead of `eldr-acp`. `workdir` is ignored — sybilclaw owns its own workspace.
+struct SybilclawAgentRunner: BridgeAgentRunner {
+    let client: SybilclawGatewayClient
+    /// The gateway keeps this conversation's history under the session key (server-side), so
+    /// Huginn records its own encrypted canonical copy but must NOT re-inject prior context —
+    /// the gateway would otherwise see the history twice.
+    var selfPersistsHistory: Bool { true }
+    func run(prompt: String, workdir: String?, context: ConversationContext) async throws -> String {
+        try await client.ask(prompt, sessionKey: context.sessionKey)
+    }
+}
+
 /// A no-op `AgentMessageSink`. The bridge uses its `AgentEngine` purely as the
 /// owner-authority ORACLE (verify owner-signed windows, answer `isAuthorizedForOwner`)
 /// and does its OWN per-recipient fan-out (§9), so the engine never posts anything.
@@ -692,7 +707,37 @@ final class ACPBridgeService: ObservableObject {
             agentRunner = SybilclawAgentRunner(
                 client: SybilclawGatewayClient(
                     port: Self.sybilclawGatewayPort(), token: Self.sybilclawGatewayToken(),
-                    diagnostics: Self.sybilclawGatewayDiagnostics()))
+                    diagnostics: Self.sybilclawGatewayDiagnostics(),
+                    userAgent: "huginn-eldr/\(Self.appVersion)",
+                    onEvent: { event in Self.postGatewayDiagnostic(event) }))
+        }
+    }
+
+    /// This app's short version string, for the gateway `userAgent` field only (free text,
+    /// never allowlist-checked — see `SybilclawGatewayClient.connectParams`).
+    private static var appVersion: String {
+        (Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String) ?? "0.1.0"
+    }
+
+    /// WS-B5: forwards the gateway client's lifecycle events into the Agent Inspector's
+    /// `DiagnosticsLog`. Protocol/connection state only — `SybilclawGatewayEvent` carries no
+    /// payload text by construction (invariant 12), so there is nothing to redact here.
+    /// `nonisolated` (like `DiagnosticsLog.post` itself) so the client's plain, non-actor
+    /// `onEvent` closure can call it synchronously off the main actor.
+    private static nonisolated func postGatewayDiagnostic(_ event: SybilclawGatewayEvent) {
+        switch event {
+        case .connecting(let host, let port):
+            DiagnosticsLog.shared.post(.acp, .info, "Gateway connecting", "\(host):\(port)")
+        case .connected:
+            DiagnosticsLog.shared.post(.acp, .success, "Gateway connected")
+        case .disconnected(let reason):
+            DiagnosticsLog.shared.post(.acp, .warn, "Gateway disconnected", reason ?? "")
+        case .turnStarted:
+            DiagnosticsLog.shared.post(.acp, .info, "Gateway turn started")
+        case .turnSucceeded:
+            DiagnosticsLog.shared.post(.acp, .success, "Gateway turn completed")
+        case .turnFailed(let reason):
+            DiagnosticsLog.shared.post(.acp, .error, "Gateway turn failed", reason)
         }
     }
 

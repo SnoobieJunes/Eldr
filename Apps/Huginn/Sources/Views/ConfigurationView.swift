@@ -10,7 +10,10 @@ struct ConfigurationView: View {
     @EnvironmentObject private var bridge: ACPBridgeService
     @StateObject private var connections = ConnectionStatusProbe()
     @State private var acpxRegistered = false
-    @State private var sybilclawRegistered = false
+    /// WS-B5: registration status for whichever gateway vendor `store.gatewayFlavor`
+    /// currently selects — previously this always checked the sybilclaw path even when
+    /// the wizard had registered into OpenClaw's config instead.
+    @State private var gatewayRegistered = false
     @State private var showTour = false
     // WS-B3: installed-CLI staleness (Status section).
     @State private var installedCLIModDate: Date?
@@ -276,7 +279,8 @@ struct ConfigurationView: View {
     private var statusSection: some View {
         Section("Status") {
             statusRow(
-                color: gatewayColor, title: "sybilclaw gateway", detail: gatewayText
+                color: gatewayColor, title: "\(store.gatewayFlavor.displayName) gateway",
+                detail: gatewayText
             ) { Task { await connections.probeGateway(port: store.sybilclawGatewayPort) } }
             LabeledContent("Gateway port") {
                 TextField(
@@ -285,6 +289,16 @@ struct ConfigurationView: View {
                     .textFieldStyle(.roundedBorder)
                     .frame(maxWidth: 90)
             }
+            // WS-B5: one flavor picker for the gateway config (URL/port above + this),
+            // shared with the setup wizard's harness step — was a wizard-only, unpersisted
+            // choice before, so this panel always said "sybilclaw" even when OpenClaw was
+            // actually configured.
+            Picker("Gateway vendor", selection: $store.gatewayFlavor) {
+                ForEach(ConfigurationStore.GatewayFlavor.allCases) { flavor in
+                    Text(flavor.displayName).tag(flavor)
+                }
+            }
+            .pickerStyle(.segmented)
 
             Divider()
             statusRow(color: healthColor, title: "Local LLM", detail: healthText) {
@@ -304,23 +318,30 @@ struct ConfigurationView: View {
             cliStatusRows
 
             Text(
-                "eldr-acp speaks over stdio and has no port of its own — a harness (Xcode, OpenClaw, sybilclaw) launches it per session, so there is no background process of ours to watch. The gateway above is sybilclaw's own daemon (default :18789); the port here only tells this panel where to look. Register or re-register from the setup wizard."
+                "eldr-acp speaks over stdio and has no port of its own — a harness (Xcode, OpenClaw, sybilclaw) launches it per session, so there is no background process of ours to watch. The gateway above is \(store.gatewayFlavor.displayName)'s own daemon (default :18789); the port here only tells this panel where to look. Register or re-register from the setup wizard."
             )
             .font(.caption).foregroundStyle(.secondary)
         }
-        .task {
-            connections.refreshAgentActivity(logFile: store.paths.logFile)
-            acpxRegistered = HarnessRegistration.isRegistered(path: store.paths.acpxGlobalConfig)
-            sybilclawRegistered = HarnessRegistration.isRegistered(
-                path: store.paths.defaultSybilclawConfig)
-            installedCLIModDate = installer.installedBinaryModificationDate()
-            await connections.probeGateway(port: store.sybilclawGatewayPort)
-            await connections.probeContextGraph(urlString: store.contextGraphURL)
-            // File-system scan off the main actor — cheap, but no reason to block it.
-            newestPQRCACPSourceDate = await Task.detached(priority: .utility) {
-                InstallerService.newestPQRCACPSourceDate()
-            }.value
+        .task { await refreshStatus() }
+        .onChange(of: store.gatewayFlavor) { _, _ in
+            // The registration check reads a DIFFERENT on-disk path per flavor.
+            gatewayRegistered = HarnessRegistration.isRegistered(
+                path: store.paths.defaultGatewayConfig(for: store.gatewayFlavor))
         }
+    }
+
+    private func refreshStatus() async {
+        connections.refreshAgentActivity(logFile: store.paths.logFile)
+        acpxRegistered = HarnessRegistration.isRegistered(path: store.paths.acpxGlobalConfig)
+        gatewayRegistered = HarnessRegistration.isRegistered(
+            path: store.paths.defaultGatewayConfig(for: store.gatewayFlavor))
+        installedCLIModDate = installer.installedBinaryModificationDate()
+        await connections.probeGateway(port: store.sybilclawGatewayPort)
+        await connections.probeContextGraph(urlString: store.contextGraphURL)
+        // File-system scan off the main actor — cheap, but no reason to block it.
+        newestPQRCACPSourceDate = await Task.detached(priority: .utility) {
+            InstallerService.newestPQRCACPSourceDate()
+        }.value
     }
 
     /// One "is it up?" row shared by every Status subsystem: a dot, a label, the
@@ -461,7 +482,9 @@ struct ConfigurationView: View {
 
             Divider()
             LabeledContent("Registered in acpx") { registrationStatus(acpxRegistered) }
-            LabeledContent("Registered in sybilclaw") { registrationStatus(sybilclawRegistered) }
+            LabeledContent("Registered in \(store.gatewayFlavor.displayName)") {
+                registrationStatus(gatewayRegistered)
+            }
         }
     }
 

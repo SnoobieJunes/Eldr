@@ -1161,7 +1161,23 @@ public actor ACPAgent {
                 let streamed = StreamedTextBox()
                 do {
                     let response: LLMResponse
-                    if streaming {
+                    if let scoped = llm as? any SessionScopedLLMClient {
+                        // WS-B5: a session-scoped backend (e.g. sybilclaw's Gateway) buckets its
+                        // OWN history by session key and has no incremental-delta stream of its
+                        // own — always run it through the scoped, one-shot `complete`, keyed by
+                        // THIS ACP session, so two concurrent sessions never share its state.
+                        // When streaming is on, forward the whole answer as one delta (mirrors
+                        // `LLMClient.stream`'s default) so the client still sees `session/update`s.
+                        response = try await scoped.complete(
+                            messages: outgoing, tools: tools, sessionId: sessionId)
+                        if streaming, !response.wantsTools, !response.content.isEmpty {
+                            await streamed.append(response.content)
+                            await connection.notify(
+                                method: "session/update",
+                                params: ACPWire.agentMessageChunk(
+                                    sessionId: sessionId, text: response.content))
+                        }
+                    } else if streaming {
                         response = try await llm.stream(messages: outgoing, tools: tools) { delta in
                             await streamed.append(delta)
                             await connection.notify(

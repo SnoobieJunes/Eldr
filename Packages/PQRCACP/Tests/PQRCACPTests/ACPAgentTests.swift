@@ -43,6 +43,29 @@ struct ACPAgentTests {
         func toolsSeen() -> [[LLMTool]] { receivedTools }
     }
 
+    /// WS-B5: a scripted `SessionScopedLLMClient` (the refinement `SybilclawLLMClient`
+    /// conforms to) that records the `sessionId` it was called with on every turn, so a
+    /// test can prove `ACPAgent` threads a DIFFERENT id per ACP session — the general
+    /// mechanism behind the cross-conversation-bleed fix (a session-scoped backend that
+    /// buckets state by that id, like sybilclaw's gateway, therefore never bleeds one
+    /// session's context into another's).
+    actor MockSessionScopedLLMClient: LLMClient, SessionScopedLLMClient {
+        private(set) var receivedSessionIds: [String] = []
+        func complete(messages: [LLMMessage], tools: [LLMTool]) async throws -> LLMResponse {
+            // The bare, unscoped requirement — `ACPAgent` must never take this path when a
+            // `SessionScopedLLMClient` is available; a call here would fail the test below.
+            receivedSessionIds.append("UNSCOPED-FALLBACK")
+            return LLMResponse(content: "unscoped")
+        }
+        func complete(messages: [LLMMessage], tools: [LLMTool], sessionId: String) async throws
+            -> LLMResponse
+        {
+            receivedSessionIds.append(sessionId)
+            return LLMResponse(content: "reply for \(sessionId)")
+        }
+        func sessionIds() -> [String] { receivedSessionIds }
+    }
+
     // MARK: Harness
 
     private func makeAgent(
@@ -775,6 +798,45 @@ struct ACPAgentTests {
 
         let firstSeen = try #require(await llm.calls().first)
         #expect(firstSeen.first?.content.contains(canary) == true)
+    }
+
+    // MARK: WS-B5 — session-scoped LLM clients get one backend session PER ACP session
+
+    /// The fix for the cross-conversation bleed: a `SessionScopedLLMClient` (like
+    /// `SybilclawLLMClient`, which buckets sybilclaw's own gateway session by this id) must
+    /// be called with a DIFFERENT `sessionId` for two different ACP sessions, never the
+    /// same value, and never through the bare unscoped `complete` — that's what let one
+    /// process-lifetime gateway session key bleed a project's context into another's the
+    /// moment two ACP sessions were live against the same node process.
+    @Test func sessionScopedClient_getsDistinctSessionIdPerACPSession_noBleed() async throws {
+        let llm = MockSessionScopedLLMClient()
+        let (agent, _) = makeAgent(llm: llm)
+        _ = await agent.handle(line: #"{"jsonrpc":"2.0","id":0,"method":"initialize","params":{}}"#)
+
+        let sid1 = try #require(
+            try parse(
+                await agent.handle(
+                    line: #"{"jsonrpc":"2.0","id":1,"method":"session/new","params":{}}"#))[
+                "result"]?["sessionId"]?.stringValue)
+        let sid2 = try #require(
+            try parse(
+                await agent.handle(
+                    line: #"{"jsonrpc":"2.0","id":2,"method":"session/new","params":{}}"#))[
+                "result"]?["sessionId"]?.stringValue)
+        #expect(sid1 != sid2)  // two distinct ACP sessions to begin with
+
+        _ = await agent.handle(
+            line:
+                "{\"jsonrpc\":\"2.0\",\"id\":3,\"method\":\"session/prompt\",\"params\":{\"sessionId\":\"\(sid1)\",\"prompt\":[{\"type\":\"text\",\"text\":\"project A\"}]}}"
+        )
+        _ = await agent.handle(
+            line:
+                "{\"jsonrpc\":\"2.0\",\"id\":4,\"method\":\"session/prompt\",\"params\":{\"sessionId\":\"\(sid2)\",\"prompt\":[{\"type\":\"text\",\"text\":\"project B\"}]}}"
+        )
+
+        let seen = await llm.sessionIds()
+        #expect(seen == [sid1, sid2])  // scoped path only, in order — never the unscoped fallback
+        #expect(Set(seen).count == 2)  // two distinct scopes → two distinct session keys, no bleed
     }
 }
 

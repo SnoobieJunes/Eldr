@@ -134,6 +134,27 @@ extension LLMClient {
     }
 }
 
+/// WS-B5: a refinement of `LLMClient` for a backend that keeps its OWN server-side
+/// conversation state, bucketed by a session key it does NOT get from `LLMMessage`/
+/// `LLMTool` (e.g. `SybilclawLLMClient`, whose turns ride the sybilclaw Gateway's
+/// `chat.send sessionKey`). `ACPAgent.runModelCall` checks for this conformance via
+/// `as?` before falling back to the plain `complete(messages:tools:)`, so every OTHER
+/// `LLMClient` (`OpenAICompatibleLLMClient`, `EchoLLMClient`, test mocks, Huginn's
+/// `InspectingLLMClient`) is completely unaffected — this is purely additive.
+///
+/// Passing the ACP `sessionId` through lets a session-scoped backend give each ACP
+/// `session/new` (i.e. each distinct conversation/project thread the agent serves)
+/// its OWN backend session, instead of bucketing every session under one shared key —
+/// the fix for the cross-conversation bleed a single process-lifetime session key caused
+/// (see `SybilclawGatewayClient`'s "Session scoping" doc and `SybilclawLLMClient`).
+public protocol SessionScopedLLMClient: LLMClient {
+    /// Same contract as `LLMClient.complete`, but scoped to `sessionId` — the caller's
+    /// ACP session id. Two different `sessionId`s MUST resolve to two independent
+    /// backend sessions (no shared state, no bleed).
+    func complete(messages: [LLMMessage], tools: [LLMTool], sessionId: String) async throws
+        -> LLMResponse
+}
+
 // MARK: - Config (ENV)
 
 public struct LLMConfig: Sendable {
