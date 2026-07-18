@@ -1,8 +1,11 @@
 import PQRCNostr
 import SwiftUI
 
-/// The live configuration form. Every control is bound to a `ConfigurationStore`
-/// `@Published` property, which debounces a write to the on-disk files the CLI reads.
+/// The live configuration form, regrouped (WS-B6) into five tabs — **Model**,
+/// **Agents & Gateway**, **Security**, **Status**, **Skills & Prompt** — so each
+/// screen stays scannable instead of one long scroll. Every control is still bound
+/// to the SAME `ConfigurationStore` `@Published` property it always was; this pass
+/// only moves where a control is DISPLAYED, never how it saves.
 struct ConfigurationView: View {
     @EnvironmentObject private var store: ConfigurationStore
     @EnvironmentObject private var health: LLMHealthChecker
@@ -22,7 +25,41 @@ struct ConfigurationView: View {
     @State private var reinstallError: String?
 
     var body: some View {
-        Form {
+        TabView {
+            modelTab
+                .tabItem { Label("Model", systemImage: "cpu") }
+            agentsGatewayTab
+                .tabItem { Label("Agents & Gateway", systemImage: "network") }
+            securityTab
+                .tabItem { Label("Security", systemImage: "lock.shield") }
+            statusTab
+                .tabItem { Label("Status", systemImage: "waveform.path.ecg") }
+            skillsPromptTab
+                .tabItem { Label("Skills & Prompt", systemImage: "text.book.closed") }
+        }
+        .sheet(isPresented: $showTour) {
+            EnterpriseTourView { showTour = false }
+        }
+    }
+
+    // MARK: - Shared form chrome
+
+    /// Every tab is a `Form` capped to reading width but filling the tab's height —
+    /// the same frame treatment the single long form used to carry once, at the
+    /// `ConfigurationView` level (CLAUDE.md: don't let forms sprawl edge-to-edge on a
+    /// big display; matches the BridgeView/TestChatView/RelayWizardView pattern).
+    @ViewBuilder
+    private func settingsForm<Content: View>(@ViewBuilder _ content: () -> Content) -> some View {
+        Form { content() }
+            .formStyle(.grouped)
+            .frame(maxWidth: 720, alignment: .leading)
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+    }
+
+    // MARK: - Model
+
+    private var modelTab: some View {
+        settingsForm {
             Section {
                 Button {
                     showTour = true
@@ -65,6 +102,59 @@ struct ConfigurationView: View {
                 .font(.caption).foregroundStyle(.secondary)
                 healthRow
             }
+        }
+    }
+
+    private var healthRow: some View {
+        HStack(spacing: 8) {
+            Circle().fill(healthColor).frame(width: 8, height: 8)
+            Text(healthText).font(.caption).foregroundStyle(.secondary)
+            Spacer()
+            Button("Test") { Task { await health.checkNow() } }
+                .controlSize(.small)
+        }
+    }
+
+    private var healthColor: Color {
+        switch health.result {
+        case .reachable: return .green
+        case .unreachable: return .red
+        default: return .yellow
+        }
+    }
+    private var healthText: String {
+        switch health.result {
+        case .reachable(let m): return m.isEmpty ? "Reachable" : "Reachable — \(m.joined(separator: ", "))"
+        case .unreachable(let e): return e
+        case .checking: return "Checking…"
+        case .unknown: return "Not checked"
+        }
+    }
+
+    // MARK: - Agents & Gateway (WS-B5 gateway flavor, cloud-agent vendor keys,
+    // context assembly, agent runtime tuning, and the tool allowlist — everything
+    // that shapes how the agent runs and what it's allowed to run through).
+
+    private var agentsGatewayTab: some View {
+        settingsForm {
+            Section("Gateway vendor") {
+                // WS-B5: one flavor picker for the gateway config, shared with the setup
+                // wizard's harness step — was a wizard-only, unpersisted choice before, so
+                // the old single-scroll layout always said "sybilclaw" even when OpenClaw
+                // was actually configured. WS-B6 moved this here out of Status: this is a
+                // CHOICE the user makes, not a live reading — the Status tab still shows
+                // the resulting up/down probe plus the port field the probe uses.
+                Picker("Gateway vendor", selection: $store.gatewayFlavor) {
+                    ForEach(ConfigurationStore.GatewayFlavor.allCases) { flavor in
+                        Text(flavor.displayName).tag(flavor)
+                    }
+                }
+                .pickerStyle(.segmented)
+                Text(
+                    "Which harness protocol the setup wizard's Register step (and the Status tab's \"Registered in …\" rows) target — sybilclaw or OpenClaw. The wire protocol is identical either way; this only changes labels and which on-disk config gets written."
+                )
+                .font(.caption).foregroundStyle(.secondary)
+            }
 
             Section("Cloud coding agents") {
                 LabeledContent("Claude Code API key") {
@@ -81,7 +171,7 @@ struct ConfigurationView: View {
                 .font(.caption).foregroundStyle(.secondary)
             }
 
-            statusSection
+            ContextGraphSection()
 
             Section("Context budget") {
                 Stepper(
@@ -125,6 +215,41 @@ struct ConfigurationView: View {
                 .font(.caption).foregroundStyle(.secondary)
             }
 
+            Section("Tools") {
+                ForEach(ConfigurationStore.allToolNames, id: \.self) { name in
+                    Toggle(
+                        name,
+                        isOn: Binding(
+                            get: { store.enabledTools.contains(name) },
+                            set: { on in
+                                if on { store.enabledTools.insert(name) }
+                                else { store.enabledTools.remove(name) }
+                            }))
+                }
+            }
+        }
+    }
+
+    private func byteLabel(_ bytes: Int) -> String {
+        bytes == 0 ? "unbounded" : "\(bytes / 1024) KB"
+    }
+
+    private func mbLabel(_ bytes: Int) -> String {
+        bytes == 0 ? "unbounded" : "\(bytes / 1_048_576) MB"
+    }
+
+    private func limitLabel(_ value: Int) -> String {
+        value == 0 ? "unlimited" : "\(value)"
+    }
+
+    private func secondsLabel(_ seconds: Int) -> String {
+        seconds == 0 ? "unlimited" : "\(seconds)s"
+    }
+
+    // MARK: - Security
+
+    private var securityTab: some View {
+        settingsForm {
             Section("Security") {
                 Toggle("Run tools without asking permission", isOn: $store.allowUngatedTools)
                 if store.allowUngatedTools {
@@ -146,7 +271,7 @@ struct ConfigurationView: View {
                     isOn: $store.cloudAgentDelegationEnabled)
                 if store.cloudAgentDelegationEnabled {
                     Label(
-                        "The agent may hand sub-tasks to Claude Code / Gemini CLI (Bridge ▸ Cloud coding agent's vendor key, above). That CLI's own file/shell actions still ask on your phone — this only lets the agent choose to spawn it.",
+                        "The agent may hand sub-tasks to Claude Code / Gemini CLI (the Agents & Gateway tab's Cloud coding agents vendor key). That CLI's own file/shell actions still ask on your phone — this only lets the agent choose to spawn it.",
                         systemImage: "exclamationmark.triangle.fill"
                     )
                     .font(.caption).foregroundStyle(.orange)
@@ -157,115 +282,7 @@ struct ConfigurationView: View {
                     .font(.caption).foregroundStyle(.secondary)
                 }
             }
-
-            ContextGraphSection()
-
-            Section("Tools") {
-                ForEach(ConfigurationStore.allToolNames, id: \.self) { name in
-                    Toggle(
-                        name,
-                        isOn: Binding(
-                            get: { store.enabledTools.contains(name) },
-                            set: { on in
-                                if on { store.enabledTools.insert(name) }
-                                else { store.enabledTools.remove(name) }
-                            }))
-                }
-            }
-
-            Section("Skills") {
-                Toggle("Advertise built-in skills", isOn: $store.skillsEnabled)
-                if store.skillsEnabled {
-                    ForEach(ConfigurationStore.allSkillNames, id: \.self) { name in
-                        Toggle(
-                            "/\(name)",
-                            isOn: Binding(
-                                get: { store.enabledSkills.contains(name) },
-                                set: { on in
-                                    if on { store.enabledSkills.insert(name) }
-                                    else { store.enabledSkills.remove(name) }
-                                })
-                        )
-                        .padding(.leading, 12)
-                    }
-                    Text("Turn off a skill to stop advertising that slash-command to the model.")
-                        .font(.caption).foregroundStyle(.secondary)
-                }
-            }
-
-            Section("Prompt tuning") {
-                VStack(alignment: .leading, spacing: 4) {
-                    Text("Prompt preamble (appended to the built-in system prompt)")
-                        .font(.caption).foregroundStyle(.secondary)
-                    TextEditor(text: $store.promptPreamble)
-                        .font(.system(.body, design: .monospaced))
-                        .frame(minHeight: 60)
-                        .border(.quaternary)
-                }
-                VStack(alignment: .leading, spacing: 4) {
-                    Text("System prompt override (replaces the built-in prompt entirely; {cwd} is substituted)")
-                        .font(.caption).foregroundStyle(.secondary)
-                    TextEditor(text: $store.systemPromptOverride)
-                        .font(.system(.body, design: .monospaced))
-                        .frame(minHeight: 60)
-                        .border(.quaternary)
-                }
-            }
-
-            ProjectMemorySection()
         }
-        .formStyle(.grouped)
-        // Cap the reading width (CLAUDE.md: don't let forms sprawl edge-to-edge on a
-        // big display) but fill the rest of the window so the form uses the full height
-        // and stays top-aligned instead of clustering at its natural size. Matches the
-        // BridgeView/TestChatView/RelayWizardView pattern.
-        .frame(maxWidth: 720, alignment: .leading)
-        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
-        .sheet(isPresented: $showTour) {
-            EnterpriseTourView { showTour = false }
-        }
-    }
-
-    private var healthRow: some View {
-        HStack(spacing: 8) {
-            Circle().fill(healthColor).frame(width: 8, height: 8)
-            Text(healthText).font(.caption).foregroundStyle(.secondary)
-            Spacer()
-            Button("Test") { Task { await health.checkNow() } }
-                .controlSize(.small)
-        }
-    }
-
-    private var healthColor: Color {
-        switch health.result {
-        case .reachable: return .green
-        case .unreachable: return .red
-        default: return .yellow
-        }
-    }
-    private var healthText: String {
-        switch health.result {
-        case .reachable(let m): return m.isEmpty ? "Reachable" : "Reachable — \(m.joined(separator: ", "))"
-        case .unreachable(let e): return e
-        case .checking: return "Checking…"
-        case .unknown: return "Not checked"
-        }
-    }
-
-    private func byteLabel(_ bytes: Int) -> String {
-        bytes == 0 ? "unbounded" : "\(bytes / 1024) KB"
-    }
-
-    private func mbLabel(_ bytes: Int) -> String {
-        bytes == 0 ? "unbounded" : "\(bytes / 1_048_576) MB"
-    }
-
-    private func limitLabel(_ value: Int) -> String {
-        value == 0 ? "unlimited" : "\(value)"
-    }
-
-    private func secondsLabel(_ seconds: Int) -> String {
-        seconds == 0 ? "unlimited" : "\(seconds)s"
     }
 
     // MARK: - Status (WS-B3: one consolidated view of every subsystem Huginn
@@ -275,6 +292,12 @@ struct ConfigurationView: View {
     // (still true for the detailed ones — this adds an at-a-glance summary of all
     // five in one place, answering "is anything actually running?" without hopping
     // across five different UI locations).
+
+    private var statusTab: some View {
+        settingsForm {
+            statusSection
+        }
+    }
 
     private var statusSection: some View {
         Section("Status") {
@@ -289,16 +312,6 @@ struct ConfigurationView: View {
                     .textFieldStyle(.roundedBorder)
                     .frame(maxWidth: 90)
             }
-            // WS-B5: one flavor picker for the gateway config (URL/port above + this),
-            // shared with the setup wizard's harness step — was a wizard-only, unpersisted
-            // choice before, so this panel always said "sybilclaw" even when OpenClaw was
-            // actually configured.
-            Picker("Gateway vendor", selection: $store.gatewayFlavor) {
-                ForEach(ConfigurationStore.GatewayFlavor.allCases) { flavor in
-                    Text(flavor.displayName).tag(flavor)
-                }
-            }
-            .pickerStyle(.segmented)
 
             Divider()
             statusRow(color: healthColor, title: "Local LLM", detail: healthText) {
@@ -318,11 +331,22 @@ struct ConfigurationView: View {
             cliStatusRows
 
             Text(
-                "eldr-acp speaks over stdio and has no port of its own — a harness (Xcode, OpenClaw, sybilclaw) launches it per session, so there is no background process of ours to watch. The gateway above is \(store.gatewayFlavor.displayName)'s own daemon (default :18789); the port here only tells this panel where to look. Register or re-register from the setup wizard."
+                "eldr-acp speaks over stdio and has no port of its own — a harness (Xcode, OpenClaw, sybilclaw) launches it per session, so there is no background process of ours to watch. The gateway above is \(store.gatewayFlavor.displayName)'s own daemon (default :18789); the port here only tells this panel where to look. The vendor itself is picked on the Agents & Gateway tab. Register or re-register from the setup wizard."
             )
             .font(.caption).foregroundStyle(.secondary)
         }
-        .task { await refreshStatus() }
+        // WS-B6: registration status used to be computed ONLY once, in a `.task` that
+        // fired on this view's first appearance — so it went stale the moment the
+        // setup wizard (re-)registered a harness afterward, since nothing here ever
+        // re-read the files. `.onAppear` re-derives it every time this tab is (re-)
+        // shown (covers switching tabs away and back), and the `.onChange` below is
+        // the deterministic trigger: the wizard bumps `harnessRegistrationRevision`
+        // the moment `registerHarness()` finishes, whether or not this tab happens to
+        // be visible at that instant.
+        .onAppear { Task { await refreshStatus() } }
+        .onChange(of: store.harnessRegistrationRevision) { _, _ in
+            Task { await refreshStatus() }
+        }
         .onChange(of: store.gatewayFlavor) { _, _ in
             // The registration check reads a DIFFERENT on-disk path per flavor.
             gatewayRegistered = HarnessRegistration.isRegistered(
@@ -518,5 +542,52 @@ struct ConfigurationView: View {
             .labelStyle(.titleAndIcon)
             .font(.caption)
             .foregroundStyle(on ? Color.green : Color.secondary)
+    }
+
+    // MARK: - Skills & Prompt
+
+    private var skillsPromptTab: some View {
+        settingsForm {
+            Section("Skills") {
+                Toggle("Advertise built-in skills", isOn: $store.skillsEnabled)
+                if store.skillsEnabled {
+                    ForEach(ConfigurationStore.allSkillNames, id: \.self) { name in
+                        Toggle(
+                            "/\(name)",
+                            isOn: Binding(
+                                get: { store.enabledSkills.contains(name) },
+                                set: { on in
+                                    if on { store.enabledSkills.insert(name) }
+                                    else { store.enabledSkills.remove(name) }
+                                })
+                        )
+                        .padding(.leading, 12)
+                    }
+                    Text("Turn off a skill to stop advertising that slash-command to the model.")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
+            }
+
+            Section("Prompt tuning") {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Prompt preamble (appended to the built-in system prompt)")
+                        .font(.caption).foregroundStyle(.secondary)
+                    TextEditor(text: $store.promptPreamble)
+                        .font(.system(.body, design: .monospaced))
+                        .frame(minHeight: 60)
+                        .border(.quaternary)
+                }
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("System prompt override (replaces the built-in prompt entirely; {cwd} is substituted)")
+                        .font(.caption).foregroundStyle(.secondary)
+                    TextEditor(text: $store.systemPromptOverride)
+                        .font(.system(.body, design: .monospaced))
+                        .frame(minHeight: 60)
+                        .border(.quaternary)
+                }
+            }
+
+            ProjectMemorySection()
+        }
     }
 }

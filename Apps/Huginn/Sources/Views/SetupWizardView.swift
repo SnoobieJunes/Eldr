@@ -274,6 +274,11 @@ struct SetupWizardView: View {
     private func registerHarness() async {
         registering = true
         defer { registering = false }
+        // WS-B6: fires whether this attempt wrote/no-op'd/errored — Configuration's
+        // Status tab (`ConfigurationView`) observes this to recompute "Registered in
+        // …", which used to only ever get computed on that view's own first
+        // appearance and so went stale the moment you registered from here.
+        defer { store.noteHarnessRegistrationChanged() }
         harnessError = nil
         harnessStatus = nil
         deferredJSON = nil

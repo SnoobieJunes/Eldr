@@ -151,6 +151,16 @@ final class ConfigurationStore: ObservableObject {
     @Published var gatewayFlavor: GatewayFlavor
     static let gatewayFlavorKey = "gatewayFlavor"
 
+    /// WS-B6: bumped every time `HarnessRegistration.apply` runs to completion
+    /// (`SetupWizardView.registerHarness()`), so any view that reads
+    /// `HarnessRegistration.isRegistered` — the Configuration ▸ Status tab's
+    /// "Registered in acpx"/"Registered in <gateway>" rows — knows to recompute
+    /// instead of showing whatever it captured on its own first appearance. In-memory
+    /// only (not persisted; a stale revision count on next launch is harmless, the
+    /// rows re-derive from disk on mount regardless).
+    @Published private(set) var harnessRegistrationRevision = 0
+    func noteHarnessRegistrationChanged() { harnessRegistrationRevision += 1 }
+
     // MARK: WS-B1 — Test Chat workspace + tool policy (Huginn-only prefs; NOT
     // eldr-acp env vars — these only govern the in-app Test Chat harness).
     /// The folder Test Chat's tools (read_file/write_file/run_shell) operate in.
