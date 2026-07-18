@@ -51,7 +51,7 @@ enum EnterpriseTour {
             body:
                 "Eldr is each org's boat through unknown waters — private, end-to-end encrypted, yours to steer. Huginn is the thought that flies between them: your AI, carried from Eldr to Eldr over a sealed line, so a whole crew can think and work as one — every ship rowing in unison — without your data ever leaking overboard.",
             fieldNote:
-                "Named for Óðinn's raven Huginn — “thought.” Send it out by pairing a phone from the EldrChat Bridge tab; the team integrations are rolling out now.",
+                "Named for Óðinn's raven Huginn — “thought.” Send it out by pairing a phone from the Bridge (phone tether) tab; the team integrations are rolling out now.",
             voiceOver:
                 "Huginn, the raven of thought. Shared thoughts, flying boat to boat. Eldr is each org's boat through unknown waters, private, end-to-end encrypted, yours to steer. Huginn is the thought that flies between them: your A.I., carried from Eldr to Eldr over a sealed line, so a whole crew can think and work as one, every ship rowing in unison, without your data ever leaking overboard. Named for Óðinn's raven Huginn, thought."
         ),
@@ -157,7 +157,7 @@ enum EnterpriseTour {
             body:
                 "Eldr ties your phone to the thought running on your own ships over a post-quantum, end-to-end-encrypted line — so you can send your raven from any shore and have it wing home, with nothing left exposed on open water.",
             fieldNote:
-                "Built to carry self-hosted agent crews like sybilclaw to your phone — pair from the EldrChat Bridge tab. Rolling out now.",
+                "Built to carry self-hosted agent crews like sybilclaw to your phone — pair from the Bridge (phone tether) tab. Rolling out now.",
             voiceOver:
                 "Send the raven from any shore. Your phone, your ship's thought, one sealed line. Eldr ties your phone to the thought running on your own ships over a post-quantum, end-to-end-encrypted line, so you can send your raven from any shore and have it wing home, with nothing left exposed on open water."
         ),

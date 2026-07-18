@@ -1,19 +1,21 @@
 import SwiftUI
 
-/// Eldr node + setup hub — the macOS "node" for EldrChat. It pairs with your phone,
+/// Eldr — Mac node & AI tether: the macOS "node" for EldrChat. It pairs with your phone,
 /// hosts the `eldr-acp` coding harness (setup wizard, live config, log viewer, in-app
-/// test chat), bridges your coding session into EldrChat conversations, and provisions
-/// infrastructure (the relay-setup wizard). It installs the binary + launcher so Xcode
-/// 27 can drive a self-hosted LLM as a coding agent.
+/// test chat), tethers your coding session into EldrChat conversations (the Bridge
+/// (phone tether) tab), and provisions infrastructure (the relay-setup wizard). It
+/// installs the binary + launcher so Xcode 27 can drive a self-hosted LLM as a coding
+/// agent.
 @main
 struct HuginnApp: App {
     @StateObject private var store = ConfigurationStore()
     @StateObject private var health = LLMHealthChecker()
     @StateObject private var installer = InstallerService()
     // WS-B2: lifted here (rather than owned by BridgeView) so the Relay tab
-    // (`RelayWizardView`) shares the SAME live node/relay state as the EldrChat Bridge
-    // tab — the "Connect local relay" quick action and the relay-status rows need to
-    // see (and reconnect) the actual running `ACPBridgeService`, not a second instance.
+    // (`RelayWizardView`) shares the SAME live node/relay state as the Bridge (phone
+    // tether) tab — the "Connect local relay" quick action and the relay-status rows
+    // need to see (and reconnect) the actual running `ACPBridgeService`, not a second
+    // instance.
     @StateObject private var bridge = ACPBridgeService()
     // WS-B3: lifted here too (were private @StateObjects in BridgeView/TestChatView)
     // so the menu-bar StatusBarView — a SEPARATE scene, not a descendant of the main
@@ -81,9 +83,9 @@ struct RootView: View {
     }
 }
 
-/// The tabbed main window for the Eldr node + setup hub. Tabs cover the local coding
-/// harness (Configuration, Test Chat, Logs), the phone pairing/bridge, and the
-/// infrastructure setup (Relay).
+/// The tabbed main window — "Eldr — Mac node & AI tether". Tabs cover the local coding
+/// harness (Configuration, Test Chat, Logs), the phone pairing/tether (Bridge (phone
+/// tether)), and the infrastructure setup (Relay).
 struct MainWindow: View {
     enum Tab: Hashable { case configuration, testChat, mlx, inspector, logs, bridge, nearby, relay }
     @State private var tab: Tab = .configuration
@@ -106,7 +108,9 @@ struct MainWindow: View {
                 .tabItem { Label("Logs", systemImage: "text.alignleft") }
                 .tag(Tab.logs)
             BridgeView()
-                .tabItem { Label("EldrChat Bridge", systemImage: "antenna.radiowaves.left.and.right") }
+                // WS-B4: was "EldrChat Bridge" — findable by NAME now: this is where the
+                // phone's tether to this Mac (pairing + the remote-drive session) lives.
+                .tabItem { Label("Bridge (phone tether)", systemImage: "antenna.radiowaves.left.and.right") }
                 .tag(Tab.bridge)
             NearbyScannerView()
                 .tabItem { Label("Nearby", systemImage: "dot.radiowaves.left.and.right") }
@@ -116,6 +120,6 @@ struct MainWindow: View {
                 .tag(Tab.relay)
         }
         .padding(.top, 6)
-        .navigationTitle("Eldr node + setup hub")
+        .navigationTitle("Eldr — Mac node & AI tether")
     }
 }

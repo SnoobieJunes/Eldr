@@ -23,14 +23,14 @@ struct BridgeView: View {
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 16) {
-                Label("EldrChat Bridge", systemImage: "antenna.radiowaves.left.and.right")
+                Label("Bridge (phone tether)", systemImage: "antenna.radiowaves.left.and.right")
                     .font(.title3.weight(.semibold))
 
                 Text("Add the coding agent to an EldrChat conversation as a first-class participant. The activity you opt into is delivered over the same post-quantum, end-to-end-encrypted PQRC channel EldrChat already uses — no server required to start.")
                     .foregroundStyle(.secondary)
 
+                tetherCard
                 stateBox
-                tetherChip
                 if case .advertising = bridge.bridgeState { pairingBox }
                 if !bridge.activeConversations.isEmpty { conversationsBox }
                 if !bridge.activeConversations.isEmpty || bridge.ownerIdentityHex != nil {
@@ -152,23 +152,70 @@ struct BridgeView: View {
         }
     }
 
-    /// WS-B3: `ACPBridgeService.relayACPServing` was published but never rendered
-    /// anywhere — this is the phone's REMOTE-drive session (the full ACP protocol
-    /// served over the relay by `ACPRelayHost`, distinct from the watch-along mirror
-    /// above). A live chip so "is my phone actually able to drive this agent right
-    /// now?" has an answer without checking logs.
-    private var tetherChip: some View {
-        HStack(spacing: 8) {
-            Image(systemName: bridge.relayACPServing ? "cable.connector" : "cable.connector.slash")
-                .foregroundStyle(bridge.relayACPServing ? .green : .secondary)
-            Text(
-                bridge.relayACPServing
-                    ? "Tethered — your phone can drive this agent remotely over the relay"
-                    : "Not tethered — pin an owner + configure a model to serve the phone's remote-drive session"
-            )
-            .font(.caption).foregroundStyle(.secondary)
+    /// WS-B4: the tether's home. `relayACPServing` was published but rendered nowhere
+    /// (the old `tetherChip` this replaces was a late add-on, easy to miss) — this is a
+    /// proper card up top so "is my phone actually tethered to this Mac right now, and
+    /// when did it last talk?" has a one-glance answer without checking logs. Serving =
+    /// the phone's REMOTE-drive session (the full ACP protocol served over the relay by
+    /// `ACPRelayHost`, distinct from the watch-along mirror below); Paired = a device has
+    /// paired with this Mac (persisted owner pin, or a live paired conversation this
+    /// session — the same signal `ownerBox` already gates on); Last activity =
+    /// `lastTetherActivity`, host/timing only, never payload (invariant 12).
+    private var tetherCard: some View {
+        GroupBox("Phone tether") {
+            VStack(alignment: .leading, spacing: 8) {
+                tetherRow(
+                    label: "Serving",
+                    isOn: bridge.relayACPServing,
+                    onText: "Your phone can drive this agent remotely over the relay",
+                    offText: "Pin an owner + configure a model to serve the phone's remote-drive session")
+                tetherRow(
+                    label: "Paired",
+                    isOn: isPhonePaired,
+                    onText: "A phone has paired with this Mac",
+                    offText: "No phone has paired yet — scan the QR code below to pair one")
+                HStack(spacing: 8) {
+                    Image(systemName: "clock").foregroundStyle(.secondary)
+                    Group {
+                        if let last = bridge.lastTetherActivity {
+                            HStack(spacing: 4) {
+                                Text("Last activity:")
+                                Text(last, style: .relative)
+                                Text("ago")
+                            }
+                        } else {
+                            Text("Last activity: none yet")
+                        }
+                    }
+                    .font(.caption).foregroundStyle(.secondary)
+                    Spacer()
+                }
+            }
+            .padding(4)
+        }
+    }
+
+    private func tetherRow(label: String, isOn: Bool, onText: String, offText: String)
+        -> some View
+    {
+        HStack(alignment: .top, spacing: 8) {
+            Image(systemName: isOn ? "checkmark.circle.fill" : "circle")
+                .foregroundStyle(isOn ? .green : .secondary)
+            VStack(alignment: .leading, spacing: 1) {
+                Text(label).font(.caption.weight(.medium))
+                Text(isOn ? onText : offText).font(.caption2).foregroundStyle(.secondary)
+            }
             Spacer()
         }
+    }
+
+    /// Whether a phone has paired with this Mac: either a live paired conversation this
+    /// session, or a persisted owner pin from a prior session (the same "configured vs
+    /// not" signal `ownerBox`'s visibility already gates on below) — `bridgeState` alone
+    /// only reflects the CURRENT link/advertising status, not whether pairing ever
+    /// happened, so it isn't the right source for this.
+    private var isPhonePaired: Bool {
+        !bridge.activeConversations.isEmpty || bridge.ownerIdentityHex != nil
     }
 
     private var pairingBox: some View {

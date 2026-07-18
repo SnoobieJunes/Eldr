@@ -13,8 +13,8 @@ import SwiftUI
 ///
 /// WS-B2 added the "This node's relay" section: unlike the generator below (which is
 /// about STANDING UP your own relay server), this section controls which relay THIS
-/// Mac's own live PQRC node (`ACPBridgeService`, shared with the EldrChat Bridge tab)
-/// actually dials — including debugging/observing that connection live.
+/// Mac's own live PQRC node (`ACPBridgeService`, shared with the Bridge (phone tether)
+/// tab) actually dials — including debugging/observing that connection live.
 struct RelayWizardView: View {
     @EnvironmentObject private var bridge: ACPBridgeService
     @State private var relayURLField = ""
@@ -65,7 +65,7 @@ struct RelayWizardView: View {
         GroupBox("This node's relay") {
             VStack(alignment: .leading, spacing: 10) {
                 Text(
-                    "Which relay THIS Mac's node (the EldrChat Bridge tab) connects to — separate from the relay-setup generator below. Defaults to \(ACPBridgeService.defaultRelayURL)."
+                    "Which relay THIS Mac's node (the Bridge (phone tether) tab) connects to — separate from the relay-setup generator below. Defaults to \(ACPBridgeService.defaultRelayURL)."
                 )
                 .font(.caption).foregroundStyle(.secondary)
 

@@ -433,6 +433,13 @@ final class ACPBridgeService: ObservableObject {
     /// status row alongside the existing pairing state.
     @Published private(set) var relayACPServing = false
 
+    /// WS-B4: when the phone tether last carried ACP traffic (either direction) — host
+    /// timing only, never payload (invariant 12). Feeds the tether card's "Last activity"
+    /// row so a live-but-quiet tether reads differently from one that's never spoken.
+    /// Updated at exactly two points: inbound ACP relay frames (`handleMessengerEvent`)
+    /// and outbound frames published to the owner (`startRelayACPHost`'s publish seam).
+    @Published private(set) var lastTetherActivity: Date?
+
     init(
         keychain: KeychainBox = KeychainBox(),
         serviceType: String = MultipeerNearbyLink.bridgeServiceType,
@@ -614,6 +621,7 @@ final class ACPBridgeService: ObservableObject {
         keypair = nil
         activeConversations.removeAll()
         inbound.removeAll()
+        lastTetherActivity = nil
         setOwnerIdentity(nil)  // forget the pinned owner (fail closed until re-pinned)
         bridgeState = .unpaired
     }
@@ -1111,7 +1119,7 @@ final class ACPBridgeService: ObservableObject {
             config: relayConfig,
             streamingEnabled: relayHostStreamingEnabled,
             descriptor: descriptor,
-            publish: { [weak messenger] framed in
+            publish: { [weak self, weak messenger] framed in
                 // The transport's send seam: publish ONE framed chunk to the owner as an
                 // ordinary PQRC message. participant_type stays .human — the frame is the
                 // node↔owner ACP control channel, not an agent-authored chat message
@@ -1121,6 +1129,8 @@ final class ACPBridgeService: ObservableObject {
                 try? await messenger?.send(
                     MessageBody(text: framed, sentAt: Int64(Date().timeIntervalSince1970)),
                     to: ownerIdentityHex)
+                // WS-B4: outbound tether traffic — host/timing only, never the frame body.
+                await self?.markTetherActivity()
             })
         relayHost = host
         host.start()
@@ -1141,6 +1151,12 @@ final class ACPBridgeService: ObservableObject {
         guard let messenger else { return }
         stopRelayACPHost()
         startRelayACPHost(messenger: messenger)
+    }
+
+    /// WS-B4: stamp `lastTetherActivity` to now. Host/timing only — never called with
+    /// (or storing) any payload text, per invariant 12.
+    private func markTetherActivity() {
+        lastTetherActivity = Date()
     }
 
     /// Route one inbound messenger event. New peers are auto-accepted (the user
@@ -1177,6 +1193,8 @@ final class ACPBridgeService: ObservableObject {
             // non-owner's `ACP1|…` frame is swallowed here (returns from routeInbound as
             // a drop) and goes no further (so a non-owner can't probe the agent either).
             if ACPRelayHost.wasACPFrame(received.body.text) {
+                // WS-B4: inbound tether traffic — host/timing only, never the frame body.
+                markTetherActivity()
                 await relayHost?.routeInbound(
                     senderIdentityHex: received.senderIdentityHex, body: received.body.text)
                 return
