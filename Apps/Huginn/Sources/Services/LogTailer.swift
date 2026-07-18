@@ -24,10 +24,19 @@ struct LogLine: Identifiable, Equatable, Sendable {
 /// crash the MLX server pane hit the first time it wrote to a tailed log
 /// (2026-07-17 crash report; regression: `LogTailerTests`). Events are rare and
 /// the handler is tiny, so main-queue delivery costs nothing.
+///
+/// WS-M0 publish hygiene: appended lines are BATCHED — ingest accumulates them in
+/// `pendingLines` and `lines` publishes at most once per `flushInterval` (~4 Hz),
+/// so a chatty writer can't invalidate every observing view per line. Seeding at
+/// (re)open stays one synchronous publish.
 @MainActor
 final class LogTailer: ObservableObject {
 
     @Published private(set) var lines: [LogLine] = []
+
+    /// True while the dispatch source is watching the file (false after `stop()` —
+    /// the observable "tailer is idle" signal the MLX kill-switch tests assert).
+    var isTailing: Bool { source != nil }
 
     private let path: String
     /// Cap retained lines so a long-running session doesn't grow unbounded in memory.
@@ -38,18 +47,30 @@ final class LogTailer: ObservableObject {
     /// the last 64 KB keeps open instant. Incremental delta reads stay unbounded
     /// (they're the few bytes just appended).
     private let maxSeedBytes: UInt64
+    /// Batch window for publishing appended lines (~4 Hz by default).
+    private let flushInterval: Duration
 
     private var source: DispatchSourceFileSystemObject?
     private var handle: FileHandle?
     private var offset: UInt64 = 0
     private var nextID = 0
+    /// Ingested-but-not-yet-published lines (already counted in `offset`/`nextID`).
+    private var pendingLines: [LogLine] = []
+    private var flushTask: Task<Void, Never>?
 
-    init(path: String, maxSeedBytes: UInt64 = 65_536) {
+    init(
+        path: String, maxSeedBytes: UInt64 = 65_536,
+        flushInterval: Duration = .milliseconds(250)
+    ) {
         self.path = path
         self.maxSeedBytes = maxSeedBytes
+        self.flushInterval = flushInterval
     }
 
-    deinit { source?.cancel() }
+    deinit {
+        source?.cancel()
+        flushTask?.cancel()
+    }
 
     // MARK: - Lifecycle
 
@@ -65,6 +86,10 @@ final class LogTailer: ObservableObject {
         source?.cancel()
         source = nil
         handle = nil
+        // Publish whatever already arrived: `offset` counts these lines, so the
+        // resume path in openAndPrime() will NOT read them again — dropping them
+        // here would lose them for good.
+        flushPendingNow()
     }
 
     /// Truncate the log on disk and clear the view ("Clear" button).
@@ -76,7 +101,12 @@ final class LogTailer: ObservableObject {
         start()
     }
 
-    var allText: String { lines.map(\.text).joined(separator: "\n") }
+    var allText: String { (lines + pendingLines).map(\.text).joined(separator: "\n") }
+
+    /// The id the NEXT ingested line will get — an "anything from now on" baseline
+    /// for callers that classify lines by age (MLXService's launch-scoped failure
+    /// scan). Counts still-unpublished pending lines too, unlike `lines.last?.id`.
+    var nextLineID: Int { nextID }
 
     // MARK: - File watching
 
@@ -91,17 +121,32 @@ final class LogTailer: ObservableObject {
         guard let h = FileHandle(forReadingAtPath: path) else { return }
         handle = h
 
-        // Seed with the existing TAIL (bounded) so the view isn't empty on open.
         let size = (try? h.seekToEnd()) ?? 0
-        let seedStart = size > maxSeedBytes ? size - maxSeedBytes : 0
-        try? h.seek(toOffset: seedStart)
-        var existing = (try? h.readToEnd()) ?? Data()
-        if seedStart > 0, let firstNewline = existing.firstIndex(of: UInt8(ascii: "\n")) {
-            // Started mid-line: drop the partial first line.
-            existing = existing[existing.index(after: firstNewline)...]
+        if offset > 0, size >= offset, size - offset <= maxSeedBytes {
+            // Re-opened mid-session (the owning view was hidden and re-shown):
+            // resume from where the last stop() left off. Re-seeding the tail here
+            // used to APPEND a second copy of everything already shown — duplicate
+            // history on every tab switch. A gap larger than maxSeedBytes falls
+            // through to a fresh bounded tail seed instead.
+            try? h.seek(toOffset: offset)
+            let delta = (try? h.readToEnd()) ?? Data()
+            offset = (try? h.offset()) ?? size
+            ingest(delta, seeding: true)
+        } else {
+            // First open, rotation (file shrank / offset reset), or a too-large
+            // resume gap: seed with the existing TAIL (bounded) so the view isn't
+            // empty on open.
+            if size < offset { offset = 0 }
+            let seedStart = size > maxSeedBytes ? size - maxSeedBytes : 0
+            try? h.seek(toOffset: seedStart)
+            var existing = (try? h.readToEnd()) ?? Data()
+            if seedStart > 0, let firstNewline = existing.firstIndex(of: UInt8(ascii: "\n")) {
+                // Started mid-line: drop the partial first line.
+                existing = existing[existing.index(after: firstNewline)...]
+            }
+            offset = (try? h.offset()) ?? size
+            ingest(existing, seeding: true)
         }
-        offset = (try? h.offset()) ?? size
-        ingest(existing, seeding: true)
 
         let src = DispatchSource.makeFileSystemObjectSource(
             fileDescriptor: h.fileDescriptor, eventMask: [.write, .extend, .rename, .delete],
@@ -150,8 +195,52 @@ final class LogTailer: ObservableObject {
                 defer { nextID += 1 }
                 return LogLine(id: nextID, text: String(line), kind: Self.classify(String(line)))
             }
-        lines.append(contentsOf: newLines)
-        if lines.count > maxLines { lines.removeFirst(lines.count - maxLines) }
+        guard !newLines.isEmpty else { return }
+        if seeding {
+            // One synchronous batch at (re)open. Pending is empty on every current
+            // path (stop() flushes before openAndPrime runs) — fold it in first
+            // anyway so line order could never invert if that changes.
+            publish(pendingLines + newLines)
+            pendingLines.removeAll()
+        } else {
+            pendingLines.append(contentsOf: newLines)
+            scheduleFlush()
+        }
+    }
+
+    // MARK: - Batched publishing
+
+    private func scheduleFlush() {
+        guard flushTask == nil else { return }
+        flushTask = Task { [weak self] in
+            guard let interval = self?.flushInterval else { return }
+            try? await Task.sleep(for: interval)
+            guard !Task.isCancelled else { return }
+            self?.flushTask = nil
+            self?.publishPending()
+        }
+    }
+
+    private func flushPendingNow() {
+        flushTask?.cancel()
+        flushTask = nil
+        publishPending()
+    }
+
+    private func publishPending() {
+        guard !pendingLines.isEmpty else { return }
+        publish(pendingLines)
+        pendingLines.removeAll()
+    }
+
+    /// Append + trim as ONE `lines` assignment — exactly one objectWillChange per
+    /// batch, even when the retention cap trims the head.
+    private func publish(_ newLines: [LogLine]) {
+        guard !newLines.isEmpty else { return }
+        var updated = lines
+        updated.append(contentsOf: newLines)
+        if updated.count > maxLines { updated.removeFirst(updated.count - maxLines) }
+        lines = updated
     }
 
     /// Bucket a log line for color-coding. Order matters: errors win over the rest.

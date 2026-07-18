@@ -1,3 +1,4 @@
+import Combine
 import Foundation
 import Testing
 
@@ -66,6 +67,82 @@ struct LogTailerTests {
         #expect(tailer.lines.count < 600, "seed was not bounded: \(tailer.lines.count) lines")
         let first = try #require(tailer.lines.first?.text)
         #expect(first.hasPrefix("line-"), "seed started mid-line: \(first)")
+    }
+
+    // WS-M0 publish hygiene: appended lines are batched — `lines` publishes at
+    // most ~once per flush interval, not once per write event. The bound asserted
+    // is structural (elapsed / interval, generously padded), not a timing race.
+    @MainActor
+    @Test func appendsCoalesceIntoBatchedPublishes() async throws {
+        let path = (NSTemporaryDirectory() as NSString)
+            .appendingPathComponent("eldr-logtailer-coalesce-\(UUID().uuidString).log")
+        defer { try? FileManager.default.removeItem(atPath: path) }
+        FileManager.default.createFile(atPath: path, contents: nil)
+
+        let tailer = LogTailer(path: path)
+        tailer.start()
+        defer { tailer.stop() }
+
+        var publishes = 0
+        let cancellable = tailer.$lines.dropFirst().sink { _ in publishes += 1 }
+        defer { cancellable.cancel() }
+
+        let handle = try #require(FileHandle(forWritingAtPath: path))
+        handle.seekToEndOfFile()
+        for index in 0..<50 {
+            try handle.write(contentsOf: Data("flood-\(index)\n".utf8))
+        }
+        try handle.close()
+
+        var complete = false
+        for _ in 0..<150 {
+            if tailer.lines.count == 50 {
+                complete = true
+                break
+            }
+            try await Task.sleep(for: .milliseconds(20))
+        }
+        #expect(complete, "flood lines never all arrived (\(tailer.lines.count)/50)")
+        #expect(tailer.lines.first?.text == "flood-0")
+        #expect(tailer.lines.last?.text == "flood-49")
+        // 3 s of polling at a 250 ms flush interval allows at most ~13 batches;
+        // per-line publishing would have produced ~50.
+        #expect(publishes <= 15, "expected batched publishes, saw \(publishes)")
+        #expect(publishes >= 1)
+    }
+
+    // WS-M0 regression: stop() + start() (the Logs tab hidden and re-shown) used to
+    // re-seed the tail and APPEND a duplicate copy of everything already shown.
+    // Re-opening now resumes from the previous offset.
+    @MainActor
+    @Test func restartResumesWithoutDuplicates() async throws {
+        let path = (NSTemporaryDirectory() as NSString)
+            .appendingPathComponent("eldr-logtailer-resume-\(UUID().uuidString).log")
+        defer { try? FileManager.default.removeItem(atPath: path) }
+        try "one\ntwo\nthree\n".write(toFile: path, atomically: true, encoding: .utf8)
+
+        let tailer = LogTailer(path: path)
+        tailer.start()
+        #expect(tailer.lines.map(\.text) == ["one", "two", "three"])
+
+        tailer.stop()
+        tailer.start()
+        #expect(
+            tailer.lines.map(\.text) == ["one", "two", "three"],
+            "re-open duplicated the seed: \(tailer.lines.map(\.text))")
+
+        // Lines appended while stopped arrive exactly once, via the resume read.
+        tailer.stop()
+        let handle = try #require(FileHandle(forWritingAtPath: path))
+        handle.seekToEndOfFile()
+        try handle.write(contentsOf: Data("four\n".utf8))
+        try handle.close()
+        tailer.start()
+        defer { tailer.stop() }
+        #expect(tailer.lines.map(\.text) == ["one", "two", "three", "four"])
+        // Ids stay unique and strictly increasing across the whole sequence.
+        let ids = tailer.lines.map(\.id)
+        #expect(ids == ids.sorted() && Set(ids).count == ids.count)
     }
 }
 

@@ -6,6 +6,12 @@ struct LogView: View {
     @EnvironmentObject private var store: ConfigurationStore
     @StateObject private var tailer: LogTailer
 
+    /// WS-M0: rendering is bounded like the MLX pane — the tailer retains up to
+    /// 2000 lines (Copy all still copies them all), but only this many rows are
+    /// laid out, so a chatty agent session can't re-layout thousands of Texts per
+    /// (batched) append. WS-M2's reusable console replaces this view.
+    private static let maxRenderedLines = 300
+
     init() {
         // The tailer needs the log path before the environment is available, so it's
         // built from the standard paths here (same path the launcher writes to).
@@ -36,7 +42,7 @@ struct LogView: View {
                                 .foregroundStyle(.secondary)
                                 .padding()
                         }
-                        ForEach(tailer.lines) { line in
+                        ForEach(tailer.lines.suffix(Self.maxRenderedLines)) { line in
                             Text(line.text)
                                 .font(.system(.caption, design: .monospaced))
                                 .foregroundStyle(color(for: line.kind))

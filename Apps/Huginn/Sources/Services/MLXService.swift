@@ -65,6 +65,13 @@ final class MLXService: ObservableObject {
     /// in-app start/stop route through launchctl instead of a child process).
     @Published private(set) var autostartEnabled: Bool
 
+    /// WS-M0 kill-switch: when false, Huginn does NOT manage an MLX server — the
+    /// child/launchd server is stopped, the health monitor and server-log tailer
+    /// idle (zero MLX-tab churn), and the Eldr backend points at an external
+    /// OpenAI-compatible server (LM Studio) instead. Persisted (`mlx.managed`);
+    /// default true = the historical behavior. Flip via `setManagesServer`.
+    @Published private(set) var managesServer: Bool
+
     @Published var serverConfig: MLXServerConfig {
         didSet { persistServerConfig() }
     }
@@ -80,7 +87,7 @@ final class MLXService: ObservableObject {
         case generate
     }
 
-    struct Job: Identifiable {
+    struct Job: Identifiable, Equatable {
         let id = UUID()
         let kind: JobKind
         let title: String
@@ -95,10 +102,36 @@ final class MLXService: ObservableObject {
 
     @Published private(set) var activeJob: Job?
     /// Terminal-style output of the current/most recent job (`jobLogKind` says
-    /// which section it belongs to).
+    /// which section it belongs to). Fed in batches — see `appendJobOutput`.
     @Published private(set) var jobLog = TerminalLineBuffer()
     @Published private(set) var jobLogKind: JobKind?
     @Published private(set) var lastJobResult: JobResult?
+
+    // MARK: - Precomputed log windows (WS-M0 publish hygiene)
+
+    /// Last `logWindowMaxLines` rows of the server log / job log, recomputed once
+    /// per (coalesced) publish. Views render these arrays as-is — the old per-body
+    /// `suffix(300).map` re-projected the window on EVERY Form re-evaluation.
+    @Published private(set) var serverLogWindow: [MLXLogRow] = []
+    @Published private(set) var jobLogWindow: [MLXLogRow] = []
+    static let logWindowMaxLines = 300
+
+    /// Narrow, Equatable snapshot of everything ONE section's inline job pane
+    /// shows — nil/empty when the active/last job isn't one of that section's
+    /// kinds, so a download job's output invalidates the Models section only,
+    /// not all six.
+    struct JobPaneState: Equatable {
+        var activeJob: Job?
+        var lastResult: JobResult?
+        var logWindow: [MLXLogRow]
+    }
+
+    func jobPaneState(for kinds: Set<JobKind>) -> JobPaneState {
+        JobPaneState(
+            activeJob: activeJob.flatMap { kinds.contains($0.kind) ? $0 : nil },
+            lastResult: lastJobResult.flatMap { kinds.contains($0.kind) ? $0 : nil },
+            logWindow: jobLogKind.map { kinds.contains($0) } == true ? jobLogWindow : [])
+    }
 
     // MARK: - Models
 
@@ -120,6 +153,10 @@ final class MLXService: ObservableObject {
     private let diagnostics = DiagnosticsLog.shared
     private static let log = Logger(subsystem: "chat.eldr.huginn", category: "mlx")
     private static let serverConfigKey = "mlx.serverConfig"
+    static let managedKey = "mlx.managed"
+    private static let resumeModeKey = "mlx.resumeMode"
+    private static let externalURLKey = "mlx.externalLLMURL"
+    private static let externalModelKey = "mlx.externalLLMModel"
 
     private var serverProcess: Process?
     private var serverLogHandle: FileHandle?
@@ -127,6 +164,16 @@ final class MLXService: ObservableObject {
     private var pendingRestart = false
     private var monitorTask: Task<Void, Never>?
     private var jobTask: Task<Void, Never>?
+    /// WS-M0: job output accumulates here and lands in `jobLog` in ~4 Hz batches
+    /// (a tqdm progress bar redraws dozens of times a second, and publishing per
+    /// line invalidated the whole MLX Form each time).
+    private var pendingJobLogChunk = ""
+    private var jobLogFlushTask: Task<Void, Never>?
+    private let jobLogFlushInterval: Duration
+
+    /// True while the 3 s health-monitor loop is alive (idle when the
+    /// kill-switch is off) — observable for the WS-M0 toggle tests.
+    var isMonitoringHealth: Bool { monitorTask != nil }
 
     /// The server log's live tail — owned HERE (not by the view) so (a) exactly one
     /// tailer exists no matter how often the tab view is rebuilt, and (b) the service
@@ -144,9 +191,11 @@ final class MLXService: ObservableObject {
     init(
         paths: ConfigPaths = .standard,
         defaults: UserDefaults = .standard,
-        launchAgentsDir: String? = nil
+        launchAgentsDir: String? = nil,
+        jobLogFlushInterval: Duration = .milliseconds(250)
     ) {
         self.defaults = defaults
+        self.jobLogFlushInterval = jobLogFlushInterval
         mlxDir = paths.mlxDir
         venvDir = (paths.mlxDir as NSString).appendingPathComponent("venv")
         venvPython = ((paths.mlxDir as NSString).appendingPathComponent("venv") as NSString)
@@ -164,6 +213,7 @@ final class MLXService: ObservableObject {
             .flatMap { try? JSONDecoder().decode(MLXServerConfig.self, from: $0) }
             ?? MLXServerConfig()
         autostartEnabled = FileManager.default.fileExists(atPath: launchAgentPlistPath)
+        managesServer = (defaults.object(forKey: Self.managedKey) as? Bool) ?? true
         serverLog = LogTailer(path: Self.serverLogPath(paths: paths))
 
         try? FileManager.default.createDirectory(
@@ -174,11 +224,20 @@ final class MLXService: ObservableObject {
         // created it (observed live in mlx-server.log).
         try? FileManager.default.createDirectory(
             atPath: cacheDir, withIntermediateDirectories: true)
-        startMonitor()
-        serverLog.start()
+        // Kill-switch off ⇒ nothing to monitor or tail: the probes and the tailer
+        // stay idle until `setManagesServer(true)` (their churn was itself a perf
+        // cost the toggle exists to remove).
+        if managesServer {
+            startMonitor()
+            serverLog.start()
+        }
         logScanCancellable = serverLog.$lines
             .receive(on: RunLoop.main)
-            .sink { [weak self] lines in self?.scanServerLog(lines) }
+            .sink { [weak self] lines in
+                guard let self else { return }
+                self.serverLogWindow = Self.window(of: lines)
+                self.scanServerLog(lines)
+            }
         // A child server must not outlive the app (the UI promises "stops when
         // Huginn quits", and an orphan would hold the port hostage for the next
         // session). launchd-managed servers deliberately DO survive quit. The
@@ -195,6 +254,7 @@ final class MLXService: ObservableObject {
     deinit {
         monitorTask?.cancel()
         jobTask?.cancel()
+        jobLogFlushTask?.cancel()
     }
 
     /// Best-effort synchronous teardown: SIGTERM the child server and cancel the
@@ -277,6 +337,9 @@ final class MLXService: ObservableObject {
     /// Start — or restart, if running — the server with the CURRENT config.
     /// In autostart mode the plist is rewritten and launchd relaunches it.
     func startServer() {
+        // Kill-switch off: nothing may launch (the monitor is idle, so a child
+        // started here would sit in `.starting` forever). The UI hides the button.
+        guard managesServer else { return }
         guard envState.isReady else {
             serverState = .failed("Install the MLX environment first.")
             return
@@ -382,7 +445,7 @@ final class MLXService: ObservableObject {
         try? serverLogHandle?.close()
         serverLogHandle = nil
         launchedServerConfig = nil
-        probeStatus = .unknown
+        updateProbeStatus(.unknown)
         if pendingRestart {
             pendingRestart = false
             expectingServerStop = false
@@ -419,10 +482,11 @@ final class MLXService: ObservableObject {
     // MARK: - Server-log failure scan
 
     /// Reset the warning + move the scan baseline to "now": only lines appended
-    /// after this launch can raise a warning for it.
+    /// after this launch can raise a warning for it. `nextLineID` counts the
+    /// tailer's still-unpublished pending lines too, unlike `lines.last?.id`.
     private func beginLogScanForThisLaunch() {
         serverWarning = nil
-        logScanBaselineID = serverLog.lines.last.map { $0.id + 1 } ?? 0
+        logScanBaselineID = serverLog.nextLineID
     }
 
     /// Watch the server's own log for a dead model-load thread. Triggered on every
@@ -460,16 +524,24 @@ final class MLXService: ObservableObject {
                             url: config.baseURL, token: "", model: config.model,
                             requestTimeoutSeconds: 4))
                     self.applyProbe(result)
-                } else if self.probeStatus != .unknown {
-                    self.probeStatus = .unknown
+                } else {
+                    self.updateProbeStatus(.unknown)
                 }
                 try? await Task.sleep(for: .seconds(3))
             }
         }
     }
 
-    private func applyProbe(_ result: LLMHealthChecker.HealthResult) {
-        probeStatus = result
+    /// WS-M0 publish hygiene: a steady probe result must not invalidate the UI
+    /// every 3 s — `probeStatus` writes only on change.
+    private func updateProbeStatus(_ result: LLMHealthChecker.HealthResult) {
+        if probeStatus != result { probeStatus = result }
+    }
+
+    /// Internal (not private) so the WS-M0 dedupe test can drive it directly —
+    /// only the monitor loop calls it in production.
+    func applyProbe(_ result: LLMHealthChecker.HealthResult) {
+        updateProbeStatus(result)
         let healthy = result.isReachable
         switch serverState {
         case .starting where healthy:
@@ -489,6 +561,7 @@ final class MLXService: ObservableObject {
     /// the plist; in-app control resumes.
     func setAutostart(_ enabled: Bool) async {
         if enabled {
+            guard managesServer else { return }
             guard envState.isReady else {
                 serverState = .failed("Install the MLX environment first.")
                 return
@@ -534,7 +607,7 @@ final class MLXService: ObservableObject {
             try? FileManager.default.removeItem(atPath: launchAgentPlistPath)
             autostartEnabled = false
             launchedServerConfig = nil
-            probeStatus = .unknown
+            updateProbeStatus(.unknown)
             diagnostics.record(.mlx, .info, "MLX server autostart disabled")
         }
     }
@@ -578,9 +651,76 @@ final class MLXService: ObservableObject {
     private func stopLaunchdServer() async {
         _ = await Self.captureProcess(
             "/bin/launchctl", ["kill", "SIGTERM", launchdServiceTarget])
-        probeStatus = .unknown
-        serverWarning = nil
+        updateProbeStatus(.unknown)
+        if serverWarning != nil { serverWarning = nil }
         diagnostics.record(.mlx, .info, "MLX server (launchd) sent SIGTERM")
+    }
+
+    // MARK: - Managed-server kill-switch (WS-M0)
+
+    /// How the server was running when management was switched OFF — restored
+    /// when it comes back ON.
+    private enum ResumeMode: String {
+        case stopped, child, launchd
+    }
+
+    /// Flip "Huginn manages the model server".
+    ///
+    /// OFF: stop the child/launchd server, idle the 3 s health monitor and the
+    /// server-log tailer (zero MLX-tab churn), and point the Eldr backend —
+    /// `ConfigurationStore.llmURL`/`llmModel`, the exact seam `useAsEldrBackend`
+    /// writes — at the saved external server. The pair is seeded from the current
+    /// values the first time, so "run LM Studio's server on the same port" needs
+    /// no edits at all.
+    ///
+    /// ON: keep whatever the user pointed Eldr at as the saved external pair,
+    /// rewire the backend to the (independently persisted) MLX server config, and
+    /// resume the server however it ran before — child process, launchd, or not
+    /// at all. Non-destructive both ways.
+    func setManagesServer(_ on: Bool, store: ConfigurationStore) async {
+        guard on != managesServer else { return }
+        if on {
+            defaults.set(store.llmURL, forKey: Self.externalURLKey)
+            defaults.set(store.llmModel, forKey: Self.externalModelKey)
+            managesServer = true
+            defaults.set(true, forKey: Self.managedKey)
+            serverLog.start()
+            startMonitor()
+            useAsEldrBackend(store: store)
+            switch ResumeMode(rawValue: defaults.string(forKey: Self.resumeModeKey) ?? "")
+                ?? .stopped
+            {
+            case .launchd: await setAutostart(true)
+            case .child: startServer()
+            case .stopped: break
+            }
+            diagnostics.record(
+                .mlx, .info, "Huginn manages the model server again", serverConfig.baseURL)
+        } else {
+            let resume: ResumeMode =
+                autostartEnabled ? .launchd : (serverProcess != nil ? .child : .stopped)
+            defaults.set(resume.rawValue, forKey: Self.resumeModeKey)
+            if autostartEnabled {
+                await setAutostart(false)
+            } else if let process = serverProcess, process.isRunning {
+                expectingServerStop = true
+                terminateServerProcess(process)
+            }
+            monitorTask?.cancel()
+            monitorTask = nil
+            updateProbeStatus(.unknown)
+            if serverWarning != nil { serverWarning = nil }
+            serverLog.stop()
+            let url = defaults.string(forKey: Self.externalURLKey) ?? store.llmURL
+            let model = defaults.string(forKey: Self.externalModelKey) ?? store.llmModel
+            defaults.set(url, forKey: Self.externalURLKey)
+            defaults.set(model, forKey: Self.externalModelKey)
+            store.llmURL = url
+            store.llmModel = model
+            managesServer = false
+            defaults.set(false, forKey: Self.managedKey)
+            diagnostics.record(.mlx, .info, "MLX management off — Eldr backend is \(url)")
+        }
     }
 
     // MARK: - Backend wiring
@@ -803,7 +943,11 @@ final class MLXService: ObservableObject {
         }
         let job = Job(kind: kind, title: title)
         activeJob = job
+        jobLogFlushTask?.cancel()
+        jobLogFlushTask = nil
+        pendingJobLogChunk = ""
         jobLog = TerminalLineBuffer()
+        jobLogWindow = []
         jobLogKind = kind
         lastJobResult = nil
         Self.log.info("MLX job started: \(kind.rawValue, privacy: .public)")
@@ -838,13 +982,56 @@ final class MLXService: ObservableObject {
         }
         lastJobResult = result
         appendJobOutput("\n[\(result.message)]\n")
+        // Flush synchronously so the pane shows the complete output the moment the
+        // result label appears (and so tests see a settled state after finish).
+        flushJobLogNow()
         Self.log.info(
             "MLX job finished: \(job.kind.rawValue, privacy: .public) success=\(error == nil)")
         onFinish?(error == nil)
     }
 
+    /// Buffered feed (WS-M0 publish hygiene): chunks accumulate in
+    /// `pendingJobLogChunk` and land in `jobLog` in ~4 Hz batches instead of one
+    /// `objectWillChange` per streamed line.
     func appendJobOutput(_ chunk: String) {
-        jobLog.feed(chunk)
+        pendingJobLogChunk += chunk
+        guard jobLogFlushTask == nil else { return }
+        jobLogFlushTask = Task { [weak self] in
+            guard let interval = self?.jobLogFlushInterval else { return }
+            try? await Task.sleep(for: interval)
+            guard !Task.isCancelled else { return }
+            self?.jobLogFlushTask = nil
+            self?.flushJobLog()
+        }
+    }
+
+    private func flushJobLogNow() {
+        jobLogFlushTask?.cancel()
+        jobLogFlushTask = nil
+        flushJobLog()
+    }
+
+    private func flushJobLog() {
+        guard !pendingJobLogChunk.isEmpty else { return }
+        jobLog.feed(pendingJobLogChunk)
+        pendingJobLogChunk = ""
+        jobLogWindow = Self.window(of: jobLog.lines)
+    }
+
+    // MARK: - Window projection (WS-M0)
+
+    /// Job-log window: ids are the lines' absolute indices, stable across appends
+    /// (they only shift when the 2000-line buffer cap trims the head).
+    private static func window(of lines: [String]) -> [MLXLogRow] {
+        let base = max(0, lines.count - logWindowMaxLines)
+        return lines.suffix(logWindowMaxLines).enumerated().map {
+            MLXLogRow(id: base + $0.offset, text: $0.element)
+        }
+    }
+
+    /// Server-log window: rows keep the tailer's own stable line ids.
+    private static func window(of lines: [LogLine]) -> [MLXLogRow] {
+        lines.suffix(logWindowMaxLines).map { MLXLogRow(id: $0.id, text: $0.text) }
     }
 
     /// Run one child process as part of the active job, streaming its merged

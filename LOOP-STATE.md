@@ -1,5 +1,24 @@
 # LOOP-STATE — end-to-end configuration bring-up
 
+## 2026-07-18 (MLX overhaul): WS-M0 perf foundation + kill-switch — DONE (AC113)
+
+Suite 117/117 (9 new tests). Shipped: probe/serverState publish dedupe; job-log +
+tailer publishes coalesced to ~4 Hz batches; `MLXView` split into six Equatable
+child sections with the 300-row log windows precomputed in the service
+(`serverLogWindow`/`jobLogWindow`, `jobPaneState(for:)`); `LogView` render bounded
+to 300 lines; LogTailer stop/start now RESUMES instead of re-seeding (fixed a
+duplicate-history-on-tab-switch bug); and the owner-requested `mlx.managed`
+kill-switch — OFF stops child/launchd server, idles monitor+tailer, hands
+`llmURL`/`llmModel` to the persisted external (LM Studio) pair; ON restores +
+rewires + resumes (`mlx.resumeMode`). Details: DEVIATIONS AC113.
+NEEDS OWNER: on-device feel check (Instruments hang-detection before/after wasn't
+runnable headless) — if the tab still stutters under a real download+server flood,
+WS-M0 step 4 (@Observable migration) is the sanctioned next lever. NOTE: the MLX
+tab's Server section now has the "Huginn manages the model server" toggle at top;
+your detached mlx server (port 1337) is untouched by this change until Huginn
+takes ownership. Next workstream: WS-M1 (serve card, brain swap, menu-bar
+controls, reasoning toggle, KV-cache flags).
+
 ## 2026-07-18 (second follow-up): tether "paired but never responds" — FIXED (AC110)
 
 Root cause: the node's `.direct` watch-along path required a live ai_window for
@@ -107,18 +126,8 @@ friend invite with AI permissions. Prove everything by real traffic, not 200s.
 
 ## Needs me
 
-1. **A2A live proof (finishes item 3):** in Huginn ▸ Bridge: toggle **Serve
-   A2A**, optionally **Auto-approve inbound tasks** (confirm dialog). When the
-   `security` keychain prompt appears, **Always Allow**. Then run:
-   `! /private/tmp/claude-501/-Users-auston-Development-Projects-Eldr/1cae8cac-eaa4-412e-9c0a-afe979403f29/scratchpad/a2a-e2e.sh`
-   (If you skip auto-approve, click Approve on my one pending task instead.)
-2. **Unblock item 5 (pick one):**
-   a. Update mlx-lm (MLX tab ▸ "Update mlx-lm") and restart the server — newer
-      releases fix Qwen3-Coder tool-call parsing; then I rerun the delegation.
-   b. Point ELDR_LLM_URL back at LM Studio (:1337 conflict — pick a port) for
-      tool-heavy flows.
-   c. Serve a model whose tool calls this mlx-lm parses (e.g.
-      Qwen3.6-27B-MLX-4bit) — also solves the RAM squeeze.
+
+
 3. **(carryover) Xcode registration repair** — if not yet done: quit Xcode,
    `mv ~/Library/Developer/Xcode/CodingAssistant/ACP/54DA80FC-….plist{,.bak-dupe}`,
    PlistBuddy `Add :requiresAuthentication bool false` on BC567FD8-….plist,

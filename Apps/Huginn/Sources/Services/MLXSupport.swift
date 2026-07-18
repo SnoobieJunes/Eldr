@@ -447,6 +447,18 @@ struct MLXHubModel: Identifiable, Equatable, Sendable, Decodable {
     var isMLX: Bool { tags?.contains("mlx") ?? false }
 }
 
+// MARK: - Log-pane rows
+
+/// One rendered log-pane row, id stable across appends so SwiftUI's diff keeps
+/// unchanged rows. WS-M0: MLXService precomputes bounded windows of these
+/// (`serverLogWindow` / `jobLogWindow`) at publish time, so the 300-row
+/// suffix+map runs once per (coalesced) publish instead of once per Form
+/// re-evaluation.
+struct MLXLogRow: Identifiable, Equatable, Sendable {
+    let id: Int
+    let text: String
+}
+
 // MARK: - Terminal output buffer
 
 /// Accumulates child-process output the way a terminal would: `\n` commits the
