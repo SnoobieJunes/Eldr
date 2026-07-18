@@ -128,10 +128,19 @@ friend invite with AI permissions. Prove everything by real traffic, not 200s.
 
 
 
-3. **(carryover) Xcode registration repair** — if not yet done: quit Xcode,
-   `mv ~/Library/Developer/Xcode/CodingAssistant/ACP/54DA80FC-….plist{,.bak-dupe}`,
-   PlistBuddy `Add :requiresAuthentication bool false` on BC567FD8-….plist,
-   relaunch, re-pick "Eldr" in the chat model picker.
+3. **(carryover) Xcode registration repair** — DONE on disk 2026-07-18 pm.
+   The old UUIDs in this note (54DA80FC / BC567FD8) were STALE — re-registration
+   minted a new one. LIVE plist is now the ONLY real one:
+   `~/Library/Developer/Xcode/CodingAssistant/ACP/EB68F751-5F32-463D-9CED-29EE59168AB5.plist`
+   (BC567FD8 survives only as `.bak-ws0`, which Xcode ignores). Applied:
+   `requiresAuthentication=false` added (plutil OK). Stored chat-model selection
+   already points at EB68F751 (verified — the dead-UUID cause is gone). REMAINING
+   USER STEP: quit Xcode-beta (running as pid 1247 at edit time) and relaunch so it
+   re-reads the plist, then re-pick "Eldr" in the chat model picker.
+   SECOND BLOCKER (new): the local model endpoint is DOWN — nothing on :1337 (nor
+   LM Studio :1234), no mlx_lm.server process. eldr-acp env targets
+   `http://127.0.0.1:1337/v1` model `Qwen3.6-27B-MLX-4bit`; auth being fixed won't
+   produce replies until that server is serving again (my detached pid 77606 is gone).
 4. **MLX server ownership:** it currently runs as my detached process. For
    permanence flip MLX tab ▸ "Start at login (launchd)" (kill pid 77606 first
    or use the tab's Start — it will surface the port conflict cleanly now).

@@ -156,7 +156,7 @@ These come straight from the SPEC/NIP. Violating any of them is a failed build, 
 - Wire structs round-trip through Codable with stable field names matching the NIP exactly (`spk`, `pqpk`, `otp`, `otp_pq`, `lrp`, `dh`, `pn`, `n`, `pq`, `ptr`, …).
 - Unknown JSON fields are preserved-or-ignored, never fatal (forward compatibility, SPEC §12).
 
-## Definition of done (one-shot)
+## Definition of done 
 
 - [ ] All **eight** packages compile; `swift test` green on every package.
 - [ ] Both app targets build: `xcodebuild test` green for **EldrChat** (incl. UI smoke tests + the accessibility audit) **and for Huginn** (macOS).
