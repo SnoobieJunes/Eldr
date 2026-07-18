@@ -1,5 +1,55 @@
 # LOOP-STATE — end-to-end configuration bring-up
 
+## 2026-07-18 (MLX overhaul): WS-M1 serve surface — DONE (AC116)
+
+Suite 138/138 (21 new tests). Shipped: `MLXBrainCard` (model/state/uptime/RSS/
+port + Eldr-backend badge; environment demoted to a chip, install card
+auto-appears only when needed); one-click `makeBrain` brain swap on every cached
+model row (validate → restart → wait-answering → wire backend, fail-closed with
+an lsof OWNERSHIP gate — launchd bootstrap "succeeds" even when the python loses
+the bind race and LM Studio answers instead); port-conflict diagnosis in plain
+language on four trigger paths; first-class Reasoning (thinking) toggle emitting
+`--chat-template-args` with a one-time absorb of the hand-typed extra-arg;
+menu-bar Start/Stop + "MLX tab" jump (`MainWindow.openTab`); Configuration ▸
+Local LLM "Managed by the MLX tab" chip. KV decision (owner, after the plan's
+server-flags premise was falsified against mlx-lm 0.31.3): server got its REAL
+cache knobs (`--prompt-cache-size/-bytes`), the `--kv-*` quartet went to the
+Playground where it actually exists. Details: DEVIATIONS AC116.
+NEEDS OWNER: (1) live acceptance — swap between two cached models while Test
+Chat is up; blocked on TWO fronts: the :1337 production brain is a DETACHED
+process (Huginn doesn't own it — flip "Huginn manages the model server" ON when
+ready to adopt it, config port 1337), and only ONE loadable MLX model is cached
+(download any small mlx-community build first). (2) On-device feel check of the
+new card + menu bar. Next: WS-M2 log console.
+
+## 2026-07-18 (tech-week): WS-C + WS-D + WS-E — DONE (AC114/AC115)
+
+Shipped (details: DEVIATIONS AC115): C1 composer-refill fix (epoch + justSent
+re-clear in ConversationView/ThreadView; regression UI test green); C2 stable
+messageID in message #0 / nearby-start / roster fan-out + receiver stable-id
+dedup; C3 honest send states (DeliveryRoute from the messenger, "Sending…"/
+"Sent nearby"/"Sent to relay"/failed, 12-attempt retry, .relayReconnected
+auto-resend); C4 approval card in its own alert-level passthrough window +
+haptic + opt-in local notification + in-chat "expired" row (phone mirrors the
+120 s C-1 deny); C5 tether configured at pairing ingest + consents/link/
+notification toggle on the acp AI detail; C6 ONE ConversationAIContextSection
+shared by Details + AI hub (duplicate pickers deleted); C7 Nearby auto-apply +
+live peer count + honest prerequisites; WS-D CustomCommand chips (PQRCACP
+type) in the phone terminal AND Huginn Test Chat (seeded from enabled skills,
+editors in both). WS-E: DEVIATIONS AC114 (retro-records the WS-B5 gateway
+merge) + AC115; AGENTS.md verified; memory updated (composer-refill-fix; C6
+note in ui-ux-overload; Xcode memory already carried the corrected non-OAuth
+diagnosis).
+VERIFIED: all 8 packages green (Core 82 / Nostr 114 incl. chaos / Agent 84 /
+ACP 267 / MCP 15 / Node 10 / ctl 10 / A2A 58); Huginn suite green; EldrChat
+124/125 with the 1 red root-caused to the a11y audit racing the still-streaming
+demo thread (nil-element "potentially inaccessible text"; C3's sending→sent
+flip widened the window) — audit now waits for a quiet screen and passes on a
+fresh sim. Full iOS suite was green on the same app build; only the TEST file
+changed after, not re-run end-to-end. NEEDS OWNER (on-device/manual): composer
+feel-check on hardware; approval card + notification with a live node while a
+sheet is up; two-device Multipeer (radios); pairing-ingest tether flow.
+
 ## 2026-07-18 (MLX overhaul): WS-M0 perf foundation + kill-switch — DONE (AC113)
 
 Suite 117/117 (9 new tests). Shipped: probe/serverState publish dedupe; job-log +

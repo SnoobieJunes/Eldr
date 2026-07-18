@@ -54,13 +54,17 @@ struct AIHubSheet: View {
     var body: some View {
         NavigationStack {
             List {
-                modeSection
+                // C6: the SAME shared "what your AI sees here" component Details
+                // embeds — one mode picker (single writer of the per-conversation
+                // key), live echo, collapsed per-AI inspection. Replaces this
+                // sheet's own drifting copy of the picker + the "go to Settings"
+                // pointer row.
+                ConversationAIContextSection(model: model, conversationID: conversationID)
                 respondsSection
                 rosterSection
                 codingSection
                 if order.count > 1 { orderSection }
                 othersSection
-                inspectorLink
             }
             .environment(\.editMode, $editMode)
             .navigationTitle("AI in this chat")
@@ -143,25 +147,6 @@ struct AIHubSheet: View {
             Text("My AI responds")
         } footer: {
             Text("\"Responds in chat\" opens a visible, time-bounded AI window and shares context for that period; \"Drafts privately\" only suggests to you. Off by default.")
-        }
-    }
-
-    // MARK: Gather mode (per-conversation override)
-
-    private var modeSection: some View {
-        Section {
-            Picker("AI context here", selection: Binding(
-                get: { model.conversationContextMode(conversationID) ?? "default" },
-                set: { model.setConversationContextMode($0 == "default" ? nil : $0, conversationID: conversationID) }
-            )) {
-                Text("Follow each AI's setting").tag("default")
-                Text("Live — full conversation while active").tag("full")
-                Text("Marked only — messages I add").tag("marked")
-                Text("Off — no AI gathers or replies here").tag("off")
-            }
-            .accessibilityIdentifier("ai-hub-context-mode")
-        } footer: {
-            Text("Overrides every AI's own setting, just here. \"Off\" silences all AIs in this chat. Each chat is separate — your AI never carries context from one into another.")
         }
     }
 
@@ -305,16 +290,6 @@ struct AIHubSheet: View {
             Text("What your AIs may read from others")
         } footer: {
             Text("Two separate switches: let your AIs read what other people SAY, and — separately — what their AIs say. Both also require the other person to share back. Off by default.")
-        }
-    }
-
-    private var inspectorLink: some View {
-        Section {
-            Label(
-                "Add or remove specific messages per AI from a message's long-press menu, or in Settings ▸ AI.",
-                systemImage: "info.circle")
-                .font(.caption)
-                .foregroundStyle(.secondary)
         }
     }
 

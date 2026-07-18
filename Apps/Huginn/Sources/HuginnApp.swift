@@ -124,6 +124,11 @@ struct MainWindow: View {
     enum Tab: Hashable { case configuration, testChat, mlx, inspector, logs, bridge, nearby, relay }
     @State private var tab: Tab = .configuration
 
+    /// Cross-scene tab jump (WS-M1): the menu-bar extra and the Configuration
+    /// linkage chip post this with a `Tab` as the object to land on a tab —
+    /// selection is otherwise private @State inside the main window.
+    static let openTab = Notification.Name("chat.eldr.huginn.open-tab")
+
     var body: some View {
         TabView(selection: $tab) {
             ConfigurationView()
@@ -155,5 +160,8 @@ struct MainWindow: View {
         }
         .padding(.top, 6)
         .navigationTitle("Eldr — Mac node & AI tether")
+        .onReceive(NotificationCenter.default.publisher(for: Self.openTab)) { note in
+            if let target = note.object as? Tab { tab = target }
+        }
     }
 }

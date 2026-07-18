@@ -107,6 +107,7 @@ struct ConfigurationView: View {
                 )
                 .font(.caption).foregroundStyle(.secondary)
                 healthRow
+                MLXBackendLinkageChip()
             }
         }
     }
@@ -118,6 +119,32 @@ struct ConfigurationView: View {
             Spacer()
             Button("Test") { Task { await health.checkNow() } }
                 .controlSize(.small)
+        }
+    }
+
+    /// WS-M1 "edit where you inspect" linkage: when the Local-LLM URL above IS
+    /// the MLX tab's managed server, say so and offer the jump. A leaf observer
+    /// struct so MLX churn re-renders only this row, never the whole form.
+    private struct MLXBackendLinkageChip: View {
+        @ObservedObject private var mlx = MLXService.shared
+        @EnvironmentObject private var store: ConfigurationStore
+
+        var body: some View {
+            if mlx.managesServer, store.llmURL == mlx.serverConfig.baseURL {
+                HStack(spacing: 8) {
+                    Label("Managed by the MLX tab", systemImage: "memorychip")
+                        .font(.caption).foregroundStyle(.secondary)
+                    Spacer()
+                    Button("Open MLX tab") {
+                        NotificationCenter.default.post(
+                            name: MainWindow.openTab, object: MainWindow.Tab.mlx)
+                    }
+                    .controlSize(.small)
+                }
+                .help(
+                    "The URL above is the MLX tab's server — start/stop it and switch models there. Editing the URL here just points Eldr somewhere else; the MLX server keeps its own config."
+                )
+            }
         }
     }
 

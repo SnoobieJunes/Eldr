@@ -210,6 +210,11 @@ public actor MultipeerLinkTransport: LocalLinkTransport {
         sealStream
     }
 
+    /// C7: number of co-present peers whose identity has proven out (the signed
+    /// hello completed both ways) — drives the live "Nearby: N" indicator.
+    /// Purely observational; never gates delivery.
+    public var verifiedPeerCount: Int { peerByIdentityHex.count }
+
     public func advertiseOwnBundle(bindingEvent: NostrEvent, prekeyBundle: PrekeyBundle) async {
         let announcement = BundleAnnouncement(bindingEvent: bindingEvent, prekeyBundle: prekeyBundle)
         ownBundleBlob = try? WireJSON.encoder().encode(announcement)

@@ -1,5 +1,6 @@
 import CryptoKit
 import LocalAuthentication
+import PQRCACP  // WS-D: the shared CustomCommand chip model.
 import PQRCAgent
 import PQRCCore
 import PQRCMCP
@@ -660,6 +661,36 @@ final class AppSession {
         // lingers at rest) and `true` is the only thing we persist.
         if value { UserDefaults.standard.set(true, forKey: key) }
         else { UserDefaults.standard.removeObject(forKey: key) }
+    }
+
+    /// C4: opt-in LOCAL notification when a paired Mac agent asks tool permission
+    /// while the app isn't frontmost — so the node's 120 s auto-deny stops eating
+    /// requests invisibly. OFF by default; the notification body is generic
+    /// (contact name + tool kind, never the command/path — invariant 12 treats
+    /// the lock screen as a log). Per-silo, mirroring the other toggles.
+    nonisolated static func approvalNotificationsEnabled(siloID: String = "") -> Bool {
+        UserDefaults.standard.bool(forKey: siloDefaultsKey("approvalNotifications", siloID))
+    }
+    nonisolated static func setApprovalNotificationsEnabled(_ value: Bool, siloID: String = "") {
+        let key = siloDefaultsKey("approvalNotifications", siloID)
+        if value { UserDefaults.standard.set(true, forKey: key) }
+        else { UserDefaults.standard.removeObject(forKey: key) }
+    }
+
+    /// WS-D: the user-editable quick-command chips for the interactive terminal
+    /// (shared `CustomCommand` model with Huginn's Test Chat strip). Per-silo;
+    /// empty by default — the node's advertised skills already render as chips.
+    nonisolated static func customCommands(siloID: String = "") -> [CustomCommand] {
+        CustomCommand.decodeList(
+            UserDefaults.standard.data(forKey: siloDefaultsKey("customCommands", siloID))) ?? []
+    }
+    nonisolated static func setCustomCommands(_ commands: [CustomCommand], siloID: String = "") {
+        let key = siloDefaultsKey("customCommands", siloID)
+        if commands.isEmpty {
+            UserDefaults.standard.removeObject(forKey: key)
+        } else if let data = CustomCommand.encodeList(commands) {
+            UserDefaults.standard.set(data, forKey: key)
+        }
     }
 
     /// Agent skills pinned to a thread (ids from `AgentSkills.catalog`), appended

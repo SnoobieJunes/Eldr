@@ -124,6 +124,35 @@ final class PQRCUITests: XCTestCase {
         XCTAssertTrue(messageVisible(app, "UI round trip!"), "message must reach Bob decrypted")
     }
 
+    /// C1 regression: sending must clear the composer atomically — the field is
+    /// empty afterwards (no write-back restores the sent text) and stays empty,
+    /// so the Send button is disabled and a second tap can send nothing.
+    func test_composer_clearsAfterSend_andSecondTapSendsNothing() throws {
+        let app = launchUniverse()
+        openConversation(app, "Bob")
+        let field = app.textFields["composer-field"]
+        type(app, into: field, "C1 once only")
+        tapWhenReady(app, button: "composer-send")
+        XCTAssertTrue(messageVisible(app, "C1 once only"))
+        // Poll ~3 s: the field must clear AND stay clear (a delayed binding
+        // write-back re-filling it is the bug this guards against). An empty
+        // SwiftUI TextField reports its placeholder ("Message") as value.
+        var lastValue = ""
+        for _ in 0..<6 {
+            usleep(500_000)
+            lastValue = (field.value as? String) ?? ""
+            XCTAssertNotEqual(
+                lastValue, "C1 once only",
+                "sent text must not reappear in the composer")
+        }
+        XCTAssertTrue(
+            lastValue.isEmpty || lastValue == "Message",
+            "composer must be empty after send, got: \(lastValue)")
+        XCTAssertFalse(
+            app.buttons["composer-send"].isEnabled,
+            "Send must be disabled once the field is empty — nothing to re-send")
+    }
+
     func test_aiDraft_previewThenSendAsAI_rendersAgentBubble() throws {
         let app = launchUniverse()
         openConversation(app, "Bob")
@@ -293,6 +322,24 @@ final class PQRCUITests: XCTestCase {
         }
     }
 
+    /// Poll until the screen's AX descendant count stops changing (3 stable
+    /// 1 s samples). The demo thread's AI exchange can still be streaming when
+    /// the audit arrives (the loop guard pauses it at 50 replies in a row), and
+    /// the auditor races actively-materializing bubbles into nil-element
+    /// "potentially inaccessible text" failures on content that is fully
+    /// accessible once landed (2026-07-18: full-suite run failed exactly there;
+    /// the isolated re-run was green). Audit settled screens only.
+    private func waitForQuietScreen(_ app: XCUIApplication, timeout: TimeInterval = 90) {
+        let deadline = Date().addingTimeInterval(timeout)
+        var lastCount = -1
+        var stable = 0
+        while Date() < deadline, stable < 3 {
+            let count = app.descendants(matching: .any).count
+            if count == lastCount { stable += 1 } else { stable = 0; lastCount = count }
+            usleep(1_000_000)
+        }
+    }
+
     func test_accessibilityAudit_allPrimaryScreens() throws {
         let app = launchUniverse()
         // Conversation list.
@@ -304,6 +351,7 @@ final class PQRCUITests: XCTestCase {
         let chip = element(app, "thread-chip-Plan lunch")
         if chip.waitForExistence(timeout: 10) {
             chip.tap()
+            waitForQuietScreen(app)
             try audit(app)
             goBack(app)
         }

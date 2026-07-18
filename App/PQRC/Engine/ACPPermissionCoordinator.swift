@@ -60,6 +60,12 @@ public protocol ACPPermissionAsking: Sendable {
 @Observable
 public final class ACPPermissionCoordinator: ACPPermissionAsking {
 
+    /// Mirror of the node's C-1 auto-deny window (`ACPAgent.requestPermission`,
+    /// default 120 s). When it lapses the phone resolves `.deny` itself and
+    /// reports it via `onExpired`, so the queue can't hold a prompt the node has
+    /// already given up on (C4 — the "silent expiry" fix).
+    public static let expirySeconds: TimeInterval = 120
+
     /// A queued prompt awaiting the human. FIFO; the UI presents `pending.first`.
     public struct Pending: Identifiable {
         public let id: String
@@ -72,12 +78,27 @@ public final class ACPPermissionCoordinator: ACPPermissionAsking {
 
     public private(set) var pending: [Pending] = []
 
+    /// C4 hooks, wired by `AppModel`: a new prompt arrived (haptic + optional
+    /// local notification) / a prompt sat unanswered past the C-1 window and was
+    /// denied (render the "expired" system row in that node's chat).
+    public var onNewRequest: ((_ nodeHex: String, _ title: String, _ kind: String) -> Void)?
+    public var onExpired: ((_ nodeHex: String, _ title: String) -> Void)?
+
     public init() {}
 
     /// Park until the human resolves this request. Appends to the (observed) queue so a
     /// SwiftUI alert appears; resumes when `resolve` (or `cancelAll`) is called.
     public func request(_ req: PermissionRequest) async -> ACPPermissionDecision {
-        await withCheckedContinuation { continuation in
+        onNewRequest?(req.nodeHex, req.title, req.kind)
+        // C4: mirror the node's C-1 timeout phone-side. If the human never
+        // answers, resolve .deny (matching what the node already did) and let
+        // the app render an explicit "expired" row instead of a silent vanish.
+        let id = req.id
+        Task { [weak self] in
+            try? await Task.sleep(for: .seconds(Self.expirySeconds))
+            self?.expire(id: id)
+        }
+        return await withCheckedContinuation { continuation in
             pending.append(
                 Pending(
                     id: req.id, nodeHex: req.nodeHex, title: req.title, kind: req.kind,
@@ -90,6 +111,15 @@ public final class ACPPermissionCoordinator: ACPPermissionAsking {
         guard let index = pending.firstIndex(where: { $0.id == id }) else { return }
         let entry = pending.remove(at: index)
         entry.continuation.resume(returning: decision)
+    }
+
+    /// C4: the C-1 window lapsed with no answer — deny (idempotent with resolve)
+    /// and surface it. Private: only the timer scheduled in `request` calls this.
+    private func expire(id: String) {
+        guard let index = pending.firstIndex(where: { $0.id == id }) else { return }
+        let entry = pending.remove(at: index)
+        entry.continuation.resume(returning: .deny)
+        onExpired?(entry.nodeHex, entry.title)
     }
 
     /// Deny + drop every pending prompt for a node (its transport tore down). Never

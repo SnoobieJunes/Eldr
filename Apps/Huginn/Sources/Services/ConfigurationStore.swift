@@ -188,6 +188,14 @@ final class ConfigurationStore: ObservableObject {
     @Published var a2aAutoApprove: Bool
     static let a2aAutoApproveKey = "a2aAutoApprove"
 
+    /// WS-D: the user-editable quick-command chips rendered above Test Chat's
+    /// composer (shared `CustomCommand` type with the phone terminal's strip).
+    /// Seeded ONCE — first load with no saved value — from the enabled skills
+    /// (`/spec /snippet /html`), then fully user-owned (add/reorder/delete).
+    /// Huginn-only pref (UserDefaults), never an eldr-acp env var.
+    @Published var customCommands: [CustomCommand]
+    static let customCommandsKey = "testChatCustomCommands"
+
     /// The four built-in tools, in advertise order (mirrors ToolExecutor.allToolNames).
     static let allToolNames = ["read_file", "write_file", "list_dir", "run_shell"]
     /// The built-in skill command names, in advertise order (mirrors PQRCACP's
@@ -264,6 +272,22 @@ final class ConfigurationStore: ObservableObject {
             (UserDefaults.standard.object(forKey: Self.testChatAutoApproveKey) as? Bool) ?? false
         a2aAutoApprove =
             (UserDefaults.standard.object(forKey: Self.a2aAutoApproveKey) as? Bool) ?? false
+        // WS-D: saved list wins; first-ever load seeds from the enabled skills in
+        // advertise order (mirrors skillsFileContents' ordering).
+        if let saved = CustomCommand.decodeList(
+            UserDefaults.standard.data(forKey: Self.customCommandsKey))
+        {
+            customCommands = saved
+        } else {
+            let seedSkills =
+                agent.skillsEnabled
+                ? ConfigurationStore.allSkillNames.filter {
+                    (agent.skillAllowlist.map(Set.init) ?? Set(ConfigurationStore.allSkillNames))
+                        .contains($0)
+                }
+                : []
+            customCommands = CustomCommand.seeded(fromSkills: seedSkills)
+        }
         claudeCodeAPIKey =
             keychain.load(account: Self.claudeCodeKeyAccount)
             .flatMap { String(data: $0, encoding: .utf8) } ?? ""
@@ -291,6 +315,9 @@ final class ConfigurationStore: ObservableObject {
         UserDefaults.standard.set(testChatWorkspacePath, forKey: Self.testChatWorkspaceKey)
         UserDefaults.standard.set(testChatAutoApprove, forKey: Self.testChatAutoApproveKey)
         UserDefaults.standard.set(a2aAutoApprove, forKey: Self.a2aAutoApproveKey)
+        if let data = CustomCommand.encodeList(customCommands) {
+            UserDefaults.standard.set(data, forKey: Self.customCommandsKey)
+        }
         saveTokenToKeychain()
         saveVendorKeysToKeychain()
         writeEnvFile()

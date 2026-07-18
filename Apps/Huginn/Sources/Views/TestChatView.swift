@@ -1,4 +1,5 @@
 import AppKit
+import PQRCACP  // WS-D: the shared CustomCommand chip model.
 import SwiftUI
 
 /// In-app chat that drives a real in-process `ACPAgent` against the configured LLM,
@@ -15,6 +16,8 @@ struct TestChatView: View {
     /// enables capture: the panel only appears when `session.showRawStream` is on, and
     /// starts collapsed so it stays out of the way.
     @State private var rawExpanded = false
+    /// WS-D: the quick-command chip editor sheet.
+    @State private var showCommandEditor = false
 
     var body: some View {
         VStack(spacing: 0) {
@@ -54,7 +57,11 @@ struct TestChatView: View {
                 rawStreamPanel
             }
             Divider()
+            commandStrip
             composer
+        }
+        .sheet(isPresented: $showCommandEditor) {
+            CustomCommandEditorSheet(commands: $store.customCommands)
         }
         .task {
             // Wire the session's config seams to this store's live selections before
@@ -167,6 +174,48 @@ struct TestChatView: View {
         if panel.runModal() == .OK, let url = panel.url {
             store.testChatWorkspacePath = url.path
         }
+    }
+
+    /// WS-D: user-editable quick-command chips (shared `CustomCommand` model with
+    /// the phone terminal's strip). An auto-send chip fires the turn through the
+    /// SAME `sendDraft()` path the field uses; a fill-only chip just loads the
+    /// composer so arguments can be typed after it.
+    private var commandStrip: some View {
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: 6) {
+                ForEach(store.customCommands) { command in
+                    Button {
+                        draft = command.text
+                        if command.autoSend { sendDraft() }
+                    } label: {
+                        Text(command.label)
+                            .font(.caption.monospaced())
+                            .lineLimit(1)
+                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
+                    .disabled(command.autoSend && session.isResponding)
+                    .help(command.autoSend
+                        ? "Send “\(command.text)” now"
+                        : "Put “\(command.text)” in the composer")
+                    .accessibilityIdentifier("testchat-chip-\(command.label)")
+                }
+                Button {
+                    showCommandEditor = true
+                } label: {
+                    Image(systemName: store.customCommands.isEmpty
+                        ? "plus.circle" : "slider.horizontal.3")
+                        .font(.caption)
+                }
+                .buttonStyle(.borderless)
+                .help("Edit quick commands (add, reorder, delete)")
+                .accessibilityIdentifier("testchat-chip-editor")
+            }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 6)
+        }
+        .frame(maxWidth: 1100, alignment: .leading)
+        .frame(maxWidth: .infinity)
     }
 
     private var composer: some View {
@@ -322,5 +371,57 @@ private struct ApprovalNoteRow: View {
         .foregroundStyle(.secondary)
         .padding(.horizontal, 10).padding(.vertical, 4)
         .frame(maxWidth: .infinity, alignment: .leading)
+    }
+}
+
+/// WS-D: editor for the quick-command chips — add, edit inline, reorder
+/// (drag), delete. Bound straight to `ConfigurationStore.customCommands`, whose
+/// debounced save persists every change.
+struct CustomCommandEditorSheet: View {
+    @Binding var commands: [CustomCommand]
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack {
+                Text("Quick commands").font(.headline)
+                Spacer()
+                Button("Done") { dismiss() }
+                    .keyboardShortcut(.defaultAction)
+            }
+            Text("Chips above the composer. \u{201C}Send now\u{201D} fires the text as a turn; off = the chip only fills the composer so you can add arguments.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            List {
+                ForEach($commands) { $command in
+                    HStack(spacing: 8) {
+                        Image(systemName: "line.3.horizontal")
+                            .foregroundStyle(.tertiary)
+                        TextField("Label", text: $command.label)
+                            .frame(width: 120)
+                        TextField("Text to send", text: $command.text)
+                            .font(.body.monospaced())
+                        Toggle("Send now", isOn: $command.autoSend)
+                            .toggleStyle(.checkbox)
+                    }
+                }
+                .onMove { from, to in commands.move(fromOffsets: from, toOffset: to) }
+                .onDelete { commands.remove(atOffsets: $0) }
+            }
+            .frame(minHeight: 220)
+            HStack {
+                Button {
+                    commands.append(CustomCommand(label: "new", text: "", autoSend: false))
+                } label: {
+                    Label("Add command", systemImage: "plus.circle")
+                }
+                Spacer()
+                if !commands.isEmpty {
+                    Button("Remove all", role: .destructive) { commands.removeAll() }
+                }
+            }
+        }
+        .padding(16)
+        .frame(minWidth: 520, minHeight: 340)
     }
 }

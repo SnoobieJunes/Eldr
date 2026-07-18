@@ -33,9 +33,22 @@ public struct ReceivedMessage: Sendable {
     public let wrapEventID: String
 }
 
+/// How an outbound message actually left the device (C3 honest send states):
+/// over the co-present local link with no relay involved, or published to at
+/// least one relay. Lets the app render "Sent nearby" vs "Sent to relay"
+/// truthfully instead of claiming a relay hop that never happened.
+public enum DeliveryRoute: Sendable, Equatable {
+    case nearby
+    case relay
+}
+
 /// Everything the engine surfaces to the app layer.
 public enum MessengerEvent: Sendable {
     case message(ReceivedMessage)
+    /// A relay transport that had gone down reported a live frame again (C3).
+    /// Observational recovery signal: the app uses it to re-publish messages
+    /// whose publish failed outright while the socket was down.
+    case relayReconnected
     /// SPEC §13.4: e.g. a human label under an agent signature — render as a
     /// red protocol-violation system row, never as a normal message.
     case protocolViolation(senderIdentityHex: String, reason: String, wrapEventID: String)
@@ -399,9 +412,12 @@ public actor PQRCMessenger {
     // MARK: - Session establishment
 
     /// Initiator: PQXDH from a verified bundle; message #0 piggybacks (D10).
+    /// Returns the route message #0 actually took (C3) — discardable for the
+    /// callers that don't render a status.
+    @discardableResult
     public func establishSession(
         with contact: VerifiedContact, bundle: PrekeyBundle, firstMessage: MessageBody
-    ) async throws {
+    ) async throws -> DeliveryRoute {
         try bundle.verifySignatures(identityPubkey: contact.binding.identityPubkey)
         let initiation = try PQXDH.initiate(
             myIdentity: identity, myIdentityDH: identityDH, peerBundle: bundle,
@@ -413,7 +429,7 @@ public actor PQRCMessenger {
         let outgoing = try await session.encrypt(
             body: firstMessage, type: .handshake, participantType: .human,
             handshake: initiation.message)
-        try await deliver(outgoing, to: contact)
+        return try await deliver(outgoing, to: contact)
     }
 
     // MARK: - Send
@@ -433,20 +449,23 @@ public actor PQRCMessenger {
         return PQRCConstants.chunkTextBudget(relayContentLimit: minLimit)
     }
 
+    /// Returns the route the message actually took (C3) — discardable so the
+    /// many control-plane callers that don't render a status stay unchanged.
+    @discardableResult
     public func send(
         _ body: MessageBody,
         to peerIdentityHex: String,
         participantType: ParticipantType = .human,
         contentPointer: ContentPointer? = nil,
         aiWindow: AIWindowAnnouncement? = nil
-    ) async throws {
+    ) async throws -> DeliveryRoute {
         guard let session = sessions[peerIdentityHex],
             let contact = contactsByNostrPub.values.first(where: { $0.identityHex == peerIdentityHex })
         else { throw PQRCError.sessionNotEstablished }
         let outgoing = try await encryptOutgoing(
             body, session: session, participantType: participantType,
             contentPointer: contentPointer, aiWindow: aiWindow)
-        try await deliver(outgoing, to: contact)
+        return try await deliver(outgoing, to: contact)
     }
 
     /// Sends an ordered batch (chunks of one logical message) to one peer.
@@ -454,11 +473,12 @@ public actor PQRCMessenger {
     /// publishes run with bounded concurrency, so a big context isn't gated on
     /// N serial OK round-trips. Reordered arrival is fine: each chunk is a
     /// distinct message number and the receiver reassembles by index.
+    @discardableResult
     public func sendBatch(
         _ bodies: [MessageBody], to peerIdentityHex: String,
         participantType: ParticipantType = .human,
         aiWindow: AIWindowAnnouncement? = nil
-    ) async throws {
+    ) async throws -> DeliveryRoute {
         guard let session = sessions[peerIdentityHex],
             let contact = contactsByNostrPub.values.first(where: { $0.identityHex == peerIdentityHex })
         else { throw PQRCError.sessionNotEstablished }
@@ -479,6 +499,7 @@ public actor PQRCMessenger {
                     recipientReceivingKey: outboundReceivingPTag(for: contact)))
         }
         try await publishBatch(relayWraps)
+        return relayWraps.isEmpty ? .nearby : .relay
     }
 
     /// Encrypts a body (advancing the ratchet) and attaches the agent signature
@@ -542,9 +563,12 @@ public actor PQRCMessenger {
     /// guesswork. The local attempt re-seals nothing on failure — the relay
     /// path builds its own envelope from the same `OutgoingMessage`, keeping
     /// the one-fuzzed-timestamp-per-message invariant (APP-SPEC §2) intact.
-    private func deliver(_ outgoing: OutgoingMessage, to contact: VerifiedContact) async throws {
-        if await tryLocalDelivery(outgoing, to: contact) { return }
+    private func deliver(
+        _ outgoing: OutgoingMessage, to contact: VerifiedContact
+    ) async throws -> DeliveryRoute {
+        if await tryLocalDelivery(outgoing, to: contact) { return .nearby }
         try await wrapAndPublish(outgoing, to: contact)
+        return .relay
     }
 
     /// Attempts local-link (co-present) delivery; returns true on success. Any
@@ -583,7 +607,11 @@ public actor PQRCMessenger {
     /// Outbox semantics: keep trying every transport with backoff until one
     /// healthy relay accepts (APP-SPEC §13). Chaos drops surface as thrown
     /// errors and are retried.
-    private func publishWithRetry(_ event: NostrEvent, maxAttempts: Int = 60) async throws {
+    /// C3: the budget is 12 attempts (was 60) so a dead relay surfaces as a
+    /// visible "failed" in seconds, not minutes of a silent spinner; recovery
+    /// after that is event-driven — `.relayReconnected` triggers the app's
+    /// auto-resend — instead of one enormous blocking loop.
+    private func publishWithRetry(_ event: NostrEvent, maxAttempts: Int = 12) async throws {
         var attempt = 0
         while attempt < maxAttempts {
             for transport in transports {
@@ -624,6 +652,30 @@ public actor PQRCMessenger {
         startReceivePump(filters: [
             NostrFilter(kinds: [PQRCConstants.giftWrapEventKind], pTags: receivingPTags)
         ])
+        // C3: watch each transport's lifecycle stream and surface down→up
+        // transitions as ONE `.relayReconnected` per recovery, so the app can
+        // re-publish sends that failed outright while the socket was down.
+        // In-process/simulator transports return a finished stream — no task
+        // lingers, and test behavior is unchanged.
+        for transport in transports {
+            let task = Task { [weak self] in
+                var wasDown = false
+                for await event in await transport.transportEvents() {
+                    switch event {
+                    case .disconnected, .error, .authFailed:
+                        wasDown = true
+                    case .connected, .authenticated:
+                        if wasDown {
+                            wasDown = false
+                            await self?.emitRelayReconnected()
+                        }
+                    case .connecting, .eose, .authChallenge:
+                        break
+                    }
+                }
+            }
+            pumpTasks.append(task)
+        }
         if let localLink {
             // Advertise our signed binding + prekey bundle so co-present peers
             // can verify and add us with no relay (SPEC §10, Nearby setting).
@@ -700,6 +752,11 @@ public actor PQRCMessenger {
             }
             pumpTasks.append(task)
         }
+    }
+
+    /// Actor hop for the transport watcher tasks (C3).
+    private func emitRelayReconnected() {
+        eventContinuation?.yield(.relayReconnected)
     }
 
     public func stop() {

@@ -1,3 +1,4 @@
+import PQRCACP  // WS-D: the shared CustomCommand chip model.
 import SwiftUI
 
 /// Phase D4 — the live INTERACTIVE terminal (PTY) a paired coding-agent node is running.
@@ -26,6 +27,9 @@ struct ACPTerminalView: View {
     // keyboard/scroll animations; only send when the derived cols/rows actually change
     // so we don't spam the node over the relay.
     @State private var lastReportedSize: (cols: Int, rows: Int)?
+    /// WS-D: the user's custom quick-command chips (per-silo, editable).
+    @State private var customCommands: [CustomCommand] = []
+    @State private var showCommandEditor = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
@@ -130,14 +134,35 @@ struct ACPTerminalView: View {
     /// may be empty or sparse, but "build/test/status" are useful in any shell.
     private static let curatedCommands = ["build", "test", "git status", "git diff", "ls", "clear"]
 
-    /// WS1 — quick-action chips: the curated set above, followed by whatever the node
-    /// advertised for this session (`available_commands_update`, e.g. skills), followed
-    /// by a `^Z` control chip. Each chip is just a shortcut for typing the same text /
-    /// control byte into the live shell — same `sendACPTerminalInput`/`Control` paths
-    /// the stdin field and ^C/^D buttons already use.
+    /// WS1 — quick-action chips: the user's OWN custom chips first (WS-D:
+    /// persisted, editable via the slider button), then the curated set, then
+    /// whatever the node advertised for this session (`available_commands_update`,
+    /// e.g. skills), then a `^Z` control chip. Each chip is just a shortcut for
+    /// typing the same text / control byte into the live shell — same
+    /// `sendACPTerminalInput`/`Control` paths the stdin field and ^C/^D use. A
+    /// custom chip with auto-send OFF only fills the stdin field for editing.
     private var chipRow: some View {
         ScrollView(.horizontal, showsIndicators: false) {
             HStack(spacing: 6) {
+                ForEach(customCommands) { command in
+                    Button {
+                        if command.autoSend {
+                            Task {
+                                await model.sendACPTerminalInput(
+                                    command.text, conversationID: conversationID)
+                            }
+                        } else {
+                            stdin = command.text
+                            stdinFocused = true
+                        }
+                    } label: {
+                        Text(command.label).font(.caption.monospaced())
+                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
+                    .tint(.purple)
+                    .accessibilityIdentifier("acp-terminal-custom-chip-\(command.label)")
+                }
                 ForEach(Self.curatedCommands, id: \.self) { cmd in
                     commandChip(cmd)
                 }
@@ -153,8 +178,24 @@ struct ACPTerminalView: View {
                 .controlSize(.small)
                 .accessibilityLabel("Send suspend (Control-Z)")
                 .accessibilityIdentifier("acp-terminal-ctrl-z")
+                // WS-D: edit the custom chips (add / reorder / delete).
+                Button {
+                    showCommandEditor = true
+                } label: {
+                    Image(systemName: customCommands.isEmpty ? "plus.circle" : "slider.horizontal.3")
+                        .font(.caption)
+                }
+                .buttonStyle(.borderless)
+                .accessibilityLabel("Edit quick commands")
+                .accessibilityIdentifier("acp-terminal-chip-editor")
             }
         }
+        .sheet(isPresented: $showCommandEditor, onDismiss: {
+            customCommands = AppSession.customCommands(siloID: model.siloID)
+        }) {
+            CustomCommandEditorView(siloID: model.siloID)
+        }
+        .onAppear { customCommands = AppSession.customCommands(siloID: model.siloID) }
     }
 
     private func commandChip(_ command: String) -> some View {
@@ -270,6 +311,59 @@ struct ACPPlanSlot: View {
                 .padding(.horizontal)
                 .padding(.top, 6)
                 .frame(maxWidth: 760)
+        }
+    }
+}
+
+/// WS-D: editor for the terminal's custom quick-command chips — add, edit
+/// inline, reorder, delete. Persists per-silo via `AppSession` on every change,
+/// so the strip (which re-reads on dismiss) always matches.
+struct CustomCommandEditorView: View {
+    let siloID: String
+    @Environment(\.dismiss) private var dismiss
+    @State private var commands: [CustomCommand] = []
+
+    var body: some View {
+        NavigationStack {
+            List {
+                Section {
+                    ForEach($commands) { $command in
+                        VStack(alignment: .leading, spacing: 6) {
+                            TextField("Label", text: $command.label)
+                                .font(.headline)
+                            TextField("Text to send", text: $command.text)
+                                .font(.body.monospaced())
+                                .autocorrectionDisabled()
+                                .textInputAutocapitalization(.never)
+                            Toggle("Send immediately", isOn: $command.autoSend)
+                                .font(.callout)
+                        }
+                        .padding(.vertical, 2)
+                    }
+                    .onMove { commands.move(fromOffsets: $0, toOffset: $1) }
+                    .onDelete { commands.remove(atOffsets: $0) }
+                    Button {
+                        commands.append(CustomCommand(label: "new", text: "", autoSend: false))
+                    } label: {
+                        Label("Add command", systemImage: "plus.circle")
+                    }
+                    .accessibilityIdentifier("custom-command-add")
+                } footer: {
+                    Text("Chips above the terminal input. \u{201C}Send immediately\u{201D} runs the text as a line the moment you tap; off = the chip only fills the input so you can add arguments first.")
+                }
+            }
+            .navigationTitle("Quick commands")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .primaryAction) { EditButton() }
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Done") { dismiss() }
+                }
+            }
+            .onAppear { commands = AppSession.customCommands(siloID: siloID) }
+            .onChange(of: commands) { _, newValue in
+                AppSession.setCustomCommands(newValue, siloID: siloID)
+            }
         }
     }
 }

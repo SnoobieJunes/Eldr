@@ -30,6 +30,15 @@ struct MLXServerConfig: Equatable, Codable, Sendable {
     var adapterPath: String = ""
     /// Free-form extra args, whitespace-split (no shell quoting — documented in the UI).
     var extraArguments: String = ""
+    /// WS-M1 reasoning ("thinking") toggle: nil = model default (flag omitted);
+    /// true/false emits `--chat-template-args {"enable_thinking":…}`. Replaces the
+    /// hand-typed Extra-arguments JSON (absorbed once by `absorbingReasoning`).
+    var reasoning: Bool?
+    /// WS-M1 server-side KV/prompt-cache bounds. These are the cache knobs
+    /// `mlx_lm.server` actually has (verified against 0.31.3 — the `--kv-bits`
+    /// quantization family is generate-only); omitted when nil.
+    var promptCacheSize: Int?
+    var promptCacheBytes: Int64?
 
     /// `0.0.0.0` means "listen on everything" — clients (health probe, the agent)
     /// still connect via loopback.
@@ -47,6 +56,14 @@ struct MLXGenerateConfig: Equatable, Sendable {
     var temperature: Double?
     var topP: Double?
     var adapterPath: String = ""
+    /// WS-M1 KV-cache controls — `mlx_lm generate` is where the quantization
+    /// family actually lives (the server has none of these; verified 0.31.3).
+    /// `kvGroupSize`/`quantizedKVStart` are only meaningful (and only emitted)
+    /// when `kvBits` is set.
+    var kvBits: Int?
+    var kvGroupSize: Int?
+    var quantizedKVStart: Int?
+    var maxKVSize: Int?
 }
 
 struct MLXConvertConfig: Equatable, Sendable {
@@ -104,8 +121,64 @@ enum MLXCommand {
         // `=`-form: a template starting with "-" would otherwise be parsed as a flag.
         if !c.chatTemplate.isEmpty { args.append("--chat-template=\(c.chatTemplate)") }
         if !c.adapterPath.isEmpty { args += ["--adapter-path", c.adapterPath] }
+        if let reasoning = c.reasoning {
+            args += ["--chat-template-args", "{\"enable_thinking\":\(reasoning)}"]
+        }
+        if let promptCacheSize = c.promptCacheSize {
+            args += ["--prompt-cache-size", String(promptCacheSize)]
+        }
+        if let promptCacheBytes = c.promptCacheBytes {
+            args += ["--prompt-cache-bytes", String(promptCacheBytes)]
+        }
+        // Extras stay LAST: argparse takes the final occurrence of a repeated
+        // flag, so a hand-typed duplicate keeps winning (documented in the UI).
         args += splitExtraArguments(c.extraArguments)
         return args
+    }
+
+    /// One-time migration for the WS-M1 reasoning toggle: if Extra arguments
+    /// carries a `--chat-template-args` whose JSON is EXACTLY
+    /// `{"enable_thinking": <bool>}` (the value the owner has been hand-typing),
+    /// absorb it into the first-class `reasoning` field and strip the tokens.
+    /// Anything richer (other keys, unparseable JSON) is left untouched — extras
+    /// are emitted last, so a kept duplicate still wins over the toggle.
+    static func absorbingReasoning(from config: MLXServerConfig) -> MLXServerConfig {
+        guard config.reasoning == nil else { return config }
+        var tokens = splitExtraArguments(config.extraArguments)
+        for (index, token) in tokens.enumerated() {
+            // (json, index of the last token the JSON spans)
+            var candidates: [(json: String, consumedThrough: Int)] = []
+            if token == "--chat-template-args" {
+                // The JSON may have been split by whitespace ({"enable_thinking":
+                // false} is two tokens) — rejoin progressively and try each span.
+                var joined = ""
+                for next in (index + 1)..<min(tokens.count, index + 9) {
+                    joined = joined.isEmpty ? tokens[next] : joined + " " + tokens[next]
+                    candidates.append((joined, next))
+                }
+            } else if token.hasPrefix("--chat-template-args=") {
+                candidates = [
+                    (String(token.dropFirst("--chat-template-args=".count)), index)
+                ]
+            } else {
+                continue
+            }
+            for candidate in candidates {
+                guard
+                    let object = try? JSONSerialization.jsonObject(
+                        with: Data(candidate.json.utf8)) as? [String: Any],
+                    object.count == 1,
+                    let value = object["enable_thinking"] as? Bool
+                else { continue }
+                var updated = config
+                updated.reasoning = value
+                tokens.removeSubrange(index...candidate.consumedThrough)
+                updated.extraArguments = tokens.joined(separator: " ")
+                return updated
+            }
+            return config  // flag present but not a pure enable_thinking object
+        }
+        return config
     }
 
     static func generateArguments(_ c: MLXGenerateConfig) -> [String] {
@@ -120,6 +193,17 @@ enum MLXCommand {
         if let temperature = c.temperature { args += ["--temp", formatNumber(temperature)] }
         if let topP = c.topP { args += ["--top-p", formatNumber(topP)] }
         if !c.adapterPath.isEmpty { args += ["--adapter-path", c.adapterPath] }
+        if let maxKVSize = c.maxKVSize { args += ["--max-kv-size", String(maxKVSize)] }
+        if let kvBits = c.kvBits {
+            args += ["--kv-bits", String(kvBits)]
+            // Group size / start only mean anything when quantization is on.
+            if let kvGroupSize = c.kvGroupSize {
+                args += ["--kv-group-size", String(kvGroupSize)]
+            }
+            if let quantizedKVStart = c.quantizedKVStart {
+                args += ["--quantized-kv-start", String(quantizedKVStart)]
+            }
+        }
         return args
     }
 
@@ -329,7 +413,114 @@ enum MLXCommand {
             : "\u{201C}\(raw)\u{201D} isn't a Hugging Face model id (owner/name) or an absolute folder path."
     }
 
+    // MARK: Port / process diagnosis (WS-M1)
+
+    /// One process listening on a diagnosed port.
+    struct PortOwner: Equatable, Sendable {
+        let pid: Int32
+        let command: String
+    }
+
+    /// Parse `lsof -nP -iTCP:<port> -sTCP:LISTEN -Fpc` field output: `p<pid>`
+    /// starts a process record, `c<command>` names it (IPv4+IPv6 listeners of one
+    /// process share a single record). lsof exits 1 with empty output when nobody
+    /// listens — callers treat that as "no owners", not an error.
+    static func parsePortOwners(fromLsof output: String) -> [PortOwner] {
+        var owners: [PortOwner] = []
+        var pendingPID: Int32?
+        for line in output.split(whereSeparator: \.isNewline) {
+            if line.hasPrefix("p") {
+                pendingPID = Int32(line.dropFirst())
+            } else if line.hasPrefix("c"), let pid = pendingPID {
+                let command = String(line.dropFirst())
+                if !owners.contains(where: { $0.pid == pid }) {
+                    owners.append(PortOwner(pid: pid, command: command))
+                }
+                pendingPID = nil
+            }
+        }
+        return owners
+    }
+
+    /// The plain-language port-conflict line ("port 1337 is held by LM Studio —
+    /// stop it there or change the port here"), or nil when the port's only
+    /// listeners are our own (excluded) processes — or nobody.
+    static func portConflictMessage(
+        port: Int, owners: [PortOwner], excludingPIDs: Set<Int32> = []
+    ) -> String? {
+        guard let foreign = owners.first(where: { !excludingPIDs.contains($0.pid) }) else {
+            return nil
+        }
+        return
+            "Port \(port) is held by \(foreign.command) (pid \(foreign.pid)) — stop it there or change the port here."
+    }
+
+    /// `ps -o etime=` → seconds. Format is `[[dd-]hh:]mm:ss`.
+    static func parseEtime(_ raw: String) -> TimeInterval? {
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return nil }
+        let dayParts = trimmed.split(separator: "-", maxSplits: 1)
+        var days = 0
+        let clock: Substring
+        if dayParts.count == 2 {
+            guard let parsed = Int(dayParts[0]) else { return nil }
+            days = parsed
+            clock = dayParts[1]
+        } else {
+            clock = dayParts[0]
+        }
+        let pieces = clock.split(separator: ":")
+        guard (2...3).contains(pieces.count) else { return nil }
+        var values: [Int] = []
+        for piece in pieces {
+            guard let value = Int(piece), value >= 0, value < 100_000 else { return nil }
+            values.append(value)
+        }
+        guard days < 100_000 else { return nil }  // overflow-proof: ps never emits this
+        let (hours, minutes, seconds) =
+            values.count == 3 ? (values[0], values[1], values[2]) : (0, values[0], values[1])
+        return TimeInterval(((days * 24 + hours) * 60 + minutes) * 60 + seconds)
+    }
+
+    /// First `rss` + `etime` pair from `ps -o rss= -o etime= -p <pid>` (rss is
+    /// reported in KB).
+    static func parseProcessStats(
+        fromPS output: String
+    ) -> (rssBytes: Int64, elapsed: TimeInterval)? {
+        let fields = output.split(whereSeparator: \.isWhitespace)
+        guard fields.count >= 2,
+            let kilobytes = Int64(fields[0]),
+            let elapsed = parseEtime(String(fields[1]))
+        else { return nil }
+        return (kilobytes * 1024, elapsed)
+    }
+
+    /// The `pid = N` line from `launchctl print gui/<uid>/<label>` — nil when the
+    /// job is loaded but not running.
+    static func parseLaunchdPID(fromPrint output: String) -> Int32? {
+        for line in output.split(whereSeparator: \.isNewline) {
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            guard trimmed.hasPrefix("pid = ") else { continue }
+            return Int32(trimmed.dropFirst("pid = ".count).trimmingCharacters(in: .whitespaces))
+        }
+        return nil
+    }
+
     // MARK: Helpers
+
+    /// UI-side GiB ↔ bytes for `--prompt-cache-bytes` (nobody types byte counts).
+    /// Nil for zero/negative/absurd input — `Int64(Double)` TRAPS past Int64.max,
+    /// and this converts text the user typed.
+    static func bytes(fromGB gigabytes: Double) -> Int64? {
+        guard gigabytes > 0, gigabytes.isFinite else { return nil }
+        let bytes = (gigabytes * 1_073_741_824).rounded()
+        guard bytes < 9.2e18 else { return nil }  // < Int64.max, exactly representable
+        return Int64(bytes)
+    }
+
+    static func gigabytes(fromBytes bytes: Int64) -> Double {
+        Double(bytes) / 1_073_741_824
+    }
 
     /// `%g` so 0.7 stays "0.7" and 1e-5 stays "1e-05" — readable in both argv and YAML.
     static func formatNumber(_ value: Double) -> String {

@@ -23,6 +23,11 @@ struct ThreadView: View {
     @State private var showCounter = false
     /// Markdown/HTML message currently open in the full-screen reader.
     @State private var fullScreenContent: FullScreenContent?
+    /// C1 composer-refill guard (same as ConversationView): the multiline field can
+    /// commit stale content back through the binding after the programmatic clear;
+    /// `onChange` re-clears an exact restore of the just-sent text (or a
+    /// whitespace-only Return remnant) within 2 s of the send.
+    @State private var justSent: (text: String, at: Date)?
 
     var body: some View {
         VStack(spacing: 0) {
@@ -191,6 +196,18 @@ struct ThreadView: View {
         .accessibilityIdentifier("thread-message-list")
     }
 
+    /// One send path for the button and the macOS Return key: clear-before-send
+    /// with the C1 refill guard armed, matching `ConversationView.sendCurrent()`.
+    private func sendCurrent() {
+        let text = draftText
+        guard !text.isEmpty else { return }
+        draftText = ""
+        justSent = (text, Date())
+        Task {
+            await model.send(text, conversationID: thread.conversationID, threadID: thread.id)
+        }
+    }
+
     private var composer: some View {
         HStack(alignment: .bottom, spacing: 8) {
             TextField("Message the thread", text: $draftText, axis: .vertical)
@@ -204,6 +221,18 @@ struct ThreadView: View {
                     Color(.secondarySystemBackground),
                     in: RoundedRectangle(cornerRadius: 18, style: .continuous))
                 .accessibilityIdentifier("thread-composer-field")
+                // C1: re-clear a post-send write-back (see ConversationView — the
+                // multiline field can restore the sent text after the clear).
+                .onChange(of: draftText) { _, newValue in
+                    guard let sent = justSent else { return }
+                    if Date().timeIntervalSince(sent.at) < 2,
+                        newValue == sent.text
+                            || (!newValue.isEmpty && newValue.allSatisfy(\.isWhitespace)) {
+                        draftText = ""
+                        return
+                    }
+                    if !newValue.isEmpty { justSent = nil }
+                }
                 // Explicit Paste for iPad/Mac (right-click / long-press) — the
                 // main composer has the same affordance.
                 .contextMenu {
@@ -220,21 +249,12 @@ struct ThreadView: View {
                         guard press.key == .return, !press.modifiers.contains(.shift),
                             !draftText.isEmpty
                         else { return .ignored }
-                        let text = draftText
-                        draftText = ""
-                        Task {
-                            await model.send(
-                                text, conversationID: thread.conversationID, threadID: thread.id)
-                        }
+                        sendCurrent()
                         return .handled
                     }
                 #endif
             Button {
-                let text = draftText
-                draftText = ""
-                Task {
-                    await model.send(text, conversationID: thread.conversationID, threadID: thread.id)
-                }
+                sendCurrent()
             } label: {
                 Image(systemName: "arrow.up.circle.fill").font(.title2)
             }

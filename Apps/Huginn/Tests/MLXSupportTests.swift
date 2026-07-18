@@ -686,3 +686,350 @@ struct MLXManagedToggleTests {
         #expect(service.serverState == .stopped)
     }
 }
+
+// WS-M1 — serve surface: reasoning toggle, server cache knobs, playground KV
+// quantization, and the port/process diagnosis parsers.
+
+@Suite("MLX serve surface arguments (WS-M1)")
+struct MLXServeSurfaceArgumentTests {
+
+    @Test func reasoningToggleEmitsChatTemplateArgs() {
+        var config = MLXServerConfig()
+        config.model = "m"
+
+        #expect(!MLXCommand.serverArguments(config).contains("--chat-template-args"))
+
+        config.reasoning = false
+        var args = MLXCommand.serverArguments(config)
+        #expect(args.contains(["--chat-template-args", "{\"enable_thinking\":false}"]))
+
+        config.reasoning = true
+        args = MLXCommand.serverArguments(config)
+        #expect(args.contains(["--chat-template-args", "{\"enable_thinking\":true}"]))
+    }
+
+    /// Extras stay LAST so a hand-typed duplicate flag keeps winning (argparse
+    /// takes the final occurrence).
+    @Test func extrasStillTrailTheNewFlags() {
+        var config = MLXServerConfig()
+        config.model = "m"
+        config.reasoning = true
+        config.promptCacheSize = 8
+        config.extraArguments = "--log-level DEBUG"
+        let args = MLXCommand.serverArguments(config)
+        #expect(args.suffix(2) == ["--log-level", "DEBUG"])
+    }
+
+    @Test func promptCacheFlagsEmitOnlyWhenSet() {
+        var config = MLXServerConfig()
+        config.model = "m"
+        let bare = MLXCommand.serverArguments(config)
+        #expect(!bare.contains("--prompt-cache-size"))
+        #expect(!bare.contains("--prompt-cache-bytes"))
+
+        config.promptCacheSize = 12
+        config.promptCacheBytes = 2_147_483_648
+        let args = MLXCommand.serverArguments(config)
+        #expect(args.contains(["--prompt-cache-size", "12"]))
+        #expect(args.contains(["--prompt-cache-bytes", "2147483648"]))
+    }
+
+    @Test func generateKVFlagsGateOnKVBits() {
+        var config = MLXGenerateConfig()
+        config.model = "m"
+        config.prompt = "p"
+        // Group size / start without bits: meaningless, must not emit.
+        config.kvGroupSize = 32
+        config.quantizedKVStart = 100
+        var args = MLXCommand.generateArguments(config)
+        #expect(!args.contains("--kv-bits"))
+        #expect(!args.contains("--kv-group-size"))
+        #expect(!args.contains("--quantized-kv-start"))
+
+        config.kvBits = 4
+        args = MLXCommand.generateArguments(config)
+        #expect(args.contains(["--kv-bits", "4"]))
+        #expect(args.contains(["--kv-group-size", "32"]))
+        #expect(args.contains(["--quantized-kv-start", "100"]))
+
+        config.maxKVSize = 4096
+        args = MLXCommand.generateArguments(config)
+        #expect(args.contains(["--max-kv-size", "4096"]))
+    }
+
+    @Test func gigabyteConversionRoundTrips() {
+        #expect(MLXCommand.bytes(fromGB: 2) == 2_147_483_648)
+        #expect(MLXCommand.bytes(fromGB: 0) == nil)
+        #expect(MLXCommand.bytes(fromGB: -1) == nil)
+        #expect(MLXCommand.gigabytes(fromBytes: 2_147_483_648) == 2)
+        #expect(MLXCommand.bytes(fromGB: 0.5) == 536_870_912)
+        // User-typed absurdities must yield nil, never an Int64-conversion trap.
+        #expect(MLXCommand.bytes(fromGB: 1e15) == nil)
+        #expect(MLXCommand.bytes(fromGB: .infinity) == nil)
+    }
+
+    /// Persisted configs from before WS-M1 have none of the new keys — they must
+    /// decode with nils, not fail.
+    @Test func legacyServerConfigJSONDecodes() throws {
+        let legacy = """
+            {"model":"m","host":"127.0.0.1","port":8080,"trustRemoteCode":false,
+             "useDefaultChatTemplate":false,"chatTemplate":"","adapterPath":"",
+             "extraArguments":""}
+            """
+        let config = try JSONDecoder().decode(MLXServerConfig.self, from: Data(legacy.utf8))
+        #expect(config.reasoning == nil)
+        #expect(config.promptCacheSize == nil)
+        #expect(config.promptCacheBytes == nil)
+    }
+}
+
+@Suite("MLX reasoning absorb migration (WS-M1)")
+struct MLXReasoningAbsorbTests {
+
+    private func config(extras: String, reasoning: Bool? = nil) -> MLXServerConfig {
+        var config = MLXServerConfig()
+        config.model = "m"
+        config.extraArguments = extras
+        config.reasoning = reasoning
+        return config
+    }
+
+    @Test func absorbsUnspacedForm() {
+        let migrated = MLXCommand.absorbingReasoning(
+            from: config(extras: "--chat-template-args {\"enable_thinking\":false}"))
+        #expect(migrated.reasoning == false)
+        #expect(migrated.extraArguments.isEmpty)
+    }
+
+    /// The owner's live server was launched with a SPACE inside the JSON — the
+    /// whitespace split turns it into two tokens that must rejoin.
+    @Test func absorbsSpacedForm() {
+        let migrated = MLXCommand.absorbingReasoning(
+            from: config(extras: "--chat-template-args {\"enable_thinking\": false}"))
+        #expect(migrated.reasoning == false)
+        #expect(migrated.extraArguments.isEmpty)
+    }
+
+    @Test func absorbsEqualsFormAndKeepsNeighbors() {
+        let migrated = MLXCommand.absorbingReasoning(
+            from: config(
+                extras: "--log-level DEBUG --chat-template-args={\"enable_thinking\":true} --pipeline"
+            ))
+        #expect(migrated.reasoning == true)
+        #expect(migrated.extraArguments == "--log-level DEBUG --pipeline")
+    }
+
+    /// Richer JSON (other keys) is NOT ours to absorb — left untouched, and the
+    /// trailing-extras rule keeps it winning over the toggle.
+    @Test func leavesRicherJSONAlone() {
+        let extras = "--chat-template-args {\"enable_thinking\":true,\"foo\":1}"
+        let migrated = MLXCommand.absorbingReasoning(from: config(extras: extras))
+        #expect(migrated.reasoning == nil)
+        #expect(migrated.extraArguments == extras)
+    }
+
+    @Test func leavesUnrelatedExtrasAlone() {
+        let migrated = MLXCommand.absorbingReasoning(from: config(extras: "--log-level DEBUG"))
+        #expect(migrated.reasoning == nil)
+        #expect(migrated.extraArguments == "--log-level DEBUG")
+    }
+
+    /// Already migrated (reasoning set): never touch extras again.
+    @Test func idempotentOnceReasoningIsSet() {
+        let extras = "--chat-template-args {\"enable_thinking\":false}"
+        let migrated = MLXCommand.absorbingReasoning(
+            from: config(extras: extras, reasoning: true))
+        #expect(migrated.reasoning == true)
+        #expect(migrated.extraArguments == extras)
+    }
+}
+
+@Suite("MLX port/process diagnosis parsers (WS-M1)")
+struct MLXDiagnosisParserTests {
+
+    @Test func parsesLsofFieldOutput() {
+        let output = "p843\ncLM Studio Helper\nf12\np1201\ncPython\nf9\n"
+        let owners = MLXCommand.parsePortOwners(fromLsof: output)
+        #expect(
+            owners == [
+                MLXCommand.PortOwner(pid: 843, command: "LM Studio Helper"),
+                MLXCommand.PortOwner(pid: 1201, command: "Python"),
+            ])
+        #expect(MLXCommand.parsePortOwners(fromLsof: "").isEmpty)
+    }
+
+    @Test func conflictMessageExcludesOwnPIDs() {
+        let owners = [
+            MLXCommand.PortOwner(pid: 843, command: "LM Studio Helper"),
+            MLXCommand.PortOwner(pid: 999, command: "Python"),
+        ]
+        let message = MLXCommand.portConflictMessage(port: 1337, owners: owners)
+        #expect(message == "Port 1337 is held by LM Studio Helper (pid 843) — stop it there or change the port here.")
+
+        // Our own server holding the port is NOT a conflict.
+        #expect(
+            MLXCommand.portConflictMessage(
+                port: 1337, owners: [owners[1]], excludingPIDs: [999]) == nil)
+        #expect(MLXCommand.portConflictMessage(port: 1337, owners: []) == nil)
+
+        // Own pid excluded, foreign one still reported.
+        let mixed = MLXCommand.portConflictMessage(
+            port: 1337, owners: owners, excludingPIDs: [843])
+        #expect(mixed?.contains("Python (pid 999)") == true)
+    }
+
+    @Test func parsesEtimeFormats() {
+        #expect(MLXCommand.parseEtime("03:07") == 187)
+        #expect(MLXCommand.parseEtime("01:02:03") == 3723)
+        #expect(MLXCommand.parseEtime("2-01:02:03") == 176_523)
+        #expect(MLXCommand.parseEtime("  00:42  ") == 42)
+        #expect(MLXCommand.parseEtime("") == nil)
+        #expect(MLXCommand.parseEtime("42") == nil)
+        #expect(MLXCommand.parseEtime("junk") == nil)
+    }
+
+    @Test func parsesPSStats() throws {
+        let stats = try #require(MLXCommand.parseProcessStats(fromPS: " 15234416   01:02:03 \n"))
+        #expect(stats.rssBytes == Int64(15_234_416) * 1024)
+        #expect(stats.elapsed == 3723)
+        #expect(MLXCommand.parseProcessStats(fromPS: "") == nil)
+        #expect(MLXCommand.parseProcessStats(fromPS: "notanumber 01:02") == nil)
+    }
+
+    @Test func parsesLaunchdPrintPID() {
+        let output = """
+            chat.eldr.mlx-server = {
+                active count = 1
+                path = /Users/x/Library/LaunchAgents/chat.eldr.mlx-server.plist
+                state = running
+
+                program = /venv/bin/python3
+                pid = 54321
+            }
+            """
+        #expect(MLXCommand.parseLaunchdPID(fromPrint: output) == 54321)
+        #expect(MLXCommand.parseLaunchdPID(fromPrint: "state = not running") == nil)
+    }
+}
+
+@Suite("MLX brain swap (WS-M1)")
+struct MLXBrainSwapTests {
+
+    @MainActor
+    private struct Fixture {
+        let service: MLXService
+        let store: ConfigurationStore
+        let defaults: UserDefaults
+        let paths: ConfigPaths
+        let cleanup: () -> Void
+
+        init() throws {
+            let tmp = (NSTemporaryDirectory() as NSString)
+                .appendingPathComponent("eldr-mlx-brain-\(UUID().uuidString)")
+            let suite = "mlx-brain-\(UUID().uuidString)"
+            let localPaths = ConfigPaths(configDir: tmp, binDir: tmp)
+            let localDefaults = try #require(UserDefaults(suiteName: suite))
+            let keychain = KeychainBox(service: "test-mlx-brain-\(UUID().uuidString)")
+            paths = localPaths
+            defaults = localDefaults
+            store = ConfigurationStore(paths: localPaths, keychain: keychain)
+            service = MLXService(paths: localPaths, defaults: localDefaults, launchAgentsDir: tmp)
+            cleanup = {
+                keychain.delete(account: "llm-token")
+                localDefaults.removePersistentDomain(forName: suite)
+                try? FileManager.default.removeItem(atPath: tmp)
+            }
+        }
+    }
+
+    /// A bad model fails the swap BEFORE any server/state/backend change.
+    @MainActor
+    @Test func invalidModelFailsFastWithoutSideEffects() async throws {
+        let fixture = try Fixture()
+        defer { fixture.cleanup() }
+        let service = fixture.service
+        let urlBefore = fixture.store.llmURL
+
+        // Force env "ready" via the fake python so validation is the gate under test.
+        let binDir = (service.venvDir as NSString).appendingPathComponent("bin")
+        try FileManager.default.createDirectory(atPath: binDir, withIntermediateDirectories: true)
+        try "#!/bin/zsh\necho \"0.0.0-test\"\n".write(
+            toFile: service.venvPython, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes(
+            [.posixPermissions: 0o755], ofItemAtPath: service.venvPython)
+        await service.refreshEnvironment()
+
+        await service.makeBrain(model: "not a repo id", store: fixture.store)
+        guard case .failed(let why) = service.brainSwap else {
+            Issue.record("expected .failed, got \(service.brainSwap)")
+            return
+        }
+        #expect(why.contains("isn't a Hugging Face model id"))
+        #expect(service.serverState == .stopped)
+        #expect(fixture.store.llmURL == urlBefore)
+    }
+
+    /// The kill-switch wins: no swap while Huginn isn't managing the server.
+    @MainActor
+    @Test func refusesWhileUnmanaged() async throws {
+        let fixture = try Fixture()
+        defer { fixture.cleanup() }
+        let service = fixture.service
+
+        await service.setManagesServer(false, store: fixture.store)
+        let urlBefore = fixture.store.llmURL
+        await service.makeBrain(model: "mlx-community/Tiny", store: fixture.store)
+        guard case .failed(let why) = service.brainSwap else {
+            Issue.record("expected .failed, got \(service.brainSwap)")
+            return
+        }
+        #expect(why.contains("manages the model server"))
+        #expect(fixture.store.llmURL == urlBefore)
+
+        service.clearBrainSwapNote()
+        #expect(service.brainSwap == .idle)
+    }
+
+    /// Missing environment is reported as such (after the managed gate, before
+    /// model validation).
+    @MainActor
+    @Test func missingEnvironmentFailsFast() async throws {
+        let fixture = try Fixture()
+        defer { fixture.cleanup() }
+
+        await fixture.service.makeBrain(model: "mlx-community/Tiny", store: fixture.store)
+        guard case .failed(let why) = fixture.service.brainSwap else {
+            Issue.record("expected .failed, got \(fixture.service.brainSwap)")
+            return
+        }
+        #expect(why.contains("MLX environment"))
+    }
+
+    /// A hand-typed `--chat-template-args {"enable_thinking": false}` in the
+    /// persisted config is absorbed into `reasoning` ON INIT, persisted, and not
+    /// re-absorbed later (the exact flag the owner has been typing by hand).
+    @MainActor
+    @Test func initAbsorbsHandTypedReasoningAndPersists() throws {
+        let fixture = try Fixture()
+        defer { fixture.cleanup() }
+
+        var legacy = MLXServerConfig()
+        legacy.model = "lmstudio-community/Qwen3.6-27B-MLX-4bit"
+        legacy.port = 1337
+        legacy.extraArguments = "--chat-template-args {\"enable_thinking\": false}"
+        fixture.defaults.set(try JSONEncoder().encode(legacy), forKey: "mlx.serverConfig")
+
+        let service = MLXService(
+            paths: fixture.paths, defaults: fixture.defaults,
+            launchAgentsDir: fixture.paths.configDir)
+        #expect(service.serverConfig.reasoning == false)
+        #expect(service.serverConfig.extraArguments.isEmpty)
+        #expect(service.serverConfig.model == legacy.model)
+
+        // And the migrated form is what's now on disk.
+        let persisted = fixture.defaults.data(forKey: "mlx.serverConfig")
+            .flatMap { try? JSONDecoder().decode(MLXServerConfig.self, from: $0) }
+        #expect(persisted?.reasoning == false)
+        #expect(persisted?.extraArguments.isEmpty == true)
+    }
+}

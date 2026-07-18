@@ -113,8 +113,10 @@ actor PersonaRuntime {
     private let transports: [any RelayTransport]
     private let blobStore: any BlobStore
     /// SPEC §10 / S1: when enabled, co-present peers exchange seals directly
-    /// over MultipeerConnectivity, with automatic relay fallback. Debug-only
-    /// at the app layer (TESTFLIGHT-GUIDE §A6).
+    /// over MultipeerConnectivity, with automatic relay fallback. A regular
+    /// user-facing setting (Settings ▸ Nearby, off by default) — requires BOTH
+    /// devices to have it on, verified contacts, and real hardware (simulators
+    /// have no radios). (The old "Debug-only" note here predated the setting.)
     private let enableLocalLink: Bool
     private var localLink: MultipeerLinkTransport?
 
@@ -1232,11 +1234,17 @@ actor PersonaRuntime {
         let (contact, bundle) = try await messenger.fetchVerifiedPeer(nostrPubkeyHex: nostrHex)
         await registerContact(contact)
         // First message carries my alias so the peer sees a name, not a key.
-        let body = MessageBody(text: firstMessage, sentAt: clock.now(), alias: myAlias)
+        // C2: mint the stable message id HERE and carry it inside the ciphertext,
+        // so both devices store message #0 under the same id (same rule as
+        // sendMessage — without it each side minted its own UUID and dedup /
+        // cross-device references could never match).
+        let messageID = UUID().uuidString
+        let body = MessageBody(
+            text: firstMessage, sentAt: clock.now(), messageID: messageID, alias: myAlias)
         try await messenger.establishSession(with: contact, bundle: bundle, firstMessage: body)
         await persistSession(contact.identityHex)
         let message = StoredMessage(
-            id: UUID().uuidString, conversationID: contact.identityHex,
+            id: messageID, conversationID: contact.identityHex,
             senderIdentity: identityHex, participantType: .human, text: firstMessage,
             sentAt: clock.now(), localStatus: "sent")
         try await store.save(message)
@@ -1252,11 +1260,14 @@ actor PersonaRuntime {
         }
         let bundle = try await peer.publicBundle()
         try bundle.verifySignatures(identityPubkey: contact.binding.identityPubkey)
-        let body = MessageBody(text: firstMessage, sentAt: clock.now(), alias: myAlias)
+        // C2: one id for both sides of message #0 (see startConversation).
+        let messageID = UUID().uuidString
+        let body = MessageBody(
+            text: firstMessage, sentAt: clock.now(), messageID: messageID, alias: myAlias)
         try await messenger.establishSession(with: contact, bundle: bundle, firstMessage: body)
         await persistSession(peerIdentityHex)
         let message = StoredMessage(
-            id: UUID().uuidString, conversationID: peerIdentityHex,
+            id: messageID, conversationID: peerIdentityHex,
             senderIdentity: identityHex, participantType: .human, text: firstMessage,
             sentAt: clock.now(), localStatus: "sent")
         try await store.save(message)
@@ -1480,6 +1491,12 @@ actor PersonaRuntime {
 
     var isLocalLinkEnabled: Bool { enableLocalLink }
 
+    /// C7: live count of co-present peers whose identity has proven out — the
+    /// Settings "Nearby: N peers" indicator. 0 when the link is off.
+    func nearbyPeerCount() async -> Int {
+        await localLink?.verifiedPeerCount ?? 0
+    }
+
     /// Discovered co-present peers not yet in your contacts (identity hex + name).
     func nearbyList() -> [(identityHex: String, name: String)] {
         nearbyContactNames
@@ -1492,16 +1509,19 @@ actor PersonaRuntime {
     /// the local link — NO relay. Identity-of-human is confirmed afterwards via
     /// the safety code, exactly as on the relay path.
     func startNearbyConversation(identityHex: String, firstMessage: String) async throws -> String {
-        let body = MessageBody(text: firstMessage, sentAt: clock.now(), alias: myAlias)
+        // C2: one id for both sides of message #0 (see startConversation).
+        let messageID = UUID().uuidString
+        let body = MessageBody(
+            text: firstMessage, sentAt: clock.now(), messageID: messageID, alias: myAlias)
         let contact = try await messenger.establishWithNearby(
             identityHex: identityHex, firstMessage: body)
         await registerContact(contact)
         await persistSession(contact.identityHex)
         nearbyContactNames[identityHex] = nil
         let message = StoredMessage(
-            id: UUID().uuidString, conversationID: contact.identityHex,
+            id: messageID, conversationID: contact.identityHex,
             senderIdentity: self.identityHex, participantType: .human, text: firstMessage,
-            sentAt: clock.now(), localStatus: "sent")
+            sentAt: clock.now(), localStatus: "sent-nearby")
         try await store.save(message)
         eventContinuation?.yield(.messageAdded(message))
         return contact.identityHex
@@ -1725,7 +1745,11 @@ actor PersonaRuntime {
             senderIdentity: identityHex, participantType: participantType,
             text: localTextOverride ?? body.text, sentAt: body.sentAt, threadID: threadID,
             isContext: isContext, aiContext: aiContext,
-            localStatus: asSystemRow ? "system" : "sent", agentName: agentName,
+            // C3 honest states: with recipients to publish to, the bubble starts
+            // as "sending" and is flipped below to what actually happened; a
+            // recipient-less local group has nothing to transport, so "sent".
+            localStatus: asSystemRow ? "system" : (recipients.isEmpty ? "sent" : "sending"),
+            agentName: agentName,
             coauthored: coauthored, agentAIID: resolvedAgentAIID)
         try await store.save(message)
         if let threadID {
@@ -1736,40 +1760,32 @@ actor PersonaRuntime {
         // Publish to each recipient (chunked for large text). Best-effort: the
         // message is already on screen, so a per-recipient delivery failure
         // doesn't erase it. `messenger.send` already retries via the outbox.
-        var reachedRelay = false
-        for recipient in recipients {
-            do {
-                if parts.count == 1 {
-                    try await messenger.send(
-                        body, to: recipient, participantType: participantType,
-                        aiWindow: aiWindow)
-                } else {
-                    // Build all chunk bodies and hand them to the batch sender,
-                    // which encrypts in order then publishes concurrently.
-                    let chunkID = UUID().uuidString
-                    let chunkBodies = parts.enumerated().map { i, part -> MessageBody in
-                        var chunkBody = body
-                        chunkBody.text = part
-                        chunkBody.chunk = MessageChunk(id: chunkID, index: i, total: parts.count)
-                        return chunkBody
-                    }
-                    try await messenger.sendBatch(
-                        chunkBodies, to: recipient, participantType: participantType,
-                        aiWindow: aiWindow)
+        if !recipients.isEmpty {
+            let route = await publishBody(
+                body, recipients: recipients, participantType: participantType,
+                aiWindow: aiWindow)
+            // C3 honest states: the bubble was stored as "sending"; flip it to
+            // what actually happened. "sent" (relay hop) and "sent-nearby"
+            // (local link only, no relay involved) render distinctly, and a
+            // total publish failure is a visible "Not sent" — never a silent
+            // drop, and never "Sent to relay" for a publish that wasn't.
+            if !asSystemRow {
+                let final: String
+                switch route {
+                case .relay: final = "sent"
+                case .nearby: final = "sent-nearby"
+                case nil:
+                    final = "failed"
+                    // Keep the payload for ONE automatic re-publish when the
+                    // relay reports it came back (.relayReconnected).
+                    rememberFailedSend(
+                        message.id, body: body, recipients: recipients,
+                        participantType: participantType, aiWindow: aiWindow)
                 }
-                await persistSession(recipient)
-                reachedRelay = true
-            } catch {
-                // Delivery to this recipient failed after the outbox's retries.
-            }
-        }
-        // Surface a total publish failure (no recipient reached the relay) as a
-        // visible "Not sent" status instead of a silent drop — so the user (and
-        // diagnostics) can tell a send failure from a receive failure.
-        if !reachedRelay, !asSystemRow, !isLocalGroup {
-            try? await store.updateStatus(messageID: message.id, status: "failed")
-            if let updated = try? await store.message(id: message.id) {
-                eventContinuation?.yield(.messageChanged(updated))
+                try? await store.updateStatus(messageID: message.id, status: final)
+                if let updated = try? await store.message(id: message.id) {
+                    eventContinuation?.yield(.messageChanged(updated))
+                }
             }
         }
 
@@ -1834,6 +1850,103 @@ actor PersonaRuntime {
                 Task { [weak self] in
                     await self?.routeSingleMyAIMention(aiID: aiID, conversationID: conversationID)
                 }
+            }
+        }
+    }
+
+    /// C3: one logical body → every recipient, chunked for large text. Returns
+    /// the honest fan-out route — `.relay` if any copy touched a relay, `.nearby`
+    /// if every delivered copy stayed on the local link, nil if no recipient was
+    /// reached at all. Shared by the live send path and the reconnect auto-retry.
+    private func publishBody(
+        _ body: MessageBody, recipients: [String], participantType: ParticipantType,
+        aiWindow: AIWindowAnnouncement? = nil
+    ) async -> DeliveryRoute? {
+        let parts = MessageChunker.split(body.text, budgetBytes: await messenger.chunkTextBudget())
+        guard parts.count <= PQRCConstants.maxChunksPerMessage else { return nil }
+        var route: DeliveryRoute?
+        for recipient in recipients {
+            do {
+                let hop: DeliveryRoute
+                if parts.count == 1 {
+                    hop = try await messenger.send(
+                        body, to: recipient, participantType: participantType,
+                        aiWindow: aiWindow)
+                } else {
+                    // Build all chunk bodies and hand them to the batch sender,
+                    // which encrypts in order then publishes concurrently.
+                    let chunkID = UUID().uuidString
+                    let chunkBodies = parts.enumerated().map { i, part -> MessageBody in
+                        var chunkBody = body
+                        chunkBody.text = part
+                        chunkBody.chunk = MessageChunk(id: chunkID, index: i, total: parts.count)
+                        return chunkBody
+                    }
+                    hop = try await messenger.sendBatch(
+                        chunkBodies, to: recipient, participantType: participantType,
+                        aiWindow: aiWindow)
+                }
+                await persistSession(recipient)
+                route = (route == .relay || hop == .relay) ? .relay : .nearby
+            } catch {
+                // Delivery to this recipient failed after the outbox's retries.
+            }
+        }
+        return route
+    }
+
+    /// C3: sends that failed outright (no recipient reached), kept for ONE
+    /// automatic re-publish per relay recovery. Bounded FIFO; the visible
+    /// "Not sent · Tap to retry" stays the manual path for anything evicted.
+    private struct PendingResend {
+        let body: MessageBody
+        let recipients: [String]
+        let participantType: ParticipantType
+        let aiWindow: AIWindowAnnouncement?
+    }
+    private var pendingResends: [String: PendingResend] = [:]
+    private var pendingResendOrder: [String] = []
+
+    private func rememberFailedSend(
+        _ messageID: String, body: MessageBody, recipients: [String],
+        participantType: ParticipantType, aiWindow: AIWindowAnnouncement?
+    ) {
+        if pendingResends[messageID] == nil {
+            pendingResendOrder.append(messageID)
+            while pendingResendOrder.count > 32 {
+                pendingResends.removeValue(forKey: pendingResendOrder.removeFirst())
+            }
+        }
+        pendingResends[messageID] = PendingResend(
+            body: body, recipients: recipients,
+            participantType: participantType, aiWindow: aiWindow)
+    }
+
+    /// C3: the relay came back — re-publish every failed send once, flipping the
+    /// stored status on success. The body is byte-identical (same stable message
+    /// id inside the ciphertext), so a half-acked original dedups receiver-side.
+    private func retryFailedSends() async {
+        guard !pendingResends.isEmpty else { return }
+        for id in pendingResendOrder {
+            guard let pending = pendingResends[id] else { continue }
+            // Skip anything the user already retried (fresh id) or deleted.
+            guard let current = try? await store.message(id: id),
+                current.localStatus == "failed"
+            else {
+                pendingResends.removeValue(forKey: id)
+                pendingResendOrder.removeAll { $0 == id }
+                continue
+            }
+            guard let route = await publishBody(
+                pending.body, recipients: pending.recipients,
+                participantType: pending.participantType, aiWindow: pending.aiWindow)
+            else { continue }  // still unreachable; keep for the next recovery
+            pendingResends.removeValue(forKey: id)
+            pendingResendOrder.removeAll { $0 == id }
+            try? await store.updateStatus(
+                messageID: id, status: route == .nearby ? "sent-nearby" : "sent")
+            if let updated = try? await store.message(id: id) {
+                eventContinuation?.yield(.messageChanged(updated))
             }
         }
     }
@@ -2317,6 +2430,22 @@ actor PersonaRuntime {
     /// Removes a stored message (tap-to-retry drops the failed copy first).
     func deleteMessage(_ id: String) async {
         try? await store.deleteMessage(messageID: id)
+        // C3: a deleted (e.g. manually retried) failed message must never be
+        // auto-resent later by the reconnect path.
+        pendingResends.removeValue(forKey: id)
+        pendingResendOrder.removeAll { $0 == id }
+    }
+
+    /// C4: record a LOCAL-only neutral system row in a conversation (e.g. "approval
+    /// request expired"). Nothing is sent — this documents a local outcome so it is
+    /// visible in the transcript instead of vanishing silently.
+    func recordLocalSystemRow(conversationID: String, text: String) async {
+        let message = StoredMessage(
+            id: UUID().uuidString, conversationID: conversationID,
+            senderIdentity: conversationID, participantType: .human, text: text,
+            sentAt: clock.now(), localStatus: "system")
+        try? await store.save(message)
+        eventContinuation?.yield(.messageAdded(message))
     }
 
     private func recipientsFor(conversationID: String) -> [String] {
@@ -2386,8 +2515,10 @@ actor PersonaRuntime {
         persistRoster(groupID)
         // Announce to the union of old and new members so removed members learn.
         let union = Set(roster.members + members).filter { $0 != identityHex && verifiedContacts[$0] != nil }
+        // C2: one id for the whole fan-out — every member stores this system row
+        // under the same key, so a double delivery (relay + Nearby) dedups.
         let body = MessageBody(
-            text: "updated the group", sentAt: clock.now(),
+            text: "updated the group", sentAt: clock.now(), messageID: UUID().uuidString,
             group: RumorContent.GroupRef(id: groupID), groupCreate: create)
         for member in union {
             try await messenger.send(body, to: member, participantType: .human)
@@ -3141,6 +3272,11 @@ actor PersonaRuntime {
                 nearbyContactNames[identityHex] = "Nearby · \(String(identityHex.prefix(8)))"
                 eventContinuation?.yield(.nearbyDiscovered(identityHex: identityHex))
             }
+        case .relayReconnected:
+            // C3: the socket came back — give every "Not sent" message one
+            // automatic re-publish (same stable id inside, so a half-acked
+            // original dedups receiver-side).
+            await retryFailedSends()
         }
     }
 
@@ -3407,6 +3543,14 @@ actor PersonaRuntime {
             } else {
                 text = full
             }
+        }
+
+        // C2/C3: the sender's stable id makes a re-delivered copy recognizable —
+        // an auto-retry after a half-acked publish, or a relay + Nearby double
+        // delivery, would otherwise render the same message twice under two
+        // local ids. The first stored copy already rendered; drop this one.
+        if let stableID = body.messageID, (try? await store.message(id: stableID)) != nil {
+            return
         }
 
         // Control messages render as neutral system rows, not bubbles.

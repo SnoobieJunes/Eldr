@@ -399,9 +399,12 @@ struct MessageBubble: View {
                     aiVisibilityBadge
                     expandButton
                     if isMine {
-                        // Local-only status; copy says "sent to relay", never "delivered" (D5).
-                        // A publish that never reached the relay shows "Not sent ·
-                        // Tap to retry" — a tappable recovery path, not a dead end.
+                        // Local-only status; copy never says "delivered" (D5). C3
+                        // honest states: "Sending…" while the publish is in flight,
+                        // "Sent nearby" for a local-link-only delivery (no relay
+                        // involved), "Sent to relay" only for a real relay hop, and
+                        // a failed publish is "Not sent · Tap to retry" — a tappable
+                        // recovery path, not a dead end.
                         if message.localStatus == "failed", let onRetry {
                             Button(action: onRetry) {
                                 Label("Not sent · Tap to retry", systemImage: "arrow.clockwise")
@@ -411,7 +414,7 @@ struct MessageBubble: View {
                             .buttonStyle(.plain)
                             .accessibilityIdentifier("retry-message")
                         } else {
-                            Text(message.localStatus == "queued" ? "Queued" : "Sent to relay")
+                            Text(sendStatusLabel)
                                 .font(.caption2)
                                 .foregroundStyle(.secondary)
                         }
@@ -424,6 +427,17 @@ struct MessageBubble: View {
         .privacySensitive()
         .accessibilityElement(children: .combine)
         .accessibilityLabel("\(isMine ? "You" : senderName): \(Self.accessibleText(message.text))")
+    }
+
+    /// C3 honest send states → user copy. Default covers "sent" plus any legacy
+    /// stored value; the old "queued" branch was dead (the runtime never stored
+    /// it for the sender's copy).
+    private var sendStatusLabel: String {
+        switch message.localStatus {
+        case "sending": "Sending…"
+        case "sent-nearby": "Sent nearby"
+        default: "Sent to relay"
+        }
     }
 
     /// Agent OUTLINE accent (the colored border — a non-color AI signal). On-hue

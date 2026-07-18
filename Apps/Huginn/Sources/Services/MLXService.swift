@@ -72,6 +72,36 @@ final class MLXService: ObservableObject {
     /// default true = the historical behavior. Flip via `setManagesServer`.
     @Published private(set) var managesServer: Bool
 
+    // MARK: - Serve surface (WS-M1)
+
+    /// The one-click "serve this model as my AI's brain" flow, observable so the
+    /// brain card and the Models rows can show progress/result.
+    enum BrainSwapState: Equatable {
+        case idle
+        case working(model: String, phase: String)
+        case done(model: String)
+        case failed(String)
+
+        var isWorking: Bool { if case .working = self { return true }; return false }
+    }
+
+    @Published private(set) var brainSwap: BrainSwapState = .idle
+    /// When the running server process started — child mode records launch time;
+    /// launchd mode derives it from `ps -o etime` (survives Huginn relaunches).
+    /// Rendered with `Text(_, style: .relative)`, which self-updates — no
+    /// periodic publish needed for a ticking uptime.
+    @Published private(set) var serverStartedAt: Date?
+    /// Server-process RSS, sampled every ~15 s while up and rounded to 16 MB so
+    /// allocator jitter doesn't republish the tab (WS-M0 discipline).
+    @Published private(set) var serverMemoryBytes: Int64?
+    /// Plain-language port-conflict line ("port 1337 is held by LM Studio …"),
+    /// set on bind-failure exits, launchd servers that stay unreachable, and
+    /// healthy-but-not-ours imposters; cleared on stop/successful start.
+    @Published private(set) var portDiagnosis: String?
+
+    private var statsTick = 0
+    private var launchdUnreachableTicks = 0
+
     @Published var serverConfig: MLXServerConfig {
         didSet { persistServerConfig() }
     }
@@ -208,10 +238,13 @@ final class MLXService: ObservableObject {
         launchAgentPlistPath = (agentsDir as NSString)
             .appendingPathComponent(MLXCommand.launchdLabel + ".plist")
 
-        serverConfig =
+        let decodedConfig =
             defaults.data(forKey: Self.serverConfigKey)
             .flatMap { try? JSONDecoder().decode(MLXServerConfig.self, from: $0) }
             ?? MLXServerConfig()
+        // WS-M1: absorb a hand-typed `--chat-template-args {"enable_thinking":…}`
+        // into the first-class reasoning toggle (one-time; persisted below).
+        serverConfig = MLXCommand.absorbingReasoning(from: decodedConfig)
         autostartEnabled = FileManager.default.fileExists(atPath: launchAgentPlistPath)
         managesServer = (defaults.object(forKey: Self.managedKey) as? Bool) ?? true
         serverLog = LogTailer(path: Self.serverLogPath(paths: paths))
@@ -249,6 +282,9 @@ final class MLXService: ObservableObject {
         ) { [weak self] _ in
             MainActor.assumeIsolated { self?.appWillTerminate() }
         }
+        // Property observers don't fire during init — write the migrated config
+        // back explicitly so the absorb happens exactly once.
+        if serverConfig != decodedConfig { persistServerConfig() }
     }
 
     deinit {
@@ -424,6 +460,10 @@ final class MLXService: ObservableObject {
         serverLogHandle = logHandle
         launchedServerConfig = config
         serverState = .starting
+        serverStartedAt = Date()
+        if serverMemoryBytes != nil { serverMemoryBytes = nil }
+        statsTick = 0
+        if portDiagnosis != nil { portDiagnosis = nil }
         beginLogScanForThisLaunch()
         Self.log.info("mlx server starting on port \(config.port, privacy: .public)")
         diagnostics.record(.mlx, .info, "MLX server starting", "\(config.model) on \(config.baseURL)")
@@ -446,6 +486,7 @@ final class MLXService: ObservableObject {
         serverLogHandle = nil
         launchedServerConfig = nil
         updateProbeStatus(.unknown)
+        clearServerStats()
         if pendingRestart {
             pendingRestart = false
             expectingServerStop = false
@@ -456,12 +497,15 @@ final class MLXService: ObservableObject {
             expectingServerStop = false
             serverState = .stopped
             serverWarning = nil
+            if portDiagnosis != nil { portDiagnosis = nil }
             diagnostics.record(.mlx, .info, "MLX server stopped")
         } else {
             serverState = .failed(
                 "The server exited unexpectedly (\(Self.describeExit(status))). See the log below.")
             diagnostics.record(.mlx, .error, "MLX server exited", "status \(status)")
             Self.log.error("mlx server exited status \(status, privacy: .public)")
+            // The classic cause is a lost bind race — say WHO holds the port.
+            Task { [weak self] in await self?.diagnosePortConflict() }
         }
     }
 
@@ -524,11 +568,129 @@ final class MLXService: ObservableObject {
                             url: config.baseURL, token: "", model: config.model,
                             requestTimeoutSeconds: 4))
                     self.applyProbe(result)
+                    await self.trackServerStats(probe: result)
                 } else {
                     self.updateProbeStatus(.unknown)
+                    self.clearServerStats()
                 }
                 try? await Task.sleep(for: .seconds(3))
             }
+        }
+    }
+
+    // MARK: - Server stats + port diagnosis (WS-M1)
+
+    /// Rides the 3 s monitor tick: every 5th tick (~15 s) sample the server
+    /// process's RSS and start time via `ps`, resolving the pid through launchd
+    /// when it owns the process. Also counts consecutive unreachable probes in
+    /// launchd mode — three in a row triggers a one-shot port diagnosis (a
+    /// launchd child that keeps losing the bind race never "exits" from our
+    /// point of view, so the child-exit hook can't catch it).
+    private func trackServerStats(probe: LLMHealthChecker.HealthResult) async {
+        if autostartEnabled {
+            if probe.isReachable {
+                launchdUnreachableTicks = 0
+            } else {
+                launchdUnreachableTicks += 1
+                if launchdUnreachableTicks == 3, portDiagnosis == nil {
+                    await diagnosePortConflict()
+                }
+            }
+        }
+        defer { statsTick += 1 }
+        guard statsTick % 5 == 0 else { return }
+        let pid: Int32?
+        if let process = serverProcess {
+            pid = process.processIdentifier
+        } else if autostartEnabled {
+            let result = await Self.captureProcess(
+                "/bin/launchctl", ["print", launchdServiceTarget])
+            pid = result.status == 0 ? MLXCommand.parseLaunchdPID(fromPrint: result.output) : nil
+        } else {
+            pid = nil
+        }
+        guard let pid else {
+            clearServerStats()
+            // launchd mode, probe answering, but the launchd job has NO pid:
+            // whoever is answering isn't ours (our copy lost the bind and died —
+            // launchd children have no exit hook, so this is the only tell).
+            if autostartEnabled, probe.isReachable {
+                await diagnosePortConflict()
+            }
+            return
+        }
+        let ps = await Self.captureProcess(
+            "/bin/ps", ["-o", "rss=", "-o", "etime=", "-p", String(pid)])
+        guard ps.status == 0, let stats = MLXCommand.parseProcessStats(fromPS: ps.output) else {
+            clearServerStats()
+            return
+        }
+        setServerMemory(stats.rssBytes)
+        setServerStarted(Date(timeIntervalSinceNow: -stats.elapsed))
+    }
+
+    private func clearServerStats() {
+        if serverMemoryBytes != nil { serverMemoryBytes = nil }
+        if serverStartedAt != nil { serverStartedAt = nil }
+        launchdUnreachableTicks = 0
+    }
+
+    /// 16 MB granularity: RSS jitters constantly and must not republish the tab.
+    private func setServerMemory(_ bytes: Int64) {
+        let granularity: Int64 = 16 << 20
+        let rounded = (bytes / granularity) * granularity
+        if serverMemoryBytes != rounded { serverMemoryBytes = rounded }
+    }
+
+    /// 5 s tolerance: `etime` has one-second resolution, so a naive assignment
+    /// would drift-republish on every sample.
+    private func setServerStarted(_ date: Date) {
+        if let current = serverStartedAt, abs(current.timeIntervalSince(date)) < 5 { return }
+        serverStartedAt = date
+    }
+
+    /// lsof the configured port and surface a FOREIGN listener (our own child /
+    /// launchd process is excluded — a bound-but-slow server is not a conflict).
+    private func diagnosePortConflict() async {
+        let port = serverConfig.port
+        var excluded = Set<Int32>()
+        if let process = serverProcess { excluded.insert(process.processIdentifier) }
+        if autostartEnabled {
+            let result = await Self.captureProcess(
+                "/bin/launchctl", ["print", launchdServiceTarget])
+            if let pid = MLXCommand.parseLaunchdPID(fromPrint: result.output) {
+                excluded.insert(pid)
+            }
+        }
+        let lsof = await Self.captureProcess(
+            "/usr/sbin/lsof", ["-nP", "-iTCP:\(port)", "-sTCP:LISTEN", "-Fpc"])
+        let owners = MLXCommand.parsePortOwners(fromLsof: lsof.output)
+        guard
+            let message = MLXCommand.portConflictMessage(
+                port: port, owners: owners, excludingPIDs: excluded)
+        else { return }
+        if portDiagnosis != message {
+            portDiagnosis = message
+            diagnostics.record(.mlx, .warn, "MLX port conflict", message)
+        }
+    }
+
+    /// The sneaky variant: the probe answers, but the answerer isn't OUR child —
+    /// e.g. LM Studio already serves the port, our server lost the bind and is
+    /// about to die. Run once on the starting→healthy transition in child mode.
+    private func verifyPortOwnership(childPID: Int32) async {
+        let port = serverConfig.port
+        let lsof = await Self.captureProcess(
+            "/usr/sbin/lsof", ["-nP", "-iTCP:\(port)", "-sTCP:LISTEN", "-Fpc"])
+        let owners = MLXCommand.parsePortOwners(fromLsof: lsof.output)
+        guard !owners.isEmpty, !owners.contains(where: { $0.pid == childPID }),
+            let foreign = owners.first
+        else { return }
+        let message =
+            "Port \(port) is answering, but it's \(foreign.command) (pid \(foreign.pid)) — not the server Huginn started. Stop it there or change the port here."
+        if portDiagnosis != message {
+            portDiagnosis = message
+            diagnostics.record(.mlx, .warn, "MLX port conflict", message)
         }
     }
 
@@ -547,6 +709,12 @@ final class MLXService: ObservableObject {
         case .starting where healthy:
             serverState = .running(healthy: true)
             diagnostics.record(.mlx, .success, "MLX server is answering", serverConfig.baseURL)
+            // Healthy is only proof SOMEONE answered — make sure it's our child
+            // and not e.g. LM Studio already holding the port (WS-M1).
+            if let child = serverProcess {
+                let childPID = child.processIdentifier
+                Task { [weak self] in await self?.verifyPortOwnership(childPID: childPID) }
+            }
         case .running(let wasHealthy) where wasHealthy != healthy:
             serverState = .running(healthy: healthy)
         default:
@@ -639,6 +807,13 @@ final class MLXService: ObservableObject {
             "/bin/launchctl", ["bootstrap", "gui/\(getuid())", launchAgentPlistPath])
         if result.status == 0 {
             launchedServerConfig = serverConfig
+            statsTick = 0
+            launchdUnreachableTicks = 0
+            if portDiagnosis != nil { portDiagnosis = nil }
+            // A reachable result from the PREVIOUS server must not survive the
+            // relaunch — makeBrain and the UI would read it as "the new model
+            // is up". The next monitor tick re-probes the fresh process.
+            updateProbeStatus(.unknown)
             beginLogScanForThisLaunch()
             diagnostics.record(.mlx, .info, "MLX server (launchd) restarted")
         } else {
@@ -653,6 +828,8 @@ final class MLXService: ObservableObject {
             "/bin/launchctl", ["kill", "SIGTERM", launchdServiceTarget])
         updateProbeStatus(.unknown)
         if serverWarning != nil { serverWarning = nil }
+        clearServerStats()
+        if portDiagnosis != nil { portDiagnosis = nil }
         diagnostics.record(.mlx, .info, "MLX server (launchd) sent SIGTERM")
     }
 
@@ -710,6 +887,8 @@ final class MLXService: ObservableObject {
             monitorTask = nil
             updateProbeStatus(.unknown)
             if serverWarning != nil { serverWarning = nil }
+            clearServerStats()
+            if portDiagnosis != nil { portDiagnosis = nil }
             serverLog.stop()
             let url = defaults.string(forKey: Self.externalURLKey) ?? store.llmURL
             let model = defaults.string(forKey: Self.externalModelKey) ?? store.llmModel
@@ -734,6 +913,156 @@ final class MLXService: ObservableObject {
         diagnostics.record(
             .mlx, .success, "Eldr LLM backend set to the MLX server", serverConfig.baseURL)
         Self.log.info("Eldr backend switched to the MLX server")
+    }
+
+    /// WS-M1 one-click brain swap: validate → point the server at the model →
+    /// (re)start → wait until it actually answers → wire the Eldr backend →
+    /// confirm. The backend is rewired ONLY after the server proves healthy, so
+    /// a failed swap never leaves Eldr pointing at a dead server. Collapses the
+    /// old 7-step, 3-tab flow into one action on a cached model's row.
+    func makeBrain(model: String, store: ConfigurationStore) async {
+        guard !brainSwap.isWorking else { return }
+        guard managesServer else {
+            brainSwap = .failed(
+                "Turn on \u{201C}Huginn manages the model server\u{201D} first — MLX serving is switched off."
+            )
+            return
+        }
+        guard envState.isReady else {
+            brainSwap = .failed("Install the MLX environment first — see the card above.")
+            return
+        }
+        if let problem = MLXCommand.validateServerModel(model) {
+            brainSwap = .failed(problem)
+            return
+        }
+        if serverConfig.model != model { serverConfig.model = model }
+        // A stale .failed from an EARLIER launchd bootstrap would abort the loop
+        // below before the fresh restart gets a chance — it no longer describes
+        // reality once we're relaunching. (Child mode overwrites it synchronously
+        // in launchServerProcess, so only launchd needs the reset.)
+        if autostartEnabled, case .failed = serverState { serverState = .stopped }
+        // Already serving EXACTLY this config and answering: just wire the
+        // backend — don't reload multi-GB weights for nothing. Full-config
+        // equality, not model equality: a changed port/flag still needs the
+        // restart, or we'd wire a URL nothing listens on.
+        if serverIsAnswering, launchedServerConfig == serverConfig {
+            if await answeringServerIsOurs() {
+                useAsEldrBackend(store: store)
+                brainSwap = .done(model: model)
+            } else {
+                brainSwap = .failed(
+                    portDiagnosis
+                        ?? "Something else is answering on port \(serverConfig.port) — not the MLX server. Stop it there or change the port here."
+                )
+            }
+            return
+        }
+        brainSwap = .working(model: model, phase: "Starting the server…")
+        startServer()
+        if case .failed(let why) = serverState {
+            brainSwap = .failed(why)
+            return
+        }
+        // Big models legitimately take minutes to load — poll generously, bail
+        // early on a real failure (child exit, bootstrap error, kill-switch).
+        // `launchedServerConfig == serverConfig` gates acceptance on the NEW
+        // launch: right after a restart the OLD child/probe can still read
+        // "answering" for a beat, and that must not count as success.
+        let deadline = ContinuousClock.now.advanced(by: .seconds(240))
+        var announcedLoading = false
+        var waited = 0
+        while ContinuousClock.now < deadline {
+            guard managesServer else {
+                brainSwap = .failed("MLX management was switched off mid-swap.")
+                return
+            }
+            if case .failed(let why) = serverState {
+                brainSwap = .failed(why)
+                return
+            }
+            if serverIsAnswering, launchedServerConfig == serverConfig {
+                // "Answering" only proves SOMEONE owns the port. If it isn't our
+                // process (LM Studio got there first; our copy lost the bind and
+                // died or is about to), wiring the backend would silently hand
+                // Eldr to the wrong server with a green success note on top.
+                if await answeringServerIsOurs() {
+                    useAsEldrBackend(store: store)
+                    brainSwap = .done(model: model)
+                } else {
+                    brainSwap = .failed(
+                        portDiagnosis
+                            ?? "Something else is answering on port \(serverConfig.port) — not the MLX server. Stop it there or change the port here."
+                    )
+                }
+                return
+            }
+            if !announcedLoading, waited >= 8 {
+                announcedLoading = true
+                brainSwap = .working(
+                    model: model,
+                    phase: "Loading \(model) — large models can take a few minutes…")
+            }
+            try? await Task.sleep(for: .milliseconds(500))
+            waited += 1
+        }
+        brainSwap = .failed(
+            "The server still isn't answering after 4 minutes — see the server log for what it's doing."
+        )
+    }
+
+    /// Ownership gate for the swap's success path: the answering port must be
+    /// held by OUR process (child pid, or the launchd job's pid). Positive
+    /// evidence of a foreign owner fails closed (and records the diagnosis);
+    /// an empty/odd lsof result fails open — tooling hiccups must not block a
+    /// genuinely healthy swap.
+    private func answeringServerIsOurs() async -> Bool {
+        let expectedPID: Int32?
+        if let process = serverProcess {
+            expectedPID = process.processIdentifier
+        } else if autostartEnabled {
+            let result = await Self.captureProcess(
+                "/bin/launchctl", ["print", launchdServiceTarget])
+            expectedPID = MLXCommand.parseLaunchdPID(fromPrint: result.output)
+        } else {
+            expectedPID = nil
+        }
+        let lsof = await Self.captureProcess(
+            "/usr/sbin/lsof", ["-nP", "-iTCP:\(serverConfig.port)", "-sTCP:LISTEN", "-Fpc"])
+        let owners = MLXCommand.parsePortOwners(fromLsof: lsof.output)
+        guard !owners.isEmpty else { return expectedPID != nil }
+        guard let expectedPID else {
+            // Someone answers but no process of ours exists (launchd copy died).
+            if let message = MLXCommand.portConflictMessage(
+                port: serverConfig.port, owners: owners), portDiagnosis != message
+            {
+                portDiagnosis = message
+                diagnostics.record(.mlx, .warn, "MLX port conflict", message)
+            }
+            return false
+        }
+        if owners.contains(where: { $0.pid == expectedPID }) { return true }
+        if let message = MLXCommand.portConflictMessage(
+            port: serverConfig.port, owners: owners, excludingPIDs: [expectedPID]),
+            portDiagnosis != message
+        {
+            portDiagnosis = message
+            diagnostics.record(.mlx, .warn, "MLX port conflict", message)
+        }
+        return false
+    }
+
+    /// "Answering" for the mode we're in: child mode trusts the state machine
+    /// (which the probe drives), launchd mode trusts the probe directly.
+    private var serverIsAnswering: Bool {
+        if autostartEnabled { return probeStatus.isReachable }
+        if case .running(true) = serverState { return true }
+        return false
+    }
+
+    /// Dismiss a lingering done/failed swap note (the card's ✕).
+    func clearBrainSwapNote() {
+        if brainSwap != .idle, !brainSwap.isWorking { brainSwap = .idle }
     }
 
     // MARK: - Models
