@@ -150,3 +150,43 @@ struct ResolvedHarnessDescriptorA2ATests {
         #expect(resolved?.a2aBearerToken == nil)  // never merged for a non-a2a descriptor
     }
 }
+
+// WS-B2: the relay-URL override may use plaintext `ws://` ONLY for loopback — and
+// "loopback" must mean an address literal, not a string prefix: `127.evil.com` is a
+// DNS name that can resolve anywhere and must be refused plaintext.
+@Suite("WS-B2: relay override validation")
+struct RelayOverrideValidationTests {
+    @MainActor
+    @Test func emptyMeansDefault() {
+        #expect(ConfigurationStore.validateRelayOverride("  ") == .success(nil))
+    }
+
+    @MainActor
+    @Test func wssAllowedAnywhere() {
+        #expect(
+            ConfigurationStore.validateRelayOverride("wss://relay.lerants.com")
+                == .success("wss://relay.lerants.com"))
+    }
+
+    @MainActor
+    @Test func wsAllowedOnLoopbackOnly() {
+        for ok in ["ws://127.0.0.1:7777", "ws://localhost:7777", "ws://[::1]:7777",
+            "ws://127.1.2.3"] {
+            #expect(ConfigurationStore.validateRelayOverride(ok) == .success(ok), "\(ok)")
+        }
+        for bad in ["ws://relay.lerants.com", "ws://127.evil.com:7777", "ws://127.evil.com",
+            "ws://192.168.1.10:7777", "ws://127.0.0.1.attacker.net"] {
+            #expect(
+                ConfigurationStore.validateRelayOverride(bad) == .failure(.plaintextOffLoopback),
+                "\(bad)")
+        }
+    }
+
+    @MainActor
+    @Test func nonWebSocketSchemesRefused() {
+        #expect(
+            ConfigurationStore.validateRelayOverride("https://relay.lerants.com")
+                == .failure(.unsupportedScheme))
+        #expect(ConfigurationStore.validateRelayOverride("not a url") == .failure(.invalidURL))
+    }
+}

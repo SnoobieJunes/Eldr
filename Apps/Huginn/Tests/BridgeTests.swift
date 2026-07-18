@@ -230,10 +230,11 @@ struct BridgeWatchAlongTests {
         #expect(await recorder.all().allSatisfy { $0.type == .agent })
     }
 
+    /// Builds a bridge with owner pinned + engine set but NO window ever received.
     @MainActor
-    @Test func failsClosedWithNoOwnerWindow() async throws {
-        let recorder = RecordingMessaging()
-        // Owner pinned + engine set, but NO window received → gate shut.
+    private static func noWindowBridge(recorder: RecordingMessaging) throws -> (
+        bridge: ACPBridgeService, ownerHex: String
+    ) {
         let clock = FixedClock(now: 1_756_000_000)
         let mac = try PQRCIdentity(seed: Data(repeating: 0x1a, count: 32))
         let owner = try PQRCIdentity(seed: Data(repeating: 0x2b, count: 32))
@@ -244,11 +245,67 @@ struct BridgeWatchAlongTests {
                 "eldr-owner-\(UUID().uuidString)"))
         bridge.setOwnerAuthority(engine)
         bridge.setOwnerIdentity(owner.publicKeyData.hexString)
+        return (bridge, owner.publicKeyData.hexString)
+    }
 
-        let convo = ACPBridgeService.BridgeConversation(
-            id: "g", name: "g", enabled: true, members: [owner.publicKeyData.hexString])
-        await bridge.broadcastAgentMessage("anything", conversation: convo)
+    /// Solo semantics (C7): the owner's OWN 1:1 chat with the node answers with no
+    /// live window — the window exists to make agent activity visible to OTHER
+    /// humans, and an owner-only send reaches none. This is the fix for "paired but
+    /// never responds" (the node went silent forever once the first window lapsed).
+    @MainActor
+    @Test func soloOwnerChatSendsWithoutWindow() async throws {
+        let recorder = RecordingMessaging()
+        let (bridge, ownerHex) = try Self.noWindowBridge(recorder: recorder)
+
+        let solo = ACPBridgeService.BridgeConversation(
+            id: ownerHex, name: "owner", enabled: true, members: [ownerHex])
+        await bridge.broadcastAgentMessage("private answer", conversation: solo)
+        let sent = await recorder.all()
+        #expect(sent.count == 1)
+        #expect(sent.first?.peer == ownerHex)
+        #expect(sent.first?.type == .agent)  // invariant 8: still agent-labeled
+    }
+
+    /// The window gate is UNCHANGED wherever a non-owner could see the send.
+    @MainActor
+    @Test func groupStillFailsClosedWithNoOwnerWindow() async throws {
+        let recorder = RecordingMessaging()
+        let (bridge, ownerHex) = try Self.noWindowBridge(recorder: recorder)
+
+        let group = ACPBridgeService.BridgeConversation(
+            id: "g", name: "g", enabled: true, members: [ownerHex, "someoneelse00"])
+        await bridge.broadcastAgentMessage("anything", conversation: group)
         #expect(await recorder.all().isEmpty)  // no live window ⇒ nothing sent
+    }
+
+    /// End-to-end solo reply: an owner prompt in the 1:1 chat drives the agent and
+    /// the answer comes back with NO window — the tether behaves like every other
+    /// "My AI" surface.
+    @MainActor
+    @Test func soloOwnerPromptAnswersWithoutWindow() async throws {
+        let recorder = RecordingMessaging()
+        let (bridge, ownerHex) = try Self.noWindowBridge(recorder: recorder)
+        bridge.watchAlongMode = .direct
+        bridge.setAgentRunner(StubRunner(answer: "solo answer"))
+
+        let solo = ACPBridgeService.BridgeConversation(
+            id: ownerHex, name: "owner", enabled: true, members: [ownerHex])
+        await bridge.handleInboundPrompt(
+            "hello?", conversation: solo, senderIdentityHex: ownerHex)
+
+        let texts = await recorder.all().filter { $0.peer == ownerHex }.map(\.text)
+        #expect(texts.contains { $0.contains("solo answer") })
+        #expect(await recorder.all().allSatisfy { $0.type == .agent })
+    }
+
+    /// Pins the DEFAULT watch-along mode to `.direct`: an `.endpoint` default once
+    /// silently dropped the 1:1 reply whenever no ai_window was live (regression).
+    /// Every other test here sets the mode explicitly, so only this one guards
+    /// what a fresh bridge actually ships with.
+    @MainActor
+    @Test func watchAlongModeDefaultsToDirect() throws {
+        let (bridge, _) = try Self.noWindowBridge(recorder: RecordingMessaging())
+        #expect(bridge.watchAlongMode == .direct)
     }
 
     @MainActor
@@ -282,8 +339,12 @@ struct BridgeWatchAlongTests {
             activeUntil: clock.now() + 1800, identity: stranger)
         await bridge.receiveOwnerWindow(forged, fromSenderIdentityHex: strangerHex)
 
+        // A GROUP conversation (owner + the stranger) — the owner-only solo
+        // exemption must not apply, so the forged window is the only thing that
+        // could open the gate, and it must not.
         let convo = ACPBridgeService.BridgeConversation(
-            id: "g", name: "g", enabled: true, members: [owner.publicKeyData.hexString])
+            id: "g", name: "g", enabled: true,
+            members: [owner.publicKeyData.hexString, strangerHex])
         await bridge.broadcastAgentMessage("secret stuff", conversation: convo)
         #expect(await recorder.all().isEmpty)  // stranger can't authorize the agent
     }

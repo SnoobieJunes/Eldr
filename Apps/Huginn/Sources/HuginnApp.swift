@@ -1,3 +1,4 @@
+import PQRCACP
 import SwiftUI
 
 /// Eldr — Mac node & AI tether: the macOS "node" for EldrChat. It pairs with your phone,
@@ -50,6 +51,39 @@ struct HuginnApp: App {
                     // pending approval fires an OS notification even while Huginn's
                     // window isn't frontmost (only the menu bar showing).
                     approvalNotifier.observe(a2aHost: a2aHost, testChatSession: testChatSession)
+                    // Restore the tether: the operator's last Enable/Stop choice is
+                    // persisted; without this every relaunch silently dropped the
+                    // relay node + tether host until "Enable bridge" was clicked again.
+                    if UserDefaults.standard.bool(forKey: ACPBridgeService.bridgeEnabledKey) {
+                        bridge.enable()
+                    }
+                    // A2A serving restore (same AC109 pattern). The providers MUST be
+                    // wired here first — BridgeView wires them too, but only once its
+                    // tab has appeared, and a launch-restored server built from the
+                    // inert defaults would answer with a NullLLMClient.
+                    a2aHost.descriptorProvider = {
+                        ConfigurationStore.resolvedHarnessDescriptor(id: bridge.relayHarnessID)
+                            ?? .builtIn
+                    }
+                    a2aHost.llmProvider = {
+                        let config = ACPBridgeService.relayHostLLMConfig()
+                        return InspectingLLMClient(
+                            wrapping: OpenAICompatibleLLMClient(config: config),
+                            model: config.model)
+                    }
+                    a2aHost.toolEnvironmentProvider = {
+                        ToolEnvironment(
+                            workdir: bridge.agentWorkdir,
+                            baseEnvironment: ProcessInfo.processInfo.environment)
+                    }
+                    a2aHost.agentConfigProvider = { .default }
+                    a2aHost.autoApproveProvider = { store.a2aAutoApprove }
+                    a2aHost.autoApproveAllowsToolsProvider = {
+                        ACPBridgeService.operatorAllowsUngatedTools()
+                    }
+                    if UserDefaults.standard.bool(forKey: A2AServerHost.serverEnabledKey) {
+                        await a2aHost.start()
+                    }
                 }
         }
         .defaultSize(width: 1000, height: 760)

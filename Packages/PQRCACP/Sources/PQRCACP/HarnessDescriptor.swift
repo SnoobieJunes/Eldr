@@ -204,14 +204,15 @@ public enum HarnessRegistry {
             command: localBin("eldr-acp-openclaw")),
 
         // ── WS3d-verified: command+args confirmed against the real installed binary. ──
-        // Claude Code: the `@zed-industries/claude-code-acp` ACP adapter (npm-deprecated in
-        // favor of `@agentclientprotocol/claude-agent-acp`, bin `claude-agent-acp` — update
-        // `command` if/when the operator installs the successor instead).
+        // Claude Code: `@agentclientprotocol/claude-agent-acp` (the maintained successor
+        // of the npm-deprecated `@zed-industries/claude-code-acp`; installed on this
+        // machine 2026-07-18, bin `claude-agent-acp`, symlinked into `~/.local/bin`).
+        // Auth: uses the `claude` CLI's own login when no `ANTHROPIC_API_KEY` is set.
         HarnessDescriptor(
             id: "claude-code",
             displayName: "Claude Code",
             kind: .stdioSpawn,
-            command: "claude-code-acp",
+            command: "claude-agent-acp",
             args: [],
             isProvisional: false,
             vendorKeyEnvVar: "ANTHROPIC_API_KEY"),

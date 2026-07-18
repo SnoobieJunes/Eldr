@@ -90,6 +90,28 @@ struct HarnessAgentExecutorTests {
         #expect(artifacts.first?.0.parts.first?.text == "hello from the agent")
         #expect(artifacts.first?.2 == true)  // lastChunk
     }
+
+    /// The operator's persistent auto-approve preference (are-you-sure-confirmed,
+    /// tech-week item 3) short-circuits the per-task gate: the task completes with
+    /// nobody resolving a pending approval. The time limit is the hang guard — a
+    /// regression that re-consults the gate would block forever.
+    @Test(.timeLimit(.minutes(1)))
+    func autoApprove_bypassesTheGateAndCompletes() async throws {
+        let gate = InboundTaskGate()
+        let executor = HarnessAgentExecutor(
+            descriptorProvider: { .builtIn },
+            llmProvider: { ScriptedLLM([LLMResponse(content: "auto-approved answer")]) },
+            toolEnvironmentProvider: { ToolEnvironment(workdir: nil, baseEnvironment: [:]) },
+            agentConfigProvider: { .default },
+            gate: gate,
+            autoApproveProvider: { true })
+        let (task, request) = makeTaskAndRequest(text: "run headless")
+        let sink = RecordingSink()
+
+        let status = try await executor.execute(task: task, request: request, events: sink)
+        #expect(status.state == .completed)
+        #expect(await sink.artifacts.count == 1)
+    }
 }
 
 @Suite("InboundTaskGate — timeout denies")

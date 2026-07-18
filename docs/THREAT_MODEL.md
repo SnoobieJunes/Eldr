@@ -162,6 +162,18 @@ stay consumed forever. Last-resort fallback semantics (unlinkability caveat:
 two sessions initiated against the same `lrp` are linkable as such by the
 recipient only) are implemented and tested.
 
+**Concurrent initiations can race one another (liveness, not confidentiality —
+AC111).** A relay is dumb storage, not a Signal-style server that dispenses each
+one-time prekey at most once: two initiators who fetch the same published
+bundle before the recipient processes either initiation will pick the same
+`otp`, the second `consume` correctly refuses (`oneTimePrekeyAlreadyConsumed`
+— one-time means one use), and that second initiation's first message is lost
+with no NACK. Nothing is disclosed and nothing downgrades; the loser simply
+isn't established. Recovery is re-initiation against the republished
+(post-consumption) bundle. Discovered by the group-mesh test fixture, which
+now serializes establishment for determinism; an automatic client-side retry
+on first-message non-reply is tracked as future work.
+
 ### 2.9 Local link (Multipeer) co-presence is observable
 The S1 local-first transport (SPEC §10; user-toggleable in Settings → Nearby,
 default off in Release — radios and the Local Network prompt only start when

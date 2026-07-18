@@ -43,6 +43,30 @@ struct LogTailerTests {
         }
         #expect(seen, "appended line never arrived — tailer event was lost")
     }
+
+    // Regression for the MLX-tab FREEZE (2026-07-17): opening the tab read the whole
+    // 454 KB server log on the main actor and rendered it in one Text. The seed is
+    // now bounded to the file's tail, starting at a complete line.
+    @MainActor
+    @Test func seedIsBoundedToTheTail() async throws {
+        let path = (NSTemporaryDirectory() as NSString)
+            .appendingPathComponent("eldr-logtailer-seed-\(UUID().uuidString).log")
+        defer { try? FileManager.default.removeItem(atPath: path) }
+        var blob = ""
+        for i in 0..<20_000 { blob += "line-\(i)\n" }  // ≈ 230 KB
+        try blob.write(toFile: path, atomically: true, encoding: .utf8)
+
+        let tailer = LogTailer(path: path, maxSeedBytes: 4_096)
+        tailer.start()
+        defer { tailer.stop() }
+
+        // Seeding is synchronous in start(): bounded, ends at the file's last line,
+        // and the first retained line is COMPLETE (the torn head line is dropped).
+        #expect(tailer.lines.last?.text == "line-19999")
+        #expect(tailer.lines.count < 600, "seed was not bounded: \(tailer.lines.count) lines")
+        let first = try #require(tailer.lines.first?.text)
+        #expect(first.hasPrefix("line-"), "seed started mid-line: \(first)")
+    }
 }
 
 /// Replays the exact crashing gesture from the 2026-07-17 report end-to-end,

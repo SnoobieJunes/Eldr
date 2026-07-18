@@ -48,8 +48,11 @@ struct EldrACPMain {
         // in ELDR_LLM_URL) before they hit disk. Standalone binary, so it uses the
         // built-in redactor; the in-app path injects PQRCCore's via AgentConfig.
         func log(_ message: String) {
-            FileHandle.standardError.write(
-                Data("eldr-acp: \(ACPLogRedactor.scrub(message))\n".utf8))
+            // Throwing write, not `write(_:)`: if the launcher/tee that holds our
+            // stderr dies, the legacy API raises an uncatchable NSException (same
+            // broken-pipe crash class as the stdout sink). Diagnostics are best-effort.
+            try? FileHandle.standardError.write(
+                contentsOf: Data("eldr-acp: \(ACPLogRedactor.scrub(message))\n".utf8))
         }
 
         // Choose the brain.
@@ -148,7 +151,12 @@ struct EldrACPMain {
             await inFlight.add(task)
         }
 
-        // stdin closed — let outstanding turns finish writing before we exit.
+        // stdin closed — no response can ever arrive now, so fail the waits that
+        // depend on one first (an un-timed `session/request_permission` would park
+        // its turn forever; `requestPermission` maps the failure to a denial), THEN
+        // let outstanding turns finish before we exit. If the client is fully gone
+        // their writes no-op against the latched sink.
+        await connection.failAll(ClientConnection.ConnectionError.cancelled)
         await inFlight.drain()
         log("stdin closed; exiting")
     }

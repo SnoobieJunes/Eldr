@@ -78,13 +78,24 @@ struct RunnerE2ETests {
     // MARK: Real binary over stdio
 
     @Test func realBinaryHandshakeAndEchoPrompt() async throws {
+        // Hermetic config dir: the binary otherwise reads the operator's live
+        // ~/.config/eldr-acp (skills/tools/env files), so their personal settings —
+        // e.g. `skills` = 0 — would flip this test's outcome.
+        let configDir = (NSTemporaryDirectory() as NSString).appendingPathComponent(
+            "eldr-acp-e2e-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(atPath: configDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(atPath: configDir) }
+
         let recorder = DriverRecorder()
         let handler = ACPClientHandler(
             onAgentMessageChunk: { await recorder.chunk($0) },
             onAvailableCommands: { await recorder.setCommands($0) })
         let driver = ACPClientDriver(
             executableURL: agentBinaryURL,
-            environmentOverrides: ["ELDR_ACP_FAKE_LLM": "1"],
+            environmentOverrides: [
+                "ELDR_ACP_FAKE_LLM": "1",
+                "ELDR_ACP_CONFIG_DIR": configDir,
+            ],
             handler: handler)
 
         let info = try await driver.start(cwd: NSTemporaryDirectory())

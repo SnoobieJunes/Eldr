@@ -9,8 +9,10 @@ import SwiftUI
 /// the section that started them.
 struct MLXView: View {
     @EnvironmentObject private var store: ConfigurationStore
-    @StateObject private var service: MLXService
-    @StateObject private var serverLog: LogTailer
+    /// The ONE app-wide MLX engine (owns the server child, jobs, and the log tail).
+    /// Deliberately not a `@StateObject`: a recreated tab view must observe the same
+    /// instance, not spawn a second service that lost the running server.
+    @ObservedObject private var service = MLXService.shared
 
     // Server "Advanced" numeric fields are optionals in the config; SwiftUI's
     // numeric TextFields fight mid-typing round-trips, so these are seeded once
@@ -22,7 +24,9 @@ struct MLXView: View {
 
     // Models
     @State private var searchQuery = ""
-    @State private var mlxCommunityOnly = true
+    @State private var searchPublisher = "mlx-community"
+    @State private var searchMLXOnly = true
+    @State private var searchSort = "downloads"
     @State private var deleteCandidate: MLXCachedModel?
 
     // Convert
@@ -46,12 +50,6 @@ struct MLXView: View {
     /// make it claim something that wasn't written).
     @State private var backendNote: String?
 
-    init() {
-        let paths = ConfigPaths.standard
-        _service = StateObject(wrappedValue: MLXService(paths: paths))
-        _serverLog = StateObject(wrappedValue: LogTailer(path: MLXService.serverLogPath(paths: paths)))
-    }
-
     private var jobRunning: Bool { service.activeJob != nil }
 
     var body: some View {
@@ -64,7 +62,7 @@ struct MLXView: View {
             fineTuneSection
         }
         .formStyle(.grouped)
-        .frame(maxWidth: 720, alignment: .leading)
+        .frame(maxWidth: 1100, alignment: .leading)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
         .task {
             if !seeded {
@@ -74,7 +72,6 @@ struct MLXView: View {
                 advTopP = service.serverConfig.topP.map(MLXCommand.formatNumber) ?? ""
                 playModel = service.serverConfig.model
             }
-            serverLog.start()
             service.refreshCachedModels()
             await service.refreshEnvironment()
         }
@@ -238,6 +235,11 @@ struct MLXView: View {
 
             serverStatusRow
 
+            if let warning = service.serverWarning {
+                Label(warning, systemImage: "exclamationmark.triangle.fill")
+                    .font(.caption).foregroundStyle(.orange)
+            }
+
             if restartHintVisible {
                 Label("Settings changed since launch — press \(startButtonTitle) to apply.",
                     systemImage: "arrow.triangle.2.circlepath")
@@ -273,7 +275,9 @@ struct MLXView: View {
             VStack(alignment: .leading, spacing: 4) {
                 Text("Server log (\(service.serverLogPath))")
                     .font(.caption).foregroundStyle(.secondary)
-                logPane(serverLog.allText.isEmpty ? "(no output yet)" : serverLog.allText)
+                logPane(
+                    service.serverLog.lines.suffix(Self.logPaneMaxLines)
+                        .map { LogRow(id: $0.id, text: $0.text) })
             }
         }
     }
@@ -397,9 +401,32 @@ struct MLXView: View {
                 TextField("Search Hugging Face models…", text: $searchQuery)
                     .textFieldStyle(.roundedBorder)
                     .onSubmit { runSearch() }
-                Toggle("mlx-community only", isOn: $mlxCommunityOnly)
                 Button("Search") { runSearch() }.disabled(service.isSearching)
             }
+            HStack(spacing: 12) {
+                Picker("Source", selection: $searchPublisher) {
+                    Text("Any publisher").tag("")
+                    ForEach(MLXCommand.searchPublishers.filter { !$0.isEmpty }, id: \.self) {
+                        Text($0).tag($0)
+                    }
+                }
+                .fixedSize()
+                Picker("Sort", selection: $searchSort) {
+                    ForEach(MLXCommand.searchSorts, id: \.value) { sort in
+                        Text(sort.label).tag(sort.value)
+                    }
+                }
+                .fixedSize()
+                Toggle("MLX format only", isOn: $searchMLXOnly)
+                Spacer()
+            }
+            .onChange(of: searchPublisher) { _, _ in refreshSearchIfActive() }
+            .onChange(of: searchSort) { _, _ in refreshSearchIfActive() }
+            .onChange(of: searchMLXOnly) { _, _ in refreshSearchIfActive() }
+            Text(
+                "Only MLX-format builds run on mlx_lm — keep the filter on unless you plan to Convert. mlx-community, lmstudio-community, and unsloth publish ready-quantized MLX models."
+            )
+            .font(.caption).foregroundStyle(.secondary)
             if service.isSearching {
                 HStack { ProgressView().controlSize(.small); Text("Searching…").font(.caption) }
             }
@@ -410,10 +437,27 @@ struct MLXView: View {
             ForEach(service.searchResults) { result in
                 HStack {
                     VStack(alignment: .leading, spacing: 2) {
-                        Text(result.id).font(.callout)
+                        HStack(spacing: 6) {
+                            Text(result.id).font(.callout)
+                            if let quant = result.quantLabel {
+                                Text(quant)
+                                    .font(.caption2).padding(.horizontal, 4).padding(.vertical, 1)
+                                    .background(.quaternary, in: Capsule())
+                            }
+                            if !result.isMLX && searchMLXOnly == false {
+                                Text("not MLX")
+                                    .font(.caption2).padding(.horizontal, 4).padding(.vertical, 1)
+                                    .background(.orange.opacity(0.2), in: Capsule())
+                            }
+                        }
                         Text(searchResultCaption(result)).font(.caption).foregroundStyle(.secondary)
                     }
                     Spacer()
+                    if let page = URL(string: "https://huggingface.co/\(result.id)") {
+                        Link(destination: page) { Image(systemName: "safari") }
+                            .controlSize(.small)
+                            .accessibilityLabel("Open \(result.id) on Hugging Face")
+                    }
                     Button("Download") { service.downloadModel(result.id) }
                         .controlSize(.small)
                         .disabled(jobRunning)
@@ -421,6 +465,12 @@ struct MLXView: View {
             }
             jobPane([.download])
         }
+    }
+
+    /// Re-run the current search when a filter changes and results are showing (the
+    /// LM Studio behavior — filters act on the live list, not just the next search).
+    private func refreshSearchIfActive() {
+        if !service.searchResults.isEmpty || !searchQuery.isEmpty { runSearch() }
     }
 
     private var totalCacheLabel: String {
@@ -432,11 +482,16 @@ struct MLXView: View {
         var parts: [String] = []
         if let downloads = result.downloads { parts.append("\(downloads.formatted()) downloads") }
         if let likes = result.likes { parts.append("\(likes.formatted()) likes") }
+        if let updated = result.lastModified?.prefix(10) { parts.append("updated \(updated)") }
         return parts.isEmpty ? "—" : parts.joined(separator: " · ")
     }
 
     private func runSearch() {
-        Task { await service.searchHub(query: searchQuery, mlxCommunityOnly: mlxCommunityOnly) }
+        Task {
+            await service.searchHub(
+                query: searchQuery, author: searchPublisher.isEmpty ? nil : searchPublisher,
+                mlxOnly: searchMLXOnly, sort: searchSort)
+        }
     }
 
     // MARK: - Convert
@@ -716,16 +771,47 @@ struct MLXView: View {
             .foregroundStyle(result.success ? Color.green : Color.orange)
         }
         if let kind = service.jobLogKind, kinds.contains(kind), !service.jobLog.isEmpty {
-            logPane(service.jobLog.text)
+            let lines = service.jobLog.lines
+            let base = max(0, lines.count - Self.logPaneMaxLines)
+            logPane(lines.suffix(Self.logPaneMaxLines).enumerated().map {
+                LogRow(id: base + $0.offset, text: $0.element)
+            })
         }
     }
 
-    private func logPane(_ text: String) -> some View {
-        ScrollView {
-            Text(text)
-                .font(.system(.caption2, design: .monospaced))
-                .textSelection(.enabled)
-                .frame(maxWidth: .infinity, alignment: .leading)
+    /// Rows kept in a log pane. Bounded because SwiftUI must diff/lay out every row
+    /// on each append; the old single-`Text`-with-the-whole-log rendering re-laid-out
+    /// hundreds of KB per update and visibly froze the app every few seconds while
+    /// the server was writing (health-poll lines land every ~5 s).
+    private static let logPaneMaxLines = 300
+
+    /// One rendered log line (a struct because ForEach needs Identifiable and Swift
+    /// key paths can't point at tuple elements).
+    private struct LogRow: Identifiable {
+        let id: Int
+        let text: String
+    }
+
+    /// Terminal-style pane: one `Text` PER LINE in a `LazyVStack`, ids stable across
+    /// appends so unchanged rows aren't re-laid-out.
+    private func logPane(_ allLines: [LogRow]) -> some View {
+        let visible = allLines.suffix(Self.logPaneMaxLines)
+        return ScrollView {
+            LazyVStack(alignment: .leading, spacing: 0) {
+                if visible.isEmpty {
+                    Text("(no output yet)")
+                        .font(.system(.caption2, design: .monospaced))
+                        .foregroundStyle(.secondary)
+                } else {
+                    ForEach(visible) { line in
+                        Text(line.text.isEmpty ? " " : line.text)
+                            .font(.system(.caption2, design: .monospaced))
+                            .textSelection(.enabled)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                    }
+                }
+            }
+            .padding(2)
         }
         .defaultScrollAnchor(.bottom)
         .frame(height: 150)
@@ -741,6 +827,11 @@ struct MLXView: View {
         panel.canChooseDirectories = true
         panel.canChooseFiles = false
         panel.allowsMultipleSelection = false
+        // Models overwhelmingly live under DOT-directories (~/.cache/huggingface/hub,
+        // ~/.lmstudio, our own ~/.config/eldr-acp/mlx) — an open panel that hides them
+        // makes every model folder unreachable without knowing ⌘⇧. .
+        panel.showsHiddenFiles = true
+        panel.treatsFilePackagesAsDirectories = true
         panel.prompt = "Select"
         if panel.runModal() == .OK, let url = panel.url { assign(url.path) }
     }
@@ -750,6 +841,8 @@ struct MLXView: View {
     private func pickSaveLocation(defaultName: String, _ assign: @escaping (String) -> Void) {
         let panel = NSSavePanel()
         panel.canCreateDirectories = true
+        panel.showsHiddenFiles = true
+        panel.treatsFilePackagesAsDirectories = true
         panel.nameFieldStringValue = defaultName
         panel.prompt = "Choose"
         if panel.runModal() == .OK, let url = panel.url { assign(url.path) }

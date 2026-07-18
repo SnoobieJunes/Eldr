@@ -91,7 +91,7 @@ final class ConfigurationStore: ObservableObject {
     @Published var contextGraphAgentName: String
 
     // MARK: WS3b — cloud-CLI harness vendor keys (Keychain only, never the env file or
-    // a descriptor's static `env`). Huginn spawns `claude-code-acp`/`gemini` itself via
+    // a descriptor's static `env`). Huginn spawns `claude-agent-acp`/`gemini` itself via
     // `runHarness`, so it merges the key into a COPY of the descriptor's `env`
     // (`HarnessDescriptor.withVendorKey`) at launch — the key never sits in `ELDR_*`
     // where a `run_shell`/`open_terminal` child (or a prompt-injected local model)
@@ -180,6 +180,14 @@ final class ConfigurationStore: ObservableObject {
     static let testChatWorkspaceKey = "testChatWorkspacePath"
     static let testChatAutoApproveKey = "testChatAutoApprove"
 
+    /// When ON, inbound A2A tasks skip the per-task approval UI and run immediately —
+    /// the headless/CLI mode the served endpoint exists for. Are-you-sure-confirmed in
+    /// the Bridge tab; persists until turned off. Tool use inside an auto-approved
+    /// task still follows `allowUngatedTools` (AC108) — this toggle never grants
+    /// tools by itself. Huginn-only pref (UserDefaults, like `testChatAutoApprove`).
+    @Published var a2aAutoApprove: Bool
+    static let a2aAutoApproveKey = "a2aAutoApprove"
+
     /// The four built-in tools, in advertise order (mirrors ToolExecutor.allToolNames).
     static let allToolNames = ["read_file", "write_file", "list_dir", "run_shell"]
     /// The built-in skill command names, in advertise order (mirrors PQRCACP's
@@ -254,6 +262,8 @@ final class ConfigurationStore: ObservableObject {
             ?? ConfigurationStore.loadTextFile(at: paths.workdirFile) ?? ""
         testChatAutoApprove =
             (UserDefaults.standard.object(forKey: Self.testChatAutoApproveKey) as? Bool) ?? false
+        a2aAutoApprove =
+            (UserDefaults.standard.object(forKey: Self.a2aAutoApproveKey) as? Bool) ?? false
         claudeCodeAPIKey =
             keychain.load(account: Self.claudeCodeKeyAccount)
             .flatMap { String(data: $0, encoding: .utf8) } ?? ""
@@ -280,6 +290,7 @@ final class ConfigurationStore: ObservableObject {
         UserDefaults.standard.set(gatewayFlavor.rawValue, forKey: Self.gatewayFlavorKey)
         UserDefaults.standard.set(testChatWorkspacePath, forKey: Self.testChatWorkspaceKey)
         UserDefaults.standard.set(testChatAutoApprove, forKey: Self.testChatAutoApproveKey)
+        UserDefaults.standard.set(a2aAutoApprove, forKey: Self.a2aAutoApproveKey)
         saveTokenToKeychain()
         saveVendorKeysToKeychain()
         writeEnvFile()
@@ -483,9 +494,17 @@ final class ConfigurationStore: ObservableObject {
         return nil
     }
 
+    /// Loopback = `localhost`, `::1`, or an IPv4 LITERAL in 127.0.0.0/8. Parsed as
+    /// four numeric octets — a string-prefix check would also match DNS names like
+    /// `127.evil.com`, which can resolve anywhere and must never get plaintext `ws://`.
     private static func isLoopbackHost(_ host: String) -> Bool {
         let h = host.lowercased()
-        return h == "localhost" || h == "127.0.0.1" || h == "::1" || h.hasPrefix("127.")
+        if h == "localhost" || h == "::1" { return true }
+        let octets = h.split(separator: ".", omittingEmptySubsequences: false)
+        guard octets.count == 4,
+            octets.allSatisfy({ !$0.isEmpty && $0.allSatisfy(\.isNumber) && UInt8($0) != nil })
+        else { return false }
+        return octets[0] == "127"
     }
 
     /// `export KEY='value'` with POSIX single-quote escaping so any URL/token/path is

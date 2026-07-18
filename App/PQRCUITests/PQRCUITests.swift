@@ -259,6 +259,19 @@ final class PQRCUITests: XCTestCase {
                         return true
                     }
                 }
+                // A row clipped by the THREAD list's top edge: the pinned
+                // ThreadHeader sits above the scroll viewport, and a clipped
+                // row's text keeps its full AX frame, so its top pokes into the
+                // header zone where the auditor samples header pixels — the
+                // same A7 occlusion class as the bars, at the thread-header
+                // boundary. Screenshot-verified 2026-07-18: the flagged rows
+                // are ordinary agent bubbles whose measured colors pass
+                // (PartyColorTests); fully-visible rows stay enforced.
+                let threadList = app.descendants(matching: .any)
+                    .matching(identifier: "thread-message-list").firstMatch
+                if threadList.exists, element.frame.minY < threadList.frame.minY {
+                    return true
+                }
                 // A row scrolled up under the TOP navigation bar's translucent
                 // scroll-edge material — the first message in a short conversation
                 // lands right beneath it. The auditor samples the bar's blur as the

@@ -109,6 +109,8 @@ actor HarnessAgentExecutor: AgentExecutor {
     private let toolEnvironmentProvider: @MainActor () -> ToolEnvironment
     private let agentConfigProvider: @MainActor () -> AgentConfig
     private let gate: InboundTaskGate
+    private let autoApproveProvider: @MainActor () -> Bool
+    private let autoApproveAllowsToolsProvider: @MainActor () -> Bool
 
     private var activeDrivers: [String: ACPClientDriver] = [:]
     private var activeHarnessTasks: [String: Task<Void, Never>] = [:]
@@ -118,20 +120,36 @@ actor HarnessAgentExecutor: AgentExecutor {
         llmProvider: @escaping @MainActor () -> any LLMClient,
         toolEnvironmentProvider: @escaping @MainActor () -> ToolEnvironment,
         agentConfigProvider: @escaping @MainActor () -> AgentConfig,
-        gate: InboundTaskGate
+        gate: InboundTaskGate,
+        autoApproveProvider: @escaping @MainActor () -> Bool = { false },
+        autoApproveAllowsToolsProvider: @escaping @MainActor () -> Bool = { false }
     ) {
         self.descriptorProvider = descriptorProvider
         self.llmProvider = llmProvider
         self.toolEnvironmentProvider = toolEnvironmentProvider
         self.agentConfigProvider = agentConfigProvider
         self.gate = gate
+        self.autoApproveProvider = autoApproveProvider
+        self.autoApproveAllowsToolsProvider = autoApproveAllowsToolsProvider
     }
 
     func execute(
         task: A2ATask, request: A2ASendMessageRequest, events: any TaskEventSink
     ) async throws -> A2ATaskStatus {
         let promptText = Self.extractText(request.message.parts)
-        let decision = await gate.requestApproval(taskId: task.id, summary: promptText)
+        // Operator's persistent headless preference (are-you-sure-confirmed) short-
+        // circuits the per-task UI gate; tool use still rides its own toggle (AC108),
+        // and the auto-approval is visible in the Inspector (ids/status only —
+        // never the task text, invariant 12).
+        let decision: InboundTaskGate.Decision
+        if await autoApproveProvider() {
+            decision = .approved(allowToolUse: await autoApproveAllowsToolsProvider())
+            DiagnosticsLog.shared.post(
+                .node, .info, "A2A task auto-approved (operator preference)",
+                "task=\(task.id)")
+        } else {
+            decision = await gate.requestApproval(taskId: task.id, summary: promptText)
+        }
         switch decision {
         case .denied(let reason):
             // REJECTED, not thrown — a thrown error records FAILED (see A2AServer), and a
@@ -238,6 +256,23 @@ final class A2AServerHost: ObservableObject {
         (UserDefaults.standard.object(forKey: portKey) as? Int) ?? defaultPort
     }
 
+    /// UserDefaults key remembering that the operator turned serving ON — restored at
+    /// launch by HuginnApp, mirroring `ACPBridgeService.bridgeEnabledKey` (AC109).
+    /// Without it every relaunch silently dropped the endpoint the operator had
+    /// deliberately exposed ("CLI access stopped working"). Restoring the choice is
+    /// safe for this surface: the listener is loopback-only and every route requires
+    /// the Keychain bearer token.
+    static let serverEnabledKey = "a2aServerEnabled"
+
+    /// Headless auto-approve for inbound tasks (`ConfigurationStore.a2aAutoApprove`,
+    /// an are-you-sure-confirmed Bridge-tab toggle). OFF (default) keeps the per-task
+    /// approval UI with deny-on-timeout exactly as before. Wired by the composition
+    /// root like the providers above; tool use inside an auto-approved task follows
+    /// the SAME persistent "Run tools without asking permission" toggle every other
+    /// surface honors (AC108) — auto-approving a task never silently enables tools.
+    var autoApproveProvider: @MainActor () -> Bool = { false }
+    var autoApproveAllowsToolsProvider: @MainActor () -> Bool = { false }
+
     private static let tokenAccount = "a2a-server-bearer-token"
     private let keychain: KeychainBox
     private let gate = InboundTaskGate()
@@ -247,6 +282,19 @@ final class A2AServerHost: ObservableObject {
     init(keychain: KeychainBox = KeychainBox()) {
         self.keychain = keychain
         self.bearerToken = Self.loadOrCreateToken(keychain: keychain)
+        // File-keychain mirror of the bearer (same service/account,
+        // `useDataProtection: false`) so the DOCUMENTED external-CLI flow can fetch
+        // it with `security find-generic-password -w` instead of hand-copying from
+        // this window — the exact launcher-mirror pattern the LLM token already uses
+        // (ConfigurationStore.launcherTokenKeychain; C-8 holds: still the Keychain,
+        // never a cleartext file). Written only when MISSING: `save` is delete+add,
+        // and rewriting every launch would shred the item ACL that makes the CLI's
+        // one-time "Always Allow" grant stick. Rotation (regenerateToken) rewrites
+        // unconditionally — a stale mirror there would strand CLI callers.
+        let mirror = KeychainBox(service: keychain.service, useDataProtection: false)
+        if !mirror.hasItem(account: Self.tokenAccount) {
+            try? mirror.save(Data(bearerToken.utf8), account: Self.tokenAccount)
+        }
     }
 
     // MARK: Lifecycle
@@ -258,7 +306,9 @@ final class A2AServerHost: ObservableObject {
         let executor = HarnessAgentExecutor(
             descriptorProvider: descriptorProvider, llmProvider: llmProvider,
             toolEnvironmentProvider: toolEnvironmentProvider,
-            agentConfigProvider: agentConfigProvider, gate: gate)
+            agentConfigProvider: agentConfigProvider, gate: gate,
+            autoApproveProvider: autoApproveProvider,
+            autoApproveAllowsToolsProvider: autoApproveAllowsToolsProvider)
         let server = A2AServer(card: card, executor: executor)
         let authenticator = BearerAuthenticator(token: bearerToken)
         let http = A2AHTTPServer(
@@ -269,6 +319,7 @@ final class A2AServerHost: ObservableObject {
             port = Int(boundPort)
             isServing = true
             lastError = nil
+            UserDefaults.standard.set(true, forKey: Self.serverEnabledKey)
             approvalsTask = Task { [weak self] in
                 guard let self else { return }
                 for await items in gate.updates { self.pendingApprovals = items }
@@ -280,7 +331,13 @@ final class A2AServerHost: ObservableObject {
         }
     }
 
-    func stop() async {
+    /// `persistPreference` is false only for INTERNAL teardown (`restart()`), so a
+    /// token rotation can't erase the operator's launch-restore choice — the same
+    /// split `ACPBridgeService.disable(persistPreference:)` uses.
+    func stop(persistPreference: Bool = true) async {
+        if persistPreference {
+            UserDefaults.standard.set(false, forKey: Self.serverEnabledKey)
+        }
         approvalsTask?.cancel()
         approvalsTask = nil
         await httpServer?.stop()
@@ -306,13 +363,18 @@ final class A2AServerHost: ObservableObject {
         let token = Self.makeToken()
         bearerToken = token
         try? keychain.save(Data(token.utf8), account: Self.tokenAccount)
+        // Keep the external-CLI mirror in step (see init) — a rotated token that
+        // only landed in the data-protection keychain would strand CLI callers on
+        // the stale value.
+        try? KeychainBox(service: keychain.service, useDataProtection: false)
+            .save(Data(token.utf8), account: Self.tokenAccount)
         // A live listener was authenticated with the OLD token; restart so the new one
         // takes effect immediately rather than silently continuing to accept the old value.
         if isServing { Task { await self.restart() } }
     }
 
     private func restart() async {
-        await stop()
+        await stop(persistPreference: false)
         await start()
     }
 

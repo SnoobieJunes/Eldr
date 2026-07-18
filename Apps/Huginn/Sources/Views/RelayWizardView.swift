@@ -49,7 +49,7 @@ struct RelayWizardView: View {
                     .font(.caption).foregroundStyle(.secondary)
             }
             .padding(20)
-            .frame(maxWidth: 680, alignment: .leading)
+            .frame(maxWidth: 1100, alignment: .leading)
             .frame(maxWidth: .infinity)
         }
         .onAppear {

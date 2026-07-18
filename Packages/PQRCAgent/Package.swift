@@ -38,6 +38,7 @@ let package = Package(
             // any future opt-in to iOS keeps the macOS build green on any Xcode.
             swiftSettings: [
                 .swiftLanguageMode(.v6),
+                .define("ELDR_PCC_SDK"),
             ]
         ),
         .testTarget(

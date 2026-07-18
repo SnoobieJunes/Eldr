@@ -134,6 +134,13 @@ struct ACPDriverAgentRunner: BridgeAgentRunner {
     /// read-only, but every mutation is still owner-approved — CR-1's actual threat
     /// (prompt-injected UNATTENDED shell during an owner window) stays blocked.
     var permissionResponder: (@Sendable (_ title: String, _ kind: String) async -> Bool)? = nil
+    /// The operator's PERSISTENT trusted-mode answer ("Run tools without asking
+    /// permission", Configuration ▸ Security — an are-you-sure-confirmed toggle that
+    /// stays on until turned off). Read per RUN so a live toggle flip applies to the
+    /// next turn without rebuilding the runner. When true, this path stops routing
+    /// every mutating tool through a phone approval card; the phone still learns via
+    /// the agent's `eldrAllowUngatedTools` capability (the WS2 bypass indicator).
+    var allowUngatedToolsProvider: (@Sendable () async -> Bool) = { false }
 
     // eldr-acp spawns a fresh, stateless process per run, so Huginn supplies cross-turn
     // memory: `context.priorContext` (the decrypted, capped transcript) is injected as an
@@ -152,13 +159,16 @@ struct ACPDriverAgentRunner: BridgeAgentRunner {
             canPromptPermissions: permissionResponder != nil)
         var env = environmentOverrides
         env["ELDR_ACP_STREAM"] = "0"  // need the complete message to scrub it (§10)
-        // A1 hard rule: the spawned agent must ASK for every mutating tool on THIS
-        // path, even when the operator's env file sets ELDR_ACP_ALLOW_UNGATED_TOOLS=1
-        // (that toggle exists for trusted prompt-less clients like a hand-driven
-        // Xcode). This runner is reachable by any chat message during an owner window,
-        // so ungated execution here would be exactly the CR-1 hole: prompt-injected
-        // unattended shell on the Mac. Forcing 0 keeps every mutation owner-approved.
-        env["ELDR_ACP_ALLOW_UNGATED_TOOLS"] = "0"
+        // Tool gating on this path follows the operator's persistent trusted-mode
+        // toggle (DEVIATIONS: supersedes the A1 "always force 0 here" rule, which in
+        // practice was BOTH ineffective — the launcher re-`source`s the env file after
+        // these overrides, so the file's value silently won whenever the launcher was
+        // used — and, on the paths where it did stick, made tool-using models fail
+        // against an approval card the owner never saw. OFF stays exactly the A1
+        // fail-closed flow: every mutation asks the owner's phone; no responder ⇒
+        // deny + mutating tools not advertised. ON is the owner's explicit,
+        // confirmed risk acceptance, and the phone shows the bypass indicator.)
+        env["ELDR_ACP_ALLOW_UNGATED_TOOLS"] = (await allowUngatedToolsProvider()) ? "1" : "0"
         // Cross-turn memory: prior transcript as an in-memory system-prompt preamble. Never
         // written to disk (SPEC §3.4) — it lives only in this child process's environment.
         if let preamble = context.priorContext, !preamble.isEmpty {
@@ -527,11 +537,19 @@ final class ACPBridgeService: ObservableObject {
 
     /// Generate/load the identity, publish the QR payload, and start advertising over
     /// Multipeer so a nearby EldrChat can discover the agent.
+    /// UserDefaults key remembering that the operator turned the bridge ON. Restored
+    /// at launch (HuginnApp): without this, every Huginn relaunch silently dropped the
+    /// relay node + tether host until someone re-clicked "Enable bridge" — the
+    /// recurring "the tether stopped working" report was usually just this.
+    static let bridgeEnabledKey = "bridgeEnabledPreference"
+
     func enable() {
         // Tear down any prior advertiser first so re-enabling (e.g. retrying from the
         // `.error` state, where the Enable button is still shown) can't orphan a live
-        // MultipeerNearbyLink + its events Task. Idempotent.
-        if link != nil || eventsTask != nil { disable() }
+        // MultipeerNearbyLink + its events Task. Idempotent. Internal cleanup — the
+        // operator's persisted enable choice must survive it.
+        if link != nil || eventsTask != nil { disable(persistPreference: false) }
+        UserDefaults.standard.set(true, forKey: Self.bridgeEnabledKey)
         do {
             let kp = try loadOrCreateKeypair()
             pairingPayloadJSON = PairingPayload(
@@ -561,7 +579,12 @@ final class ACPBridgeService: ObservableObject {
     }
 
     /// Stop advertising + tear down the PQRC node (keeps the persisted identity/keys).
-    func disable() {
+    /// `persistPreference` is false only for INTERNAL teardown (enable()'s cleanup) —
+    /// a user-initiated stop records the choice so launch doesn't re-enable.
+    func disable(persistPreference: Bool = true) {
+        if persistPreference {
+            UserDefaults.standard.set(false, forKey: Self.bridgeEnabledKey)
+        }
         eventsTask?.cancel()
         eventsTask = nil
         let link = self.link
@@ -701,7 +724,8 @@ final class ACPBridgeService: ObservableObject {
                     // fails closed on its own when no owner/messenger is live.
                     permissionResponder: { [weak self] title, kind in
                         await self?.requestPhonePermission(title: title, kind: kind) ?? false
-                    })
+                    },
+                    allowUngatedToolsProvider: { await Self.operatorAllowsUngatedTools() })
             }
         case .sybilclaw:
             agentRunner = SybilclawAgentRunner(
@@ -739,6 +763,15 @@ final class ACPBridgeService: ObservableObject {
         case .turnFailed(let reason):
             DiagnosticsLog.shared.post(.acp, .error, "Gateway turn failed", reason)
         }
+    }
+
+    /// The operator's persistent trusted-mode toggle, read fresh from the SAME env
+    /// file the CLI launcher sources — so Huginn-hosted paths and external clients
+    /// (Xcode) can never disagree about the effective tool policy.
+    static func operatorAllowsUngatedTools(paths: ConfigPaths = .standard) -> Bool {
+        AgentConfig.fromEnvironment(
+            ConfigurationStore.parseEnvFile(at: paths.envFile), configDir: paths.configDir
+        ).allowUngatedTools
     }
 
     /// sybilclaw gateway port — the SAME Huginn pref the Connections panel writes
@@ -1151,10 +1184,18 @@ final class ACPBridgeService: ObservableObject {
             wrapping: OpenAICompatibleLLMClient(config: llmConfig), model: llmConfig.model)
         let toolEnvironment = ToolEnvironment(
             workdir: agentWorkdir, baseEnvironment: ProcessInfo.processInfo.environment)
+        // Derive the relay-hosted agent's config from the SAME env file every other
+        // surface honors. This host used to pass `AgentConfig.default`, which silently
+        // discarded the operator's context-budget tuning, tool allowlist, permission
+        // timeout, and — the felt one — the persistent "Run tools without asking
+        // permission" toggle: phone remote-drive kept demanding per-call approval
+        // cards (auto-denying on timeout) no matter what the operator had chosen.
+        var relayConfig = AgentConfig.fromEnvironment(
+            ConfigurationStore.parseEnvFile(at: ConfigPaths.standard.envFile),
+            configDir: ConfigPaths.standard.configDir)
         // B2: carry the at-rest metadata key so the in-process agent seals/reads the metadata
         // sinks under the same key. (Today this host passes no configDir/events file, so this
         // is inert; wired now so it stays correct if those are supplied later.)
-        var relayConfig = AgentConfig.default
         relayConfig.metadataKey = metadataKeyB64.flatMap { Data(base64Encoded: $0) }
         let host = ACPRelayHost(
             ownerIdentityHex: ownerIdentityHex,
@@ -1533,7 +1574,24 @@ final class ACPBridgeService: ObservableObject {
 
         switch watchAlongMode {
         case .direct:
-            guard await ownerAuthorized(threadID: conversation.threadID) else { return }
+            // Solo semantics (C7 — "the tether is just an AI"): when the ONLY
+            // recipient is the owner (their 1:1 chat with this node), answer
+            // without requiring a live ai_window — the same rule the phone's own
+            // My-AI solo chat and this file's `sendDraftToOwner` already apply
+            // (its doc: "no window gate — the draft is private, owner↔agent
+            // E2EE"). SPEC §13's window exists to make agent activity VISIBLE TO
+            // OTHER HUMANS; an owner-only reply reaches none. Without this, the
+            // solo tether chat went permanently silent the moment the first
+            // window lapsed — "paired but never responds". Conversations with
+            // any non-owner recipient keep the full window/invite gate.
+            if !recipientsAreOwnerOnly {
+                guard await ownerAuthorized(threadID: conversation.threadID) else {
+                    DiagnosticsLog.shared.post(
+                        .node, .warn, "Watch-along prompt dropped",
+                        "no active owner window/invite for this group/thread")
+                    return
+                }
+            }
             let agentContext = await makeAgentContext()
             // Record the owner's prompt only once we're committed to answering it (past the
             // owner-window gate), so the transcript never accumulates a dangling User turn
@@ -1622,8 +1680,20 @@ final class ACPBridgeService: ObservableObject {
     /// (PQXDH + Double Ratchet), so divergent bodies are natural and only the owner's
     /// session ever carries the secret, E2E-encrypted to the owner.
     func broadcastAgentMessage(_ text: String, conversation: BridgeConversation) async {
-        guard await ownerAuthorized(threadID: conversation.threadID), let ownerIdentityHex
-        else { return }  // fail closed — no live owner window ⇒ no send
+        guard let ownerIdentityHex else { return }  // no owner pinned ⇒ fail closed
+        // Solo semantics: an owner-only send is the private owner↔agent channel
+        // `sendDraftToOwner` already serves without a window (see the rationale at
+        // `handleInboundPrompt`'s `.direct` gate). Any non-owner recipient keeps
+        // the full fail-closed window/invite gate.
+        let ownerOnly = conversation.recipients.allSatisfy { $0 == ownerIdentityHex }
+        if !ownerOnly {
+            guard await ownerAuthorized(threadID: conversation.threadID) else {
+                DiagnosticsLog.shared.post(
+                    .node, .warn, "Agent send dropped",
+                    "no active owner window/invite for this group/thread")
+                return  // fail closed — no live owner window ⇒ no send
+            }
+        }
         let redacted = CredentialRedactor.scrub(text)
         for member in conversation.recipients {
             let visible = member == ownerIdentityHex ? text : redacted

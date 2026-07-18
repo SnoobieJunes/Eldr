@@ -33,10 +33,7 @@ final class PendingApprovalNotifier: ObservableObject {
     private var cancellables: Set<AnyCancellable> = []
 
     /// Wire this notifier to both pending-approval surfaces. Call once, from the
-    /// composition root (`HuginnApp`), once both hosts exist. Idempotent — re-calling
-    /// just re-subscribes (harmless; the old subscriptions are dropped when
-    /// `cancellables` is overwritten by the fresh `.store` insert... actually simplest
-    /// to just guard against a second call).
+    /// composition root (`HuginnApp`), once both hosts exist; later calls are no-ops.
     func observe(a2aHost: A2AServerHost, testChatSession: TestChatSession) {
         guard cancellables.isEmpty else { return }
         a2aHost.$pendingApprovals

@@ -21,6 +21,7 @@ breaks toward privacy.
   budget, at-rest log redaction. The `eldr-acp` executable.
 - `PQRCMCP` — MCP server exposing the phone's chat context as CODENAMES only.
 - `EldrNode` / `Eldrctl` — headless `eldr-node` daemon + `eldrctl` CLI.
+- `SwiftA2A` — A2A v1.0 (Agent2Agent) core types, JSON-RPC, client/server, HTTP transport.
 
 `App/` is the thin SwiftUI iOS app (`EldrChat.xcodeproj`; sources under `App/PQRC/`).
 `Apps/Huginn/` is the macOS companion (`Huginn.xcodeproj`) that runs the tethered AI +
@@ -36,8 +37,8 @@ export DEVELOPER_DIR=/Applications/Xcode-beta.app/Contents/Developer
 ```
 
 ```bash
-# Fast headless inner loop — all seven packages.
-for p in PQRCCore PQRCNostr PQRCAgent PQRCACP PQRCMCP EldrNode Eldrctl; do
+# Fast headless inner loop — all eight packages.
+for p in PQRCCore PQRCNostr PQRCAgent PQRCACP PQRCMCP EldrNode Eldrctl SwiftA2A; do
   swift test --package-path "Packages/$p" || break
 done
 

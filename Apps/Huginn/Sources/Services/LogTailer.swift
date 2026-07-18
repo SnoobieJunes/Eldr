@@ -32,13 +32,22 @@ final class LogTailer: ObservableObject {
     private let path: String
     /// Cap retained lines so a long-running session doesn't grow unbounded in memory.
     private let maxLines = 2000
+    /// Cap how much of an EXISTING file the tailer reads when it (re)opens. A
+    /// long-lived server log reaches hundreds of KB, and `readToEnd()` of the whole
+    /// file on the main actor visibly froze the MLX tab on first open — seeding from
+    /// the last 64 KB keeps open instant. Incremental delta reads stay unbounded
+    /// (they're the few bytes just appended).
+    private let maxSeedBytes: UInt64
 
     private var source: DispatchSourceFileSystemObject?
     private var handle: FileHandle?
     private var offset: UInt64 = 0
     private var nextID = 0
 
-    init(path: String) { self.path = path }
+    init(path: String, maxSeedBytes: UInt64 = 65_536) {
+        self.path = path
+        self.maxSeedBytes = maxSeedBytes
+    }
 
     deinit { source?.cancel() }
 
@@ -82,9 +91,16 @@ final class LogTailer: ObservableObject {
         guard let h = FileHandle(forReadingAtPath: path) else { return }
         handle = h
 
-        // Seed with the existing tail so the view isn't empty on open.
-        let existing = (try? h.readToEnd()) ?? Data()
-        offset = (try? h.offset()) ?? UInt64(existing.count)
+        // Seed with the existing TAIL (bounded) so the view isn't empty on open.
+        let size = (try? h.seekToEnd()) ?? 0
+        let seedStart = size > maxSeedBytes ? size - maxSeedBytes : 0
+        try? h.seek(toOffset: seedStart)
+        var existing = (try? h.readToEnd()) ?? Data()
+        if seedStart > 0, let firstNewline = existing.firstIndex(of: UInt8(ascii: "\n")) {
+            // Started mid-line: drop the partial first line.
+            existing = existing[existing.index(after: firstNewline)...]
+        }
+        offset = (try? h.offset()) ?? size
         ingest(existing, seeding: true)
 
         let src = DispatchSource.makeFileSystemObjectSource(

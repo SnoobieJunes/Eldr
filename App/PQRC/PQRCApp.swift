@@ -1269,6 +1269,11 @@ final class AppSession {
         }
     }
 
+    // TODO(AC111): under --uitest the post-boot conversation seeding occasionally
+    // never materializes a single row (observed: zero `conversation-*` elements
+    // after 150 s, vs rows by ~50 s on a healthy boot; everything is in-memory,
+    // so it's a boot race, not persistence). UI tests mitigate with one relaunch
+    // (UXVerificationTests.launchUniverse); root-cause the seed path.
     func bootUniverse(runScript: Bool) async {
         let universe = LocalUniverse()
         do {

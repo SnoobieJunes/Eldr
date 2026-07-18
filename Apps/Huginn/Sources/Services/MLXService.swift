@@ -1,4 +1,5 @@
 import AppKit
+import Combine
 import Foundation
 import PQRCACP
 import os
@@ -18,6 +19,12 @@ import os
 /// machine. The server is independent of jobs.
 @MainActor
 final class MLXService: ObservableObject {
+
+    /// ONE app-wide instance. The MLX tab used to create its own `@StateObject`, so a
+    /// torn-down/recreated tab view spawned a second service that had lost track of the
+    /// first one's running server child (stale "Stopped" UI, port-bind failures on the
+    /// next Start). The server is a machine-wide resource; its owner must be too.
+    static let shared = MLXService()
 
     // MARK: - Environment
 
@@ -47,6 +54,10 @@ final class MLXService: ObservableObject {
     @Published private(set) var serverState: ServerState = .stopped
     /// Latest health-probe result (child AND launchd mode; `.unknown` when idle).
     @Published private(set) var probeStatus: LLMHealthChecker.HealthResult = .unknown
+    /// A model-load failure spotted in the server's own log AFTER our launch. The
+    /// health probe can't see this: `mlx_lm.server`'s load thread can die while
+    /// `/v1/models` keeps answering 200, leaving a "healthy" server whose chats hang.
+    @Published private(set) var serverWarning: String?
     /// The config the running server was actually launched with — UI shows a
     /// "restart to apply" hint when it drifts from the edited `serverConfig`.
     @Published private(set) var launchedServerConfig: MLXServerConfig?
@@ -117,6 +128,15 @@ final class MLXService: ObservableObject {
     private var monitorTask: Task<Void, Never>?
     private var jobTask: Task<Void, Never>?
 
+    /// The server log's live tail — owned HERE (not by the view) so (a) exactly one
+    /// tailer exists no matter how often the tab view is rebuilt, and (b) the service
+    /// can scan newly-appended lines for load failures (`serverWarning`).
+    let serverLog: LogTailer
+    private var logScanCancellable: AnyCancellable?
+    /// Only log lines with ids beyond this belong to OUR current launch; older ones
+    /// are a previous run's history and must not raise a warning for this one.
+    private var logScanBaselineID = Int.max
+
     static func serverLogPath(paths: ConfigPaths) -> String {
         ((paths.mlxDir as NSString).appendingPathComponent("mlx-server.log"))
     }
@@ -144,10 +164,21 @@ final class MLXService: ObservableObject {
             .flatMap { try? JSONDecoder().decode(MLXServerConfig.self, from: $0) }
             ?? MLXServerConfig()
         autostartEnabled = FileManager.default.fileExists(atPath: launchAgentPlistPath)
+        serverLog = LogTailer(path: Self.serverLogPath(paths: paths))
 
         try? FileManager.default.createDirectory(
             atPath: paths.mlxDir, withIntermediateDirectories: true)
+        // The HF hub cache must exist BEFORE the server serves: huggingface_hub's
+        // scan_cache_dir() raises CacheNotFound on a missing directory, which made
+        // every /v1/models request die with a traceback until the first download
+        // created it (observed live in mlx-server.log).
+        try? FileManager.default.createDirectory(
+            atPath: cacheDir, withIntermediateDirectories: true)
         startMonitor()
+        serverLog.start()
+        logScanCancellable = serverLog.$lines
+            .receive(on: RunLoop.main)
+            .sink { [weak self] lines in self?.scanServerLog(lines) }
         // A child server must not outlive the app (the UI promises "stops when
         // Huginn quits", and an orphan would hold the port hostage for the next
         // session). launchd-managed servers deliberately DO survive quit. The
@@ -250,8 +281,8 @@ final class MLXService: ObservableObject {
             serverState = .failed("Install the MLX environment first.")
             return
         }
-        guard !serverConfig.model.trimmingCharacters(in: .whitespaces).isEmpty else {
-            serverState = .failed("Set a model first — pick one in the Models section.")
+        if let problem = MLXCommand.validateServerModel(serverConfig.model) {
+            serverState = .failed(problem)
             return
         }
         if autostartEnabled {
@@ -281,7 +312,12 @@ final class MLXService: ObservableObject {
     }
 
     private func launchServerProcess() {
-        let config = serverConfig
+        var config = serverConfig
+        // A "~/…" model is legal in the UI but not to Python: expand it here (the
+        // validator already did, for its checks).
+        if config.model.hasPrefix("~") {
+            config.model = (config.model as NSString).expandingTildeInPath
+        }
         let arguments = MLXCommand.serverArguments(config)
 
         guard let logHandle = openServerLogHandle() else {
@@ -325,6 +361,7 @@ final class MLXService: ObservableObject {
         serverLogHandle = logHandle
         launchedServerConfig = config
         serverState = .starting
+        beginLogScanForThisLaunch()
         Self.log.info("mlx server starting on port \(config.port, privacy: .public)")
         diagnostics.record(.mlx, .info, "MLX server starting", "\(config.model) on \(config.baseURL)")
     }
@@ -355,6 +392,7 @@ final class MLXService: ObservableObject {
         if expectingServerStop {
             expectingServerStop = false
             serverState = .stopped
+            serverWarning = nil
             diagnostics.record(.mlx, .info, "MLX server stopped")
         } else {
             serverState = .failed(
@@ -376,6 +414,34 @@ final class MLXService: ObservableObject {
 
     private static func describeExit(_ status: Int32) -> String {
         status == 15 ? "terminated" : "status \(status)"
+    }
+
+    // MARK: - Server-log failure scan
+
+    /// Reset the warning + move the scan baseline to "now": only lines appended
+    /// after this launch can raise a warning for it.
+    private func beginLogScanForThisLaunch() {
+        serverWarning = nil
+        logScanBaselineID = serverLog.lines.last.map { $0.id + 1 } ?? 0
+    }
+
+    /// Watch the server's own log for a dead model-load thread. Triggered on every
+    /// tail update; only lines newer than the launch baseline count, and only while
+    /// a server we manage should be up.
+    private func scanServerLog(_ lines: [LogLine]) {
+        guard serverWarning == nil, serverProcess != nil || autostartEnabled else { return }
+        let markers = [
+            "HFValidationError", "CacheNotFound", "Exception in thread",
+            "Traceback (most recent call last)",
+        ]
+        for line in lines where line.id >= logScanBaselineID {
+            if markers.contains(where: { line.text.contains($0) }) {
+                serverWarning =
+                    "The server hit an error while loading the model — chats will hang even though the health check answers. Check the model id/path (log below)."
+                diagnostics.record(.mlx, .error, "MLX model load failed", "see mlx-server.log")
+                return
+            }
+        }
     }
 
     // MARK: - Health monitor
@@ -427,8 +493,8 @@ final class MLXService: ObservableObject {
                 serverState = .failed("Install the MLX environment first.")
                 return
             }
-            guard !serverConfig.model.isEmpty else {
-                serverState = .failed("Set a model first — pick one in the Models section.")
+            if let problem = MLXCommand.validateServerModel(serverConfig.model) {
+                serverState = .failed(problem)
                 return
             }
             if let process = serverProcess, process.isRunning {
@@ -500,6 +566,7 @@ final class MLXService: ObservableObject {
             "/bin/launchctl", ["bootstrap", "gui/\(getuid())", launchAgentPlistPath])
         if result.status == 0 {
             launchedServerConfig = serverConfig
+            beginLogScanForThisLaunch()
             diagnostics.record(.mlx, .info, "MLX server (launchd) restarted")
         } else {
             serverState = .failed(
@@ -512,6 +579,7 @@ final class MLXService: ObservableObject {
         _ = await Self.captureProcess(
             "/bin/launchctl", ["kill", "SIGTERM", launchdServiceTarget])
         probeStatus = .unknown
+        serverWarning = nil
         diagnostics.record(.mlx, .info, "MLX server (launchd) sent SIGTERM")
     }
 
@@ -558,8 +626,10 @@ final class MLXService: ObservableObject {
         refreshCachedModels()
     }
 
-    func searchHub(query: String, mlxCommunityOnly: Bool) async {
-        guard let url = MLXCommand.searchURL(query: query, mlxCommunityOnly: mlxCommunityOnly)
+    func searchHub(query: String, author: String?, mlxOnly: Bool, sort: String) async {
+        guard
+            let url = MLXCommand.searchURL(
+                query: query, author: author, mlxOnly: mlxOnly, sort: sort)
         else { return }
         isSearching = true
         modelsError = nil

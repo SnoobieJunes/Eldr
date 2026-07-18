@@ -655,8 +655,10 @@ public actor ACPAgent {
         } catch {
             // C-6: stderr is an at-rest diagnostic sink (the launcher tees it to a
             // logfile); scrub the error text in case it echoes a request body/header.
-            FileHandle.standardError.write(
-                Data(config.logRedactor("contextgraph assemble failed: \(Self.describe(error))\n").utf8))
+            // Throwing write: a dead tee must not crash the agent (broken-pipe class).
+            try? FileHandle.standardError.write(
+                contentsOf: Data(
+                    config.logRedactor("contextgraph assemble failed: \(Self.describe(error))\n").utf8))
             return nil
         }
     }

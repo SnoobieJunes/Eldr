@@ -52,3 +52,34 @@ curl -s http://127.0.0.1:<port>/.well-known/agent-card.json \
   distinct delegation consent exists exactly so this is a deliberate per-use choice.
 - **Card signatures are not yet verified** (AC99): card trust currently equals transport
   trust. HTTPS/bearer locally; kind-10420 peer verification over PQRC.
+
+## CLI quickstart — talking to the served agent from a terminal (verified 2026-07-18)
+
+Any local process (Claude Code, a script, another agent) can drive the served
+agent once **Bridge ▸ Serve A2A** is on. The bearer token mirrors once into the
+login keychain for exactly this use (first `security` read prompts once —
+Always Allow):
+
+```bash
+TOKEN=$(security find-generic-password -s chat.eldr.huginn -a a2a-server-bearer-token -w)
+H=(-H "Authorization: Bearer $TOKEN" -H "A2A-Version: 1.0" -H "Content-Type: application/json")
+
+# Send (non-blocking). WITHOUT returnImmediately the JSON-RPC response blocks
+# until the task is terminal (spec behavior) — always pass it from a CLI.
+curl -s "${H[@]}" http://127.0.0.1:41252/a2a -d '{
+  "jsonrpc":"2.0","id":1,"method":"SendMessage",
+  "params":{"configuration":{"returnImmediately":true},
+            "message":{"role":"ROLE_USER","parts":[{"text":"…"}]}}}'
+# → result.task.id; then poll (result IS the task object):
+curl -s "${H[@]}" http://127.0.0.1:41252/a2a -d '{
+  "jsonrpc":"2.0","id":2,"method":"GetTask","params":{"id":"<task-id>"}}'
+# → result.status.state == TASK_STATE_COMPLETED, reply in result.artifacts[].parts[].text
+```
+
+Per-task approval applies unless **Auto-approve inbound tasks** is on
+(are-you-sure-confirmed; tool use inside tasks still follows Security ▸
+ungated-tools). The reverse direction — the LOCAL model tasking a cloud agent —
+is `delegate_to_cloud_agent` (harness `claude-code` → `claude-agent-acp`,
+using the `claude` CLI's own login); it requires an LLM server whose tool-call
+output mlx-lm can parse (see LOOP-STATE 2026-07-18: Qwen3-Coder-Next's XML
+grammar does not parse; Qwen3.6-27B's classic format does).

@@ -23,6 +23,9 @@ struct ConfigurationView: View {
     @State private var newestPQRCACPSourceDate: Date?
     @State private var reinstalling = false
     @State private var reinstallError: String?
+    /// Are-you-sure step for the persistent ungated-tools toggle: the switch flips
+    /// only after explicit confirmation; turning it OFF never asks.
+    @State private var confirmUngatedTools = false
 
     var body: some View {
         TabView {
@@ -52,7 +55,10 @@ struct ConfigurationView: View {
     private func settingsForm<Content: View>(@ViewBuilder _ content: () -> Content) -> some View {
         Form { content() }
             .formStyle(.grouped)
-            .frame(maxWidth: 720, alignment: .leading)
+            // 980 (was 720): use the window's width for settings too — the old cap
+            // left a third of a desktop window as dead margin ("app doesn't expand
+            // horizontally"), while 980 still keeps captions at a readable measure.
+            .frame(maxWidth: 980, alignment: .leading)
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
     }
 
@@ -230,6 +236,19 @@ struct ConfigurationView: View {
         }
     }
 
+    /// ON goes through the are-you-sure dialog; OFF applies immediately.
+    private var ungatedToolsBinding: Binding<Bool> {
+        Binding(
+            get: { store.allowUngatedTools },
+            set: { on in
+                if on {
+                    confirmUngatedTools = true
+                } else {
+                    store.allowUngatedTools = false
+                }
+            })
+    }
+
     private func byteLabel(_ bytes: Int) -> String {
         bytes == 0 ? "unbounded" : "\(bytes / 1024) KB"
     }
@@ -251,10 +270,23 @@ struct ConfigurationView: View {
     private var securityTab: some View {
         settingsForm {
             Section("Security") {
-                Toggle("Run tools without asking permission", isOn: $store.allowUngatedTools)
+                Toggle("Run tools without asking permission", isOn: ungatedToolsBinding)
+                    .confirmationDialog(
+                        "Let the agent run tools without asking?",
+                        isPresented: $confirmUngatedTools, titleVisibility: .visible
+                    ) {
+                        Button("Enable — I accept the risk", role: .destructive) {
+                            store.allowUngatedTools = true
+                        }
+                        Button("Cancel", role: .cancel) {}
+                    } message: {
+                        Text(
+                            "The agent will create and modify files and run shell commands with no per-action approval — in Xcode, Test Chat, and phone-driven sessions on this Mac. A prompt-injected chat message could execute commands unattended. This does NOT expire; it stays on until you switch it off here. Your phone shows a bypass indicator while it's on."
+                        )
+                    }
                 if store.allowUngatedTools {
                     Label(
-                        "The agent will create/modify files and run shell commands with NO prompt. Only enable on a machine you fully trust and isolate.",
+                        "The agent will create/modify files and run shell commands with NO prompt — everywhere, until you turn this off. Only for a machine you fully trust and isolate.",
                         systemImage: "exclamationmark.triangle.fill"
                     )
                     .font(.caption).foregroundStyle(.red)

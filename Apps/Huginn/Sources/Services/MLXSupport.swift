@@ -254,21 +254,79 @@ enum MLXCommand {
         return nil
     }
 
-    /// Hugging Face model-search endpoint (most-downloaded first). `nil` only for
+    /// The publishers the Models section offers as source filters — the same houses
+    /// LM Studio's discover surface leans on. "" = any publisher.
+    static let searchPublishers = [
+        "", "mlx-community", "lmstudio-community", "unsloth", "Qwen", "bartowski",
+    ]
+
+    /// Search sort orders the HF list API accepts (label → API value).
+    static let searchSorts: [(label: String, value: String)] = [
+        ("Downloads", "downloads"),
+        ("Likes", "likes"),
+        ("Trending", "trendingScore"),
+        ("Updated", "lastModified"),
+    ]
+
+    /// Hugging Face model-search endpoint. `mlxOnly` filters by the `mlx` library tag
+    /// (any publisher's MLX-format builds — the only kind `mlx_lm.server` can load);
+    /// `author` narrows to one publisher (mlx-community / lmstudio-community / unsloth
+    /// / …; empty = all). `expand[]` requests the row fields the UI captions
+    /// (downloads/likes/updated/tags — verified against the live API). `nil` only for
     /// a query URLComponents can't percent-encode.
-    static func searchURL(query: String, mlxCommunityOnly: Bool, limit: Int = 20) -> URL? {
+    static func searchURL(
+        query: String, author: String? = nil, mlxOnly: Bool = true,
+        sort: String = "downloads", limit: Int = 30
+    ) -> URL? {
         guard var components = URLComponents(string: "https://huggingface.co/api/models") else {
             return nil
         }
         var items = [
-            URLQueryItem(name: "sort", value: "downloads"),
+            URLQueryItem(name: "sort", value: sort),
             URLQueryItem(name: "direction", value: "-1"),
             URLQueryItem(name: "limit", value: String(limit)),
         ]
         if !query.isEmpty { items.append(URLQueryItem(name: "search", value: query)) }
-        if mlxCommunityOnly { items.append(URLQueryItem(name: "author", value: "mlx-community")) }
+        if let author, !author.isEmpty { items.append(URLQueryItem(name: "author", value: author)) }
+        if mlxOnly { items.append(URLQueryItem(name: "filter", value: "mlx")) }
+        for field in ["downloads", "likes", "lastModified", "tags"] {
+            items.append(URLQueryItem(name: "expand[]", value: field))
+        }
         components.queryItems = items
         return components.url
+    }
+
+    /// Pre-launch validation of the server's `--model` value, so a typo'd local path
+    /// fails HERE with a real message instead of what actually happens without it:
+    /// `mlx_lm.server` starts, its model-load thread dies (HFValidationError), and
+    /// `/v1/models` keeps answering 200 — a "healthy" server whose every chat hangs.
+    /// Returns the user-facing problem, or nil when the value is launchable.
+    static func validateServerModel(
+        _ raw: String, fileManager: FileManager = .default
+    ) -> String? {
+        let model = (raw.trimmingCharacters(in: .whitespacesAndNewlines) as NSString)
+            .expandingTildeInPath
+        guard !model.isEmpty else {
+            return "Set a model first — pick one in the Models section."
+        }
+        if model.hasPrefix("/") {
+            var isDir: ObjCBool = false
+            guard fileManager.fileExists(atPath: model, isDirectory: &isDir) else {
+                return "That model folder doesn't exist: \(model). Pick a cached model from the Models section, or Browse… to a real MLX model folder."
+            }
+            guard isDir.boolValue else {
+                return "The model path must be a folder holding the MLX model files (config.json + weights), not a single file. (A .gguf file is LM Studio/llama.cpp format — mlx_lm can't load it; download an MLX build instead.)"
+            }
+            guard fileManager.fileExists(
+                atPath: (model as NSString).appendingPathComponent("config.json"))
+            else {
+                return "That folder has no config.json, so it isn't an MLX model folder. Pick the folder that directly contains config.json and the .safetensors weights."
+            }
+            return nil
+        }
+        return isValidRepoID(model)
+            ? nil
+            : "\u{201C}\(raw)\u{201D} isn't a Hugging Face model id (owner/name) or an absolute folder path."
     }
 
     // MARK: Helpers
@@ -378,6 +436,15 @@ struct MLXHubModel: Identifiable, Equatable, Sendable, Decodable {
     let id: String
     let downloads: Int?
     let likes: Int?
+    let lastModified: String?
+    let tags: [String]?
+
+    /// The quantization tag HF carries for MLX builds ("4-bit"/"8-bit"/…), if any.
+    var quantLabel: String? {
+        tags?.first { $0.hasSuffix("-bit") }
+    }
+
+    var isMLX: Bool { tags?.contains("mlx") ?? false }
 }
 
 // MARK: - Terminal output buffer

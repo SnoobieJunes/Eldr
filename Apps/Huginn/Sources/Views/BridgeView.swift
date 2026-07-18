@@ -16,6 +16,9 @@ struct BridgeView: View {
     // pending-approval badge + the notification observer) — was a private
     // @StateObject here.
     @EnvironmentObject private var a2aHost: A2AServerHost
+    /// Are-you-sure step for A2A auto-approve (mirrors the Security tab's
+    /// ungated-tools dialog): ON only through explicit confirmation, OFF instantly.
+    @State private var confirmA2AAutoApprove = false
     @State private var copied = false
     @State private var manualOwnerHex = ""
     @State private var a2aBearerField = ""
@@ -46,7 +49,9 @@ struct BridgeView: View {
                 a2aServingBox
             }
             .padding(20)
-            .frame(maxWidth: 640, alignment: .leading)
+            // Wide enough to actually use a desktop window (the old 640 left half a
+            // 1200-pt window as dead margin); the cap only bites on very wide panes.
+            .frame(maxWidth: 1100, alignment: .leading)
             .frame(maxWidth: .infinity)
         }
         .task {
@@ -69,12 +74,31 @@ struct BridgeView: View {
             // (which may carry `allowUngatedTools: true`): a remote HTTP caller's tasks stay
             // fail-closed regardless of that Mac-local convenience toggle — the ONLY thing that
             // authorizes a mutating tool on this surface is the per-task "allow tool use"
-            // checkbox in the approval UI (default off).
+            // checkbox in the approval UI (default off), or — for auto-approved headless
+            // tasks — the operator's confirmed AC108 toggle via the provider below.
             a2aHost.agentConfigProvider = { .default }
+            a2aHost.autoApproveProvider = { store.a2aAutoApprove }
+            a2aHost.autoApproveAllowsToolsProvider = {
+                ACPBridgeService.operatorAllowsUngatedTools()
+            }
         }
     }
 
     // MARK: - A2A serving (surface b — this Mac serves an A2A endpoint other clients call)
+
+    /// ON routes through the are-you-sure dialog; OFF applies immediately (same
+    /// shape as `ConfigurationView.ungatedToolsBinding`).
+    private var a2aAutoApproveBinding: Binding<Bool> {
+        Binding(
+            get: { store.a2aAutoApprove },
+            set: { on in
+                if on {
+                    confirmA2AAutoApprove = true
+                } else {
+                    store.a2aAutoApprove = false
+                }
+            })
+    }
 
     private var a2aServingBox: some View {
         GroupBox("A2A serving") {
@@ -90,6 +114,28 @@ struct BridgeView: View {
                         get: { a2aHost.isServing },
                         set: { newValue in Task { newValue ? await a2aHost.start() : await a2aHost.stop() } }
                     ))
+
+                Toggle("Auto-approve inbound tasks (headless/CLI)", isOn: a2aAutoApproveBinding)
+                    .confirmationDialog(
+                        "Run inbound A2A tasks without asking?",
+                        isPresented: $confirmA2AAutoApprove, titleVisibility: .visible
+                    ) {
+                        Button("Enable — I accept the risk", role: .destructive) {
+                            store.a2aAutoApprove = true
+                        }
+                        Button("Cancel", role: .cancel) {}
+                    } message: {
+                        Text(
+                            "Any local process holding the bearer token can run tasks on your agent immediately, with no approval prompt. Tool use inside those tasks still follows Security ▸ \u{201C}Run tools without asking permission\u{201D}. This does not expire; it stays on until you switch it off here."
+                        )
+                    }
+                if store.a2aAutoApprove {
+                    Label(
+                        "Inbound tasks run WITHOUT per-task approval. Tool use follows the Security tab's ungated-tools toggle.",
+                        systemImage: "exclamationmark.triangle.fill"
+                    )
+                    .font(.caption).foregroundStyle(.orange)
+                }
 
                 LabeledContent("Port") {
                     TextField(

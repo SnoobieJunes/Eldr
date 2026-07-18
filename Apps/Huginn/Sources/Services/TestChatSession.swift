@@ -335,8 +335,10 @@ final class TestChatSession: ObservableObject {
 
     /// Best-effort sweep of scratch dirs earlier sessions left behind — nothing ever
     /// removed them, so they accumulated in `$TMPDIR` indefinitely. Runs once per
-    /// session start; a locked/in-use leftover is simply skipped and swept next time.
-    /// Only ever touches its own "eldr-acp-testchat-*" prefix.
+    /// session object, BEFORE this session mints its own scratch dir, so it can only
+    /// ever remove leftovers (or another concurrently-running Huginn's — acceptable
+    /// for a single-instance dev tool). Only touches the "eldr-acp-testchat-" prefix;
+    /// a dir that can't be removed is skipped and retried next launch.
     private static func cleanupStaleWorkspaces() {
         let fm = FileManager.default
         let tmp = NSTemporaryDirectory()

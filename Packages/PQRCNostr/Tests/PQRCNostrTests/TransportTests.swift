@@ -126,76 +126,10 @@ struct TransportTests {
         await collector.stop()
     }
 
-    @Test func blossom_blobRoundTrip_sha256Verified_mirrorFallback() async throws {
-        let primary = LocalBlossomSimulator(baseURL: "local://blossom-1")
-        let mirror = LocalBlossomSimulator(baseURL: "local://blossom-2")
-        await primary.addMirror(mirror)
-
-        let payload = SeededRandomSource(seed: 21).bytes(200 * 1024)  // 200 KB
-        let pointer = try await BlobCipher.encryptAndStore(
-            payload, store: primary, mirrorURLs: ["local://blossom-2"],
-            randomSource: SeededRandomSource(seed: 22), nonceSource: SeededRandomSource(seed: 23))
-
-        // Round trip from the primary.
-        #expect(try await BlobCipher.fetchAndDecrypt(pointer, store: primary) == payload)
-        // Primary outage: the mirror serves the same content-addressed blob.
-        await primary.setFailing(true)
-        #expect(try await BlobCipher.fetchAndDecrypt(pointer, store: primary) == payload)
-        // Integrity: a pointer with a wrong hash never returns data.
-        let badPointer = ContentPointer(
-            blossomURL: pointer.blossomURL, decryptionKey: pointer.decryptionKey,
-            sha256: String(repeating: "00", count: 32), sizeBytes: pointer.sizeBytes,
-            mirrorURLs: pointer.mirrorURLs)
-        await #expect(throws: NostrError.self) {
-            _ = try await BlobCipher.fetchAndDecrypt(badPointer, store: primary)
-        }
-    }
-
-    @Test func relayEnvelope_constantSizeRegardlessOfBlobSize() async throws {
-        // A 5 MB attachment and a 200 KB attachment produce the SAME on-relay
-        // envelope size profile: the pointer body pads to the same bucket.
-        let store = LocalBlossomSimulator()
-        let clock = FixedClock()
-        var envelopeSizes = Set<Int>()
-        for (seed, size) in [(31, 200 * 1024), (32, 5 * 1024 * 1024)] {
-            let payload = SeededRandomSource(seed: UInt64(seed)).bytes(size)
-            let pointer = try await BlobCipher.encryptAndStore(
-                payload, store: store,
-                randomSource: SeededRandomSource(seed: 33), nonceSource: SeededRandomSource(seed: 34))
-            let (alice, bob) = try await establishedPair(seedOffset: UInt64(seed * 100), clock: clock)
-            let outgoing = try await alice.encrypt(
-                body: MessageBody(text: "", sentAt: 0), participantType: .human,
-                contentPointer: pointer)
-            _ = bob
-            envelopeSizes.insert(outgoing.rumor.ciphertext?.count ?? 0)
-        }
-        #expect(envelopeSizes.count == 1, "pointer envelopes are constant-size")
-    }
-
-    /// Direct session pair without relays (for size checks).
-    private func establishedPair(
-        seedOffset: UInt64, clock: FixedClock
-    ) async throws -> (PQRCSession, PQRCSession) {
-        let alice = try PQRCIdentity(seed: SeededRandomSource(seed: seedOffset).bytes(32))
-        let bob = try PQRCIdentity(seed: SeededRandomSource(seed: seedOffset &+ 1).bytes(32))
-        let random = SeededRandomSource(seed: seedOffset &+ 2)
-        let aliceIKDH = try Curve25519.KeyAgreement.PrivateKey(rawRepresentation: random.bytes(32))
-        let prekeys = try PrekeyManager(identity: bob, randomSource: random, oneTimeCount: 1)
-        let bundle = try await prekeys.publicBundle()
-        let initiation = try PQXDH.initiate(
-            myIdentity: alice, myIdentityDH: aliceIKDH, peerBundle: bundle, randomSource: random)
-        let aliceSession = try PQRCSession(
-            initiation: initiation, peerIdentityPubkey: bob.publicKeyData, clock: clock,
-            randomSource: random)
-        let consumed = try await prekeys.consume(
-            spkUsed: initiation.message.spkUsed, otpUsed: initiation.message.otpUsed,
-            otpPQUsed: initiation.message.otpPQUsed, lrpUsed: initiation.message.lrpUsed)
-        let response = try PQXDH.respond(
-            myIdentityPub: bob.publicKeyData, consumed: consumed, message: initiation.message)
-        let bobSession = PQRCSession(
-            response: response, myKEMPrivate: consumed.otpPQ ?? consumed.pqpk,
-            peerIdentityPubkey: alice.publicKeyData, clock: clock,
-            randomSource: SeededRandomSource(seed: seedOffset &+ 3))
-        return (aliceSession, bobSession)
-    }
+    // The Blossom/blob-pointer transport tests (round-trip, mirror failover,
+    // constant-size pointer envelopes) were removed: the blob path is vestigial and
+    // permanently rejected (CLAUDE.md rule 4 — text-only product, no blob server;
+    // >64 KB text goes via relay chunking, covered by ChunkingTests and the relay
+    // chunk suites). `ptr` stays NIP wire law, so its codec fidelity remains pinned
+    // by PQRCCore's PaddingEnvelopeTests + SessionTests.
 }

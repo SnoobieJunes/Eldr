@@ -180,7 +180,8 @@ struct MLXCommandTests {
 
     @Test func searchURLComposition() throws {
         let url = try #require(
-            MLXCommand.searchURL(query: "qwen 4bit", mlxCommunityOnly: true, limit: 20))
+            MLXCommand.searchURL(
+                query: "qwen 4bit", author: "mlx-community", mlxOnly: true, limit: 20))
         let components = try #require(URLComponents(url: url, resolvingAgainstBaseURL: false))
         #expect(components.host == "huggingface.co")
         #expect(components.path == "/api/models")
@@ -188,12 +189,67 @@ struct MLXCommandTests {
         #expect(items.contains(URLQueryItem(name: "author", value: "mlx-community")))
         #expect(items.contains(URLQueryItem(name: "search", value: "qwen 4bit")))
         #expect(items.contains(URLQueryItem(name: "sort", value: "downloads")))
+        // MLX filter = the `mlx` library tag, independent of publisher.
+        #expect(items.contains(URLQueryItem(name: "filter", value: "mlx")))
+        // The UI captions need these expanded row fields.
+        let expanded = items.filter { $0.name == "expand[]" }.compactMap(\.value)
+        #expect(Set(expanded).isSuperset(of: ["downloads", "likes", "lastModified", "tags"]))
 
-        let noAuthor = try #require(MLXCommand.searchURL(query: "", mlxCommunityOnly: false))
+        let noAuthor = try #require(
+            MLXCommand.searchURL(query: "", author: nil, mlxOnly: false))
         let noAuthorItems =
             URLComponents(url: noAuthor, resolvingAgainstBaseURL: false)?.queryItems ?? []
         #expect(!noAuthorItems.contains { $0.name == "author" })
         #expect(!noAuthorItems.contains { $0.name == "search" })
+        #expect(!noAuthorItems.contains { $0.name == "filter" })
+
+        let sorted = try #require(
+            MLXCommand.searchURL(query: "x", author: "unsloth", mlxOnly: true, sort: "likes"))
+        let sortedItems =
+            URLComponents(url: sorted, resolvingAgainstBaseURL: false)?.queryItems ?? []
+        #expect(sortedItems.contains(URLQueryItem(name: "sort", value: "likes")))
+        #expect(sortedItems.contains(URLQueryItem(name: "author", value: "unsloth")))
+    }
+
+    @Test func hubModelDecodesSearchRow() throws {
+        let json = """
+            [{"id":"lmstudio-community/Qwen3.6-27B-MLX-4bit","downloads":995364,"likes":7,
+              "lastModified":"2026-04-22T14:25:11.000Z",
+              "tags":["transformers","safetensors","mlx","4-bit","region:us"]}]
+            """
+        let rows = try JSONDecoder().decode([MLXHubModel].self, from: Data(json.utf8))
+        let row = try #require(rows.first)
+        #expect(row.isMLX)
+        #expect(row.quantLabel == "4-bit")
+        #expect(row.lastModified?.hasPrefix("2026-04-22") == true)
+    }
+
+    @Test func serverModelValidation() throws {
+        // Repo ids pass; junk fails.
+        #expect(MLXCommand.validateServerModel("mlx-community/Qwen3-4bit") == nil)
+        #expect(MLXCommand.validateServerModel("") != nil)
+        #expect(MLXCommand.validateServerModel("not a repo id") != nil)
+
+        // A nonexistent absolute path fails with a message naming the path — the
+        // exact live failure: server "healthy", load thread dead, every chat hung.
+        let missing = MLXCommand.validateServerModel("/nonexistent/model-folder")
+        #expect(missing?.contains("/nonexistent/model-folder") == true)
+
+        // A real folder without config.json is rejected; with config.json it passes.
+        let dir = NSTemporaryDirectory() + "mlx-validate-\(UUID().uuidString)"
+        try FileManager.default.createDirectory(
+            atPath: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(atPath: dir) }
+        #expect(MLXCommand.validateServerModel(dir)?.contains("config.json") == true)
+        FileManager.default.createFile(
+            atPath: (dir as NSString).appendingPathComponent("config.json"),
+            contents: Data("{}".utf8))
+        #expect(MLXCommand.validateServerModel(dir) == nil)
+
+        // A FILE path (e.g. a .gguf) is rejected as not-a-folder.
+        let file = (dir as NSString).appendingPathComponent("weights.gguf")
+        FileManager.default.createFile(atPath: file, contents: Data())
+        #expect(MLXCommand.validateServerModel(file)?.contains("folder") == true)
     }
 }
 

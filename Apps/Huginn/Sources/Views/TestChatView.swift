@@ -37,7 +37,7 @@ struct TestChatView: View {
                         }
                     }
                     .padding(12)
-                    .frame(maxWidth: 720, alignment: .leading)
+                    .frame(maxWidth: 1100, alignment: .leading)
                     .frame(maxWidth: .infinity)
                 }
                 .onChange(of: session.items.count) { _, _ in
@@ -98,7 +98,7 @@ struct TestChatView: View {
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 8)
-        .frame(maxWidth: 720, alignment: .leading)
+        .frame(maxWidth: 1100, alignment: .leading)
         .frame(maxWidth: .infinity)
     }
 
