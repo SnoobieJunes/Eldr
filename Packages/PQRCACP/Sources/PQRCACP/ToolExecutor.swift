@@ -76,14 +76,23 @@ public struct ToolEnvironment: Sendable {
             || k.contains("PASSPHRASE") || k.hasSuffix("_KEY") || k.contains("_KEY_")
     }
 
+    /// Strip the agent's own long-term secrets (`secretEnvKeys` + `isOwnedSecretShaped`) from
+    /// an arbitrary environment. Shared by `shellEnvironment` (run_shell / open_terminal) and
+    /// the external-harness spawn seam (`StdioHarnessTransport`) so NO child the agent spawns —
+    /// a shell, a PTY, or a cloud CLI — ever inherits `ELDR_LLM_TOKEN` / `ELDR_ACP_METADATA_KEY`
+    /// / `SYBILCLAW_GATEWAY_TOKEN`. One definition so the two seams can't drift apart.
+    public static func scrubbingAgentSecrets(_ env: [String: String]) -> [String: String] {
+        var e = env
+        for key in e.keys where secretEnvKeys.contains(key) || isOwnedSecretShaped(key) {
+            e.removeValue(forKey: key)
+        }
+        return e
+    }
+
     /// The effective environment for a spawned shell: the base environment with the
     /// agent's secrets removed (see `secretEnvKeys`), plus the DEVELOPER_DIR override.
     var shellEnvironment: [String: String] {
-        var e = baseEnvironment
-        for key in e.keys
-        where Self.secretEnvKeys.contains(key) || Self.isOwnedSecretShaped(key) {
-            e.removeValue(forKey: key)
-        }
+        var e = Self.scrubbingAgentSecrets(baseEnvironment)
         if let dev = developerDir { e["DEVELOPER_DIR"] = dev }
         return e
     }
@@ -135,12 +144,17 @@ public struct ToolExecutor: Sendable {
     /// Wall-clock cap (seconds) for a single `run_shell` / search child process.
     /// 0 = unlimited (no watchdog) — a real build/test legitimately runs for minutes.
     let shellTimeoutSeconds: TimeInterval
+    /// A2: when a result is over `maxResultBytes`, ALSO spill the whole thing to a
+    /// jail-inside file (`<workdir>/.eldr/tool-results/`) so the model can `read_file`
+    /// the part truncation dropped. Default off here (the agent layer opts in via
+    /// `AgentConfig.toolResultSpillEnabled`), so a bare executor never touches disk.
+    let spillOversizedResults: Bool
 
     public init(
         capabilities: ClientCapabilities, environment: ToolEnvironment,
         connection: ClientConnection?, sessionId: String, outputByteLimit: Int = 64 * 1024,
         maxResultBytes: Int = Int.max, maxReadFileBytes: Int = Int.max,
-        shellTimeoutSeconds: TimeInterval = 0
+        shellTimeoutSeconds: TimeInterval = 0, spillOversizedResults: Bool = false
     ) {
         self.capabilities = capabilities
         self.environment = environment
@@ -150,13 +164,14 @@ public struct ToolExecutor: Sendable {
         self.maxResultBytes = maxResultBytes
         self.maxReadFileBytes = maxReadFileBytes
         self.shellTimeoutSeconds = max(0, shellTimeoutSeconds)
+        self.spillOversizedResults = spillOversizedResults
     }
 
     /// The built-in tools' names, in advertise order. The single source of truth for
     /// "what tools exist" (used to validate an allowlist).
     public static let allToolNames = [
         "read_file", "write_file", "edit_file", "list_dir", "search", "run_shell",
-        "open_terminal",
+        "open_terminal", "delegate_to_cloud_agent",
     ]
 
     /// Phase D4 — the interactive-PTY tool name. A PERSISTENT streaming terminal (REPLs,
@@ -165,6 +180,16 @@ public struct ToolExecutor: Sendable {
     /// it and manages the `PTYProcess` lifecycle. Defined here so it shares the tool
     /// allowlist + the `execute` ToolKind (and therefore the phone's mutating-tool gate).
     public static let openTerminalTool = "open_terminal"
+
+    /// WS3e — the brokering tool: hand a sub-task to an external cloud-CLI harness
+    /// (Claude Code / Gemini CLI) and return its result. NOT run by `ToolExecutor` (it
+    /// spawns and drives a whole nested ACP session, not a single call); `ACPAgent`
+    /// intercepts it, same as `open_terminal`. Gated TWICE, independently: the node
+    /// operator's `AgentConfig.cloudAgentDelegationEnabled` (a hard off-switch, checked
+    /// before anything is spawned) AND the SAME phone permission card every mutating
+    /// tool gets (`needsPermission`) — the highest-risk surface in the router plan gets
+    /// the narrowest default, not a shortcut around the existing gate.
+    public static let delegateToCloudAgentTool = "delegate_to_cloud_agent"
 
     /// The OpenAI tool/function definitions the agent advertises to its LLM,
     /// optionally filtered to an allowlist (empty → all). Descriptions are written
@@ -265,6 +290,27 @@ public struct ToolExecutor: Sendable {
                     name: "command",
                     desc: "an optional command to run immediately in the new shell (may be empty)",
                     required: false)),
+            LLMTool(
+                name: "delegate_to_cloud_agent",
+                description:
+                    "Hand a self-contained sub-task to an external cloud coding CLI (Claude Code or Gemini CLI) running on this Mac and return its final answer. Use for a task better suited to a different model — NOT for routine file/shell work you can already do yourself. May be DISABLED on this node; a disabled/denied call returns an error, not a hang. The delegated agent's own file/shell actions are separately permission-gated on the user's device, same as your own.",
+                parameters: .object([
+                    "type": .string("object"),
+                    "properties": .object([
+                        "harness": .object([
+                            "type": .string("string"),
+                            "description": .string(
+                                "which cloud CLI to delegate to: \"claude-code\" or \"gemini-cli\""),
+                        ]),
+                        "task": .object([
+                            "type": .string("string"),
+                            "description": .string(
+                                "the self-contained sub-task/prompt to hand off"),
+                        ]),
+                    ]),
+                    "required": .array([.string("harness"), .string("task")]),
+                    "additionalProperties": .bool(false),
+                ])),
         ]
         guard !allowlist.isEmpty else { return all }
         let wanted = Set(allowlist)
@@ -294,12 +340,11 @@ public struct ToolExecutor: Sendable {
         case "write_file", "edit_file": return "edit"
         // run_shell and open_terminal both EXECUTE on the node → the `execute` ToolKind,
         // which the phone's allowlist (`PersonaRuntime.isMutatingACPToolKind`) treats as
-        // mutating. open_terminal carries the stronger phone-side gate (the standing
-        // autonomous-changes consent, no allow-once) because an open-ended interactive
-        // shell can't be meaningfully approved per-keystroke — that distinction is made
-        // phone-side off the tool TITLE (`isInteractiveTerminalTitle`), since the ACP
-        // ToolKind vocabulary has no finer-grained value.
-        case "run_shell", "open_terminal": return "execute"
+        // mutating. Both route through the SAME allow-once/always/deny prompt
+        // (`PersonaRuntime.decidePermission`) — the standing autonomous-changes consent
+        // still skips the prompt, but without it the human is asked per request, same as
+        // any other mutating tool. The node still re-checks C-1 (deny-on-timeout).
+        case "run_shell", "open_terminal", "delegate_to_cloud_agent": return "execute"
         default: return "other"
         }
     }
@@ -308,7 +353,7 @@ public struct ToolExecutor: Sendable {
     /// prompt (when the client supports it) before they run.
     static func needsPermission(_ tool: String) -> Bool {
         tool == "write_file" || tool == "edit_file" || tool == "run_shell"
-            || tool == "open_terminal"
+            || tool == "open_terminal" || tool == "delegate_to_cloud_agent"
     }
 
     /// A short human title for a tool call (shown in the editor's tool UI).
@@ -321,13 +366,21 @@ public struct ToolExecutor: Sendable {
         case "search": return "Search \"\(args["query"]?.stringValue ?? "")\""
         case "run_shell": return "Run: \(args["command"]?.stringValue ?? "")"
         case "open_terminal":
-            // The phone keys its STRONGER gate (standing autonomous-changes consent, no
-            // allow-once) off this exact prefix — `ACPTerminal.interactiveTerminalTitlePrefix`
-            // (iOS-available, the single source of truth) / `PersonaRuntime.isInteractiveTerminalTitle`.
+            // `ACPTerminal.interactiveTerminalTitlePrefix` (iOS-available, the single
+            // source of truth) — the exact prefix the title starts with, shown in the
+            // phone's permission card so the human can see it's an open-ended shell,
+            // not a one-shot command, before deciding allow-once/always/deny.
             let cmd = args["command"]?.stringValue ?? ""
             return cmd.isEmpty
                 ? interactiveTerminalTitlePrefix
                 : "\(interactiveTerminalTitlePrefix): \(cmd)"
+        case "delegate_to_cloud_agent":
+            // WS3f keys its distinct consent + live indicator off this exact prefix
+            // (`ACPCloudDelegation.delegateTitlePrefix`, iOS-available).
+            let harness = args["harness"]?.stringValue ?? "?"
+            let task = args["task"]?.stringValue ?? ""
+            let truncated = task.count > 80 ? "\(task.prefix(80))…" : task
+            return "\(delegateToCloudAgentTitlePrefix) (\(harness)): \(truncated)"
         default: return tool
         }
     }
@@ -336,6 +389,12 @@ public struct ToolExecutor: Sendable {
     /// carries. Re-exported from the iOS-available `ACPTerminal` (the single source of
     /// truth shared with the phone's gate) so node-side call sites stay terse.
     public static let interactiveTerminalTitlePrefix = ACPTerminal.interactiveTerminalTitlePrefix
+
+    /// WS3e/3f — the stable title prefix every `delegate_to_cloud_agent` permission
+    /// request carries. Re-exported from the iOS-available `ACPCloudDelegation` (the
+    /// single source of truth shared with the phone's gate) so node-side call sites
+    /// stay terse, mirroring `interactiveTerminalTitlePrefix`.
+    public static let delegateToCloudAgentTitlePrefix = ACPCloudDelegation.delegateTitlePrefix
 
     // MARK: Dispatch
 
@@ -353,15 +412,67 @@ public struct ToolExecutor: Sendable {
         // Context-window guard: every tool result fed back to the model is bounded.
         // (Shell already capped its CAPTURE at outputByteLimit; this trims further
         // for the prompt, and is the ONLY cap for read_file/list_dir.)
-        return capped(result)
+        return capped(result, tool: tool)
     }
 
     /// Head+tail truncate an over-budget result for the model, preserving the error
     /// flag and noting the elision. A no-op when the result already fits.
-    private func capped(_ result: ToolResult) -> ToolResult {
-        let trimmed = ContextBudget.truncate(result.text, maxBytes: maxResultBytes)
-        guard trimmed.utf8.count != result.text.utf8.count else { return result }
-        return ToolResult(text: trimmed, isError: result.isError)
+    ///
+    /// A2 spill-to-file: when the result is over budget AND spilling is enabled, the
+    /// WHOLE result is first written to a jail-inside file and the model is handed the
+    /// head+tail PLUS that path — so it can `read_file` the elided middle instead of
+    /// losing it. The returned text still fits `maxResultBytes` (the spill note's bytes
+    /// are reserved out of the budget), so this never re-inflates the window.
+    private func capped(_ result: ToolResult, tool: String) -> ToolResult {
+        let originalBytes = result.text.utf8.count
+        guard maxResultBytes != Int.max, originalBytes > maxResultBytes else { return result }
+
+        // Optionally spill the full result so nothing is truly lost. The destination
+        // (and so the note's exact size) is chosen BEFORE anything is written: a
+        // budget too small to even carry the note skips the spill entirely, so no
+        // orphaned file the model is never told about is left behind.
+        var spillNote = ""
+        if spillOversizedResults, let rel = spillDestination(tool: tool) {
+            let note =
+                "\n[full \(originalBytes)-byte result saved to \(rel) — read_file it to see the elided part]\n"
+            if maxResultBytes - note.utf8.count > 0, spill(result.text, toRelative: rel) {
+                spillNote = note
+            }
+        }
+        // The note's bytes are reserved out of the budget, so head+tail+note still fits.
+        let textBudget = maxResultBytes - spillNote.utf8.count
+        let trimmed = ContextBudget.truncate(result.text, maxBytes: textBudget)
+        return ToolResult(text: trimmed + spillNote, isError: result.isError)
+    }
+
+    /// A2: the jail-inside directory (relative to the workdir) oversized tool results
+    /// spill into. Kept under a dot-dir so it's out of the way and easy to `.gitignore`.
+    static let spillDirRelative = ".eldr/tool-results"
+
+    /// Pick a fresh spill destination under `<workdir>/.eldr/tool-results/`, RELATIVE
+    /// to the workdir (what the model passes to `read_file`). nil when the resolved
+    /// path would land outside the jail (e.g. `.eldr` replaced by an outbound symlink).
+    private func spillDestination(tool: String) -> String? {
+        let safeTool = tool.filter { $0.isLetter || $0.isNumber || $0 == "_" }
+        let name = safeTool.isEmpty ? "result" : safeTool
+        let rel = "\(Self.spillDirRelative)/\(name)-\(UUID().uuidString.prefix(8)).txt"
+        return jailedPath(rel) == nil ? nil : rel
+    }
+
+    /// Write the full `text` to the chosen destination. Best-effort: false on any
+    /// failure (the caller then omits the note) — spilling never fails the tool. The
+    /// path is run through `jailedPath` so it can only ever land inside the jail.
+    private func spill(_ text: String, toRelative rel: String) -> Bool {
+        guard let abs = jailedPath(rel) else { return false }
+        let dir = (abs as NSString).deletingLastPathComponent
+        do {
+            try FileManager.default.createDirectory(
+                atPath: dir, withIntermediateDirectories: true)
+            try Data(text.utf8).write(to: URL(fileURLWithPath: abs))
+            return true
+        } catch {
+            return false
+        }
     }
 
     // MARK: Path resolution

@@ -583,6 +583,28 @@ final class AppSession {
         else { UserDefaults.standard.removeObject(forKey: key) }
     }
 
+    /// WS3f — per-node CLOUD-AGENT-DELEGATION consent ("Allow a cloud agent to run on
+    /// your Mac"): whether the owner has consented to let this node's local model hand
+    /// tasks to an external cloud CLI (`delegate_to_cloud_agent`, WS3e) WITHOUT a
+    /// per-request prompt. OFF by default. DISTINCT from `autonomousChangesConsent` —
+    /// enabling standing autonomous file/shell changes must NEVER silently also
+    /// authorize handing tasks to a cloud vendor (a different trust boundary: the
+    /// delegated CLI reads the project and talks to ITS vendor, not just this Mac).
+    /// `PersonaRuntime.decidePermission` checks this instead of the standard consent
+    /// whenever the request title is `ACPCloudDelegation.isDelegationTitle`. Same
+    /// per-silo/nonisolated shape as `autonomousChangesConsent`.
+    nonisolated static func cloudAgentDelegationConsent(nodeID: String, siloID: String = "") -> Bool {
+        UserDefaults.standard.bool(
+            forKey: siloDefaultsKey("acpCloudAgentDelegation.\(nodeID)", siloID))
+    }
+    nonisolated static func setCloudAgentDelegationConsent(
+        _ value: Bool, nodeID: String, siloID: String = ""
+    ) {
+        let key = siloDefaultsKey("acpCloudAgentDelegation.\(nodeID)", siloID)
+        if value { UserDefaults.standard.set(true, forKey: key) }
+        else { UserDefaults.standard.removeObject(forKey: key) }
+    }
+
     /// Per-node SHARE-CHAT-CONTEXT consent (Phase D3 — MCP passthrough over the
     /// relay): whether the owner has consented to let a paired `coding_agent` node's
     /// coding agent USE this phone's MCP chat tools (read REDACTED conversations,
@@ -1247,6 +1269,11 @@ final class AppSession {
         }
     }
 
+    // TODO(AC111): under --uitest the post-boot conversation seeding occasionally
+    // never materializes a single row (observed: zero `conversation-*` elements
+    // after 150 s, vs rows by ~50 s on a healthy boot; everything is in-memory,
+    // so it's a boot race, not persistence). UI tests mitigate with one relaunch
+    // (UXVerificationTests.launchUniverse); root-cause the seed path.
     func bootUniverse(runScript: Bool) async {
         let universe = LocalUniverse()
         do {

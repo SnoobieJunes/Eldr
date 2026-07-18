@@ -50,6 +50,33 @@ public enum RelayStatus: Sendable, Equatable {
     case failed(String)
 }
 
+/// Relay connection-lifecycle events, for diagnostics UIs (e.g. Huginn's Relay tab and
+/// Inspector — B2). Purely observational, exactly like `RelayStatus`: nothing here ever
+/// gates delivery, and nothing here ever carries event content or keys — only
+/// protocol-level metadata (connect/disconnect/EOSE/AUTH), so a conformer can log/forward
+/// it freely without touching the payload-privacy invariants (CLAUDE.md invariant 12).
+public enum RelayTransportEvent: Sendable, Equatable {
+    /// A dial attempt started.
+    case connecting
+    /// A frame arrived, proving the socket is live.
+    case connected
+    /// The socket went down. `reason` is nil for a caller-initiated `disconnect()`,
+    /// non-nil (a short, user-facing description — never raw error internals) for a
+    /// failure.
+    case disconnected(reason: String?)
+    /// The relay reported end-of-stored-events for one subscription.
+    case eose(subscriptionID: String)
+    /// The relay sent a NIP-42 AUTH challenge.
+    case authChallenge
+    /// A NIP-42 AUTH round-trip succeeded.
+    case authenticated
+    /// A NIP-42 AUTH round-trip was rejected or timed out.
+    case authFailed(reason: String?)
+    /// A transport-level error not already covered by `disconnected` (e.g. a send
+    /// failure while otherwise connected).
+    case error(String)
+}
+
 public struct PublishAck: Sendable, Equatable {
     public let eventID: String
     public let accepted: Bool
@@ -82,6 +109,13 @@ public protocol RelayTransport: Sendable {
     /// Drives adaptive chunk sizing: bigger chunks on relays that accept bigger
     /// events. nil means "unknown" → callers use the safe default.
     func maxContentLength() async -> Int?
+    /// A live stream of connection-lifecycle events (B2 — diagnostics only, never a
+    /// delivery gate). Default: an immediately-finished stream, so in-process/simulator
+    /// transports (and every existing conformer) need no change; only
+    /// `NostrWebSocketTransport` has anything real to report here. `async` (like
+    /// `currentStatus()`/`checkConnection()`) so an actor conformer can implement it
+    /// without crossing isolation.
+    func transportEvents() async -> AsyncStream<RelayTransportEvent>
 }
 
 extension RelayTransport {
@@ -90,6 +124,10 @@ extension RelayTransport {
     public func checkConnection() async -> RelayStatus { await currentStatus() }
     /// In-process transports have no NIP-11 limit; nil → callers use the default.
     public func maxContentLength() async -> Int? { nil }
+    /// In-process/simulator transports have no socket lifecycle to report.
+    public func transportEvents() async -> AsyncStream<RelayTransportEvent> {
+        AsyncStream { $0.finish() }
+    }
 }
 
 /// Local-link transport seam (SPEC §10; stretch goal S1, implemented by

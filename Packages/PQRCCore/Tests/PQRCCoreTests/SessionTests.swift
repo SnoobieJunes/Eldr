@@ -215,10 +215,11 @@ struct SessionTests {
         #expect(atAlice.text == "restored bob replies")
     }
 
-    @Test func session_largeBodiesRouteThroughPointer_notInline() async throws {
+    @Test func session_largeBodiesRejectedInline_pointerWireFieldRoundTrips() async throws {
         let universe = try await Self.establish(seed: 200)
         // The session layer enforces the inline cap: a >64 KB body cannot be
-        // encrypted inline (the app's blob path sends a ContentPointer instead).
+        // encrypted inline (the app splits large text into relay chunks; `ptr` is
+        // a NIP wire field other clients may send, so it must still round-trip).
         let huge = String(repeating: "x", count: PQRCConstants.inlineSizeLimit + 100)
         await #expect(throws: PQRCError.self) {
             _ = try await universe.aliceSession.encrypt(

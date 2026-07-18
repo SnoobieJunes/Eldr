@@ -45,6 +45,19 @@ public struct AgentConfig: Sendable, Equatable {
     /// the assembled history exceeds it, the oldest non-system messages are elided
     /// (oldest-first) until it fits. Env: `ELDR_ACP_MAX_CONTEXT_CHARS`. 0 → no cap.
     public var maxContextChars: Int
+    /// A2 (tool-result aging): how many of the MOST-RECENT tool results are kept
+    /// verbatim in the running history; older tool-result bodies are replaced with a
+    /// one-line stub BEFORE any whole-message drop (the model can re-run the tool if it
+    /// still needs the detail). The industry fix for a long tool loop whose old, bulky
+    /// results crowd out the recent ones. Env: `ELDR_ACP_TOOL_RESULT_KEEP`. 0 → stub
+    /// every tool result but the current turn's; a large value → effectively off.
+    public var toolResultKeepVerbatim: Int
+    /// A2 (spill-to-file): when a single tool result is over `maxToolResultBytes`, also
+    /// write the WHOLE result to a jail-inside file (`<workdir>/.eldr/tool-results/`) and
+    /// hand the model head+tail PLUS that path — so it can `read_file` the rest instead
+    /// of losing it to truncation. Default on. Env: `ELDR_ACP_TOOL_RESULT_SPILL`
+    /// (boolean). NODE-SIDE, inside the existing path jail; never leaves the workdir.
+    public var toolResultSpillEnabled: Bool
     /// Tool allowlist: only these tool names are advertised to the model and
     /// accepted. Empty → all built-in tools. Env: `ELDR_ACP_TOOLS` (comma/space
     /// separated, e.g. `read_file,write_file,run_shell`).
@@ -104,6 +117,12 @@ public struct AgentConfig: Sendable, Equatable {
     /// acceptance; default false (fail closed: a mutating tool runs only on an explicit
     /// grant; a timeout/error is a denial). Env: `ELDR_ACP_ALLOW_UNGATED_TOOLS`.
     public var allowUngatedTools: Bool
+    /// WS3e: the SEPARATE, DISTINCT fail-closed gate for `delegate_to_cloud_agent` — an
+    /// EXPLICIT operator opt-in, off by default, independent of `allowUngatedTools`
+    /// (enabling standing autonomous changes must NOT also silently enable handing
+    /// tasks to an external cloud CLI). When false the tool call is refused immediately,
+    /// before any process is spawned. Env: `ELDR_ACP_ALLOW_CLOUD_DELEGATION`.
+    public var cloudAgentDelegationEnabled: Bool
     /// D2 (node-side image input): whether the configured LLM can read images. When
     /// true, the agent advertises `promptCapabilities.image=true` at `initialize` and
     /// forwards a node-side ACP `image` content block to the model as a multimodal
@@ -143,6 +162,8 @@ public struct AgentConfig: Sendable, Equatable {
         maxReadFileBytes: 1024 * 1024,
         maxHistoryTurns: 12,
         maxContextChars: 48 * 1024,
+        toolResultKeepVerbatim: 4,
+        toolResultSpillEnabled: true,
         toolAllowlist: [],
         promptPreamble: nil,
         systemPromptOverride: nil,
@@ -157,6 +178,7 @@ public struct AgentConfig: Sendable, Equatable {
         maxIterations: 0,
         shellTimeoutSeconds: 0,
         allowUngatedTools: false,
+        cloudAgentDelegationEnabled: false,
         visionEnabled: false,
         metadataKey: nil)
 
@@ -165,6 +187,8 @@ public struct AgentConfig: Sendable, Equatable {
         maxReadFileBytes: Int = 1024 * 1024,
         maxHistoryTurns: Int = 12,
         maxContextChars: Int = 48 * 1024,
+        toolResultKeepVerbatim: Int = 4,
+        toolResultSpillEnabled: Bool = true,
         toolAllowlist: [String] = [],
         promptPreamble: String? = nil,
         systemPromptOverride: String? = nil,
@@ -179,6 +203,7 @@ public struct AgentConfig: Sendable, Equatable {
         maxIterations: Int = 0,
         shellTimeoutSeconds: Double = 0,
         allowUngatedTools: Bool = false,
+        cloudAgentDelegationEnabled: Bool = false,
         visionEnabled: Bool = false,
         metadataKey: Data? = nil,
         logRedactor: @escaping ACPLogScrubber = ACPLogRedactor.scrub
@@ -189,6 +214,9 @@ public struct AgentConfig: Sendable, Equatable {
         self.maxReadFileBytes = maxReadFileBytes > 0 ? maxReadFileBytes : Int.max
         self.maxHistoryTurns = max(0, maxHistoryTurns)
         self.maxContextChars = max(0, maxContextChars)
+        // A negative keep-count is meaningless; clamp to 0 (= stub all but the newest).
+        self.toolResultKeepVerbatim = max(0, toolResultKeepVerbatim)
+        self.toolResultSpillEnabled = toolResultSpillEnabled
         self.toolAllowlist = toolAllowlist
         self.promptPreamble = promptPreamble
         self.systemPromptOverride = systemPromptOverride
@@ -204,6 +232,7 @@ public struct AgentConfig: Sendable, Equatable {
         self.maxIterations = max(0, maxIterations)
         self.shellTimeoutSeconds = max(0, shellTimeoutSeconds)
         self.allowUngatedTools = allowUngatedTools
+        self.cloudAgentDelegationEnabled = cloudAgentDelegationEnabled
         self.visionEnabled = visionEnabled
         // Accept a metadata key only if it's exactly 32 bytes (AES-256); anything else is
         // treated as absent so a malformed env value can't half-enable sealing.
@@ -218,6 +247,8 @@ public struct AgentConfig: Sendable, Equatable {
             && lhs.maxReadFileBytes == rhs.maxReadFileBytes
             && lhs.maxHistoryTurns == rhs.maxHistoryTurns
             && lhs.maxContextChars == rhs.maxContextChars
+            && lhs.toolResultKeepVerbatim == rhs.toolResultKeepVerbatim
+            && lhs.toolResultSpillEnabled == rhs.toolResultSpillEnabled
             && lhs.toolAllowlist == rhs.toolAllowlist
             && lhs.promptPreamble == rhs.promptPreamble
             && lhs.systemPromptOverride == rhs.systemPromptOverride
@@ -230,6 +261,7 @@ public struct AgentConfig: Sendable, Equatable {
             && lhs.contextGraphAgentName == rhs.contextGraphAgentName
             && lhs.permissionTimeoutSeconds == rhs.permissionTimeoutSeconds
             && lhs.allowUngatedTools == rhs.allowUngatedTools
+            && lhs.cloudAgentDelegationEnabled == rhs.cloudAgentDelegationEnabled
             && lhs.visionEnabled == rhs.visionEnabled
             && lhs.metadataKey == rhs.metadataKey
     }
@@ -301,6 +333,10 @@ public struct AgentConfig: Sendable, Equatable {
             maxReadFileBytes: intEnv("ELDR_ACP_MAX_READ_FILE_BYTES", default: d.maxReadFileBytes),
             maxHistoryTurns: intEnv("ELDR_ACP_MAX_HISTORY_TURNS", default: d.maxHistoryTurns),
             maxContextChars: intEnv("ELDR_ACP_MAX_CONTEXT_CHARS", default: d.maxContextChars),
+            toolResultKeepVerbatim: intEnv(
+                "ELDR_ACP_TOOL_RESULT_KEEP", default: d.toolResultKeepVerbatim),
+            toolResultSpillEnabled: boolEnv(
+                "ELDR_ACP_TOOL_RESULT_SPILL", default: d.toolResultSpillEnabled),
             toolAllowlist: tools,
             promptPreamble: textEnvOrFile("ELDR_ACP_PROMPT_PREAMBLE", file: "prompt-preamble"),
             systemPromptOverride: textEnvOrFile("ELDR_ACP_SYSTEM_PROMPT", file: "system-prompt"),
@@ -315,6 +351,8 @@ public struct AgentConfig: Sendable, Equatable {
             maxIterations: intEnv("ELDR_ACP_MAX_ITERATIONS", default: d.maxIterations),
             shellTimeoutSeconds: doubleEnv("ELDR_ACP_SHELL_TIMEOUT", default: d.shellTimeoutSeconds),
             allowUngatedTools: boolEnv("ELDR_ACP_ALLOW_UNGATED_TOOLS", default: d.allowUngatedTools),
+            cloudAgentDelegationEnabled: boolEnv(
+                "ELDR_ACP_ALLOW_CLOUD_DELEGATION", default: d.cloudAgentDelegationEnabled),
             visionEnabled: boolEnv("ELDR_LLM_VISION", default: d.visionEnabled),
             metadataKey: metadataKey)
     }
@@ -408,14 +446,19 @@ public enum ContextBudget {
     /// call, WITHOUT losing the instructions the model needs:
     ///  - the leading system message(s) are ALWAYS kept (the agent's contract);
     ///  - the first user message (the task) is kept;
+    ///  - A2: older TOOL RESULTS are aged to one-line stubs (keeping only the most
+    ///    recent `keepRecentToolResults` verbatim) BEFORE any whole-message drop, so a
+    ///    long tool loop's bulky old outputs stop crowding out the recent context;
     ///  - then the most-recent messages are kept up to `maxTurns` non-system turns;
     ///  - finally, if still over `maxChars`, the oldest *kept* non-anchor messages
     ///    are replaced with a one-line elision note, oldest-first, until it fits.
     ///
     /// Dropping a message that an `assistant` tool-call turn references is safe here:
-    /// we elide *content*, never reorder, and an elided tool result still leaves its
-    /// `tool` envelope (with the call id) so the OpenAI message sequence stays valid.
-    public static func trim(_ messages: [LLMMessage], maxTurns: Int, maxChars: Int) -> [LLMMessage] {
+    /// we elide *content*, never reorder, and an elided/stubbed tool result still
+    /// leaves its `tool` envelope (with the call id) so the OpenAI sequence stays valid.
+    public static func trim(
+        _ messages: [LLMMessage], maxTurns: Int, maxChars: Int, keepRecentToolResults: Int = 4
+    ) -> [LLMMessage] {
         guard !messages.isEmpty else { return messages }
 
         // Partition off the leading run of system messages (always anchored).
@@ -428,7 +471,12 @@ public enum ContextBudget {
 
         // Anchor the first non-system message (the task) so it's never dropped.
         let firstTask = rest.first
-        let tail = firstTask == nil ? [] : Array(rest.dropFirst())
+        var tail = firstTask == nil ? [] : Array(rest.dropFirst())
+
+        // (0) A2 tool-result aging: stub older tool results before any whole-message
+        // drop. The gentle compaction runs first, so the harder turn/char caps below
+        // act on an already-slimmer tail.
+        tail = ageToolResults(tail, keepRecent: keepRecentToolResults)
 
         // (1) Turn-count cap: keep the most-recent `maxTurns` of the tail.
         var keptTail = tail
@@ -466,6 +514,43 @@ public enum ContextBudget {
     }
 
     static let elisionPrefix = "[elided to fit context budget"
+
+    /// A2: marker prefix on an aged-out tool-result stub (distinct from `elisionPrefix`
+    /// so the two stages don't re-stub each other and a reader can tell them apart).
+    static let toolStubPrefix = "[tool result aged out"
+
+    /// A2 tool-result aging: replace the BODY of every tool-result message except the
+    /// most-recent `keepRecent` with a one-line stub, in place (preserving order, role,
+    /// and `toolCallId` so tool_call/tool pairing stays valid). Non-tool messages and
+    /// the recent window are untouched; already-stubbed/elided results are left as-is.
+    /// The TRAILING run of tool messages — the current batch, which `trim` sees BEFORE
+    /// the model call that first consumes it — is never stubbed, whatever `keepRecent`
+    /// says: stubbing an unread result would tell the model to re-run a tool it just
+    /// ran. `keepRecent >= (number of tool results)` is a no-op.
+    static func ageToolResults(_ messages: [LLMMessage], keepRecent: Int) -> [LLMMessage] {
+        let toolIdxs = messages.indices.filter { messages[$0].role == .tool }
+        // The trailing tool run is the current, not-yet-consumed batch. It and the
+        // keep-window are both suffixes of `toolIdxs`, so protecting the longer
+        // suffix covers both.
+        var trailingRun = 0
+        while trailingRun < messages.count,
+            messages[messages.count - 1 - trailingRun].role == .tool
+        {
+            trailingRun += 1
+        }
+        let protectedCount = max(trailingRun, max(0, keepRecent))
+        guard toolIdxs.count > protectedCount else { return messages }
+        let toStub = Set(toolIdxs.prefix(toolIdxs.count - protectedCount))
+        var out = messages
+        for i in toStub {
+            let existing = out[i].content
+            if existing.hasPrefix(toolStubPrefix) || existing.hasPrefix(elisionPrefix) { continue }
+            out[i].content =
+                "\(toolStubPrefix): \(existing.count) chars from an earlier tool result — "
+                + "re-run the tool if you still need it]"
+        }
+        return out
+    }
 
     private static func elide(_ m: LLMMessage) -> LLMMessage {
         let originalChars = m.content.count

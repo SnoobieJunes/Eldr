@@ -25,10 +25,12 @@ struct MessageBubble: View {
     /// Per-party color coding (APP-SPEC §6.2 readability pass). When supplied,
     /// the HUMAN bubble fills with `palette.solid` and an AGENT bubble uses the
     /// matched tint + on-hue outline/label, so an AI reads as a faded cousin of
-    /// its owner. nil keeps the original accent/purple styling (e.g. AI threads,
-    /// which are AI-centric and don't color by party). Color is NEVER the sole
-    /// signal — agent bubbles always carry the outline + sparkles glyph too
-    /// (SPEC §8.2 / colorblind safety), regardless of palette.
+    /// its owner. Every message surface (conversations AND threads) passes one:
+    /// the nil fallback keeps the legacy accent/purple styling, which fails the
+    /// WCAG contrast audit (white on the accent gradient), and survives only for
+    /// previews/tests. Color is NEVER the sole signal — agent bubbles always
+    /// carry the outline + sparkles glyph too (SPEC §8.2 / colorblind safety),
+    /// regardless of palette.
     var palette: PartyColor.Palette? = nil
     /// Backend-type badge for an AGENT bubble — the same mark the Settings AI row
     /// shows (AITypeIcon): exactly one of an SF Symbol or an emoji glyph, or neither

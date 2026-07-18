@@ -16,49 +16,18 @@ import Testing
 /// no UI to ask (headless / locked). "Allow once" opens the one shell without flipping
 /// the standing consent.
 ///
-/// Two layers: (1) the pure decision logic (fast, exact), and (2) an end-to-end proof
-/// over the real relay-ACP path — a scripted node issues an interactive-terminal
+/// An end-to-end proof over the real relay-ACP path — a scripted node issues a
 /// `session/request_permission` and the owner's `PersonaRuntime` must deny it without
 /// consent and allow it with consent. Plus the fail-closed teardown (tearing the
 /// transport down — which on a real device terminates the node's PTY).
+///
+/// WS3f — the same harness also proves the CLOUD-DELEGATION gate's distinctness: a
+/// `delegate_to_cloud_agent`-titled request routes to `cloudAgentDelegationConsent`,
+/// NEVER the general `autonomousChangesConsent` (see the `delegation_*` tests).
 @Suite("Phase D4 — interactive terminal gate (phone side)", .serialized)
 struct ACPInteractiveTerminalGateTests {
 
-    // MARK: - (1) Pure decision logic
-
-    /// The interactive-PTY gate keys ONLY off the standing autonomous-changes consent —
-    /// no allow-once, no prompt. Off ⇒ false (fail closed); on ⇒ true.
-    @Test func decideInteractivePTY_requiresStandingConsent() {
-        let node = "deadbeef-pty-gate-\(UUID().uuidString.prefix(6))"
-        AppSession.setAutonomousChangesConsent(false, nodeID: node, siloID: "")
-        #expect(
-            PersonaRuntime.decideInteractivePTY(nodeHex: node, silo: "") == false,
-            "with autonomous-changes consent OFF, opening an interactive shell must FAIL CLOSED")
-
-        AppSession.setAutonomousChangesConsent(true, nodeID: node, siloID: "")
-        #expect(
-            PersonaRuntime.decideInteractivePTY(nodeHex: node, silo: "") == true,
-            "with the standing consent ON, the interactive shell is allowed")
-        AppSession.setAutonomousChangesConsent(false, nodeID: node, siloID: "")
-    }
-
-    /// The phone recognizes an interactive-PTY request purely from the ACP `title` the
-    /// node attaches (the `execute` ToolKind is too coarse). The matcher must accept the
-    /// title the node actually produces for `open_terminal`, and reject a `run_shell` one.
-    @Test func isInteractiveTerminalTitle_matchesNodeTitle_notRunShell() {
-        // The exact prefix the node sends (single source of truth, iOS-available).
-        #expect(
-            PersonaRuntime.isInteractiveTerminalTitle(
-                ACPTerminal.interactiveTerminalTitlePrefix))
-        #expect(
-            PersonaRuntime.isInteractiveTerminalTitle(
-                "\(ACPTerminal.interactiveTerminalTitlePrefix): python3"))
-        // A one-shot run_shell title must NOT trip the stronger gate (it has its own).
-        #expect(!PersonaRuntime.isInteractiveTerminalTitle("Run: ls -la"))
-        #expect(!PersonaRuntime.isInteractiveTerminalTitle("Write A.swift"))
-    }
-
-    // MARK: - (2) End-to-end over the real relay-ACP path
+    // MARK: - End-to-end over the real relay-ACP path
 
     private func makeRuntime(_ name: String, seed: UInt64, relay: LocalRelaySimulator, ais: [TetheredAI])
         async -> PersonaRuntime
@@ -106,12 +75,15 @@ struct ACPInteractiveTerminalGateTests {
     }
 
     /// A scripted node that, on each `session/prompt`, issues ONE
-    /// `session/request_permission` carrying the INTERACTIVE-TERMINAL title (as the real
-    /// node does for `open_terminal`), records the owner's outcome, then ends the turn.
-    /// Drives entirely off the node's `RelayACPTransport` (no `runACPAgent`, so it runs on
-    /// iOS — the same stand-in `RelayACPRuntimeTests` uses).
+    /// `session/request_permission` carrying `permissionTitle` (default: the
+    /// interactive-terminal title, as the real node sends for `open_terminal`; the
+    /// delegation tests pass a `delegate_to_cloud_agent` title instead), records the
+    /// owner's outcome, then ends the turn. Drives entirely off the node's
+    /// `RelayACPTransport` (no `runACPAgent`, so it runs on iOS — the same stand-in
+    /// `RelayACPRuntimeTests` uses).
     private func scriptedTerminalRequestingNode(
-        on transport: RelayACPTransport, outcomes: PermissionOutcomes
+        on transport: RelayACPTransport, outcomes: PermissionOutcomes,
+        permissionTitle: String = ACPTerminal.interactiveTerminalTitlePrefix
     ) -> Task<Void, Never> {
         Task {
             for await line in transport.inboundLines() {
@@ -133,9 +105,9 @@ struct ACPInteractiveTerminalGateTests {
                     transport.send(
                         #"{"jsonrpc":"2.0","id":\#(id),"result":{"sessionId":"node-sess-1"}}"#)
                 case "session/prompt":
-                    // Issue an OUTBOUND interactive-terminal permission request (the node's
-                    // outbound ids are negative, so they never collide with the owner's).
-                    let title = ACPTerminal.interactiveTerminalTitlePrefix
+                    // Issue the OUTBOUND permission request (the node's outbound ids are
+                    // negative, so they never collide with the owner's).
+                    let title = permissionTitle
                     transport.send(
                         JSONValue.object([
                             "jsonrpc": .string("2.0"),
@@ -172,9 +144,10 @@ struct ACPInteractiveTerminalGateTests {
     }
 
     /// Build owner+node, verify+consent (C-3) both ways, pre-create the node's transport
-    /// with the scripted terminal-requesting agent, and bind the owner's acp provider.
+    /// with the scripted permission-requesting agent, and bind the owner's acp provider.
     private func establishPair(
-        seedBase: UInt64, ownerAIs: [TetheredAI]
+        seedBase: UInt64, ownerAIs: [TetheredAI],
+        permissionTitle: String = ACPTerminal.interactiveTerminalTitlePrefix
     ) async throws -> (
         owner: PersonaRuntime, node: PersonaRuntime, ownerHex: String, nodeHex: String,
         nodeAgent: Task<Void, Never>, outcomes: PermissionOutcomes
@@ -206,7 +179,8 @@ struct ACPInteractiveTerminalGateTests {
         let nodeTransport = await node.ensureRelayACPTransport(nodeHex: ownerHex)
         #expect(nodeTransport != nil)
         let outcomes = PermissionOutcomes()
-        let agentTask = scriptedTerminalRequestingNode(on: nodeTransport!, outcomes: outcomes)
+        let agentTask = scriptedTerminalRequestingNode(
+            on: nodeTransport!, outcomes: outcomes, permissionTitle: permissionTitle)
 
         await owner.setAIs(ownerAIs)
         return (owner, node, ownerHex, nodeHex, agentTask, outcomes)
@@ -303,6 +277,102 @@ struct ACPInteractiveTerminalGateTests {
         await pair.node.shutdown()
     }
 
+    // MARK: - WS3f: the cloud-delegation gate is DISTINCT from autonomous-changes
+
+    /// The outer `delegate_to_cloud_agent` title, as `ToolExecutor.title(for:)` renders it.
+    private var delegationTitle: String {
+        "\(ACPCloudDelegation.delegateTitlePrefix) (claude-code): fix the flaky test"
+    }
+
+    /// THE distinctness property, fail-closed side: standing `autonomousChangesConsent`
+    /// alone must NEVER approve a delegation. Autonomy ON + delegation consent OFF + no
+    /// asker (headless) ⇒ the delegation request is DENIED — if this ever regresses to
+    /// the general consent path, autonomy ON would silently authorize cloud handoffs.
+    @Test func delegation_autonomousConsentAlone_isDenied_failClosed() async throws {
+        let pair = try await establishPair(
+            seedBase: 9_400, ownerAIs: [acpAI()], permissionTitle: delegationTitle)
+        defer {
+            pair.nodeAgent.cancel()
+            AppSession.setRemoteDevControlConsent(false, nodeID: pair.nodeHex, siloID: "")
+            AppSession.setRemoteDevControlConsent(false, nodeID: pair.ownerHex, siloID: "")
+            AppSession.setAutonomousChangesConsent(false, nodeID: pair.nodeHex, siloID: "")
+            AppSession.setCloudAgentDelegationConsent(false, nodeID: pair.nodeHex, siloID: "")
+        }
+        AppSession.setAutonomousChangesConsent(true, nodeID: pair.nodeHex, siloID: "")
+        AppSession.setCloudAgentDelegationConsent(false, nodeID: pair.nodeHex, siloID: "")
+
+        _ = try? await pair.owner.draftReply(conversationID: pair.nodeHex)
+
+        #expect(await pair.outcomes.waitForOne(), "the node must have received a permission outcome")
+        let granted = await pair.outcomes.granted
+        #expect(
+            granted.allSatisfy { $0 == false },
+            "autonomous-changes consent must not approve a cloud delegation (got \(granted))")
+
+        await pair.owner.shutdown()
+        await pair.node.shutdown()
+    }
+
+    /// The distinct consent works in the other direction too: delegation consent ON
+    /// (autonomy OFF) ⇒ the delegation request is ALLOWED without a prompt.
+    @Test func delegation_allowedWithDistinctStandingConsent() async throws {
+        let pair = try await establishPair(
+            seedBase: 9_450, ownerAIs: [acpAI()], permissionTitle: delegationTitle)
+        defer {
+            pair.nodeAgent.cancel()
+            AppSession.setRemoteDevControlConsent(false, nodeID: pair.nodeHex, siloID: "")
+            AppSession.setRemoteDevControlConsent(false, nodeID: pair.ownerHex, siloID: "")
+            AppSession.setCloudAgentDelegationConsent(false, nodeID: pair.nodeHex, siloID: "")
+        }
+        AppSession.setAutonomousChangesConsent(false, nodeID: pair.nodeHex, siloID: "")
+        AppSession.setCloudAgentDelegationConsent(true, nodeID: pair.nodeHex, siloID: "")
+
+        _ = try? await pair.owner.draftReply(conversationID: pair.nodeHex)
+
+        #expect(await pair.outcomes.waitForOne(), "the node must have received a permission outcome")
+        let granted = await pair.outcomes.granted
+        #expect(
+            granted.contains(true),
+            "the distinct standing delegation consent allows the request (got \(granted))")
+
+        await pair.owner.shutdown()
+        await pair.node.shutdown()
+    }
+
+    /// "Allow always" on a DELEGATION card flips ONLY `cloudAgentDelegationConsent` —
+    /// never `autonomousChangesConsent`. A user granting standing cloud delegation must
+    /// not silently also grant standing file/shell autonomy (or vice versa).
+    @Test func delegation_allowAlways_flipsOnlyTheDelegationConsent() async throws {
+        let pair = try await establishPair(
+            seedBase: 9_500, ownerAIs: [acpAI()], permissionTitle: delegationTitle)
+        defer {
+            pair.nodeAgent.cancel()
+            AppSession.setRemoteDevControlConsent(false, nodeID: pair.nodeHex, siloID: "")
+            AppSession.setRemoteDevControlConsent(false, nodeID: pair.ownerHex, siloID: "")
+            AppSession.setAutonomousChangesConsent(false, nodeID: pair.nodeHex, siloID: "")
+            AppSession.setCloudAgentDelegationConsent(false, nodeID: pair.nodeHex, siloID: "")
+        }
+        AppSession.setAutonomousChangesConsent(false, nodeID: pair.nodeHex, siloID: "")
+        AppSession.setCloudAgentDelegationConsent(false, nodeID: pair.nodeHex, siloID: "")
+        let asker = AlwaysAsker()
+        await pair.owner.setPermissionAsker(asker)
+
+        _ = try? await pair.owner.draftReply(conversationID: pair.nodeHex)
+
+        #expect(await pair.outcomes.waitForOne(), "the node must have received a permission outcome")
+        #expect(await pair.outcomes.granted.contains(true), "allow-always grants the request")
+        #expect(await asker.requestCount() >= 1, "the prompt was consulted (no standing consent)")
+        #expect(
+            AppSession.cloudAgentDelegationConsent(nodeID: pair.nodeHex, siloID: "") == true,
+            "allow-always on a delegation card flips the DELEGATION consent")
+        #expect(
+            AppSession.autonomousChangesConsent(nodeID: pair.nodeHex, siloID: "") == false,
+            "…and must NOT flip the general autonomous-changes consent")
+
+        await pair.owner.shutdown()
+        await pair.node.shutdown()
+    }
+
     /// FAIL-CLOSED TEARDOWN: tearing the relay-ACP transport down drops the node's
     /// transport (so on a real device the node's runACPAgent inbound stream ends and it
     /// terminates every live PTY). Here we prove the phone-side trigger: after teardown,
@@ -340,6 +410,19 @@ private final class AllowingAsker: ACPPermissionAsking {
     func request(_ request: PermissionRequest) async -> ACPPermissionDecision {
         count += 1
         return .allowOnce
+    }
+    func cancelAll(nodeHex: String) {}
+    func requestCount() -> Int { count }
+}
+
+/// WS3f — an asker that answers ALLOW ALWAYS, so a test can prove which standing
+/// consent the decision flips (the delegation one, never the general autonomy one).
+@MainActor
+private final class AlwaysAsker: ACPPermissionAsking {
+    private var count = 0
+    func request(_ request: PermissionRequest) async -> ACPPermissionDecision {
+        count += 1
+        return .allowAlways
     }
     func cancelAll(nodeHex: String) {}
     func requestCount() -> Int { count }

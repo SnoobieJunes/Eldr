@@ -249,10 +249,24 @@ public enum ProjectContext {
         return (project as NSString).appendingPathComponent("eldr.md")
     }
 
-    /// Resolve the context to inject for a session: an explicit `ELDR_ACP_CONTEXT_FILE`
-    /// path wins; otherwise the auto-discovered per-project file. Returns nil when
-    /// neither exists or both are empty. Reads at most `maxBytes` (the budget the
-    /// system-prompt block is capped to).
+    /// A3: the industry-standard, agent-facing orientation file other harnesses
+    /// (claude-code, gemini-cli, Xcode) also read — so a single file at the project
+    /// root serves EVERY agent. Discovered at `<cwd>/AGENTS.md`, LAST in the chain
+    /// (an explicit override or a per-project `eldr.md` still wins).
+    public static let agentsFileName = "AGENTS.md"
+
+    /// `<cwd>/AGENTS.md`
+    public static func agentsPath(cwd: String) -> String {
+        (cwd as NSString).appendingPathComponent(agentsFileName)
+    }
+
+    /// Resolve the context to inject for a session. Precedence (highest first):
+    ///  1. an explicit `ELDR_ACP_CONTEXT_FILE` path (`explicitPath`);
+    ///  2. the auto-discovered per-project `eldr.md`
+    ///     (`<configDir>/projects/<sha256(cwd)>/eldr.md`);
+    ///  3. A3: `<cwd>/AGENTS.md` — the industry-standard file other harnesses read.
+    /// Returns nil when none exists or all are empty. Reads at most `maxBytes` (the
+    /// budget the system-prompt block is capped to).
     public static func read(
         explicitPath: String?, configDir: String?, cwd: String, maxBytes: Int = 4096,
         key: Data? = nil
@@ -263,6 +277,10 @@ public enum ProjectContext {
         if let configDir {
             let auto = memoryPath(configDir: configDir, cwd: cwd)
             if let text = readFile(auto, maxBytes: maxBytes, key: key) { return text }
+        }
+        // A3: fall back to a repo-root AGENTS.md so one file serves every agent.
+        if let text = readFile(agentsPath(cwd: cwd), maxBytes: maxBytes, key: key) {
+            return text
         }
         return nil
     }

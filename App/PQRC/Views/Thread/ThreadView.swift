@@ -120,6 +120,13 @@ struct ThreadView: View {
                             isMine: message.senderIdentity == model.myIdentityHex,
                             senderName: model.contactNames[message.senderIdentity] ?? "Contact",
                             agentName: message.agentName ?? model.aiNames[message.senderIdentity],
+                            // Same audited party palette as ConversationView. The
+                            // nil-palette purple/accent fallback fails the WCAG
+                            // contrast audit (white on the accent gradient for my
+                            // own bubbles), so threads color by party too.
+                            palette: PartyColor.palette(
+                                forIdentity: message.senderIdentity,
+                                isSelf: message.senderIdentity == model.myIdentityHex),
                             typeSymbol: model.aiTypeBadge(
                                 agentName: message.agentName,
                                 isMine: message.senderIdentity == model.myIdentityHex)?.symbol,
@@ -188,7 +195,14 @@ struct ThreadView: View {
         HStack(alignment: .bottom, spacing: 8) {
             TextField("Message the thread", text: $draftText, axis: .vertical)
                 .lineLimit(1...4)
-                .textFieldStyle(.roundedBorder)
+                // Same treatment as the main composer — the bare rounded-border
+                // field measures under the 44 pt minimum hit target and hard-fails
+                // the accessibility audit.
+                .padding(.horizontal, 12)
+                .padding(.vertical, 11)
+                .background(
+                    Color(.secondarySystemBackground),
+                    in: RoundedRectangle(cornerRadius: 18, style: .continuous))
                 .accessibilityIdentifier("thread-composer-field")
                 // Explicit Paste for iPad/Mac (right-click / long-press) — the
                 // main composer has the same affordance.

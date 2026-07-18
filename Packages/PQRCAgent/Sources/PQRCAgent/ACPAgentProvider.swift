@@ -197,7 +197,11 @@ public actor ACPAgentProvider: AgentProvider {
             }
         }
         do {
-            _ = try await client.start(cwd: cwd)
+            let info = try await client.start(cwd: cwd)
+            // WS2 — the silent-bypass indicator: surface the node's ungated-tools state
+            // as a live event immediately (it's known only once, at start, unlike
+            // availableCommands which can also arrive via a later session/update).
+            observer(.ungatedToolsAdvertised(info.ungatedToolsAllowed))
         } catch {
             // Started nothing usable — unwind the half-built consumer/client so a
             // retry starts clean.
@@ -288,7 +292,7 @@ actor TurnAccumulator {
             if let text, !text.isEmpty { line += ": \(text)" }
             line += "]"
             activity.append(line)
-        case .availableCommands:
+        case .availableCommands, .ungatedToolsAdvertised:
             // Session metadata, not turn output — nothing to fold.
             break
         case .plan:

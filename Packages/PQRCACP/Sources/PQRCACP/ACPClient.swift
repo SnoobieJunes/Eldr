@@ -20,6 +20,35 @@ public enum ACPTerminal {
     public static let interactiveTerminalTitlePrefix = "Open interactive terminal"
 }
 
+/// WS3f — iOS-available constants for `delegate_to_cloud_agent` (WS3e), same rationale
+/// as `ACPTerminal`: the phone must recognize a delegation-related permission request to
+/// key its DISTINCT consent (`cloudAgentDelegationConsent`, separate from
+/// `autonomousChangesConsent`) and its live "cloud agent running" indicator off the
+/// title, since the ACP `ToolKind` (`execute`) can't distinguish it from any other
+/// mutating tool. The node's `ToolExecutor`/`ACPAgent` reuse these same prefixes so the
+/// two sides agree by construction.
+public enum ACPCloudDelegation {
+    /// The title prefix on the OUTER `delegate_to_cloud_agent` tool_call itself — the
+    /// one whose pending→completed lifecycle brackets a live delegation (drives the
+    /// phone's persistent indicator) and whose permission request should flip the
+    /// distinct standing consent on "Always".
+    public static let delegateTitlePrefix = "Delegate to cloud agent"
+    /// The title prefix on a NESTED action the delegated harness itself performs (its
+    /// own file/shell tool calls, proxied through the same permission channel). Checked
+    /// for the DISTINCT consent too (delegating implies trusting the harness's own
+    /// actions), but NOT for the live indicator — each nested action is its own
+    /// separately-lifecycled permission card, not the bracket for "a delegation is
+    /// running" (only the outer call is).
+    public static let delegatedActionTitlePrefix = "Delegated action"
+    /// True if `title` is either shape of a cloud-delegation permission request — the
+    /// single recognizer the phone's consent gate uses (mirrors
+    /// `PersonaRuntime.isInteractiveTerminalTitle`'s retired role for open_terminal,
+    /// except this ACTUALLY needs a distinct consent, so the recognition stays).
+    public static func isDelegationTitle(_ title: String) -> Bool {
+        title.hasPrefix(delegateTitlePrefix) || title.hasPrefix(delegatedActionTitlePrefix)
+    }
+}
+
 /// One step of the agent's plan (an ACP `PlanEntry`), as the phone consumes it.
 /// Display-only: `content` is agent output and gets the same hygiene as an agent
 /// bubble (no special trust). `priority` is dropped — the phone's checklist keys
@@ -43,6 +72,10 @@ public enum ACPUIEvent: Sendable, Equatable {
     case toolCallUpdate(id: String, status: String, text: String?, isError: Bool)
     /// The agent advertised its slash-commands for the session.
     case availableCommands([String])
+    /// The node's `allowUngatedTools` state, advertised at `initialize` (the
+    /// silent-bypass indicator). `true` means the node runs mutating tools WITHOUT a
+    /// phone-side prompt — the client must surface this loudly, not silently trust it.
+    case ungatedToolsAdvertised(Bool)
     /// The agent reported its plan for the turn (a checklist). Re-sent in full on
     /// each change, so the latest `.plan` is the current state of every step.
     case plan([ACPPlanEntry])

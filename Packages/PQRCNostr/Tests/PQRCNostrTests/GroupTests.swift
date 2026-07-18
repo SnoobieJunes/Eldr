@@ -38,17 +38,34 @@ struct GroupTests {
             await collector.attach(try await persona.messenger.start())
             inboxes.append(collector)
         }
-        // Full session mesh.
+        // Full session mesh. Each establishment is awaited THROUGH the responder's
+        // processing before the next bundle fetch: a fetch racing an unprocessed
+        // initiation re-serves the same `otp.first`, whose second consume fails by
+        // design (one-time = one use) and silently drops that link's first message —
+        // initiators get no NACK on a dumb relay (production recovers by
+        // re-initiating against the republished bundle).
+        var delivered = [Int](repeating: 0, count: personas.count)
         for i in personas.indices {
             for j in personas.indices where j > i {
                 try await personas[i].messenger.establishSession(
                     with: try personas[j].asContact(),
                     bundle: try await personas[j].prekeyManager.publicBundle(),
                     firstMessage: MessageBody(text: "mesh \(i)->\(j)", sentAt: 0))
+                delivered[j] += 1
+                _ = await inboxes[j].waitForMessages(delivered[j])
             }
         }
         return GroupUniverse(
             relay: relay, personas: personas, inboxes: inboxes, groupID: "group-uuid-1")
+    }
+
+    /// Wait for exactly `expected` messages, then hold a short probe window for
+    /// an unexpected extra one. Negative assertions (exactly-once, removed-member)
+    /// need the probe; asking for a count that never arrives would instead burn
+    /// the full 10 s timeout on every green run.
+    private func settled(_ inbox: EventCollector, expected: Int) async -> [ReceivedMessage] {
+        _ = await inbox.waitForMessages(expected)
+        return await inbox.waitForMessages(expected + 1, timeoutMillis: 300)
     }
 
     @Test func group_fanOut_allMembersDecryptSameMessage() async throws {
@@ -59,7 +76,9 @@ struct GroupTests {
         try await universe.persona(0).messenger.sendToGroup(body, memberIdentityHexes: members)
 
         for index in 1..<4 {
-            let messages = await universe.inboxes[index].waitForMessages(4)  // 3 mesh + 1 group
+            // Member `index` was the responder for `index` mesh first-messages
+            // (pairs i<index), plus the one group copy.
+            let messages = await settled(universe.inboxes[index], expected: index + 1)
             let groupMessages = messages.filter { $0.body.group?.id == universe.groupID }
             #expect(groupMessages.count == 1, "member \(index) gets the group message exactly once")
             #expect(groupMessages.first?.body.text == "hello group")
@@ -85,7 +104,8 @@ struct GroupTests {
             MessageBody(text: "compartmentalized", sentAt: 0, group: .init(id: universe.groupID)),
             memberIdentityHexes: members)
 
-        let member2Messages = await universe.inboxes[2].waitForMessages(4)
+        // Member 2 receives 2 mesh first-messages (0->2, 1->2) + 1 group copy.
+        let member2Messages = await universe.inboxes[2].waitForMessages(3)
         #expect(member2Messages.map(\.body.text).contains("compartmentalized"))
 
         // Grab the 0->2 wrap off the relay and try the stolen 0->1 ratchet on it.
@@ -125,11 +145,15 @@ struct GroupTests {
                 text: "after roster change", sentAt: 0, group: .init(id: universe.groupID)),
             memberIdentityHexes: phase2Members)
 
-        let member3Messages = await universe.inboxes[3].waitForMessages(4)
+        // Member 3: 3 mesh first-messages + the phase-2 group copy only — the
+        // probe window catches a wrongly-delivered phase-1 copy.
+        let member3Messages = await settled(universe.inboxes[3], expected: 4)
         let member3Group = member3Messages.compactMap { $0.body.group != nil ? $0.body.text : nil }
         #expect(member3Group == ["after roster change"], "joiner sees no history")
 
-        let member1Messages = await universe.inboxes[1].waitForMessages(4)
+        // Member 1: 1 mesh first-message (0->1) + the phase-1 group copy only —
+        // the probe window catches a wrongly-delivered phase-2 copy.
+        let member1Messages = await settled(universe.inboxes[1], expected: 2)
         let member1Group = member1Messages.compactMap { $0.body.group != nil ? $0.body.text : nil }
         #expect(member1Group == ["before join"], "removed member simply stops receiving")
         for inbox in universe.inboxes { await inbox.stop() }

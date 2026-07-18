@@ -124,6 +124,23 @@ struct AgentRunTimeout: Error {}
 struct ACPDriverAgentRunner: BridgeAgentRunner {
     let executableURL: URL
     var environmentOverrides: [String: String] = [:]
+    /// A1 — routes a mutating tool's permission request to the OWNER'S PHONE
+    /// (`ACPBridgeService.requestPhonePermission` → `ACPPermissionChannel` →
+    /// `PersonaRuntime.decidePermission` → the approval card) and returns the
+    /// verdict. nil ⇒ no route to an owner exists; the runner then declares
+    /// `eldrCanPrompt:false` so the agent doesn't advertise mutating tools at all,
+    /// and the deny-default fails any stray request closed. This supersedes the
+    /// CR-1 "My AI chat is read-only" stance (DEVIATIONS A1): the chat is no longer
+    /// read-only, but every mutation is still owner-approved — CR-1's actual threat
+    /// (prompt-injected UNATTENDED shell during an owner window) stays blocked.
+    var permissionResponder: (@Sendable (_ title: String, _ kind: String) async -> Bool)? = nil
+    /// The operator's PERSISTENT trusted-mode answer ("Run tools without asking
+    /// permission", Configuration ▸ Security — an are-you-sure-confirmed toggle that
+    /// stays on until turned off). Read per RUN so a live toggle flip applies to the
+    /// next turn without rebuilding the runner. When true, this path stops routing
+    /// every mutating tool through a phone approval card; the phone still learns via
+    /// the agent's `eldrAllowUngatedTools` capability (the WS2 bypass indicator).
+    var allowUngatedToolsProvider: (@Sendable () async -> Bool) = { false }
 
     // eldr-acp spawns a fresh, stateless process per run, so Huginn supplies cross-turn
     // memory: `context.priorContext` (the decrypted, capped transcript) is injected as an
@@ -133,30 +150,25 @@ struct ACPDriverAgentRunner: BridgeAgentRunner {
     // isn't needed: eldr-acp owns its own ephemeral workspace, and Huginn owns the transcript.
     func run(prompt: String, workdir: String?, context: ConversationContext) async throws -> String {
         let collected = AgentAnswerCollector()
-        // CR-1: this watch-along / Mac-responder runner has no interactive client to
-        // approve a mutating tool, so the default `requestPermission` ({ _,_ in true })
-        // AUTO-APPROVED run_shell / write_file / edit_file UNATTENDED — an owner-window-open
-        // + prompt-injected task could run arbitrary shell on the Mac. This path is a
-        // chat-participant / drafting role that needs only file READS for context, and
-        // reads never request permission, so DENY every permission request (which denies
-        // exactly the mutating tools). Real mutating work goes through the phone-driven
-        // relay-ACP path (ACPRelayHost), which routes each request to the owner's phone
-        // for an explicit Allow / Deny.
+        // A1: mutating tools are permission-gated through the owner's phone (the
+        // responder above) instead of hard-denied. No responder ⇒ deny (fail closed)
+        // AND declare the session prompt-less so those tools aren't advertised.
         let handler = ACPClientHandler(
             onAgentMessageChunk: { await collected.append($0) },
-            requestPermission: { _, _ in false })
+            requestPermission: permissionResponder ?? { _, _ in false },
+            canPromptPermissions: permissionResponder != nil)
         var env = environmentOverrides
         env["ELDR_ACP_STREAM"] = "0"  // need the complete message to scrub it (§10)
-        // CR-1 (cont.): since this chat/drafting path DENIES every mutating tool (the
-        // handler above), advertise ONLY the READ-ONLY tools to the model. A
-        // coding-tuned local model would otherwise keep calling run_shell / write_file,
-        // each one bounced by the deny — wasting turns and surfacing confusing "tool
-        // denied" noise in the user's LLM server (LM Studio). Reads never request
-        // permission, so this loses no capability here, and it overrides the env-file
-        // `tools` allowlist for THIS path only (the env var wins; AgentConfig §tools).
-        // The phone-driven coding-agent path (ACPRelayHost) keeps the user's full tool
-        // set and routes each mutating request to the phone for Allow / Deny.
-        env["ELDR_ACP_TOOLS"] = "read_file,list_dir"
+        // Tool gating on this path follows the operator's persistent trusted-mode
+        // toggle (DEVIATIONS: supersedes the A1 "always force 0 here" rule, which in
+        // practice was BOTH ineffective — the launcher re-`source`s the env file after
+        // these overrides, so the file's value silently won whenever the launcher was
+        // used — and, on the paths where it did stick, made tool-using models fail
+        // against an approval card the owner never saw. OFF stays exactly the A1
+        // fail-closed flow: every mutation asks the owner's phone; no responder ⇒
+        // deny + mutating tools not advertised. ON is the owner's explicit,
+        // confirmed risk acceptance, and the phone shows the bypass indicator.)
+        env["ELDR_ACP_ALLOW_UNGATED_TOOLS"] = (await allowUngatedToolsProvider()) ? "1" : "0"
         // Cross-turn memory: prior transcript as an in-memory system-prompt preamble. Never
         // written to disk (SPEC §3.4) — it lives only in this child process's environment.
         if let preamble = context.priorContext, !preamble.isEmpty {
@@ -175,6 +187,21 @@ struct ACPDriverAgentRunner: BridgeAgentRunner {
 actor AgentAnswerCollector {
     private(set) var value = ""
     func append(_ s: String) { value += s }
+}
+
+/// `BridgeAgentRunner` backed by sybilclaw's Gateway (the unified `PQRCACP.SybilclawGatewayClient`
+/// — WS-B5). Drop-in alternative to `ACPDriverAgentRunner`: the owner's inbound chat (already
+/// C-3-gated + redaction-wrapped by `handleInboundPrompt`) is answered by sybilclaw's own
+/// assistant instead of `eldr-acp`. `workdir` is ignored — sybilclaw owns its own workspace.
+struct SybilclawAgentRunner: BridgeAgentRunner {
+    let client: SybilclawGatewayClient
+    /// The gateway keeps this conversation's history under the session key (server-side), so
+    /// Huginn records its own encrypted canonical copy but must NOT re-inject prior context —
+    /// the gateway would otherwise see the history twice.
+    var selfPersistsHistory: Bool { true }
+    func run(prompt: String, workdir: String?, context: ConversationContext) async throws -> String {
+        try await client.ask(prompt, sessionKey: context.sessionKey)
+    }
 }
 
 /// A no-op `AgentMessageSink`. The bridge uses its `AgentEngine` purely as the
@@ -229,6 +256,25 @@ final class ACPBridgeService: ObservableObject {
 
         /// The recipients to fan a message out to (the roster, or just the peer for 1:1).
         var recipients: [String] { members.isEmpty ? [id] : members }
+    }
+
+    /// WS-B2: one relay's live connection state for the Relay tab, keyed by its URL
+    /// string. Populated purely from `NostrWebSocketTransport.transportEvents()` — never
+    /// gates delivery, mirrors what's forwarded into `DiagnosticsLog`'s `.relay` category
+    /// so the same activity is visible in both the Relay tab and the Inspector.
+    struct RelayConnectionInfo: Identifiable, Equatable {
+        enum AuthState: Equatable {
+            case none
+            case challengeReceived
+            case authenticated
+            case failed(String)
+        }
+        var id: String { url }
+        let url: String
+        var status: RelayStatus = .disconnected
+        var lastEventAt: Date?
+        var eoseSeen = false
+        var authState: AuthState = .none
     }
 
     @Published private(set) var bridgeState: BridgeState = .unpaired
@@ -288,6 +334,37 @@ final class ACPBridgeService: ObservableObject {
         }
     }
 
+    /// WS3c — which backend answers the phone's REMOTE-drive session over the relay
+    /// (`ACPRelayHost`): the built-in `eldr-acp` (default) or a `HarnessRegistry` id for
+    /// an external cloud CLI (`claude-code`, `gemini-cli`) whose vendor key comes from
+    /// the Keychain (Settings ▸ Cloud coding agents), never this app's general env.
+    /// DISTINCT from `responder`, which only picks what drafts a reply in the Mac's own
+    /// read-only watch-along chat mirror — a completely separate feature.
+    @Published var relayHarnessID: String = ConfigurationStore.selectedRelayHarnessID() {
+        didSet {
+            UserDefaults.standard.set(relayHarnessID, forKey: ConfigurationStore.relayHarnessIDKey)
+            // Re-wire the live relay host immediately if it's already serving.
+            if messenger != nil { refreshRelayACPHost() }
+        }
+    }
+
+    /// WS-B2: the persisted relay-URL override (Relay tab), loaded from the SAME
+    /// UserDefaults key `ConfigurationStore.relayURL` reads/writes so both surfaces
+    /// agree. Raw text — an invalid value (malformed URL, plaintext `ws://` off
+    /// loopback) is kept here as typed but never dialed; `effectivePreferredRelay`
+    /// is the gate. Persist-only on edit — reconnecting is an explicit action
+    /// (`setRelayURLOverride`/`connectToLocalRelay`), not a side effect of every
+    /// keystroke a bound text field would otherwise trigger.
+    @Published var relayURLOverride: String = ConfigurationStore.selectedRelayURL() {
+        didSet {
+            UserDefaults.standard.set(relayURLOverride, forKey: ConfigurationStore.relayURLKey)
+        }
+    }
+
+    /// WS-B2: live per-relay connection state for the Relay tab, forwarded from
+    /// `NostrWebSocketTransport.transportEvents()`. Keyed by relay URL string.
+    @Published private(set) var relayConnections: [RelayConnectionInfo] = []
+
     // Per-message-type opt-in — OFF by default (the user chooses to share).
     @Published var shareToolCalls = false
     @Published var shareBuildResults = false
@@ -297,7 +374,10 @@ final class ACPBridgeService: ObservableObject {
     private let keychain: KeychainBox
     private let keyAccount = "bridge-nostr-identity"
     private let serviceType: String
-    private let preferredRelay: String?
+    /// Explicit relay override from init — the test/injection seam. Non-nil ALWAYS
+    /// wins over the persisted `relayURLOverride` (tests construct this directly and
+    /// don't go through the UserDefaults-backed pref at all).
+    private let explicitPreferredRelay: String?
     private let clock: any Clock = SystemClock()
     private var messaging: BridgeMessaging
     /// The owner-authority oracle: verifies owner-signed windows/invites and answers
@@ -353,6 +433,15 @@ final class ACPBridgeService: ObservableObject {
     private var nodeTask: Task<Void, Never>?
     /// The relay the node publishes to / subscribes on. MUST match the phone's relay.
     static let defaultRelayURL = "wss://relay.lerants.com"
+    /// WS-B2: the local dev/demo `pqrc-relay`'s own default port (`PQRCRelayMain.swift`:
+    /// `--port` defaults to 7777) — the "Connect local relay" quick action targets this.
+    /// Plaintext `ws://` is fine here ONLY because 127.0.0.1 never leaves the box (SPEC
+    /// §0 — never downgrade transport to plaintext off-box; `ConfigurationStore.
+    /// validateRelayOverride` allows `ws://` for loopback hosts for exactly this reason).
+    static let localRelayURL = "ws://127.0.0.1:7777"
+    /// Tasks forwarding each live transport's `transportEvents()` into `relayConnections`
+    /// + `DiagnosticsLog`. Cancelled in `stopMessagingNode()`.
+    private var relayEventTasks: [Task<Void, Never>] = []
 
     /// The relay-carried ACP host (Phase 3 LIVE node side): serves the FULL ACP protocol
     /// to the OWNER's phone over the relay, so the phone can drive the agent REMOTELY.
@@ -369,6 +458,13 @@ final class ACPBridgeService: ObservableObject {
     /// status row alongside the existing pairing state.
     @Published private(set) var relayACPServing = false
 
+    /// WS-B4: when the phone tether last carried ACP traffic (either direction) — host
+    /// timing only, never payload (invariant 12). Feeds the tether card's "Last activity"
+    /// row so a live-but-quiet tether reads differently from one that's never spoken.
+    /// Updated at exactly two points: inbound ACP relay frames (`handleMessengerEvent`)
+    /// and outbound frames published to the owner (`startRelayACPHost`'s publish seam).
+    @Published private(set) var lastTetherActivity: Date?
+
     init(
         keychain: KeychainBox = KeychainBox(),
         serviceType: String = MultipeerNearbyLink.bridgeServiceType,
@@ -378,7 +474,7 @@ final class ACPBridgeService: ObservableObject {
     ) {
         self.keychain = keychain
         self.serviceType = serviceType
-        self.preferredRelay = preferredRelay
+        self.explicitPreferredRelay = preferredRelay
         self.messaging = messaging
         self.ownerFilePath = configDir.map { ($0 as NSString).appendingPathComponent("owner") }
         self.workdirFilePath = configDir.map { ($0 as NSString).appendingPathComponent("workdir") }
@@ -389,6 +485,16 @@ final class ACPBridgeService: ObservableObject {
         self.conversationMemory = transcripts.map { ConversationMemory(directory: $0) }
         self.ownerIdentityHex = Self.loadOwner(from: ownerFilePath)
         self.agentWorkdir = Self.loadOwner(from: workdirFilePath)
+    }
+
+    /// WS-B2: the relay to actually dial — an explicit init override (tests) wins,
+    /// otherwise the persisted `relayURLOverride` IF it validates, otherwise nil (⇒
+    /// `Self.defaultRelayURL`). An invalid persisted override (malformed, or plaintext
+    /// `ws://` off loopback) is never trusted — falling back to the known-good default
+    /// is the fail-safe behavior (SPEC §0: never downgrade transport off-box).
+    private var effectivePreferredRelay: String? {
+        if let explicitPreferredRelay { return explicitPreferredRelay }
+        return ConfigurationStore.effectiveRelayURL(relayURLOverride)
     }
 
     /// Set (or clear) the project directory the agent's tools operate in, and persist it.
@@ -431,16 +537,25 @@ final class ACPBridgeService: ObservableObject {
 
     /// Generate/load the identity, publish the QR payload, and start advertising over
     /// Multipeer so a nearby EldrChat can discover the agent.
+    /// UserDefaults key remembering that the operator turned the bridge ON. Restored
+    /// at launch (HuginnApp): without this, every Huginn relaunch silently dropped the
+    /// relay node + tether host until someone re-clicked "Enable bridge" — the
+    /// recurring "the tether stopped working" report was usually just this.
+    static let bridgeEnabledKey = "bridgeEnabledPreference"
+
     func enable() {
         // Tear down any prior advertiser first so re-enabling (e.g. retrying from the
         // `.error` state, where the Enable button is still shown) can't orphan a live
-        // MultipeerNearbyLink + its events Task. Idempotent.
-        if link != nil || eventsTask != nil { disable() }
+        // MultipeerNearbyLink + its events Task. Idempotent. Internal cleanup — the
+        // operator's persisted enable choice must survive it.
+        if link != nil || eventsTask != nil { disable(persistPreference: false) }
+        UserDefaults.standard.set(true, forKey: Self.bridgeEnabledKey)
         do {
             let kp = try loadOrCreateKeypair()
-            pairingPayloadJSON = PairingPayload(pubkey: kp.publicKeyHex, relay: preferredRelay)
-                .jsonString()
-            pairingLink = Self.deepLink(pubkeyHex: kp.publicKeyHex, relay: preferredRelay)
+            pairingPayloadJSON = PairingPayload(
+                pubkey: kp.publicKeyHex, relay: effectivePreferredRelay
+            ).jsonString()
+            pairingLink = Self.deepLink(pubkeyHex: kp.publicKeyHex, relay: effectivePreferredRelay)
             let link = MultipeerNearbyLink(serviceType: serviceType)
             self.link = link
             bridgeState = .advertising
@@ -464,7 +579,12 @@ final class ACPBridgeService: ObservableObject {
     }
 
     /// Stop advertising + tear down the PQRC node (keeps the persisted identity/keys).
-    func disable() {
+    /// `persistPreference` is false only for INTERNAL teardown (enable()'s cleanup) —
+    /// a user-initiated stop records the choice so launch doesn't re-enable.
+    func disable(persistPreference: Bool = true) {
+        if persistPreference {
+            UserDefaults.standard.set(false, forKey: Self.bridgeEnabledKey)
+        }
         eventsTask?.cancel()
         eventsTask = nil
         let link = self.link
@@ -539,6 +659,7 @@ final class ACPBridgeService: ObservableObject {
         keypair = nil
         activeConversations.removeAll()
         inbound.removeAll()
+        lastTetherActivity = nil
         setOwnerIdentity(nil)  // forget the pinned owner (fail closed until re-pinned)
         bridgeState = .unpaired
     }
@@ -597,14 +718,60 @@ final class ACPBridgeService: ObservableObject {
                 // on-disk env file, C-8) so it seals events.jsonl + reads sealed eldr.md.
                 if let metadataKeyB64 { env["ELDR_ACP_METADATA_KEY"] = metadataKeyB64 }
                 agentRunner = ACPDriverAgentRunner(
-                    executableURL: executable, environmentOverrides: env)
+                    executableURL: executable, environmentOverrides: env,
+                    // A1: mutating tools in the chat bridge are gated through the
+                    // owner's phone (approval card), not hard-denied. The responder
+                    // fails closed on its own when no owner/messenger is live.
+                    permissionResponder: { [weak self] title, kind in
+                        await self?.requestPhonePermission(title: title, kind: kind) ?? false
+                    },
+                    allowUngatedToolsProvider: { await Self.operatorAllowsUngatedTools() })
             }
         case .sybilclaw:
             agentRunner = SybilclawAgentRunner(
                 client: SybilclawGatewayClient(
                     port: Self.sybilclawGatewayPort(), token: Self.sybilclawGatewayToken(),
-                    diagnostics: Self.sybilclawGatewayDiagnostics()))
+                    diagnostics: Self.sybilclawGatewayDiagnostics(),
+                    userAgent: "huginn-eldr/\(Self.appVersion)",
+                    onEvent: { event in Self.postGatewayDiagnostic(event) }))
         }
+    }
+
+    /// This app's short version string, for the gateway `userAgent` field only (free text,
+    /// never allowlist-checked — see `SybilclawGatewayClient.connectParams`).
+    private static var appVersion: String {
+        (Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String) ?? "0.1.0"
+    }
+
+    /// WS-B5: forwards the gateway client's lifecycle events into the Agent Inspector's
+    /// `DiagnosticsLog`. Protocol/connection state only — `SybilclawGatewayEvent` carries no
+    /// payload text by construction (invariant 12), so there is nothing to redact here.
+    /// `nonisolated` (like `DiagnosticsLog.post` itself) so the client's plain, non-actor
+    /// `onEvent` closure can call it synchronously off the main actor.
+    private static nonisolated func postGatewayDiagnostic(_ event: SybilclawGatewayEvent) {
+        switch event {
+        case .connecting(let host, let port):
+            DiagnosticsLog.shared.post(.acp, .info, "Gateway connecting", "\(host):\(port)")
+        case .connected:
+            DiagnosticsLog.shared.post(.acp, .success, "Gateway connected")
+        case .disconnected(let reason):
+            DiagnosticsLog.shared.post(.acp, .warn, "Gateway disconnected", reason ?? "")
+        case .turnStarted:
+            DiagnosticsLog.shared.post(.acp, .info, "Gateway turn started")
+        case .turnSucceeded:
+            DiagnosticsLog.shared.post(.acp, .success, "Gateway turn completed")
+        case .turnFailed(let reason):
+            DiagnosticsLog.shared.post(.acp, .error, "Gateway turn failed", reason)
+        }
+    }
+
+    /// The operator's persistent trusted-mode toggle, read fresh from the SAME env
+    /// file the CLI launcher sources — so Huginn-hosted paths and external clients
+    /// (Xcode) can never disagree about the effective tool policy.
+    static func operatorAllowsUngatedTools(paths: ConfigPaths = .standard) -> Bool {
+        AgentConfig.fromEnvironment(
+            ConfigurationStore.parseEnvFile(at: paths.envFile), configDir: paths.configDir
+        ).allowUngatedTools
     }
 
     /// sybilclaw gateway port — the SAME Huginn pref the Connections panel writes
@@ -755,16 +922,21 @@ final class ACPBridgeService: ObservableObject {
             let identity = try loadOrCreatePQRCIdentity()
             let identityDH = try loadOrCreateIdentityDH()
             let prekeyManager = try await loadOrCreatePrekeyManager(identity: identity)
-            let relayURLs = overrideRelayURLs ?? [preferredRelay ?? Self.defaultRelayURL]
+            let relayURLs = overrideRelayURLs ?? [effectivePreferredRelay ?? Self.defaultRelayURL]
 
             let transports: [any RelayTransport]
             if let injectedTransports {
                 transports = injectedTransports
             } else {
+                // WS-B2: fresh live bring-up — start each relay's status row clean
+                // rather than carrying over a stale entry from a prior relay/session.
+                relayConnections.removeAll()
                 var built: [any RelayTransport] = []
                 for raw in relayURLs {
                     if let url = URL(string: raw) {
-                        built.append(await NostrWebSocketTransport(url: url).connect())
+                        let transport = NostrWebSocketTransport(url: url)
+                        subscribeToRelayEvents(transport, urlString: raw)
+                        built.append(await transport.connect())
                     }
                 }
                 transports = built
@@ -812,10 +984,175 @@ final class ACPBridgeService: ObservableObject {
         nodeTask?.cancel()
         nodeTask = nil
         stopRelayACPHost()
+        // A1 hygiene: the permission route to the phone just went away — resolve every
+        // still-awaiting request with DENY so no agent turn is left parked (its own
+        // C-1/timeout would eventually deny too; this is immediate + explicit).
+        failAllPhonePermissions()
+        for task in relayEventTasks { task.cancel() }
+        relayEventTasks.removeAll()
         let messenger = self.messenger
         self.messenger = nil
         Task { await messenger?.stop() }
         messaging = UnpairedMessaging()
+    }
+
+    // MARK: WS-B2 — relay-URL override + live per-relay status
+
+    /// Update the persisted relay-URL override (Relay tab). Persists immediately
+    /// (via `relayURLOverride`'s `didSet`) but does NOT reconnect on its own — a bound
+    /// text field would otherwise tear the node down on every keystroke. Call
+    /// `reconnectToConfiguredRelay()` (or use `connectToLocalRelay()`, which does both)
+    /// once the user is done editing.
+    func setRelayURLOverride(_ raw: String) {
+        relayURLOverride = raw
+    }
+
+    /// Quick action (Relay tab): point the override at the local dev/demo `pqrc-relay`
+    /// and reconnect immediately.
+    func connectToLocalRelay() {
+        relayURLOverride = Self.localRelayURL
+        reconnectToConfiguredRelay()
+    }
+
+    /// Tear down the live node (if any) and bring it back up against whatever
+    /// `effectivePreferredRelay` resolves to right now — the explicit action behind
+    /// manual relay-URL edits and the local-relay quick action. No-op if the node was
+    /// never started (nothing to reconnect; the next `enable()` picks up the override).
+    func reconnectToConfiguredRelay() {
+        guard messenger != nil else { return }
+        stopMessagingNode()
+        Task { [weak self] in await self?.startMessagingNode() }
+    }
+
+    /// Subscribe to one live transport's connection-lifecycle events and forward them
+    /// into `relayConnections` (the Relay tab) + `DiagnosticsLog`'s `.relay` category
+    /// (the Inspector). Fire-and-forget: the Task ends when the transport's stream
+    /// finishes (teardown) or `self` is freed; also cancelled explicitly in
+    /// `stopMessagingNode()` via `relayEventTasks`.
+    private func subscribeToRelayEvents(_ transport: NostrWebSocketTransport, urlString: String) {
+        upsertRelayConnection(urlString: urlString, status: .connecting)
+        let task = Task { [weak self] in
+            for await event in await transport.transportEvents() {
+                await self?.recordRelayEvent(event, urlString: urlString)
+            }
+        }
+        relayEventTasks.append(task)
+    }
+
+    private func upsertRelayConnection(
+        urlString: String, status: RelayStatus? = nil,
+        mutate: ((inout RelayConnectionInfo) -> Void)? = nil
+    ) {
+        if let index = relayConnections.firstIndex(where: { $0.url == urlString }) {
+            if let status { relayConnections[index].status = status }
+            mutate?(&relayConnections[index])
+        } else {
+            var info = RelayConnectionInfo(url: urlString)
+            if let status { info.status = status }
+            mutate?(&info)
+            relayConnections.append(info)
+        }
+    }
+
+    /// Apply one relay lifecycle event to `relayConnections` and mirror it into
+    /// `DiagnosticsLog`'s `.relay` category — host only, never event content (invariant 12).
+    private func recordRelayEvent(_ event: RelayTransportEvent, urlString: String) {
+        let host = URL(string: urlString)?.host ?? urlString
+        let now = Date()
+        switch event {
+        case .connecting:
+            upsertRelayConnection(urlString: urlString, status: .connecting) { $0.lastEventAt = now }
+            DiagnosticsLog.shared.post(.relay, .info, "Connecting", host)
+        case .connected:
+            upsertRelayConnection(urlString: urlString, status: .connected) { $0.lastEventAt = now }
+            DiagnosticsLog.shared.post(.relay, .success, "Connected", host)
+        case .disconnected(let reason):
+            upsertRelayConnection(
+                urlString: urlString, status: reason.map { .failed($0) } ?? .disconnected
+            ) {
+                $0.lastEventAt = now
+                $0.eoseSeen = false
+            }
+            DiagnosticsLog.shared.post(
+                .relay, reason == nil ? .info : .warn, "Disconnected",
+                reason.map { "\(host) — \($0)" } ?? host)
+        case .eose:
+            upsertRelayConnection(urlString: urlString) { $0.lastEventAt = now; $0.eoseSeen = true }
+            DiagnosticsLog.shared.post(.relay, .info, "EOSE", host)
+        case .authChallenge:
+            upsertRelayConnection(urlString: urlString) {
+                $0.lastEventAt = now
+                $0.authState = .challengeReceived
+            }
+            DiagnosticsLog.shared.post(.relay, .info, "AUTH challenge", host)
+        case .authenticated:
+            upsertRelayConnection(urlString: urlString) {
+                $0.lastEventAt = now
+                $0.authState = .authenticated
+            }
+            DiagnosticsLog.shared.post(.relay, .success, "AUTH ok", host)
+        case .authFailed(let reason):
+            upsertRelayConnection(urlString: urlString) {
+                $0.lastEventAt = now
+                $0.authState = .failed(reason ?? "unknown")
+            }
+            DiagnosticsLog.shared.post(
+                .relay, .error, "AUTH failed", reason.map { "\(host) — \($0)" } ?? host)
+        case .error(let message):
+            upsertRelayConnection(urlString: urlString) { $0.lastEventAt = now }
+            DiagnosticsLog.shared.post(.relay, .error, "Relay error", "\(host) — \(message)")
+        }
+    }
+
+    // MARK: A1 — chat-bridge permission routing (node → owner's phone)
+
+    /// In-flight owner-phone permission requests, keyed by the request id minted in
+    /// `requestPhonePermission`. Resolved by the owner's `ACPPermissionChannel`
+    /// response frame (`handleMessengerEvent`), by the deny timeout, or by teardown.
+    private var pendingPhonePermissions: [String: CheckedContinuation<Bool, Never>] = [:]
+
+    /// How long to wait for the owner's answer before denying. Mirrors the agent's
+    /// C-1 default (120 s deny-on-timeout) — and is the ONLY brake when the operator's
+    /// env sets `ELDR_ACP_PERMISSION_TIMEOUT=0` (agent waits forever).
+    static let phonePermissionTimeoutSeconds: Double = 120
+
+    /// A1 — ask the OWNER'S PHONE to approve one mutating tool call from the chat
+    /// bridge's spawned agent. Sends an `ACPPermissionChannel` request frame to the
+    /// pinned owner over the E2EE mesh and awaits the response frame. FAIL CLOSED:
+    /// no messenger, no pinned owner, a send failure, or no answer within
+    /// `phonePermissionTimeoutSeconds` ⇒ false (denied).
+    func requestPhonePermission(title: String, kind: String) async -> Bool {
+        guard let messenger, let owner = ownerIdentityHex else { return false }
+        let id = UUID().uuidString
+        let frame = ACPPermissionChannel.requestFrame(id: id, title: title, kind: kind)
+        let sentAt = Int64(Date().timeIntervalSince1970)
+        return await withCheckedContinuation { continuation in
+            pendingPhonePermissions[id] = continuation
+            Task { [weak self] in
+                // Transport is the same ratcheted mesh as chat; a failed send just
+                // leaves the timeout to deny.
+                try? await messenger.send(MessageBody(text: frame, sentAt: sentAt), to: owner)
+                try? await Task.sleep(
+                    nanoseconds: UInt64(Self.phonePermissionTimeoutSeconds * 1_000_000_000))
+                self?.resolvePhonePermission(id: id, allowed: false)
+            }
+        }
+    }
+
+    /// Resolve one pending phone-permission request. Idempotent — the first resolver
+    /// (owner's answer, timeout, teardown) wins; later calls are no-ops, so a late
+    /// answer after the deny timeout can never resurrect a denied tool call.
+    private func resolvePhonePermission(id: String, allowed: Bool) {
+        guard let continuation = pendingPhonePermissions.removeValue(forKey: id) else { return }
+        continuation.resume(returning: allowed)
+    }
+
+    /// Deny + drop every in-flight phone-permission request (teardown hygiene —
+    /// never strand a continuation).
+    private func failAllPhonePermissions() {
+        let doomed = pendingPhonePermissions.values
+        pendingPhonePermissions.removeAll()
+        for continuation in doomed { continuation.resume(returning: false) }
     }
 
     // MARK: Relay-carried ACP host (Phase 3 LIVE node side)
@@ -823,15 +1160,23 @@ final class ACPBridgeService: ObservableObject {
     /// Stand up the relay ACP host over `messenger`: serve the FULL ACP protocol to the
     /// OWNER's phone over the relay (remote drive), with the C-3 gate admitting ONLY the
     /// owner's frames and the permission gate left fail-closed. No-op (fail-closed) unless
-    /// an owner is pinned AND a usable LLM is configured — without an owner there is no
-    /// gate target, and without a model the agent can't answer. Idempotent. The host's
+    /// an owner is pinned AND a usable backend is configured — without an owner there is
+    /// no gate target; without a model there is nothing to answer with UNLESS
+    /// `relayHarnessID` (WS3c) selects an external cloud CLI, which brings its own model
+    /// and needs no local LLM URL. Idempotent. The host's
     /// publish seam is `messenger.send(framed, to: owner)`; its inbound is fed by
     /// `handleMessengerEvent`'s ACP-frame routing.
     private func startRelayACPHost(messenger: PQRCMessenger) {
         guard relayHost == nil, let ownerIdentityHex else { return }
         let llmConfig = Self.relayHostLLMConfig()
-        // No usable endpoint (empty URL) ⇒ don't serve a dead agent over the relay.
-        guard !llmConfig.url.isEmpty else { return }
+        // WS3c: resolve the selected backend FIRST — an external cloud CLI brings its
+        // own model, so the built-in LLM-URL check below must not fail-closed a
+        // deliberately-selected cloud harness just because no local LLM is configured.
+        let descriptor =
+            ConfigurationStore.resolvedHarnessDescriptor(id: relayHarnessID) ?? .builtIn
+        // No usable endpoint (empty URL) ⇒ don't serve a dead built-in agent over the
+        // relay. Only applies to `.builtIn` — a `.stdioSpawn` harness needs no local URL.
+        guard descriptor.kind != .builtIn || !llmConfig.url.isEmpty else { return }
         DiagnosticsLog.shared.post(
             .node, .info, "Relay ACP host starting",
             "owner=\(ownerIdentityHex.prefix(12))… · LLM=\(llmConfig.url) · model=\(llmConfig.model)")
@@ -839,10 +1184,18 @@ final class ACPBridgeService: ObservableObject {
             wrapping: OpenAICompatibleLLMClient(config: llmConfig), model: llmConfig.model)
         let toolEnvironment = ToolEnvironment(
             workdir: agentWorkdir, baseEnvironment: ProcessInfo.processInfo.environment)
+        // Derive the relay-hosted agent's config from the SAME env file every other
+        // surface honors. This host used to pass `AgentConfig.default`, which silently
+        // discarded the operator's context-budget tuning, tool allowlist, permission
+        // timeout, and — the felt one — the persistent "Run tools without asking
+        // permission" toggle: phone remote-drive kept demanding per-call approval
+        // cards (auto-denying on timeout) no matter what the operator had chosen.
+        var relayConfig = AgentConfig.fromEnvironment(
+            ConfigurationStore.parseEnvFile(at: ConfigPaths.standard.envFile),
+            configDir: ConfigPaths.standard.configDir)
         // B2: carry the at-rest metadata key so the in-process agent seals/reads the metadata
         // sinks under the same key. (Today this host passes no configDir/events file, so this
         // is inert; wired now so it stays correct if those are supplied later.)
-        var relayConfig = AgentConfig.default
         relayConfig.metadataKey = metadataKeyB64.flatMap { Data(base64Encoded: $0) }
         let host = ACPRelayHost(
             ownerIdentityHex: ownerIdentityHex,
@@ -851,7 +1204,8 @@ final class ACPBridgeService: ObservableObject {
             toolEnvironment: toolEnvironment,
             config: relayConfig,
             streamingEnabled: relayHostStreamingEnabled,
-            publish: { [weak messenger] framed in
+            descriptor: descriptor,
+            publish: { [weak self, weak messenger] framed in
                 // The transport's send seam: publish ONE framed chunk to the owner as an
                 // ordinary PQRC message. participant_type stays .human — the frame is the
                 // node↔owner ACP control channel, not an agent-authored chat message
@@ -861,6 +1215,8 @@ final class ACPBridgeService: ObservableObject {
                 try? await messenger?.send(
                     MessageBody(text: framed, sentAt: Int64(Date().timeIntervalSince1970)),
                     to: ownerIdentityHex)
+                // WS-B4: outbound tether traffic — host/timing only, never the frame body.
+                await self?.markTetherActivity()
             })
         relayHost = host
         host.start()
@@ -883,6 +1239,12 @@ final class ACPBridgeService: ObservableObject {
         startRelayACPHost(messenger: messenger)
     }
 
+    /// WS-B4: stamp `lastTetherActivity` to now. Host/timing only — never called with
+    /// (or storing) any payload text, per invariant 12.
+    private func markTetherActivity() {
+        lastTetherActivity = Date()
+    }
+
     /// Route one inbound messenger event. New peers are auto-accepted (the user
     /// initiated pairing from their phone); owner-signed windows/grants open the gate;
     /// a human message becomes a watch-along prompt.
@@ -898,6 +1260,18 @@ final class ACPBridgeService: ObservableObject {
                 bridgeState = .paired(contactName: shortHex(contact.identityHex))
             }
         case .message(let received):
+            // A1 — the owner's answer to a chat-bridge permission request
+            // (`ACPPermissionChannel`). ALWAYS swallowed (a control frame, never chat);
+            // honored only from the pinned owner — anyone else's frame resolves
+            // nothing (fail closed: the pending request just times out to deny).
+            if ACPPermissionChannel.isFrame(received.body.text) {
+                if received.senderIdentityHex == ownerIdentityHex,
+                    let response = ACPPermissionChannel.parseResponse(received.body.text)
+                {
+                    resolvePhonePermission(id: response.id, allowed: response.allowed)
+                }
+                return
+            }
             // Relay-carried ACP frame? Route it to the relay host (Phase 3 LIVE node
             // side) and STOP — an ACP frame is the node↔owner control channel, never a
             // chat message: it must not become a watch-along prompt or a paired
@@ -905,6 +1279,8 @@ final class ACPBridgeService: ObservableObject {
             // non-owner's `ACP1|…` frame is swallowed here (returns from routeInbound as
             // a drop) and goes no further (so a non-owner can't probe the agent either).
             if ACPRelayHost.wasACPFrame(received.body.text) {
+                // WS-B4: inbound tether traffic — host/timing only, never the frame body.
+                markTetherActivity()
                 await relayHost?.routeInbound(
                     senderIdentityHex: received.senderIdentityHex, body: received.body.text)
                 return
@@ -1198,7 +1574,24 @@ final class ACPBridgeService: ObservableObject {
 
         switch watchAlongMode {
         case .direct:
-            guard await ownerAuthorized(threadID: conversation.threadID) else { return }
+            // Solo semantics (C7 — "the tether is just an AI"): when the ONLY
+            // recipient is the owner (their 1:1 chat with this node), answer
+            // without requiring a live ai_window — the same rule the phone's own
+            // My-AI solo chat and this file's `sendDraftToOwner` already apply
+            // (its doc: "no window gate — the draft is private, owner↔agent
+            // E2EE"). SPEC §13's window exists to make agent activity VISIBLE TO
+            // OTHER HUMANS; an owner-only reply reaches none. Without this, the
+            // solo tether chat went permanently silent the moment the first
+            // window lapsed — "paired but never responds". Conversations with
+            // any non-owner recipient keep the full window/invite gate.
+            if !recipientsAreOwnerOnly {
+                guard await ownerAuthorized(threadID: conversation.threadID) else {
+                    DiagnosticsLog.shared.post(
+                        .node, .warn, "Watch-along prompt dropped",
+                        "no active owner window/invite for this group/thread")
+                    return
+                }
+            }
             let agentContext = await makeAgentContext()
             // Record the owner's prompt only once we're committed to answering it (past the
             // owner-window gate), so the transcript never accumulates a dangling User turn
@@ -1287,8 +1680,20 @@ final class ACPBridgeService: ObservableObject {
     /// (PQXDH + Double Ratchet), so divergent bodies are natural and only the owner's
     /// session ever carries the secret, E2E-encrypted to the owner.
     func broadcastAgentMessage(_ text: String, conversation: BridgeConversation) async {
-        guard await ownerAuthorized(threadID: conversation.threadID), let ownerIdentityHex
-        else { return }  // fail closed — no live owner window ⇒ no send
+        guard let ownerIdentityHex else { return }  // no owner pinned ⇒ fail closed
+        // Solo semantics: an owner-only send is the private owner↔agent channel
+        // `sendDraftToOwner` already serves without a window (see the rationale at
+        // `handleInboundPrompt`'s `.direct` gate). Any non-owner recipient keeps
+        // the full fail-closed window/invite gate.
+        let ownerOnly = conversation.recipients.allSatisfy { $0 == ownerIdentityHex }
+        if !ownerOnly {
+            guard await ownerAuthorized(threadID: conversation.threadID) else {
+                DiagnosticsLog.shared.post(
+                    .node, .warn, "Agent send dropped",
+                    "no active owner window/invite for this group/thread")
+                return  // fail closed — no live owner window ⇒ no send
+            }
+        }
         let redacted = CredentialRedactor.scrub(text)
         for member in conversation.recipients {
             let visible = member == ownerIdentityHex ? text : redacted

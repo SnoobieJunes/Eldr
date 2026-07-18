@@ -1,21 +1,42 @@
 import XCTest
 
-/// On-device runtime verification of the 5 findings in docs/UX-RECOMMENDATIONS.md.
-/// These DRIVE the real app (taps, sheets, typing) and attach screenshots as
-/// evidence — they assert the usability ISSUE actually manifests, not a fix.
-/// Temporary: delete after the review is acted on.
+/// Runtime verification of the findings from docs/deprecated/UX-RECOMMENDATIONS.md.
+/// These DRIVE the real app (taps, sheets, typing) and attach screenshots.
+/// Status per test:
+///  - rec1: the review was acted on (single AI chip + Details override are the two
+///    intended surfaces) — the test now pins that consolidation as REGRESSION coverage.
+///  - rec4 / rec5: still assert the ISSUE manifests (typed-note-dropped-on-paste-send;
+///    no passphrase strength floor). When either is fixed, flip its assertions to pin
+///    the fix — a red here means the app's behavior changed, deliberately or not.
 final class UXVerificationTests: XCTestCase {
     override func setUpWithError() throws { continueAfterFailure = false }
 
     // MARK: helpers (mirrors PQRCUITests.swift)
 
     private func launchUniverse(extraArguments: [String] = []) -> XCUIApplication {
-        let app = XCUIApplication()
+        var app = XCUIApplication()
         app.launchArguments = ["--uitest"] + extraArguments
         app.launch()
         XCTAssertTrue(
             app.segmentedControls["persona-switcher"].waitForExistence(timeout: 60),
             "Local Universe failed to boot")
+        // Conversations seed AFTER the switcher. A boot race can hang seeding
+        // outright — zero rows ever, not merely slow (observed at 150 s while a
+        // healthy boot shows rows by ~50 s; TODO(AC111) in PQRCApp). Nothing
+        // persists between --uitest launches, so one relaunch redraws the
+        // lottery; a healthy first boot never pays this.
+        let anyRow = app.descendants(matching: .any)
+            .matching(NSPredicate(format: "identifier BEGINSWITH 'conversation-'"))
+            .firstMatch
+        if !anyRow.waitForExistence(timeout: 90) {
+            app.terminate()
+            app = XCUIApplication()
+            app.launchArguments = ["--uitest"] + extraArguments
+            app.launch()
+            XCTAssertTrue(
+                app.segmentedControls["persona-switcher"].waitForExistence(timeout: 60),
+                "Local Universe failed to boot on relaunch")
+        }
         return app
     }
 
@@ -25,7 +46,18 @@ final class UXVerificationTests: XCTestCase {
 
     private func openConversation(_ app: XCUIApplication, _ title: String) {
         let row = element(app, "conversation-\(title)")
-        XCTAssertTrue(row.waitForExistence(timeout: 30), "conversation \(title) missing")
+        // The --uitest universe reseeds on every launch and takes 30–60 s alone,
+        // stretching well past 90 s when earlier tests have the simulator hot
+        // (rec4 failed at 90 s twice in-suite, passed at 39 s solo). A green run
+        // only ever pays the actual seed time.
+        if !row.waitForExistence(timeout: 150) {
+            // Failure triage: which rows DID render, and did boot error out?
+            let tree = app.debugDescription.split(separator: "\n")
+            let rows = tree.filter { $0.contains("conversation-") || $0.contains("boot") }
+            print("OPENCONV-DEBUG rows visible:\n\(rows.joined(separator: "\n"))")
+            XCTFail("conversation \(title) missing")
+            return
+        }
         row.tap()
         _ = app.textFields["composer-field"].waitForExistence(timeout: 10)
     }
@@ -129,9 +161,13 @@ final class UXVerificationTests: XCTestCase {
                        "no duplicate AI button in landscape either")
         shot(app, "rec1-03-single-ai-control-landscape")
 
-        // Details hosts a THIRD copy of the same per-conversation AI-context control.
-        // After the toolbar consolidation it lives inside the single "•••" menu, so
-        // open that first, then tap the item.
+        // Details is the second (and by design, the only other) home of the
+        // per-conversation AI-context override + the egress-firewall override.
+        // Back to portrait FIRST: in landscape the split view puts the sidebar's
+        // list ahead of the sheet in scroll-container match order, so the swipes
+        // below would scroll the wrong surface and never reveal the picker.
+        XCUIDevice.shared.orientation = .portrait
+        // The sheet lives behind the single "•••" menu; open that first.
         let moreMenu = element(app, "conversation-more-menu")
         XCTAssertTrue(moreMenu.waitForExistence(timeout: 10), "the '•••' menu is missing")
         moreMenu.tap()
@@ -149,17 +185,19 @@ final class UXVerificationTests: XCTestCase {
                       app.tables.firstMatch] where c.exists { return c }
             return app
         }()
+        // The Form is lazy: a row not yet scrolled into view has no AX node at
+        // all, so keep swiping until BOTH rows have been realized.
         let aiMode = element(app, "conversation-ai-mode")
+        let firewallMode = element(app, "conversation-firewall-mode")
         var tries = 0
-        while !aiMode.exists && tries < 8 {
+        while !(aiMode.exists && firewallMode.exists) && tries < 10 {
             scroller.swipeUp(velocity: .fast); tries += 1
         }
         XCTAssertTrue(aiMode.exists,
-                      "Details ALSO has the same 'AI context here' picker (3rd surface)")
-        XCTAssertTrue(element(app, "conversation-firewall-mode").exists,
-                      "Details also has the per-conversation egress-firewall override")
+                      "Details keeps the per-conversation 'AI context here' override")
+        XCTAssertTrue(firewallMode.exists,
+                      "Details keeps the per-conversation egress-firewall override")
         shot(app, "rec1-04-Details-has-same-control")
-        XCUIDevice.shared.orientation = .portrait
         // Toolbar consolidation (rec1): there is no separate sparkles 'My AI' button to
         // overflow on iPhone portrait — the AI:live chip is the single AI entry point and
         // every other conversation action lives in the one "•••" menu. The single-chip /

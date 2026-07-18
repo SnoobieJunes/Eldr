@@ -26,17 +26,44 @@ struct ACPAgentTests {
     }
 
     /// A scripted LLM: returns a queued response per `complete` call. Records the
-    /// messages it was given so tests can assert tool results were fed back.
+    /// messages AND the advertised tool definitions it was given so tests can assert
+    /// both what was fed back and what the model was offered.
     actor MockLLMClient: LLMClient {
         private var queue: [LLMResponse]
         private(set) var receivedMessages: [[LLMMessage]] = []
+        private(set) var receivedTools: [[LLMTool]] = []
         init(_ responses: [LLMResponse]) { self.queue = responses }
         func complete(messages: [LLMMessage], tools: [LLMTool]) async throws -> LLMResponse {
             receivedMessages.append(messages)
+            receivedTools.append(tools)
             if queue.isEmpty { return LLMResponse(content: "(no more scripted responses)") }
             return queue.removeFirst()
         }
         func calls() -> [[LLMMessage]] { receivedMessages }
+        func toolsSeen() -> [[LLMTool]] { receivedTools }
+    }
+
+    /// WS-B5: a scripted `SessionScopedLLMClient` (the refinement `SybilclawLLMClient`
+    /// conforms to) that records the `sessionId` it was called with on every turn, so a
+    /// test can prove `ACPAgent` threads a DIFFERENT id per ACP session — the general
+    /// mechanism behind the cross-conversation-bleed fix (a session-scoped backend that
+    /// buckets state by that id, like sybilclaw's gateway, therefore never bleeds one
+    /// session's context into another's).
+    actor MockSessionScopedLLMClient: LLMClient, SessionScopedLLMClient {
+        private(set) var receivedSessionIds: [String] = []
+        func complete(messages: [LLMMessage], tools: [LLMTool]) async throws -> LLMResponse {
+            // The bare, unscoped requirement — `ACPAgent` must never take this path when a
+            // `SessionScopedLLMClient` is available; a call here would fail the test below.
+            receivedSessionIds.append("UNSCOPED-FALLBACK")
+            return LLMResponse(content: "unscoped")
+        }
+        func complete(messages: [LLMMessage], tools: [LLMTool], sessionId: String) async throws
+            -> LLMResponse
+        {
+            receivedSessionIds.append(sessionId)
+            return LLMResponse(content: "reply for \(sessionId)")
+        }
+        func sessionIds() -> [String] { receivedSessionIds }
     }
 
     // MARK: Harness
@@ -75,8 +102,28 @@ struct ACPAgentTests {
         // We require NO auth.
         #expect(result["authMethods"]?.arrayValue?.isEmpty == true)
         #expect(result["agentInfo"]?["name"]?.stringValue == "eldr-acp")
+        // A4: version + build stamp are readable so a client can flag a stale CLI.
+        let advertisedVersion = try #require(result["agentInfo"]?["version"]?.stringValue)
+        #expect(!advertisedVersion.isEmpty)
+        #expect(advertisedVersion == ACPAgent.agentVersion)
+        #expect(result["agentInfo"]?["build"]?.stringValue == ACPAgent.agentBuild)
         // We don't persist sessions.
         #expect(result["agentCapabilities"]?["loadSession"]?.boolValue == false)
+        // WS2 — the silent-bypass indicator: DEFAULT config never runs tools ungated, and
+        // the node must say so honestly at initialize (the phone has no other way to know).
+        #expect(result["agentCapabilities"]?["eldrAllowUngatedTools"]?.boolValue == false)
+    }
+
+    /// WS2 — when the node's `allowUngatedTools` override IS on (the Mac-side "run tools
+    /// without asking" escape hatch), `initialize` must say so, so the phone can show its
+    /// silent-bypass banner instead of trusting a prompt that will never come.
+    @Test func initialize_advertisesUngatedToolsWhenConfigured() async throws {
+        let (agent, _) = makeAgent(
+            llm: EchoLLMClient(), config: AgentConfig(allowUngatedTools: true))
+        let response = try parse(
+            await agent.handle(
+                line: #"{"jsonrpc":"2.0","id":0,"method":"initialize","params":{}}"#))
+        #expect(response["result"]?["agentCapabilities"]?["eldrAllowUngatedTools"]?.boolValue == true)
     }
 
     // MARK: D2 — vision capability gate + image forwarding
@@ -585,6 +632,104 @@ struct ACPAgentTests {
         #expect((try? String(contentsOfFile: target, encoding: .utf8)) == "hello")
     }
 
+    // MARK: - WS3e: delegate_to_cloud_agent (cloud-CLI brokering) fail-closed gate
+
+    /// The gate order matters: `cloudAgentDelegationEnabled` is checked BEFORE the
+    /// harness lookup or any process spawn, so even `allowUngatedTools: true` (which
+    /// skips the phone permission card entirely) must NOT let the call through when
+    /// the operator's separate cloud-delegation switch is off (the default). Two
+    /// INDEPENDENT gates, neither implies the other.
+    @Test func delegateToCloudAgent_disabledByDefault_refusesBeforeSpawning() async throws {
+        let toolCall = LLMToolCall(
+            id: "d1", name: "delegate_to_cloud_agent",
+            arguments: "{\"harness\":\"claude-code\",\"task\":\"do a thing\"}")
+        let llm = MockLLMClient([
+            LLMResponse(content: "", toolCalls: [toolCall]),
+            LLMResponse(content: "done"),
+        ])
+        // allowUngatedTools ON: proves the DISTINCT cloudAgentDelegationEnabled gate
+        // isn't just a proxy for the standing mutating-tool gate.
+        let (agent, sink) = makeAgent(
+            llm: llm, config: AgentConfig(allowUngatedTools: true, cloudAgentDelegationEnabled: false))
+        _ = await agent.handle(line: #"{"jsonrpc":"2.0","id":0,"method":"initialize","params":{}}"#)
+        let sid = try #require(
+            try parse(
+                await agent.handle(
+                    line: #"{"jsonrpc":"2.0","id":1,"method":"session/new","params":{}}"#))[
+                "result"]?["sessionId"]?.stringValue)
+        _ = await agent.handle(
+            line:
+                "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"session/prompt\",\"params\":{\"sessionId\":\"\(sid)\",\"prompt\":[{\"type\":\"text\",\"text\":\"go\"}]}}"
+        )
+
+        let updates = await sink.updates()
+        let completed = updates.last { $0["sessionUpdate"]?.stringValue == "tool_call_update" }
+        #expect(completed?["status"]?.stringValue == "failed")
+        let errorText = completed?["content"]?.arrayValue?.first?["error"]?.stringValue
+        #expect(errorText?.contains("disabled") == true)
+    }
+
+    /// Enabled but an unknown/unsupported harness id ⇒ a clear error, no spawn attempt —
+    /// never silently falls back to SOME default harness.
+    @Test func delegateToCloudAgent_unknownHarness_isRejected() async throws {
+        let toolCall = LLMToolCall(
+            id: "d2", name: "delegate_to_cloud_agent",
+            arguments: "{\"harness\":\"not-a-real-harness\",\"task\":\"do a thing\"}")
+        let llm = MockLLMClient([
+            LLMResponse(content: "", toolCalls: [toolCall]),
+            LLMResponse(content: "done"),
+        ])
+        let (agent, sink) = makeAgent(
+            llm: llm, config: AgentConfig(allowUngatedTools: true, cloudAgentDelegationEnabled: true))
+        _ = await agent.handle(line: #"{"jsonrpc":"2.0","id":0,"method":"initialize","params":{}}"#)
+        let sid = try #require(
+            try parse(
+                await agent.handle(
+                    line: #"{"jsonrpc":"2.0","id":1,"method":"session/new","params":{}}"#))[
+                "result"]?["sessionId"]?.stringValue)
+        _ = await agent.handle(
+            line:
+                "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"session/prompt\",\"params\":{\"sessionId\":\"\(sid)\",\"prompt\":[{\"type\":\"text\",\"text\":\"go\"}]}}"
+        )
+
+        let updates = await sink.updates()
+        let completed = updates.last { $0["sessionUpdate"]?.stringValue == "tool_call_update" }
+        #expect(completed?["status"]?.stringValue == "failed")
+        let errorText = completed?["content"]?.arrayValue?.first?["error"]?.stringValue
+        #expect(errorText?.contains("unknown or unsupported") == true)
+    }
+
+    /// A disabled node must not even ADVERTISE delegate_to_cloud_agent to its model —
+    /// offering a tool that always refuses just burns a weak model's turns. Enabled ⇒
+    /// advertised; disabled (default) ⇒ absent. (The runOneTool guard independently
+    /// refuses a hallucinated call either way — see the tests above.)
+    @Test func delegateTool_advertisedOnlyWhenDelegationEnabled() async throws {
+        func toolsOffered(config: AgentConfig) async throws -> [String] {
+            let llm = MockLLMClient([LLMResponse(content: "ok")])
+            let (agent, _) = makeAgent(llm: llm, config: config)
+            _ = await agent.handle(
+                line: #"{"jsonrpc":"2.0","id":0,"method":"initialize","params":{}}"#)
+            let sid = try #require(
+                try parse(
+                    await agent.handle(
+                        line: #"{"jsonrpc":"2.0","id":1,"method":"session/new","params":{}}"#))[
+                    "result"]?["sessionId"]?.stringValue)
+            _ = await agent.handle(
+                line:
+                    "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"session/prompt\",\"params\":{\"sessionId\":\"\(sid)\",\"prompt\":[{\"type\":\"text\",\"text\":\"hi\"}]}}"
+            )
+            return try #require(await llm.toolsSeen().first).map(\.name)
+        }
+
+        let defaultTools = try await toolsOffered(config: .default)
+        #expect(!defaultTools.contains("delegate_to_cloud_agent"))
+        #expect(defaultTools.contains("run_shell"))  // the filter removed ONLY delegation
+
+        let enabledTools = try await toolsOffered(
+            config: AgentConfig(cloudAgentDelegationEnabled: true))
+        #expect(enabledTools.contains("delegate_to_cloud_agent"))
+    }
+
     // MARK: - Phase 1c: project-context injection
 
     @Test func contextFile_injectedAsLeadingSystemMessage() async throws {
@@ -653,6 +798,45 @@ struct ACPAgentTests {
 
         let firstSeen = try #require(await llm.calls().first)
         #expect(firstSeen.first?.content.contains(canary) == true)
+    }
+
+    // MARK: WS-B5 — session-scoped LLM clients get one backend session PER ACP session
+
+    /// The fix for the cross-conversation bleed: a `SessionScopedLLMClient` (like
+    /// `SybilclawLLMClient`, which buckets sybilclaw's own gateway session by this id) must
+    /// be called with a DIFFERENT `sessionId` for two different ACP sessions, never the
+    /// same value, and never through the bare unscoped `complete` — that's what let one
+    /// process-lifetime gateway session key bleed a project's context into another's the
+    /// moment two ACP sessions were live against the same node process.
+    @Test func sessionScopedClient_getsDistinctSessionIdPerACPSession_noBleed() async throws {
+        let llm = MockSessionScopedLLMClient()
+        let (agent, _) = makeAgent(llm: llm)
+        _ = await agent.handle(line: #"{"jsonrpc":"2.0","id":0,"method":"initialize","params":{}}"#)
+
+        let sid1 = try #require(
+            try parse(
+                await agent.handle(
+                    line: #"{"jsonrpc":"2.0","id":1,"method":"session/new","params":{}}"#))[
+                "result"]?["sessionId"]?.stringValue)
+        let sid2 = try #require(
+            try parse(
+                await agent.handle(
+                    line: #"{"jsonrpc":"2.0","id":2,"method":"session/new","params":{}}"#))[
+                "result"]?["sessionId"]?.stringValue)
+        #expect(sid1 != sid2)  // two distinct ACP sessions to begin with
+
+        _ = await agent.handle(
+            line:
+                "{\"jsonrpc\":\"2.0\",\"id\":3,\"method\":\"session/prompt\",\"params\":{\"sessionId\":\"\(sid1)\",\"prompt\":[{\"type\":\"text\",\"text\":\"project A\"}]}}"
+        )
+        _ = await agent.handle(
+            line:
+                "{\"jsonrpc\":\"2.0\",\"id\":4,\"method\":\"session/prompt\",\"params\":{\"sessionId\":\"\(sid2)\",\"prompt\":[{\"type\":\"text\",\"text\":\"project B\"}]}}"
+        )
+
+        let seen = await llm.sessionIds()
+        #expect(seen == [sid1, sid2])  // scoped path only, in order — never the unscoped fallback
+        #expect(Set(seen).count == 2)  // two distinct scopes → two distinct session keys, no bleed
     }
 }
 

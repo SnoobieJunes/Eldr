@@ -8,11 +8,14 @@ import Foundation
 // interprets little ACP itself — it pipes the verified, decrypted stream both ways").
 //
 // `runHarness` is the single seam the node calls to run ANY backend: it dispatches on the
-// descriptor's `kind` — `.builtIn` → `runACPAgent` (unchanged), `.stdioSpawn` → spawn a
-// `StdioHarnessTransport` and `runACPProxy` between it and the phone.
+// descriptor's `kind` — `.builtIn` → `runACPAgent` (unchanged), `.stdioSpawn`/`.a2aRemote` →
+// build the harness's transport via an injected `HarnessTransportFactory` and `runACPProxy`
+// between it and the phone. The factory is the seam that keeps `.a2aRemote` support (which
+// needs `SwiftA2A`) out of this dependency-free target — see `HarnessTransportFactory.swift`.
 //
-// This file is transport-agnostic and largely iOS-available; only the `.stdioSpawn` branch of
-// `runHarness` (which constructs the Process-spawning `StdioHarnessTransport`) is macOS-gated.
+// This file is transport-agnostic and largely iOS-available; only the non-`.builtIn` branch of
+// `runHarness` (which builds a `HarnessTransportFactory`-produced transport, macOS-only by
+// default) is macOS-gated.
 
 /// The transport-agnostic ACP PROXY driver: forward every line from `client.inboundLines()`
 /// → `harness.send`, and every line from `harness.inboundLines()` → `client.send`, until
@@ -50,19 +53,23 @@ public func runACPProxy(client: any ACPTransport, harness: any ACPTransport) asy
 
 /// The single seam the node calls to run ANY selectable backend over an already-verified
 /// client transport. Dispatches on the descriptor's `kind`:
-///   • `.builtIn`   → `runACPAgent(transport: client, llm: llm, …)` — the unchanged Phase-1
-///     built-in path (the bring-your-own-model reference harness, driven by `llm`).
-///   • `.stdioSpawn`→ spawn a `StdioHarnessTransport(descriptor:)`, then `runACPProxy` between
-///     the phone and the harness; `llm` is IGNORED (external harnesses bring their own model).
+///   • `.builtIn`               → `runACPAgent(transport: client, llm: llm, …)` — the
+///     unchanged Phase-1 built-in path (the bring-your-own-model reference harness, driven
+///     by `llm`).
+///   • `.stdioSpawn`/`.a2aRemote`→ build the harness's `ACPTransport` via `factory`
+///     (`.stdioSpawn` spawns a subprocess, `.a2aRemote` bridges to an A2A agent — the
+///     factory owns which), then `runACPProxy` between the phone and it; `llm` is IGNORED
+///     (external harnesses bring their own model).
 ///
 /// `client` MUST already be owner-verified (see the trust-boundary note on `runACPProxy`).
-/// Returns when the session ends (transport closed / harness exited). On a `.stdioSpawn`
-/// launch failure the client transport is closed so the phone sees a clean disconnect rather
-/// than a hang.
+/// Returns when the session ends (transport closed / harness exited). On a factory build
+/// failure the client transport is closed so the phone sees a clean disconnect rather than
+/// a hang.
 ///
-/// macOS-only because the `.stdioSpawn` branch spawns a `Process`. The node (Mac/server/Pi)
-/// hosts harnesses; the phone is the ACP client and calls `runACPAgent`/drives a remote one,
-/// never `runHarness`. Same gating as `runACPAgent` and `StdioHarnessTransport`.
+/// macOS-only because the default factory's `.stdioSpawn` branch spawns a `Process`. The
+/// node (Mac/server/Pi) hosts harnesses; the phone is the ACP client and calls
+/// `runACPAgent`/drives a remote one, never `runHarness`. Same gating as `runACPAgent` and
+/// `StdioHarnessTransport`.
 #if os(macOS)
 public func runHarness(
     descriptor: HarnessDescriptor,
@@ -71,22 +78,28 @@ public func runHarness(
     toolEnvironment: ToolEnvironment = .fromEnvironment(),
     config: AgentConfig = .fromEnvironment(),
     configDir: String? = nil,
-    streamingEnabled: Bool = true
+    streamingEnabled: Bool = true,
+    extraTools: (any ExtraToolProvider)? = nil,
+    factory: any HarnessTransportFactory = DefaultHarnessTransportFactory()
 ) async {
     switch descriptor.kind {
     case .builtIn:
         // Unchanged built-in path: run the in-process ACPAgent over the phone transport.
+        // `extraTools` (Phase D3 MCP chat-tool passthrough) is built-in-only — an external
+        // harness brings its own tools and never sees the phone's MCP seam.
         await runACPAgent(
             transport: client, llm: llm, toolEnvironment: toolEnvironment,
-            config: config, configDir: configDir, streamingEnabled: streamingEnabled)
+            config: config, configDir: configDir, streamingEnabled: streamingEnabled,
+            extraTools: extraTools)
 
-    case .stdioSpawn:
-        // Spawn the external harness and pipe the phone's verified stream both ways.
-        let harness = StdioHarnessTransport(descriptor: descriptor)
+    case .stdioSpawn, .a2aRemote:
+        // Build the external harness's transport (spawn or A2A bridge, per `factory`) and
+        // pipe the phone's verified stream both ways.
+        let harness: any ACPTransport
         do {
-            try harness.start()
+            harness = try factory.makeTransport(for: descriptor)
         } catch {
-            // Launch failed: close the phone side so it sees a clean disconnect (the phone's
+            // Build failed: close the phone side so it sees a clean disconnect (the phone's
             // in-flight initialize fails via failAll, not a hang). The harness never started,
             // so nothing to tear down beyond this.
             client.close()

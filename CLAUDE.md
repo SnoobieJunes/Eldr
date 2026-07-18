@@ -76,13 +76,14 @@ Packages/
   PQRCMCP/         # MCP server — the phone's chat context to an agent, as CODENAMES only.
   EldrNode/        # headless `eldr-node` daemon (Mac/server) + sybilclaw gateway client.
   Eldrctl/         # `eldrctl` CLI — SSH installer / conduit provisioner.
+  SwiftA2A/        # A2A v1.0 (Agent2Agent) core types, JSON-RPC, client/server, HTTP transport.
 App/               # Thin SwiftUI iOS app (EldrChat.xcodeproj; sources still under App/PQRC/).
 Apps/Huginn/       # macOS companion app (Huginn.xcodeproj) — pairs with the phone, runs the
                    # tethered AI + coding agent, encrypted at-rest AI memory.
 TestVectors/       # Frozen JSON vectors (see TEST-PLAN §2).
-docs/              # Generated + working docs. The specs at the repo ROOT are the canonical
-                   # copies; docs/pqrc-SPEC-v1_1.md, docs/APP-SPEC.md, docs/TEST-PLAN.md are
-                   # symlinks to them. docs/NIP-XX-pqrc.md is a real file (the wire format).
+docs/              # ALL documentation lives here — one folder, real files (the old root
+                   # copies + symlinks are gone). Canon: pqrc-SPEC-v1_1.md, NIP-XX-pqrc.md,
+                   # APP-SPEC.md, TEST-PLAN.md. Superseded material: docs/deprecated/ only.
 Eldr.xcworkspace   # ties the two apps + packages together.
 ```
 
@@ -106,8 +107,8 @@ export DEVELOPER_DIR=/Applications/Xcode-beta.app/Contents/Developer   # Xcode 2
 ```
 
 ```bash
-# Fast inner loop (no simulator needed) — ALL SEVEN packages, not just the first three.
-for p in PQRCCore PQRCNostr PQRCAgent PQRCACP PQRCMCP EldrNode Eldrctl; do
+# Fast inner loop (no simulator needed) — ALL EIGHT packages, not just the first three.
+for p in PQRCCore PQRCNostr PQRCAgent PQRCACP PQRCMCP EldrNode Eldrctl SwiftA2A; do
   swift test --package-path "Packages/$p" || break
 done
 
@@ -155,9 +156,9 @@ These come straight from the SPEC/NIP. Violating any of them is a failed build, 
 - Wire structs round-trip through Codable with stable field names matching the NIP exactly (`spk`, `pqpk`, `otp`, `otp_pq`, `lrp`, `dh`, `pn`, `n`, `pq`, `ptr`, …).
 - Unknown JSON fields are preserved-or-ignored, never fatal (forward compatibility, SPEC §12).
 
-## Definition of done (one-shot)
+## Definition of done 
 
-- [ ] All **seven** packages compile; `swift test` green on every package.
+- [ ] All **eight** packages compile; `swift test` green on every package.
 - [ ] Both app targets build: `xcodebuild test` green for **EldrChat** (incl. UI smoke tests + the accessibility audit) **and for Huginn** (macOS).
 - [ ] TEST-PLAN coverage implemented: crypto vectors frozen in `TestVectors/`, ratchet/FS/PCS proofs, envelope/padding/fuzz checks, agent-integrity suite, simulator chaos matrix, group fan-out, performance budgets wired (baseline-relative).
 - [ ] Demo "Local Universe" runs: scripted Alice/Bob conversation incl. one AI-drafted message, one `ai_window`, one shared AI thread, one >64 KB paste (**via relay chunking**), one group of 4. Script documented in `docs/DEMO.md`.

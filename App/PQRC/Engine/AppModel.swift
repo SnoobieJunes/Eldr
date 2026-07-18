@@ -61,6 +61,15 @@ struct LiveACPTerminal: Identifiable, Equatable {
     static let maxOutputBytes = 256 * 1024
 }
 
+/// WS3f — one live cloud-CLI delegation (`delegate_to_cloud_agent`), for the
+/// persistent "cloud agent running" indicator. `toolCallId` correlates the
+/// `.acpCloudDelegationEnded` that clears it, so an unrelated tool_call's completion
+/// can never mistakenly clear a still-live delegation.
+struct ActiveCloudDelegation: Equatable {
+    let toolCallId: String
+    let harness: String
+}
+
 /// Main-actor view state for one persona, fed by its `PersonaRuntime`.
 @MainActor
 @Observable
@@ -118,6 +127,17 @@ final class AppModel {
     /// is display-only agent text and is NEVER persisted (CLAUDE.md inv. 12 — the live
     /// stream is not written at rest).
     var acpTerminalByConversation: [String: LiveACPTerminal] = [:]
+    /// conversationID -> the node's advertised slash-commands/skills for the session
+    /// (`available_commands_update`), e.g. `["/spec", "/snippet", "/html"]`. Drives the
+    /// quick-action chip row in the interactive-terminal view; replaced wholesale on
+    /// each change, mirroring `acpPlansByConversation`.
+    var acpCommandsByConversation: [String: [String]] = [:]
+    /// conversationID -> whether that node last advertised `allowUngatedTools` (WS2 —
+    /// the silent-bypass indicator). Absent until the node's first `initialize`.
+    var acpNodeUngatedByConversation: [String: Bool] = [:]
+    /// conversationID -> the live cloud-CLI delegation (WS3f), or nil when none is
+    /// running. Drives the persistent "cloud agent running" indicator.
+    var acpCloudDelegationByConversation: [String: ActiveCloudDelegation] = [:]
     /// Nearby peers discovered over the local link (SPEC §10) — startable with
     /// no relay. Populated only when the Nearby setting is on.
     var nearbyContacts: [NearbyVM] = []
@@ -301,6 +321,21 @@ final class AppModel {
             term.closed = true
             term.exitCode = exitCode
             acpTerminalByConversation[conversationID] = term
+        case .acpAvailableCommands(let conversationID, let commands):
+            // Full snapshot from the node — replace, don't merge, mirroring `.acpPlan`.
+            acpCommandsByConversation[conversationID] = commands.isEmpty ? nil : commands
+        case .acpUngatedToolsAdvertised(let conversationID, let allowed):
+            acpNodeUngatedByConversation[conversationID] = allowed
+        case .acpCloudDelegationStarted(let conversationID, let toolCallId, let harness):
+            acpCloudDelegationByConversation[conversationID] = ActiveCloudDelegation(
+                toolCallId: toolCallId, harness: harness)
+        case .acpCloudDelegationEnded(let conversationID, let toolCallId):
+            // Only clear if THIS is the delegation that's currently shown — an
+            // unrelated tool_call reaching completed/failed (which also funnels
+            // through this case) must never clear a still-live one.
+            if acpCloudDelegationByConversation[conversationID]?.toolCallId == toolCallId {
+                acpCloudDelegationByConversation[conversationID] = nil
+            }
         }
     }
 

@@ -135,6 +135,37 @@ actor NostrEventCollector {
     }
 }
 
+/// Collects `RelayTransportEvent`s from `NostrWebSocketTransport.transportEvents()`
+/// (B2) into an inspectable, awaitable buffer — mirrors `NostrEventCollector`.
+actor TransportEventCollector {
+    private var events: [RelayTransportEvent] = []
+    private var task: Task<Void, Never>?
+
+    func attach(_ stream: AsyncStream<RelayTransportEvent>) {
+        task = Task {
+            for await event in stream {
+                self.append(event)
+            }
+        }
+    }
+
+    private func append(_ event: RelayTransportEvent) {
+        events.append(event)
+    }
+
+    func all() -> [RelayTransportEvent] { events }
+
+    /// Polls until at least `minimumCount` events arrived or the timeout elapses.
+    func waitUntil(minimumCount: Int, timeoutMillis: Int) async -> [RelayTransportEvent] {
+        var waited = 0
+        while events.count < minimumCount && waited < timeoutMillis {
+            try? await Task.sleep(for: .milliseconds(10))
+            waited += 10
+        }
+        return events
+    }
+}
+
 /// Collects messenger events into an inspectable, awaitable buffer.
 actor EventCollector {
     private var events: [MessengerEvent] = []

@@ -247,6 +247,39 @@ struct ACPAgentProviderTests {
         }
     }
 
+    // WS2 — the silent-bypass indicator: a node started with `allowUngatedTools` must
+    // forward `.ungatedToolsAdvertised(true)` to the observer on the FIRST call (when
+    // `ensureStarted` runs the ACP handshake), so the app can show its banner without
+    // waiting on a turn to complete.
+    @Test func eventObserverReceivesUngatedToolsAdvertisement() async throws {
+        try await withTimeout(20) {
+            let llm = ScriptedLLM([LLMResponse(content: "hi")])
+            let seen = BoolBox()
+            let (clientSide, agentSide) = InMemoryACPTransport.makePair()
+            let agentTask = Task {
+                await runACPAgent(
+                    transport: agentSide, llm: llm,
+                    toolEnvironment: ToolEnvironment(
+                        workdir: NSTemporaryDirectory(), baseEnvironment: [:]),
+                    config: AgentConfig(allowUngatedTools: true), configDir: nil,
+                    streamingEnabled: false)
+            }
+            defer { agentTask.cancel() }
+            let provider = ACPAgentProvider(
+                transport: clientSide, turnTimeout: 8, permissionHandler: { _, _ in true },
+                eventObserver: { event in
+                    if case .ungatedToolsAdvertised(let allowed) = event, allowed {
+                        seen.set(true)
+                    }
+                })
+
+            _ = try await provider.draftReply(context: self.context("hi"))
+            await provider.shutdown()
+
+            #expect(seen.value, "the observer must see the node's ungated-tools state")
+        }
+    }
+
     // (e) Default (no observer) ⇒ zero behavior change: a plain reply still returns,
     // and nothing about the existing path depends on the observer being set.
     @Test func defaultProviderHasNoObserverAndStillReplies() async throws {
@@ -291,6 +324,20 @@ struct ACPAgentProviderTests {
         // The agent entry is labeled "Bob's AI" by the shared renderer.
         #expect(prompt.contains("Bob's AI: auto-reply"))
         #expect(prompt.contains("Bob: ping"))
+    }
+}
+
+/// A lock-guarded, Sendable single-bool sink, same justification as `PlanCollector`.
+private final class BoolBox: @unchecked Sendable {
+    private let lock = NSLock()
+    private var flag = false
+    func set(_ v: Bool) {
+        lock.lock(); defer { lock.unlock() }
+        flag = v
+    }
+    var value: Bool {
+        lock.lock(); defer { lock.unlock() }
+        return flag
     }
 }
 

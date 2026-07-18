@@ -36,26 +36,53 @@ struct AgentInspectorView: View {
     }
 
     private var controls: some View {
-        HStack(spacing: 8) {
-            Picker("Filter", selection: $filter) {
-                Text("All").tag(DiagnosticsLog.Category?.none)
-                ForEach(DiagnosticsLog.Category.allCases) { cat in
-                    Label(cat.rawValue, systemImage: cat.symbol).tag(DiagnosticsLog.Category?.some(cat))
-                }
+        VStack(alignment: .leading, spacing: 6) {
+            filterChips
+            HStack(spacing: 8) {
+                Spacer()
+                Text("\(shown.count) event\(shown.count == 1 ? "" : "s")")
+                    .font(.caption).foregroundStyle(.secondary)
+                Button {
+                    log.clear(); expanded.removeAll()
+                } label: { Label("Clear", systemImage: "trash") }
+                    .disabled(log.events.isEmpty)
             }
-            .pickerStyle(.segmented)
-            .labelsHidden()
-            .frame(maxWidth: 320)
-
-            Spacer()
-            Text("\(shown.count) event\(shown.count == 1 ? "" : "s")")
-                .font(.caption).foregroundStyle(.secondary)
-            Button {
-                log.clear(); expanded.removeAll()
-            } label: { Label("Clear", systemImage: "trash") }
-                .disabled(log.events.isEmpty)
         }
         .padding(8)
+    }
+
+    /// Horizontal filter chips (replaces the old segmented-control picker) — scrolls
+    /// instead of squeezing labels as categories grow (WS-B2 added `.relay`, a fifth).
+    private var filterChips: some View {
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: 6) {
+                filterChip(title: "All", symbol: "tray.full", isSelected: filter == nil) {
+                    filter = nil
+                }
+                ForEach(DiagnosticsLog.Category.allCases) { cat in
+                    filterChip(title: cat.rawValue, symbol: cat.symbol, isSelected: filter == cat) {
+                        filter = cat
+                    }
+                }
+            }
+        }
+    }
+
+    private func filterChip(
+        title: String, symbol: String, isSelected: Bool, action: @escaping () -> Void
+    ) -> some View {
+        Button(action: action) {
+            Label(title, systemImage: symbol)
+                .font(.caption.weight(isSelected ? .semibold : .regular))
+                .padding(.horizontal, 10)
+                .padding(.vertical, 5)
+        }
+        .buttonStyle(.plain)
+        .background(
+            Capsule().fill(isSelected ? Color.accentColor.opacity(0.2) : Color.secondary.opacity(0.1))
+        )
+        .overlay(Capsule().stroke(isSelected ? Color.accentColor : Color.clear, lineWidth: 1))
+        .foregroundStyle(isSelected ? Color.accentColor : Color.primary)
     }
 
     private var eventList: some View {

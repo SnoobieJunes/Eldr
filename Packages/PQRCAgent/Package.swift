@@ -38,14 +38,6 @@ let package = Package(
             // any future opt-in to iOS keeps the macOS build green on any Xcode.
             swiftSettings: [
                 .swiftLanguageMode(.v6),
-                // ELDR_PCC_SDK is ON (DEVIATIONS A40/AC36). The Private Cloud Compute
-                // symbols (`PrivateCloudComputeLanguageModel`, `ContextOptions`) ship in
-                // the **Xcode 27 / iOS 27** SDK — VERIFIED 2026-06 (47 + 29 refs in the
-                // iPhoneOS *and* iPhoneSimulator FoundationModels.swiftinterface). They are
-                // ABSENT from the Xcode 26.x SDK, so this target MUST be built with
-                // Xcode 27: `DEVELOPER_DIR=/Applications/Xcode-beta.app/Contents/Developer`
-                // (or set it as the active `xcode-select`). Building with 26.x fails with
-                // "cannot find type 'PrivateCloudComputeLanguageModel'/'ContextOptions'".
                 .define("ELDR_PCC_SDK"),
             ]
         ),

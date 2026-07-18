@@ -3,12 +3,16 @@ import Foundation
 /// Builders for the ACP wire shapes the agent emits, kept in one place so the
 /// agent loop reads cleanly and the exact JSON field names live next to the spec
 /// references. Field names match agentclientprotocol.com /protocol/v1/schema.
-enum ACPWire {
+///
+/// `public` (not just `ACPAgent`-internal): `A2AHarness`'s `A2AACPBridge` also speaks the
+/// AGENT half of ACP — over an A2A backend instead of a local tool loop — and reuses these
+/// same builders rather than hand-duplicating the wire shapes.
+public enum ACPWire {
 
     // MARK: session/update payloads (the `params` of a session/update notification)
 
     /// `{ sessionId, update: { sessionUpdate: "agent_message_chunk", content: {type:text,text} } }`
-    static func agentMessageChunk(sessionId: String, text: String) -> JSONValue {
+    public static func agentMessageChunk(sessionId: String, text: String) -> JSONValue {
         .object([
             "sessionId": .string(sessionId),
             "update": .object([
@@ -22,7 +26,7 @@ enum ACPWire {
     }
 
     /// `{ sessionId, update: { sessionUpdate:"tool_call", toolCallId, title, kind, status, rawInput } }`
-    static func toolCall(
+    public static func toolCall(
         sessionId: String, toolCallId: String, title: String, kind: String, status: String,
         rawInput: JSONValue
     ) -> JSONValue {
@@ -41,7 +45,7 @@ enum ACPWire {
 
     /// `{ sessionId, update: { sessionUpdate:"tool_call_update", toolCallId, status, content:[…] } }`
     /// `content` is omitted when `text` is nil (e.g. an in_progress transition).
-    static func toolCallUpdate(
+    public static func toolCallUpdate(
         sessionId: String, toolCallId: String, status: String, contentText: String? = nil,
         isError: Bool = false
     ) -> JSONValue {
@@ -72,7 +76,7 @@ enum ACPWire {
     /// `{ sessionId, update: { sessionUpdate:"available_commands_update", availableCommands:[…] } }`
     /// Advertises the agent's slash-commands/skills to the client (it surfaces them
     /// in its command menu). Each entry is `{ name, description, input:{hint} }`.
-    static func availableCommandsUpdate(sessionId: String, commands: [JSONValue]) -> JSONValue {
+    public static func availableCommandsUpdate(sessionId: String, commands: [JSONValue]) -> JSONValue {
         .object([
             "sessionId": .string(sessionId),
             "update": .object([
@@ -88,7 +92,7 @@ enum ACPWire {
     /// `status` ∈ pending|in_progress|completed). The whole plan is re-sent on each
     /// change (the spec models it as a full snapshot, not a delta), so re-emitting with
     /// updated statuses is how a step flips to `completed`.
-    static func plan(sessionId: String, entries: [(content: String, status: String)]) -> JSONValue {
+    public static func plan(sessionId: String, entries: [(content: String, status: String)]) -> JSONValue {
         let entryObjects = entries.map { entry -> JSONValue in
             .object([
                 "content": .string(entry.content),
@@ -118,7 +122,7 @@ enum ACPWire {
 
     /// `{ sessionId, update: { sessionUpdate:"terminal_opened", terminalId, title } }`
     /// Announces a newly-spawned interactive PTY so the phone shows a terminal view.
-    static func terminalOpened(sessionId: String, terminalId: String, title: String) -> JSONValue {
+    public static func terminalOpened(sessionId: String, terminalId: String, title: String) -> JSONValue {
         .object([
             "sessionId": .string(sessionId),
             "update": .object([
@@ -131,7 +135,7 @@ enum ACPWire {
 
     /// `{ sessionId, update: { sessionUpdate:"terminal_output", terminalId, chunk } }`
     /// One incremental slice of the PTY's combined stdout+stderr.
-    static func terminalOutput(sessionId: String, terminalId: String, chunk: String) -> JSONValue {
+    public static func terminalOutput(sessionId: String, terminalId: String, chunk: String) -> JSONValue {
         .object([
             "sessionId": .string(sessionId),
             "update": .object([
@@ -145,7 +149,7 @@ enum ACPWire {
     /// `{ sessionId, update: { sessionUpdate:"terminal_closed", terminalId, exitCode? } }`
     /// The PTY ended (child exited or it was killed). `exitCode` is omitted when unknown
     /// (e.g. killed by signal).
-    static func terminalClosed(sessionId: String, terminalId: String, exitCode: Int?) -> JSONValue {
+    public static func terminalClosed(sessionId: String, terminalId: String, exitCode: Int?) -> JSONValue {
         var update: [String: JSONValue] = [
             "sessionUpdate": .string("terminal_closed"),
             "terminalId": .string(terminalId),
@@ -159,7 +163,7 @@ enum ACPWire {
 
     /// `{ sessionId, terminalId, data }` — the `terminal/input` notification params
     /// (write stdin to a live PTY).
-    static func terminalInput(sessionId: String, terminalId: String, data: String) -> JSONValue {
+    public static func terminalInput(sessionId: String, terminalId: String, data: String) -> JSONValue {
         .object([
             "sessionId": .string(sessionId),
             "terminalId": .string(terminalId),
@@ -171,7 +175,7 @@ enum ACPWire {
 
     /// `{ sessionId, toolCall: { toolCallId, title, kind, status }, options:[…] }`.
     /// Offers a standard allow-once/allow-always/reject-once set.
-    static func requestPermission(
+    public static func requestPermission(
         sessionId: String, toolCallId: String, title: String, kind: String
     ) -> JSONValue {
         .object([
@@ -201,7 +205,7 @@ enum ACPWire {
 
     /// Interpret a RequestPermissionResponse outcome. Returns true if the user
     /// allowed (selected an allow_* option); false if rejected or cancelled.
-    static func permissionGranted(_ result: JSONValue) -> Bool {
+    public static func permissionGranted(_ result: JSONValue) -> Bool {
         guard let outcome = result["outcome"] else { return false }
         // Shape: { outcome: { outcome:"selected", optionId:"allow_once" } } | { outcome:"cancelled" }
         if outcome.stringValue == "cancelled" { return false }

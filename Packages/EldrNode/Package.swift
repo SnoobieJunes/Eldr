@@ -41,6 +41,9 @@ let package = Package(
                 "PQRCCore",
                 "PQRCNostr",
                 .product(name: "PQRCACP", package: "PQRCACP"),
+                // A2A v1.0 delegation harness (`.a2aRemote` descriptors) — mirrors the
+                // Configurator's `ACPRelayHost`/`ACPNodeHost` factory injection.
+                .product(name: "A2AHarness", package: "PQRCACP"),
             ],
             swiftSettings: [.swiftLanguageMode(.v6)]
         ),
@@ -64,6 +67,7 @@ let package = Package(
                 "PQRCCore",
                 "PQRCNostr",
                 .product(name: "PQRCACP", package: "PQRCACP"),
+                .product(name: "A2AHarness", package: "PQRCACP"),
                 .product(name: "PQRCMCP", package: "PQRCMCP"),
             ],
             swiftSettings: [.swiftLanguageMode(.v6)]

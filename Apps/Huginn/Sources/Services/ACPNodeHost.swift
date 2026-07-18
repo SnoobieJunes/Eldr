@@ -1,3 +1,4 @@
+import A2AHarness
 import Foundation
 import PQRCACP
 import PQRCCore
@@ -60,6 +61,9 @@ public actor ACPNodeHost {
     private let config: AgentConfig
     private let configDir: String?
     private let streamingEnabled: Bool
+    /// WS3c — same seam as `ACPRelayHost`: `.builtIn` (default) is unchanged behavior;
+    /// a `.stdioSpawn` descriptor spawns an external cloud CLI instead.
+    private let descriptor: HarnessDescriptor
 
     /// The `runACPAgent` driver task. nil until `start()`, cancelled by `stop()`.
     private var serveTask: Task<Void, Never>?
@@ -88,7 +92,8 @@ public actor ACPNodeHost {
         toolEnvironment: ToolEnvironment = .fromEnvironment(),
         config: AgentConfig = .fromEnvironment(),
         configDir: String? = nil,
-        streamingEnabled: Bool = true
+        streamingEnabled: Bool = true,
+        descriptor: HarnessDescriptor = .builtIn
     ) {
         self.transport = transport
         self.llm = llm
@@ -96,6 +101,7 @@ public actor ACPNodeHost {
         self.config = config
         self.configDir = configDir
         self.streamingEnabled = streamingEnabled
+        self.descriptor = descriptor
     }
 
     public func currentStatus() -> Status { status }
@@ -118,12 +124,14 @@ public actor ACPNodeHost {
         let config = self.config
         let configDir = self.configDir
         let streamingEnabled = self.streamingEnabled
+        let descriptor = self.descriptor
         serveTask = Task {
             // Serve the AGENT half over the node's transport — the exact mirror of the
             // phone's CLIENT half. Returns when `transport.inboundLines()` finishes.
-            await runACPAgent(
-                transport: transport, llm: llm, toolEnvironment: toolEnvironment,
-                config: config, configDir: configDir, streamingEnabled: streamingEnabled)
+            await runHarness(
+                descriptor: descriptor, client: transport, llm: llm,
+                toolEnvironment: toolEnvironment, config: config, configDir: configDir,
+                streamingEnabled: streamingEnabled, factory: A2AHarnessFactory())
             await self.markStopped()
         }
     }

@@ -1,4 +1,5 @@
 import AppKit
+import PQRCNostr
 import SwiftUI
 
 /// Relay-provisioning wizard. Collects khatru relay config and GENERATES paste-able
@@ -9,7 +10,16 @@ import SwiftUI
 /// script expects; the VALUES are NOT copied into the generated text (the script reads
 /// them from the host env or prompts with `read -s`). Secret fields are marked and the
 /// view warns about it.
+///
+/// WS-B2 added the "This node's relay" section: unlike the generator below (which is
+/// about STANDING UP your own relay server), this section controls which relay THIS
+/// Mac's own live PQRC node (`ACPBridgeService`, shared with the Bridge (phone tether)
+/// tab) actually dials — including debugging/observing that connection live.
 struct RelayWizardView: View {
+    @EnvironmentObject private var bridge: ACPBridgeService
+    @State private var relayURLField = ""
+    @State private var didLoadRelayField = false
+
     // Non-secret config, edited live.
     @State private var domain = ""
     @State private var port = 7777
@@ -29,6 +39,8 @@ struct RelayWizardView: View {
         ScrollView {
             VStack(alignment: .leading, spacing: 16) {
                 header
+                connectionBox
+                Divider()
                 relayForm
                 allowlistBox
                 secretsBox
@@ -37,8 +49,115 @@ struct RelayWizardView: View {
                     .font(.caption).foregroundStyle(.secondary)
             }
             .padding(20)
-            .frame(maxWidth: 680, alignment: .leading)
+            .frame(maxWidth: 1100, alignment: .leading)
             .frame(maxWidth: .infinity)
+        }
+        .onAppear {
+            guard !didLoadRelayField else { return }
+            didLoadRelayField = true
+            relayURLField = bridge.relayURLOverride
+        }
+    }
+
+    // MARK: WS-B2 — this node's relay connection
+
+    private var connectionBox: some View {
+        GroupBox("This node's relay") {
+            VStack(alignment: .leading, spacing: 10) {
+                Text(
+                    "Which relay THIS Mac's node (the Bridge (phone tether) tab) connects to — separate from the relay-setup generator below. Defaults to \(ACPBridgeService.defaultRelayURL)."
+                )
+                .font(.caption).foregroundStyle(.secondary)
+
+                LabeledContent("Relay URL") {
+                    TextField(
+                        ACPBridgeService.defaultRelayURL, text: $relayURLField
+                    )
+                    .textFieldStyle(.roundedBorder)
+                    .autocorrectionDisabled()
+                    .font(.caption.monospaced())
+                    .onChange(of: relayURLField) { _, newValue in
+                        bridge.setRelayURLOverride(newValue)
+                    }
+                }
+
+                if let error = relayURLValidationMessage {
+                    Label(error, systemImage: "exclamationmark.triangle.fill")
+                        .font(.caption2).foregroundStyle(.orange)
+                }
+
+                HStack {
+                    Button("Reconnect") { bridge.reconnectToConfiguredRelay() }
+                        .controlSize(.small)
+                    Button("Use default relay") {
+                        relayURLField = ""
+                        bridge.setRelayURLOverride("")
+                        bridge.reconnectToConfiguredRelay()
+                    }
+                    .controlSize(.small)
+                    .disabled(relayURLField.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                    Button("Connect local relay") {
+                        relayURLField = ACPBridgeService.localRelayURL
+                        bridge.connectToLocalRelay()
+                    }
+                    .controlSize(.small)
+                    .help("Points at ws://127.0.0.1:7777 — run `swift run pqrc-relay` in Packages/PQRCNostr first.")
+                }
+
+                if !bridge.relayConnections.isEmpty {
+                    Divider()
+                    ForEach(bridge.relayConnections) { relayRow($0) }
+                }
+            }
+            .padding(4)
+        }
+    }
+
+    private var relayURLValidationMessage: String? {
+        switch ConfigurationStore.validateRelayOverride(relayURLField) {
+        case .success: return nil
+        case .failure(.invalidURL): return "Not a valid URL."
+        case .failure(.unsupportedScheme): return "Use wss:// (or ws:// for a loopback host only)."
+        case .failure(.plaintextOffLoopback):
+            return "ws:// is plaintext — only allowed for a loopback host (127.0.0.1/localhost). Use wss:// for anything else."
+        }
+    }
+
+    private func relayRow(_ info: ACPBridgeService.RelayConnectionInfo) -> some View {
+        HStack(spacing: 8) {
+            Circle().fill(relayStatusColor(info.status)).frame(width: 8, height: 8)
+            Text(info.url).font(.caption.monospaced()).lineLimit(1).truncationMode(.middle)
+            Spacer()
+            if info.eoseSeen {
+                Label("EOSE", systemImage: "checkmark.circle").font(.caption2).foregroundStyle(.secondary)
+            }
+            authStateLabel(info.authState)
+            if let lastEventAt = info.lastEventAt {
+                Text(lastEventAt, format: .dateTime.hour().minute().second())
+                    .font(.caption2.monospacedDigit()).foregroundStyle(.secondary)
+            }
+        }
+        .padding(.vertical, 2)
+    }
+
+    @ViewBuilder private func authStateLabel(_ state: ACPBridgeService.RelayConnectionInfo.AuthState) -> some View {
+        switch state {
+        case .none: EmptyView()
+        case .challengeReceived:
+            Label("AUTH…", systemImage: "key").font(.caption2).foregroundStyle(.orange)
+        case .authenticated:
+            Label("AUTH", systemImage: "key.fill").font(.caption2).foregroundStyle(.green)
+        case .failed:
+            Label("AUTH failed", systemImage: "key.slash").font(.caption2).foregroundStyle(.red)
+        }
+    }
+
+    private func relayStatusColor(_ status: RelayStatus) -> Color {
+        switch status {
+        case .connected: return .green
+        case .connecting: return .yellow
+        case .disconnected: return .secondary
+        case .failed: return .red
         }
     }
 

@@ -9,11 +9,25 @@ public protocol OutputSink: Sendable {
 /// An `OutputSink` over a `FileHandle` (stdout in production). Writes are
 /// serialized through this actor so concurrent notifications never interleave
 /// bytes on the pipe.
+///
+/// Uses the throwing `write(contentsOf:)`, NOT the legacy `write(_:)`: on EPIPE
+/// (the client cancelled the run, died, or tore the process down mid-turn) the
+/// legacy API raises an uncatchable `NSFileHandleOperationException` and takes
+/// the whole process down — `signal(SIGPIPE, SIG_IGN)` alone doesn't save you,
+/// because Foundation turns the EPIPE into an ObjC exception. After the first
+/// failed write the sink latches closed and silently drops the rest: the peer
+/// is gone, and the read loop's EOF path is the intended exit.
 public actor FileHandleOutputSink: OutputSink {
     private let handle: FileHandle
+    private var closed = false
     public init(_ handle: FileHandle) { self.handle = handle }
     public func write(line: String) async {
-        handle.write(Data((line + "\n").utf8))
+        guard !closed else { return }
+        do {
+            try handle.write(contentsOf: Data((line + "\n").utf8))
+        } catch {
+            closed = true
+        }
     }
 }
 
@@ -33,6 +47,11 @@ public actor ClientConnection {
     /// Per-request timeout tasks, cancelled when the response arrives, so a bounded
     /// `request(timeout:)` resumes with `.timedOut` only when the client never answers.
     private var timeouts: [Int: Task<Void, Never>] = [:]
+    /// Set by `failAll` — the connection is dead (client gone / stdin EOF). Latches:
+    /// a `request` made AFTER the close fails immediately instead of parking a
+    /// continuation no response can ever resume (an un-timed permission wait —
+    /// `ELDR_ACP_PERMISSION_TIMEOUT=0` — would otherwise hang its turn forever).
+    private var closeError: Error?
 
     public init(sink: any OutputSink) { self.sink = sink }
 
@@ -62,6 +81,7 @@ public actor ClientConnection {
     public func request(
         method: String, params: JSONValue, timeout: Double? = nil
     ) async throws -> JSONValue {
+        if let closeError { throw closeError }
         let id = nextOutboundID
         nextOutboundID -= 1
         let envelope: JSONValue = .object([
@@ -115,8 +135,12 @@ public actor ClientConnection {
         return true
     }
 
-    /// Fail all outstanding outbound requests (e.g. the client closed the pipe).
+    /// Fail all outstanding outbound requests (e.g. the client closed the pipe),
+    /// and latch the connection closed: every LATER `request` throws the same error
+    /// immediately. Callers treat the failure as a denial / lost turn (fail closed);
+    /// nothing legitimate can succeed once the peer is gone.
     public func failAll(_ error: Error) {
+        closeError = error
         let waiters = pending.values
         pending.removeAll()
         for task in timeouts.values { task.cancel() }

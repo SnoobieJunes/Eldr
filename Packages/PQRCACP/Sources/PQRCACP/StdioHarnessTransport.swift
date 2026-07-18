@@ -88,7 +88,13 @@ public final class StdioHarnessTransport: ACPTransport, @unchecked Sendable {
             process.executableURL = URL(fileURLWithPath: "/usr/bin/env")
             process.arguments = [descriptor.command] + descriptor.args
         }
-        var environment = ProcessInfo.processInfo.environment
+        // Env hygiene: an external harness (e.g. a cloud CLI) must inherit its OWN vendor key
+        // (carried in `descriptor.env`) but NEVER the agent's long-term secrets. Scrub the
+        // inherited node env of ELDR_/PQRC_/SYBILCLAW_ secrets FIRST, then layer descriptor.env
+        // on top — otherwise the spawned harness could read ELDR_LLM_TOKEN / ELDR_ACP_METADATA_KEY
+        // / SYBILCLAW_GATEWAY_TOKEN, the same self-exfiltration ToolEnvironment.shellEnvironment
+        // guards against for run_shell/open_terminal. Shared scrub so the two seams can't drift.
+        var environment = ToolEnvironment.scrubbingAgentSecrets(ProcessInfo.processInfo.environment)
         for (key, value) in descriptor.env { environment[key] = value }
         process.environment = environment
 

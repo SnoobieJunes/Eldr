@@ -1,3 +1,4 @@
+import A2AHarness
 import Foundation
 import PQRCACP
 import PQRCCore
@@ -75,6 +76,12 @@ final class ACPRelayHost {
     private let config: AgentConfig
     private let configDir: String?
     private let streamingEnabled: Bool
+    /// WS3c — which backend actually answers: `.builtIn` (default, unchanged behavior —
+    /// the in-process `ACPAgent` driven by `llm`) or a `.stdioSpawn` cloud CLI
+    /// (Claude Code / Gemini CLI), already carrying its vendor key
+    /// (`HarnessDescriptor.withVendorKey`, resolved by the caller from ITS OWN
+    /// Keychain — this host never touches Keychain itself).
+    private let descriptor: HarnessDescriptor
 
     /// The pinned owner's identity hex (the C-3 gate target). Only ACP frames whose
     /// `senderIdentityHex` equals this drive the agent. Captured at construction.
@@ -110,6 +117,7 @@ final class ACPRelayHost {
         config: AgentConfig = .default,
         configDir: String? = nil,
         streamingEnabled: Bool = false,
+        descriptor: HarnessDescriptor = .builtIn,
         publish: @escaping @Sendable (String) async -> Void
     ) {
         self.ownerIdentityHex = ownerIdentityHex
@@ -118,6 +126,7 @@ final class ACPRelayHost {
         self.config = config
         self.configDir = configDir
         self.streamingEnabled = streamingEnabled
+        self.descriptor = descriptor
         self.transport = RelayACPTransport(maxFrameBytes: maxFrameBytes, send: publish)
     }
 
@@ -142,12 +151,17 @@ final class ACPRelayHost {
         let config = self.config
         let configDir = self.configDir
         let streamingEnabled = self.streamingEnabled
+        let descriptor = self.descriptor
         serveTask = Task {
             // Serve the AGENT half over the relay transport — the exact mirror of the
             // phone's CLIENT half. Returns when `transport.inboundLines()` finishes.
-            await runACPAgent(
-                transport: transport, llm: llm, toolEnvironment: toolEnvironment,
-                config: config, configDir: configDir, streamingEnabled: streamingEnabled)
+            // WS3c: `runHarness` dispatches on `descriptor.kind` — `.builtIn` (default)
+            // is byte-for-byte the same `runACPAgent` call this used to make directly;
+            // a `.stdioSpawn` descriptor instead spawns the external CLI and proxies.
+            await runHarness(
+                descriptor: descriptor, client: transport, llm: llm,
+                toolEnvironment: toolEnvironment, config: config, configDir: configDir,
+                streamingEnabled: streamingEnabled, factory: A2AHarnessFactory())
             self.markStopped()
         }
     }

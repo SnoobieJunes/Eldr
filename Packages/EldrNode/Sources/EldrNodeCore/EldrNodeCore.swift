@@ -1,3 +1,4 @@
+import A2AHarness
 import Foundation
 import PQRCACP
 import PQRCCore
@@ -131,6 +132,12 @@ public actor EldrNodeCore {
     ///   - streamingEnabled: stream the final answer token-by-token to the owner's ACP
     ///     client. The node↔owner channel is the owner's own E2EE session, so streaming
     ///     is fine; off by default (no fan-out redaction is involved here).
+    ///   - descriptor: WS3c — which backend answers. `.builtIn` (default) is byte-for-byte
+    ///     the prior direct `runACPAgent` call; a `.stdioSpawn` descriptor (already
+    ///     carrying its vendor key via `HarnessDescriptor.withVendorKey`, resolved by the
+    ///     caller from ITS OWN Keychain) spawns an external cloud CLI instead. Either way
+    ///     the C-3 gate above is unchanged — it decides what reaches the transport, not
+    ///     what runs behind it.
     public func serve(
         messenger: any NodeMessenger,
         ownerIdentityHex: String,
@@ -138,7 +145,8 @@ public actor EldrNodeCore {
         llm: any LLMClient,
         toolEnvironment: ToolEnvironment,
         config: AgentConfig = .default,
-        streamingEnabled: Bool = false
+        streamingEnabled: Bool = false,
+        descriptor: HarnessDescriptor = .builtIn
     ) async {
         // The transport's send seam publishes one framed chunk to the owner over the
         // relay. Failures are swallowed so a relay hiccup doesn't wedge the agent's turn
@@ -168,10 +176,11 @@ public actor EldrNodeCore {
         // `session/prompt` turn must not block the inbound read loop below (the owner's
         // permission answer arrives as a LATER inbound frame the in-flight turn awaits).
         let agentTask = Task {
-            await runACPAgent(
-                transport: transport, llm: llm, toolEnvironment: toolEnvironment,
-                config: config, configDir: nil, streamingEnabled: streamingEnabled,
-                extraTools: mcpClient)
+            await runHarness(
+                descriptor: descriptor, client: transport, llm: llm,
+                toolEnvironment: toolEnvironment, config: config, configDir: nil,
+                streamingEnabled: streamingEnabled, extraTools: mcpClient,
+                factory: A2AHarnessFactory())
         }
 
         // Begin the messenger's single event stream and consume it as the SOLE consumer.

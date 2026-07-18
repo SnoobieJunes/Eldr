@@ -29,8 +29,21 @@ let package = Package(
         // Terminal ACP client that drives the agent by hand (and exposes the reusable
         // ACPClientDriver the PQRC watch-along bridge also uses).
         .executable(name: "eldr-acp-run", targets: ["eldr-acp-run"]),
+        // A2A v1.0 delegation harness: `.a2aRemote` descriptors are bridged to a real
+        // ACP transport over `SwiftA2A`. A SEPARATE product/target from `PQRCACP` —
+        // see the dependency note below.
+        .library(name: "A2AHarness", targets: ["A2AHarness"]),
+    ],
+    dependencies: [
+        // Only `A2AHarness` depends on this — see the note on that target.
+        .package(path: "../SwiftA2A")
     ],
     targets: [
+        // NO dependencies, ever — this is PQRCACP's zero-dep promise (CLAUDE.md: "The
+        // library has NO app/crypto/SwiftUI dependencies and ZERO external packages").
+        // A2A support is layered ABOVE this target (`A2AHarness`), not folded into it;
+        // `HarnessTransportFactory.swift` is the dependency-free seam that makes that
+        // possible (see that file).
         .target(
             name: "PQRCACP",
             swiftSettings: [.swiftLanguageMode(.v6)]
@@ -45,11 +58,29 @@ let package = Package(
             dependencies: ["PQRCACP"],
             swiftSettings: [.swiftLanguageMode(.v6)]
         ),
+        // Implements `HarnessTransportFactory` for `.a2aRemote` by driving a real
+        // `SwiftA2A` client — the ONLY target in this package that imports SwiftA2A.
+        // Optional at the wiring layer: a node that never selects an `.a2aRemote`
+        // harness need not link this.
+        .target(
+            name: "A2AHarness",
+            dependencies: [
+                "PQRCACP",
+                .product(name: "A2AClient", package: "SwiftA2A"),
+                .product(name: "A2ACore", package: "SwiftA2A"),
+            ],
+            swiftSettings: [.swiftLanguageMode(.v6)]
+        ),
         .testTarget(
             name: "PQRCACPTests",
             // Depend on the `eldr-acp` executable so `swift test` builds it into the
             // products dir — RunnerE2ETests spawns the real binary through ACPClientDriver.
             dependencies: ["PQRCACP", "eldr-acp"],
+            swiftSettings: [.swiftLanguageMode(.v6)]
+        ),
+        .testTarget(
+            name: "A2AHarnessTests",
+            dependencies: ["A2AHarness"],
             swiftSettings: [.swiftLanguageMode(.v6)]
         ),
     ]

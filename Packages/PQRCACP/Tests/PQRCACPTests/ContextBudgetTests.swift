@@ -310,6 +310,225 @@ struct ToolExecutorCapTests {
     }
 }
 
+// A2 — tool-result aging/stubbing in ContextBudget.trim (keep last N verbatim, stub
+// older ones to one line) that runs BEFORE whole-message drops.
+@Suite("ContextBudget tool-result aging")
+struct ContextBudgetAgingTests {
+    private func msgs(toolResults: Int) -> [LLMMessage] {
+        var m: [LLMMessage] = [
+            LLMMessage(role: .system, content: "SYS"),
+            LLMMessage(role: .user, content: "TASK"),
+        ]
+        for i in 0..<toolResults {
+            m.append(LLMMessage(role: .assistant, content: "assistant \(i)"))
+            m.append(
+                LLMMessage(
+                    role: .tool, content: "TOOL-BODY-\(i)-" + String(repeating: "x", count: 200),
+                    toolCallId: "c\(i)"))
+        }
+        return m
+    }
+
+    @Test func stubsOlderKeepsLastNVerbatim() {
+        // 10 tool results, keep last 4 verbatim; no turn/char drops so we see aging alone.
+        let trimmed = ContextBudget.trim(
+            msgs(toolResults: 10), maxTurns: 0, maxChars: 0, keepRecentToolResults: 4)
+        // Message count is preserved — aging elides bodies, never drops messages.
+        #expect(trimmed.count == msgs(toolResults: 10).count)
+
+        let toolMsgs = trimmed.filter { $0.role == .tool }
+        #expect(toolMsgs.count == 10)
+        // The first 6 are stubbed…
+        for old in toolMsgs.prefix(6) {
+            #expect(old.content.hasPrefix(ContextBudget.toolStubPrefix))
+        }
+        // …the last 4 are verbatim (still carry their original body + call id).
+        for (offset, recent) in toolMsgs.suffix(4).enumerated() {
+            let i = 6 + offset
+            #expect(recent.content.contains("TOOL-BODY-\(i)-"))
+            #expect(recent.toolCallId == "c\(i)")
+        }
+    }
+
+    @Test func agingRunsBeforeWholeMessageDrops_andShrinksTotal() {
+        let full = msgs(toolResults: 8)
+        let aged = ContextBudget.trim(full, maxTurns: 0, maxChars: 0, keepRecentToolResults: 4)
+        // Aging alone (no drops) must reduce the total char count vs the untrimmed list.
+        #expect(ContextBudget.totalChars(aged) < ContextBudget.totalChars(full))
+        // Anchors are never stubbed.
+        #expect(aged[0].content == "SYS")
+        #expect(aged[1].content == "TASK")
+        // Every stubbed message keeps its `tool` envelope so tool_call/tool pairing holds.
+        for m in aged where m.content.hasPrefix(ContextBudget.toolStubPrefix) {
+            #expect(m.role == .tool)
+            #expect(m.toolCallId != nil)
+        }
+    }
+
+    @Test func fewerThanKeepIsNoOp() {
+        let full = msgs(toolResults: 3)
+        let aged = ContextBudget.trim(full, maxTurns: 0, maxChars: 0, keepRecentToolResults: 4)
+        // 3 tool results ≤ keep 4 → nothing stubbed.
+        #expect(!aged.contains { $0.content.hasPrefix(ContextBudget.toolStubPrefix) })
+    }
+
+    @Test func keepZeroStubsAllButCurrentBatch() {
+        // trim runs BEFORE the model call that consumes the trailing batch, so even
+        // keep=0 must leave the newest (not-yet-read) tool result verbatim.
+        let aged = ContextBudget.trim(
+            msgs(toolResults: 5), maxTurns: 0, maxChars: 0, keepRecentToolResults: 0)
+        let toolMsgs = aged.filter { $0.role == .tool }
+        for old in toolMsgs.prefix(4) {
+            #expect(old.content.hasPrefix(ContextBudget.toolStubPrefix))
+        }
+        #expect(toolMsgs.last?.content.contains("TOOL-BODY-4-") == true)
+    }
+
+    @Test func currentBatchNeverStubbedEvenWhenBiggerThanKeep() {
+        // Three earlier single-result turns, then ONE assistant turn with a 6-result
+        // batch the model has not seen yet. keep=2 < batch size: the whole trailing
+        // batch stays verbatim (stubbing an unread result would make the model re-run
+        // tools it just ran); the 3 earlier results age out.
+        var m: [LLMMessage] = [
+            LLMMessage(role: .system, content: "SYS"),
+            LLMMessage(role: .user, content: "TASK"),
+        ]
+        for i in 0..<3 {
+            m.append(LLMMessage(role: .assistant, content: "assistant \(i)"))
+            m.append(LLMMessage(role: .tool, content: "OLD-BODY-\(i)", toolCallId: "old\(i)"))
+        }
+        m.append(LLMMessage(role: .assistant, content: "batch turn"))
+        for i in 0..<6 {
+            m.append(LLMMessage(role: .tool, content: "BATCH-BODY-\(i)", toolCallId: "b\(i)"))
+        }
+
+        let aged = ContextBudget.trim(m, maxTurns: 0, maxChars: 0, keepRecentToolResults: 2)
+        let toolMsgs = aged.filter { $0.role == .tool }
+        #expect(toolMsgs.count == 9)
+        for old in toolMsgs.prefix(3) {
+            #expect(old.content.hasPrefix(ContextBudget.toolStubPrefix))
+        }
+        for (i, fresh) in toolMsgs.suffix(6).enumerated() {
+            #expect(fresh.content == "BATCH-BODY-\(i)")
+        }
+    }
+}
+
+// A2 — spill-to-file: an oversized tool result is written WHOLE to a jail-inside file
+// (`<workdir>/.eldr/tool-results/`) and the model gets head+tail plus that path.
+@Suite("ToolExecutor spill-to-file")
+struct ToolExecutorSpillTests {
+    private func freshWorkdir() -> String {
+        let dir = (NSTemporaryDirectory() as NSString).appendingPathComponent(
+            "eldr-spill-\(UUID().uuidString)")
+        try? FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
+        return dir
+    }
+
+    @Test func oversizedReadSpillsFullResultInsideJail() async throws {
+        let workdir = freshWorkdir()
+        defer { try? FileManager.default.removeItem(atPath: workdir) }
+        let bigPath = (workdir as NSString).appendingPathComponent("big.txt")
+        let body =
+            "HEAD_MARKER\n" + String(repeating: "Z", count: 50_000) + "\nTAIL_MARKER"
+        try Data(body.utf8).write(to: URL(fileURLWithPath: bigPath))
+
+        let ex = ToolExecutor(
+            capabilities: ClientCapabilities(), environment: ToolEnvironment(workdir: workdir),
+            connection: nil, sessionId: "s1", maxResultBytes: 4096, spillOversizedResults: true)
+        let read = await ex.run(tool: "read_file", args: .object(["path": .string("big.txt")]))
+
+        #expect(!read.isError)
+        // The message carries head+tail signal + the elision marker + the spill path.
+        #expect(read.text.contains("HEAD_MARKER"))
+        #expect(read.text.contains("TAIL_MARKER"))
+        #expect(read.text.contains("bytes elided"))
+        #expect(read.text.contains(ToolExecutor.spillDirRelative))
+        // …and still fits the budget (the spill note's bytes are reserved out of it).
+        #expect(read.text.utf8.count <= 4096)
+
+        // A file landed under <workdir>/.eldr/tool-results/ and holds the FULL result.
+        let spillDir = (workdir as NSString).appendingPathComponent(ToolExecutor.spillDirRelative)
+        let entries = try FileManager.default.contentsOfDirectory(atPath: spillDir)
+        #expect(entries.count == 1)
+        let spilled = try String(
+            contentsOfFile: (spillDir as NSString).appendingPathComponent(entries[0]),
+            encoding: .utf8)
+        #expect(spilled == body)
+
+        // The advertised relative path is real: read_file can page it back.
+        let rel = try #require(
+            read.text.split(separator: "\n").first { $0.contains(ToolExecutor.spillDirRelative) })
+        // Extract the `.eldr/tool-results/...txt` token from the note.
+        let token = String(rel).components(separatedBy: " ").first {
+            $0.contains(ToolExecutor.spillDirRelative)
+        }
+        let relPath = try #require(token)
+        let paged = await ex.run(tool: "read_file", args: .object(["path": .string(relPath)]))
+        #expect(paged.text.contains("HEAD_MARKER"))
+    }
+
+    @Test func spillDisabledByDefault_onlyTruncates() async throws {
+        let workdir = freshWorkdir()
+        defer { try? FileManager.default.removeItem(atPath: workdir) }
+        let bigPath = (workdir as NSString).appendingPathComponent("big.txt")
+        try Data(String(repeating: "Z", count: 50_000).utf8).write(
+            to: URL(fileURLWithPath: bigPath))
+
+        // Default init: spillOversizedResults defaults to false (bare executor).
+        let ex = ToolExecutor(
+            capabilities: ClientCapabilities(), environment: ToolEnvironment(workdir: workdir),
+            connection: nil, sessionId: "s1", maxResultBytes: 4096)
+        let read = await ex.run(tool: "read_file", args: .object(["path": .string("big.txt")]))
+
+        #expect(read.text.contains("bytes elided"))
+        #expect(!read.text.contains(ToolExecutor.spillDirRelative))
+        // No spill directory was created.
+        let spillDir = (workdir as NSString).appendingPathComponent(ToolExecutor.spillDirRelative)
+        #expect(!FileManager.default.fileExists(atPath: spillDir))
+    }
+
+    @Test func underBudgetNeverSpills() async throws {
+        let workdir = freshWorkdir()
+        defer { try? FileManager.default.removeItem(atPath: workdir) }
+        let path = (workdir as NSString).appendingPathComponent("small.txt")
+        try Data("hello".utf8).write(to: URL(fileURLWithPath: path))
+
+        let ex = ToolExecutor(
+            capabilities: ClientCapabilities(), environment: ToolEnvironment(workdir: workdir),
+            connection: nil, sessionId: "s1", maxResultBytes: 4096, spillOversizedResults: true)
+        let read = await ex.run(tool: "read_file", args: .object(["path": .string("small.txt")]))
+        #expect(read.text == "hello")
+        let spillDir = (workdir as NSString).appendingPathComponent(ToolExecutor.spillDirRelative)
+        #expect(!FileManager.default.fileExists(atPath: spillDir))
+    }
+}
+
+// A2 — the two new AgentConfig knobs (verbatim-keep count, spill toggle).
+@Suite("AgentConfig tool-result knobs")
+struct AgentConfigToolResultKnobTests {
+    @Test func defaults() {
+        let c = AgentConfig.fromEnvironment([:], configDir: nil)
+        #expect(c.toolResultKeepVerbatim == 4)
+        #expect(c.toolResultSpillEnabled == true)
+    }
+
+    @Test func envOverrides() {
+        let c = AgentConfig.fromEnvironment(
+            [
+                "ELDR_ACP_TOOL_RESULT_KEEP": "2",
+                "ELDR_ACP_TOOL_RESULT_SPILL": "0",
+            ], configDir: nil)
+        #expect(c.toolResultKeepVerbatim == 2)
+        #expect(c.toolResultSpillEnabled == false)
+    }
+
+    @Test func negativeKeepClampsToZero() {
+        let c = AgentConfig(toolResultKeepVerbatim: -5)
+        #expect(c.toolResultKeepVerbatim == 0)
+    }
+}
+
 @Suite("System prompt tuning")
 struct SystemPromptTests {
     @Test func defaultMentionsCwdAndOneToolAtATime() {

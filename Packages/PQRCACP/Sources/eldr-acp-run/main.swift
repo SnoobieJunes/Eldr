@@ -76,8 +76,10 @@ func pingLLM(_ config: LLMConfig) async -> String {
     }
 }
 
-func out(_ s: String) { FileHandle.standardOutput.write(Data((s + "\n").utf8)) }
-func outInline(_ s: String) { FileHandle.standardOutput.write(Data(s.utf8)) }
+// Throwing writes: piping the runner into `head`/a dead pager must not abort it
+// with the uncatchable NSException the legacy `write(_:)` raises on EPIPE.
+func out(_ s: String) { try? FileHandle.standardOutput.write(contentsOf: Data((s + "\n").utf8)) }
+func outInline(_ s: String) { try? FileHandle.standardOutput.write(contentsOf: Data(s.utf8)) }
 
 @main
 struct EldrACPRun {

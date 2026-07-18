@@ -4,6 +4,7 @@ import Foundation
 import PQRCACP
 import PQRCCore
 import PQRCNostr
+import os
 
 /// `eldr-node` — the STANDALONE HEADLESS node (ACPRouterplan Phase 4: "run the host on
 /// another machine"). It loads/creates the node's PQRC identity from the macOS Keychain,
@@ -20,6 +21,12 @@ import PQRCNostr
 ///              `wss://relay.lerants.com`. MUST match the phone's relay.
 ///   --workdir  the C-2 jail root the agent's file tools operate in. Default: the
 ///              process cwd. Real file/build tasks need a real project dir here.
+///   --responder  who answers: `sybilclaw` (default), `eldr-acp`, or a `HarnessRegistry`
+///              id (`claude-code`, `gemini-cli`, …) to spawn that external cloud CLI as
+///              a `.stdioSpawn` harness (WS3c). Its vendor key comes from the Keychain
+///              (`--import-vendor-key`), never argv/env.
+///   --import-vendor-key <harness-id>  seed that harness's vendor API key from STDIN
+///              into the node Keychain, then exit (mirrors `--import-token`).
 ///
 /// Model config is read from the environment by `LLMConfig.fromEnvironment`
 /// (`ELDR_LLM_URL` / `ELDR_LLM_TOKEN` / `ELDR_LLM_MODEL` / `ELDR_LLM_TIMEOUT_SECONDS`),
@@ -39,6 +46,14 @@ struct EldrNodeMain {
         // shell history. This is how the SSH installer provisions the token headlessly.
         if rawArguments.contains("--import-token") {
             await importTokenMode()
+            return
+        }
+
+        // WS3b: seed a cloud-CLI harness's vendor key (`--import-vendor-key claude-code`)
+        // into the node Keychain from STDIN, same discipline as `--import-token` — never
+        // argv/env file/shell history.
+        if let harnessID = arguments["import-vendor-key"]?.nonEmpty {
+            await importVendorKeyMode(harnessID: harnessID)
             return
         }
 
@@ -108,15 +123,45 @@ struct EldrNodeMain {
             // to the user's OWN assistant over its local Gateway (their "current agent");
             // `eldr-acp` uses the node's own local LLM tool loop (the proven path). The
             // sybilclaw path reuses the same ACP plumbing via an LLMClient adapter.
+            // WS3c: `--responder claude-code`/`gemini-cli` instead spawn that cloud CLI as
+            // an EXTERNAL `.stdioSpawn` harness (`HarnessRegistry`) — `llm` below is then
+            // unused (the CLI brings its own model); its vendor key comes from the node
+            // Keychain (`--import-vendor-key`), never argv/env file, and is merged into
+            // the descriptor's `env` ONLY (never the general node env `toolEnvironment`
+            // wraps — see `HarnessDescriptor.withVendorKey`).
             let responder = arguments["responder"]?.nonEmpty?.lowercased() ?? "sybilclaw"
             let gatewayPort = arguments["gateway-port"]?.nonEmpty.flatMap { Int($0) } ?? 18789
-            let useSybilclaw = !["eldr-acp", "eldracp", "acp"].contains(responder)
+            // Only a `.stdioSpawn` registry hit is an EXTERNAL cloud harness. "eldr-acp"
+            // is in the registry too — as `.builtIn` — and must keep taking the built-in
+            // path below (status line and all), not the cloud-harness one.
+            let registryHit = HarnessRegistry.descriptor(id: responder)
+            let cloudHarness =
+                (registryHit?.kind == .stdioSpawn || registryHit?.kind == .a2aRemote)
+                ? registryHit : nil
+            let useSybilclaw = cloudHarness == nil && !["eldr-acp", "eldracp", "acp"].contains(responder)
             let llm: any LLMClient =
                 useSybilclaw
                 ? SybilclawLLMClient(
                     gateway: SybilclawGatewayClient(
-                        port: gatewayPort, token: env["SYBILCLAW_GATEWAY_TOKEN"]))
+                        port: gatewayPort, token: env["SYBILCLAW_GATEWAY_TOKEN"],
+                        userAgent: "eldr-node/0.1.0",
+                        // WS-B5: no diagnostics UI on the headless node — fold the client's
+                        // lifecycle events into the daemon's own OSLog stream (protocol/
+                        // connection state only; the client never hands this payload text).
+                        onEvent: { event in logGatewayEvent(event) }))
                 : OpenAICompatibleLLMClient(config: llmConfig)
+            let harnessDescriptor: HarnessDescriptor
+            if let cloudHarness, cloudHarness.kind == .a2aRemote {
+                let bearerToken = NodeKeychain().load(account: a2aBearerAccount(for: cloudHarness.id))
+                    .flatMap { String(data: $0, encoding: .utf8) }
+                harnessDescriptor = cloudHarness.withBearerToken(bearerToken)
+            } else if let cloudHarness {
+                let vendorKey = NodeKeychain().load(account: vendorKeyAccount(for: cloudHarness.id))
+                    .flatMap { String(data: $0, encoding: .utf8) }
+                harnessDescriptor = cloudHarness.withVendorKey(vendorKey)
+            } else {
+                harnessDescriptor = .builtIn
+            }
 
             // Status only — never secrets/payloads (inv. 10, 12). `identityHex` is a
             // PUBLIC key derived from the (actor-isolated) identity; awaited, prefix only.
@@ -126,7 +171,17 @@ struct EldrNodeMain {
             print("  owner:    \(hexPrefix(ownerIdentityHex)) (C-3 gate target)")
             print("  node id:  \(hexPrefix(nodeIdentityHex))")
             print("  workdir:  \(workdir) (C-2 jail)")
-            if useSybilclaw {
+            if let cloudHarness, cloudHarness.kind == .a2aRemote {
+                let hasToken = harnessDescriptor.a2aBearerToken?.isEmpty == false
+                print(
+                    "  responder: \(cloudHarness.displayName) (A2A: \(cloudHarness.a2aCardURL ?? "?")) — bearer token \(hasToken ? "loaded" : "MISSING, import with --import-vendor-key \(cloudHarness.id)")"
+                )
+            } else if let cloudHarness {
+                let hasKey = !(harnessDescriptor.env[cloudHarness.vendorKeyEnvVar ?? ""] ?? "").isEmpty
+                print(
+                    "  responder: \(cloudHarness.displayName) (\(cloudHarness.command)) — vendor key \(hasKey ? "loaded" : "MISSING, import with --import-vendor-key \(cloudHarness.id)")"
+                )
+            } else if useSybilclaw {
                 print("  responder: sybilclaw assistant (local Gateway :\(gatewayPort))")
             } else {
                 print("  responder: eldr-acp — \(llmConfig.url) [\(llmConfig.model)]")
@@ -157,7 +212,8 @@ struct EldrNodeMain {
                     llm: llm,
                     toolEnvironment: toolEnvironment,
                     config: .default,
-                    streamingEnabled: false)
+                    streamingEnabled: false,
+                    descriptor: harnessDescriptor)
             }
 
             signal(SIGINT, SIG_IGN)
@@ -192,6 +248,21 @@ struct EldrNodeMain {
     /// at serve time (C-8: the token lives in the Keychain, never the env file).
     static let tokenAccount = "node-llm-token"
 
+    /// WS3b: the Keychain account a cloud-CLI harness's vendor key is seeded into by
+    /// `--import-vendor-key <id>` and read back at serve time. One account per harness id
+    /// so multiple vendor keys coexist independently.
+    static func vendorKeyAccount(for harnessID: String) -> String {
+        "node-vendor-key-\(harnessID)"
+    }
+
+    /// `.a2aRemote` counterpart to `vendorKeyAccount`: the Keychain account a harness's A2A
+    /// bearer token is seeded into by `--import-vendor-key <id>` (same CLI flag — the mode
+    /// picks the right account by looking up the descriptor's `kind`) and read back at serve
+    /// time via `HarnessDescriptor.withBearerToken`.
+    static func a2aBearerAccount(for harnessID: String) -> String {
+        "node-a2a-bearer-\(harnessID)"
+    }
+
     // MARK: - Headless provisioning modes (exit after running)
 
     /// Read the LLM token from STDIN and store it in the node Keychain. Never logs the
@@ -212,6 +283,38 @@ struct EldrNodeMain {
         } catch {
             FileHandle.standardError.write(Data(
                 "eldr-node --import-token: Keychain write failed: \(error)\n".utf8))
+            exit(1)
+        }
+    }
+
+    /// WS3b: read a cloud-CLI harness's vendor key from STDIN and store it in the node
+    /// Keychain under that harness's own account. Same discipline as `importTokenMode` —
+    /// never argv/env file/shell history. `harnessID` should be a `HarnessRegistry` id
+    /// (e.g. `claude-code`, `gemini-cli`); an unknown id still stores under its own
+    /// account (harmless — `serve` just never resolves that descriptor at all).
+    private static func importVendorKeyMode(harnessID: String) async {
+        let data = FileHandle.standardInput.readDataToEndOfFile()
+        let key = String(decoding: data, as: UTF8.self)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !key.isEmpty else {
+            FileHandle.standardError.write(Data(
+                "eldr-node --import-vendor-key \(harnessID): empty key on stdin; nothing imported.\n"
+                    .utf8))
+            exit(2)
+        }
+        // Route to the A2A bearer account when the id names an `.a2aRemote` descriptor, else
+        // the vendor-key account (`.stdioSpawn`) — same CLI surface, correct storage either way.
+        let account =
+            HarnessRegistry.descriptor(id: harnessID)?.kind == .a2aRemote
+            ? a2aBearerAccount(for: harnessID) : vendorKeyAccount(for: harnessID)
+        do {
+            try NodeKeychain().save(Data(key.utf8), account: account)
+            FileHandle.standardError.write(Data(
+                "eldr-node: vendor key for \(harnessID) imported to the Keychain.\n".utf8))
+        } catch {
+            FileHandle.standardError.write(Data(
+                "eldr-node --import-vendor-key \(harnessID): Keychain write failed: \(error)\n"
+                    .utf8))
             exit(1)
         }
     }
@@ -309,6 +412,29 @@ struct EldrNodeMain {
     /// terse and consistent with inv. 12's "no payload-adjacent value in full".)
     private static func hexPrefix(_ hex: String) -> String {
         hex.count > 12 ? "\(hex.prefix(8))…\(hex.suffix(4))" : hex
+    }
+
+    /// WS-B5: the sybilclaw gateway client's lifecycle events, one OSLog line each.
+    /// `SybilclawGatewayEvent` carries no payload text by construction (invariant 12) —
+    /// only protocol/connection state and short, non-payload error descriptions — so
+    /// there's nothing to redact here.
+    private static let gatewayLog = Logger(subsystem: "chat.eldr.eldr-node", category: "gateway")
+
+    private static func logGatewayEvent(_ event: SybilclawGatewayEvent) {
+        switch event {
+        case .connecting(let host, let port):
+            gatewayLog.debug("connecting → \(host, privacy: .public):\(port, privacy: .public)")
+        case .connected:
+            gatewayLog.debug("connected")
+        case .disconnected(let reason):
+            gatewayLog.notice("disconnected: \(reason ?? "-", privacy: .public)")
+        case .turnStarted:
+            gatewayLog.debug("turn started")
+        case .turnSucceeded:
+            gatewayLog.debug("turn succeeded")
+        case .turnFailed(let reason):
+            gatewayLog.error("turn failed: \(reason, privacy: .public)")
+        }
     }
 
     /// Tiny `--flag value` parser — no ArgumentParser dependency, matching `pqrc-relay`

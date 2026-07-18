@@ -27,14 +27,15 @@ struct ACPRoundTripTests {
     /// LLM. Returns the client and the agent's run Task (cancel it when done).
     private func makePair(
         llm: any LLMClient, workdir: String,
-        permission: @escaping @Sendable (String, String) async -> Bool = { _, _ in true }
+        permission: @escaping @Sendable (String, String) async -> Bool = { _, _ in true },
+        config: AgentConfig = .default
     ) -> (ACPClient, Task<Void, Never>) {
         let (clientSide, agentSide) = InMemoryACPTransport.makePair()
         let agentTask = Task {
             await runACPAgent(
                 transport: agentSide, llm: llm,
                 toolEnvironment: ToolEnvironment(workdir: workdir, baseEnvironment: [:]),
-                config: .default, configDir: nil, streamingEnabled: false)
+                config: config, configDir: nil, streamingEnabled: false)
         }
         let client = ACPClient(transport: clientSide, permissionHandler: permission)
         return (client, agentTask)
@@ -57,6 +58,8 @@ struct ACPRoundTripTests {
 
         let info = try await client.start()
         #expect(info.agentName == "eldr-acp")
+        // WS2 — default config never runs tools ungated.
+        #expect(info.ungatedToolsAllowed == false)
         let stop = try await client.prompt("hi")
         #expect(stop == "end_turn")
         await client.shutdown()
@@ -65,6 +68,21 @@ struct ACPRoundTripTests {
             if case .assistantText(let t) = event { return t } else { return nil }
         }.joined()
         #expect(text.contains("Hello from the agent."))
+    }
+
+    /// WS2 — the silent-bypass indicator, over the real ACP handshake: a node configured
+    /// with `allowUngatedTools` must report it in `ACPSessionInfo` (the phone has no other
+    /// way to know it's being silently bypassed — see `ACPAgentTests.initialize_advertises*`
+    /// for the wire-level `eldrAllowUngatedTools` field this decodes).
+    @Test func ungatedNode_advertisesItInStartResult() async throws {
+        let llm = ScriptedLLM([LLMResponse(content: "ok")])
+        let (client, agentTask) = makePair(
+            llm: llm, workdir: NSTemporaryDirectory(),
+            config: AgentConfig(allowUngatedTools: true))
+        defer { agentTask.cancel() }
+        let info = try await client.start()
+        #expect(info.ungatedToolsAllowed == true)
+        await client.shutdown()
     }
 
     @Test func toolCallWithPermissionGrantedWritesFileAndStreamsLifecycle() async throws {

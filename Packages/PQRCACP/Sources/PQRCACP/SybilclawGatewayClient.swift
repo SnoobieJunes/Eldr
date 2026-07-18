@@ -1,12 +1,25 @@
 import Foundation
 import os
 
-/// A client for the **OpenClaw / sybilclaw Gateway** — the local Node daemon that runs the
-/// user's *own* assistant (its model, persona/SOUL.md, per-user memory, and tools). This is
-/// what lets an EldrChat phone "chat to sybilclaw and get a reply": the phone's message rides
-/// the E2EE relay to Huginn, Huginn hands it to this client, the client asks sybilclaw's
-/// agent over its local Gateway, and the reply goes back over the relay. `eldr-acp` and its
-/// LLM are NOT in this path.
+// WS-B5: the ONE OpenClaw / sybilclaw Gateway WebSocket client. Previously this type was
+// hand-duplicated — Apps/Huginn/Sources/Services/SybilclawGatewayClient.swift (the chat
+// bridge's copy) and Packages/EldrNode/Sources/eldr-node/SybilclawGatewayClient.swift (the
+// headless node's copy) — and the two drifted at least once (the node copy kept an
+// off-allowlist handshake after the app's was fixed, breaking that path silently until a
+// parity test caught it). Both call sites (`ACPBridgeService.applyProductionRunner` in
+// Huginn, `EldrNodeMain`'s `--responder sybilclaw` wiring) now depend on THIS type, so a
+// protocol fix only has to happen once. The wrapper that adapts this client to each host's
+// OWN agent-runner abstraction stays local to that host (Huginn's `SybilclawAgentRunner:
+// BridgeAgentRunner` in ACPBridgeService.swift; the node's `SybilclawLLMClient: LLMClient`)
+// since those protocols are host-specific — this type carries no app/SwiftUI dependency
+// (PQRCACP's zero-dependency promise), only Foundation + os.
+
+/// A client for the **OpenClaw / sybilclaw Gateway** — the local Node daemon that runs a
+/// user's *own* assistant (its model, persona/SOUL.md, per-user memory, and tools). A
+/// PQRC phone's message rides the E2EE relay to a Mac (Huginn, tethered) or a headless
+/// `eldr-node`; the host hands the turn to this client, which asks sybilclaw's agent over
+/// its local Gateway, and the reply goes back over the relay. `eldr-acp` and its own LLM
+/// are NOT in this path.
 ///
 /// The protocol below is grounded in the OpenClaw source (github.com/openclaw/openclaw), not
 /// inferred. An earlier draft spoke JSON-RPC 2.0 with a `"agent"` method and a guessed reply
@@ -22,7 +35,17 @@ import os
 ///      - response: `{"type":"res",   "id":…, "ok":Bool, "payload":…, "error":…}`
 ///      - event   : `{"type":"event", "event":…, "payload":…, "seq":…}`
 ///  • **Handshake** — the FIRST frame MUST be a `connect` request declaring `role` + `scopes`
-///    (docs/gateway/protocol.md). The gateway services no method before it.
+///    (docs/gateway/protocol.md). The gateway services no method before it. `client.id`/
+///    `client.mode` MUST come from the gateway's compiled allowlists (13 ids / 7 modes,
+///    `.../protocol/client-info.ts) — an off-list value is schema-rejected with "must be
+///    equal to constant; must match a schema in anyOf". `"openclaw-macos"` is the macOS
+///    identity; `"backend"` (NOT `"ui"`) is deliberate — there's no role↔mode check
+///    (role-policy.ts authorizes by role alone), and `"ui"` can trip the gateway's
+///    browser-origin check, which a native `URLSession` socket would fail (it sends no
+///    `Origin` header). `"backend"` skips that path entirely. The protocol range `[3,4]`
+///    brackets the cofounder's fork (rdevaul/sybilclaw, v3) AND upstream openclaw (v4) —
+///    verified: `src/gateway/server/ws-connection/message-handler.ts` rejects only when
+///    `maxProtocol < server || minProtocol > server`.
 ///  • **Run a turn** — `chat.send` (`schema/logs-chat.ts` `ChatSendParamsSchema`): the prompt
 ///    goes in `message`, the conversation in `sessionKey`, plus a required `idempotencyKey`.
 ///    The `res` does NOT carry the reply — it acks immediately with `{ runId, status:"in_flight" }`.
@@ -44,50 +67,73 @@ import os
 /// we call `agents.list`, take `defaultId` (or the first agent's `id`), and retry ONCE with
 /// it named explicitly — so we never hard-code which agent is the user's, and we don't need
 /// the operator to configure one.
-struct SybilclawGatewayClient: Sendable {
-    let host: String
-    let port: Int
+///
+/// **Session scoping (WS-B5 fix):** `ask(_:sessionKey:)` takes the gateway session key as a
+/// per-call parameter — the caller decides what "one conversation" means. Huginn scopes it
+/// per `BridgeConversation`/thread (`ACPBridgeService.gatewaySessionKey(for:)`); `eldr-node`
+/// must scope it per ACP session (see `SybilclawLLMClient`) rather than reuse one process-
+/// lifetime key for every conversation — the earlier node copy's `sessionBase`, generated
+/// once at construction and reused for EVERY turn regardless of which ACP session/`prompt`
+/// it belonged to, bled one project/thread's context into another's the moment the owner had
+/// more than one live ACP session against the same node process.
+public struct SybilclawGatewayClient: Sendable {
+    public let host: String
+    public let port: Int
     /// Optional bearer token, sent as `connect.params.auth.token`. `nil` = no auth (typical
     /// for a localhost gateway with `auth.mode: "none"`).
-    let token: String?
+    public let token: String?
     /// Optional gateway agent id to target up front. `nil` ⇒ let the gateway pick its default
     /// agent, and only name one explicitly (discovered via `agents.list`) if that's rejected.
-    let agentId: String?
+    public let agentId: String?
     /// Overall wall-clock cap for one ask (connect + create + send + read, incl. the retry).
-    /// `handleInboundPrompt` also wraps the run, but `agentRunTimeout` defaults to 0
-    /// (unlimited), so this is the backstop that keeps a silent gateway from hanging a turn.
-    var overallTimeout: TimeInterval = 90
+    public var overallTimeout: TimeInterval = 90
     /// Opt-in raw-frame diagnostics (default off). When on, the `connect` handshake (with the
-    /// auth token redacted) and the gateway's raw `connect` reply are logged to OSLog and the
-    /// Agent Inspector, so a handshake rejection produces EVIDENCE (the offending field, the
-    /// protocol-version error) instead of a reverse-engineered theory. Logs protocol metadata
-    /// only — never the user's prompt/reply (`chat.send`/`chat` frames are never logged).
-    var diagnostics: Bool = false
+    /// auth token redacted) and the gateway's raw `res` replies are logged to this client's
+    /// own OSLog `Logger` — protocol metadata only, never the user's prompt/reply (`chat.send`/
+    /// `chat` frames are never logged). A host app that wants these surfaced in its own UI
+    /// (Huginn's Agent Inspector) does so through `onEvent` below, not by parsing OSLog.
+    public var diagnostics: Bool = false
+    /// Identifies this HOST on the wire (`connect.params.userAgent`) — free text, not
+    /// allowlist-checked. Each host names itself (`"huginn-eldr/<version>"`,
+    /// `"eldr-node/<version>"`) so gateway-side logs can tell the callers apart; nil falls
+    /// back to a generic `"pqrcacp-gateway-client/<version>"`.
+    public var userAgent: String?
+    /// Optional lifecycle hook: connect/disconnect/turn-start/turn-end/error, invariant-12
+    /// clean (NEVER the prompt or the reply text — only protocol-level state and short,
+    /// non-payload error descriptions, same class of string `GatewayError.errorDescription`
+    /// already produces). A host forwards these into its own diagnostics surface (Huginn →
+    /// `DiagnosticsLog`); a headless host (`eldr-node`) may fold them into its own OSLog line
+    /// or leave this `nil` to ignore them entirely — the client works identically either way.
+    public var onEvent: (@Sendable (SybilclawGatewayEvent) -> Void)?
 
     /// Handshake/protocol diagnostics only — never message content (see `diagnostics`).
-    private static let log = Logger(subsystem: "chat.eldr.huginn", category: "gateway")
+    private static let log = Logger(subsystem: "chat.eldr.pqrcacp", category: "gateway")
 
-    init(
+    public init(
         host: String = "127.0.0.1", port: Int, token: String? = nil, agentId: String? = nil,
-        diagnostics: Bool = false
+        overallTimeout: TimeInterval = 90, diagnostics: Bool = false, userAgent: String? = nil,
+        onEvent: (@Sendable (SybilclawGatewayEvent) -> Void)? = nil
     ) {
         self.host = host
         self.port = port
         self.token = (token?.isEmpty == false) ? token : nil
         self.agentId = (agentId?.isEmpty == false) ? agentId : nil
+        self.overallTimeout = overallTimeout
         self.diagnostics = diagnostics
+        self.userAgent = (userAgent?.isEmpty == false) ? userAgent : nil
+        self.onEvent = onEvent
     }
 
     // MARK: Errors
 
-    enum GatewayError: LocalizedError {
+    public enum GatewayError: LocalizedError, Sendable {
         case badURL
         case handshake(String)
         case rpc(String)
         case timeout(lastFrame: String?)
         case closed(String)
 
-        var errorDescription: String? {
+        public var errorDescription: String? {
             switch self {
             case .badURL: return "Bad sybilclaw gateway URL."
             case .handshake(let m):
@@ -108,8 +154,10 @@ struct SybilclawGatewayClient: Sendable {
     /// whole exchange against `overallTimeout` so a silent gateway can't hang the turn.
     /// `sessionKey` is the stable, opaque per-conversation session id the gateway buckets
     /// history under — supplied by the caller so a conversation keeps context across turns
-    /// and stays separate from every other conversation (and from Discord).
-    func ask(_ prompt: String, sessionKey: String) async throws -> String {
+    /// and stays separate from every other conversation (and from Discord). Callers MUST
+    /// scope this per logical conversation/session on THEIR side (see the type doc's
+    /// "Session scoping" note) — this client applies no scoping of its own.
+    public func ask(_ prompt: String, sessionKey: String) async throws -> String {
         try await withThrowingTaskGroup(of: String.self) { group in
             group.addTask { try await self.askImpl(prompt, sessionKey: sessionKey) }
             group.addTask {
@@ -124,13 +172,18 @@ struct SybilclawGatewayClient: Sendable {
         }
     }
 
+    private func emit(_ event: SybilclawGatewayEvent) {
+        onEvent?(event)
+    }
+
     private func askImpl(_ prompt: String, sessionKey: String) async throws -> String {
         guard let url = URL(string: "ws://\(host):\(port)/") else { throw GatewayError.badURL }
+        emit(.connecting(host: host, port: port))
         let session = URLSession(configuration: .ephemeral)
         // Release the per-`ask()` ephemeral session (and its operation queue) promptly instead of
         // leaving it to ARC's discretion. Declared BEFORE the task defer so it runs AFTER the
         // graceful `task.cancel` (defers are LIFO); `finishTasksAndInvalidate` lets that close
-        // settle first. Keep this identical to the eldr-node copy.
+        // settle first.
         defer { session.finishTasksAndInvalidate() }
         let task = session.webSocketTask(with: url)
         task.resume()
@@ -143,30 +196,47 @@ struct SybilclawGatewayClient: Sendable {
             // `.public`: the redacted handshake is protocol metadata (no message content, token
             // stripped), and the whole point is for the operator to actually read it in `log show`.
             Self.log.debug("connect → \(sent, privacy: .public)")
-            DiagnosticsLog.shared.post(.acp, .info, "Gateway connect sent", sent)
         }
         do {
             try await send(task, ["type": "req", "id": connectID, "method": "connect", "params": connectParams()])
             _ = try await awaitResponse(task, id: connectID, context: "connect", logRaw: diagnostics)
         } catch let error as GatewayError {
+            emit(.disconnected(reason: error.errorDescription))
             throw error  // a real handshake rejection (schema/protocol) — keep its detail
         } catch {
             // Socket-level failure before the handshake landed (refused / timed out / DNS) — the
             // gateway almost certainly isn't running. Say so, instead of leaking a raw URLError.
-            throw GatewayError.handshake("couldn't reach \(host):\(port) — \(error.localizedDescription)")
+            let wrapped = GatewayError.handshake(
+                "couldn't reach \(host):\(port) — \(error.localizedDescription)")
+            emit(.disconnected(reason: wrapped.errorDescription))
+            throw wrapped
         }
+        emit(.connected)
+        emit(.turnStarted)
 
         // Attempt 1: the configured agent (nil ⇒ the gateway's default).
         do {
-            return try await runTurn(task, prompt: prompt, sessionKey: sessionKey, agentId: agentId)
+            let reply = try await runTurn(task, prompt: prompt, sessionKey: sessionKey, agentId: agentId)
+            emit(.turnSucceeded)
+            return reply
         } catch {
             // Self-heal: the gateway wants an explicit agent/session ("choose a session" /
             // UNAVAILABLE). Discover its default agent and retry ONCE, naming it explicitly.
             guard Self.isSelectionError(error),
                 let discovered = try? await discoverDefaultAgent(task),
                 discovered != agentId
-            else { throw error }
-            return try await runTurn(task, prompt: prompt, sessionKey: sessionKey, agentId: discovered)
+            else {
+                emit(.turnFailed(reason: error.localizedDescription))
+                throw error
+            }
+            do {
+                let reply = try await runTurn(task, prompt: prompt, sessionKey: sessionKey, agentId: discovered)
+                emit(.turnSucceeded)
+                return reply
+            } catch {
+                emit(.turnFailed(reason: error.localizedDescription))
+                throw error
+            }
         }
     }
 
@@ -262,11 +332,6 @@ struct SybilclawGatewayClient: Sendable {
     private static func frame(
         _ payload: [String: Any], belongsTo runID: String?, sessionKey: String
     ) -> Bool {
-        // A6: once we've captured this turn's runId from the chat.send ack, a frame that declares a
-        // DIFFERENT runId is another run's — reject it. Any frame that carries a runId is matched on it
-        // (before the ack, runID is nil ⇒ accept: exactly one turn runs per socket). Only a frame with
-        // NO runId falls back to sessionKey correlation (chat frames carry both; agent frames carry the
-        // runId, handled above), and a frame with neither is ours only on that single-turn socket.
         if let frameRun = payload["runId"] as? String { return runID == nil || frameRun == runID }
         if let frameSession = payload["sessionKey"] as? String { return frameSession == sessionKey }
         return runID == nil
@@ -290,7 +355,8 @@ struct SybilclawGatewayClient: Sendable {
 
     /// The `connect` params (docs/gateway/protocol.md handshake). Declares an `operator`
     /// role with read+write scope; `auth.token` only when one is configured.
-    /// Non-`private` so `GatewayHandshakeTests` can lock the id/mode/version against a blind edit.
+    /// Non-`private` so the framing/handshake tests can lock the id/mode/version against a
+    /// blind edit.
     func connectParams() -> [String: Any] {
         var params: [String: Any] = [
             "minProtocol": 3,
@@ -320,7 +386,7 @@ struct SybilclawGatewayClient: Sendable {
             "commands": [String](),
             "permissions": [String: Any](),
             "locale": "en-US",
-            "userAgent": "huginn-eldr/\(Self.appVersion)",
+            "userAgent": userAgent ?? "pqrcacp-gateway-client/\(Self.appVersion)",
         ]
         if let token { params["auth"] = ["token": token] }
         return params
@@ -368,9 +434,7 @@ struct SybilclawGatewayClient: Sendable {
             if logRaw {
                 // The raw `res` frame is protocol metadata (ok/error/version) — no user content.
                 // It carries `error.code` and the AJV `errors[]` detail that `errorText` distills.
-                let ok = (obj["ok"] as? Bool) == true
                 Self.log.debug("\(context) ← \(frame, privacy: .public)")
-                DiagnosticsLog.shared.post(.acp, ok ? .success : .error, "Gateway \(context) reply", frame)
             }
             if (obj["ok"] as? Bool) == true { return obj["payload"] as? [String: Any] }
             let message = Self.errorText(obj) ?? "rejected"
@@ -388,7 +452,8 @@ struct SybilclawGatewayClient: Sendable {
     /// (`assembled`, from `event:agent` `data.text`); the terminal `chat:final` frame's `message`
     /// is NOT guaranteed to be that text (it can be an echo/status/routing note), so prefer the
     /// streamed text and fall back to the chat `message` only when nothing streamed (a gateway
-    /// variant that emits no agent frames). Pure + non-private so `GatewayReplyTests` can lock it.
+    /// variant that emits no agent frames). Pure + non-private so the reply-selection tests can
+    /// lock it.
     static func chooseReply(assembled: String, chatMessage: String?) -> String {
         let reply = assembled.isEmpty ? (chatMessage ?? "") : assembled
         return reply.isEmpty ? "(sybilclaw returned no text)" : reply
@@ -430,17 +495,23 @@ struct SybilclawGatewayClient: Sendable {
     }
 }
 
-/// `BridgeAgentRunner` backed by sybilclaw's Gateway. Drop-in alternative to
-/// `ACPDriverAgentRunner`: the owner's inbound chat (already C-3-gated + redaction-wrapped by
-/// `handleInboundPrompt`) is answered by sybilclaw's own assistant instead of `eldr-acp`.
-/// `workdir` is ignored — sybilclaw owns its own workspace.
-struct SybilclawAgentRunner: BridgeAgentRunner {
-    let client: SybilclawGatewayClient
-    /// The gateway keeps this conversation's history under the session key (server-side), so
-    /// Huginn records its own encrypted canonical copy but must NOT re-inject prior context —
-    /// the gateway would otherwise see the history twice.
-    var selfPersistsHistory: Bool { true }
-    func run(prompt: String, workdir: String?, context: ConversationContext) async throws -> String {
-        try await client.ask(prompt, sessionKey: context.sessionKey)
-    }
+/// Lifecycle diagnostics for one `ask()` call — protocol/connection state ONLY. **Never**
+/// carries the prompt or the assistant's reply (invariant 12: no payload-adjacent value ever
+/// crosses this seam); `reason`/`errorDescription` strings are the same short, non-payload
+/// protocol/transport detail `GatewayError.errorDescription` already produces (a handshake
+/// rejection detail, an RPC error code, a timeout note) — never message content.
+public enum SybilclawGatewayEvent: Sendable, Equatable {
+    /// Dialing the gateway's WebSocket for one turn.
+    case connecting(host: String, port: Int)
+    /// The `connect` handshake succeeded.
+    case connected
+    /// The handshake failed, or the socket tore down before/after a turn. `reason` is a
+    /// short protocol/transport detail, never prompt/reply content.
+    case disconnected(reason: String?)
+    /// `chat.send` was accepted and a turn is now running.
+    case turnStarted
+    /// The turn completed and produced a reply (the reply text itself is never included).
+    case turnSucceeded
+    /// The turn failed. `reason` mirrors `GatewayError.errorDescription`.
+    case turnFailed(reason: String)
 }

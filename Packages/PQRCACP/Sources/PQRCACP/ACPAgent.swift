@@ -21,6 +21,19 @@ import Foundation
 public actor ACPAgent {
     public static let agentName = "eldr-acp"
     public static let agentVersion = "0.1.0"
+    /// A4: a build stamp for STALENESS detection. The installed `~/.local/bin/eldr-acp`
+    /// can drift a month behind the source; comparing this against the value a freshly
+    /// built agent reports is how a UI (Huginn/Xcode, later WS-B3) flags a stale CLI.
+    /// SPM has no clean build-time date/commit injection, so it's a compile-time
+    /// constant bumped per build/release (DEVIATIONS A2/A4 `[tech-debt]`).
+    public static let agentBuild = "2026-07-17"
+    /// A4: the single, parseable version line reported EVERYWHERE the version surfaces —
+    /// `eldr-acp --version`, the ACP `initialize` response (`agentInfo.version`+`build`),
+    /// and Huginn's read-back. Keep the `eldr-acp/<semver>` prefix stable so a parser
+    /// (WS-B3) can split on it.
+    public static var agentVersionSummary: String {
+        "\(agentName)/\(agentVersion) (build \(agentBuild))"
+    }
     /// ACP MAJOR protocol version we speak (a single integer; see spec). Defined on the
     /// iOS-available client driver so the phone path can reference it without pulling in
     /// this macOS-only agent; mirrored here to keep the agent's call sites unchanged.
@@ -60,6 +73,12 @@ public actor ACPAgent {
     /// context" opt-in; see `sessionsWithMCP`). PQRCACP stays MCP-knowledge-free: the
     /// provider is the seam, and the MCP/relay wiring lives in its implementation.
     private let extraTools: (any ExtraToolProvider)?
+    /// WS3g — builds the `ACPTransport` `delegateToCloudAgent` proxies through, for any
+    /// harness kind that isn't `.builtIn`. Defaults to `DefaultHarnessTransportFactory`
+    /// (`.stdioSpawn` only, keeping this target dependency-free); the node injects
+    /// `A2AHarness`'s factory when `.a2aRemote` delegation should also work. See
+    /// `HarnessTransportFactory.swift`.
+    private let harnessTransportFactory: any HarnessTransportFactory
 
     /// Negotiated at `initialize`. Defaults to "everything off" until then (so a
     /// stray prompt before initialize still works via Foundation fallbacks).
@@ -83,6 +102,11 @@ public actor ACPAgent {
     /// context, so this gate keeps the MCP-passthrough path inert otherwise (and
     /// inert entirely when `extraTools` is nil).
     private var sessionsWithMCP: Set<String> = []
+    /// A1 — sessions whose client declared `eldrCanPrompt:false` at `session/new`:
+    /// no human can answer a permission prompt there, so mutating tools are filtered
+    /// from the ADVERTISED set and a system-prompt line says where they ARE
+    /// available. Advertising-honesty only; the C-1 permission gate is unchanged.
+    private var sessionsWithoutPromptCapableClient: Set<String> = []
     /// Phase D4 — live INTERACTIVE terminals (PTYs), by `terminalId`. The persistent
     /// interactive shell `open_terminal` spawns lives HERE (on the actor), not in the
     /// per-turn `ToolExecutor` value. Each entry carries the process and the task
@@ -108,7 +132,8 @@ public actor ACPAgent {
         streamingEnabled: Bool = true,
         requestTimeoutSeconds: Double = 0,
         contextGraph: (any ContextGraphAssembling)? = nil,
-        extraTools: (any ExtraToolProvider)? = nil
+        extraTools: (any ExtraToolProvider)? = nil,
+        harnessTransportFactory: any HarnessTransportFactory = DefaultHarnessTransportFactory()
     ) {
         self.connection = connection
         self.llm = llm
@@ -119,6 +144,7 @@ public actor ACPAgent {
         self.streamingEnabled = streamingEnabled
         self.requestTimeoutSeconds = max(0, requestTimeoutSeconds)
         self.extraTools = extraTools
+        self.harnessTransportFactory = harnessTransportFactory
         self.skills = AgentSkillSet.from(config: config)
         // Build the real client from config when enabled and not injected (tests
         // inject a stub so they stay network-free).
@@ -173,8 +199,21 @@ public actor ACPAgent {
         case "initialize": return initializeResult(params: params)
         case "session/new": return await newSessionResult(params: params)
         case "session/prompt": return try await promptResult(params: params)
-        // session/load and authenticate are intentionally not implemented — we
-        // require no auth and advertise loadSession:false (see initialize).
+        // WS0: `authenticate` succeeds as a no-op. We require no auth (initialize
+        // advertises `authMethods: []`), but Xcode 27's newer ACP seed can still
+        // exercise the call while resolving an agent's auth state — and the previous
+        // `-32601` was indistinguishable from "this agent needs auth I can't provide"
+        // (`Gateway.Error Code=6` / "This provider requires authentication").
+        // Answering success is spec-compliant for a no-auth agent and unblocks it.
+        case "authenticate": return .object([:])
+        // WS0: newer-spec session mutators we have no state for. The spec allows a
+        // null/empty response; a benign success keeps a newer client (Xcode 27's
+        // Logout/SetSessionModel-era stack) from treating the whole agent as broken
+        // over an optional feature. We change no behavior — there is exactly one
+        // mode/model, so "set" trivially holds.
+        case "session/set_mode", "session/set_model": return .object([:])
+        // session/load is intentionally not implemented — we advertise
+        // loadSession:false (see initialize), so a conforming client never calls it.
         default: throw RPCError(code: -32601, message: "Method not found: \(method)")
         }
     }
@@ -187,7 +226,7 @@ public actor ACPAgent {
                 // Fail-closed: a cancel also KILLS every interactive terminal owned by
                 // this session — an open-ended shell must never outlive the turn that was
                 // cancelled (no orphaned interactive shell on the Mac).
-                terminateTerminals(forSession: sid)
+                await terminateTerminals(forSession: sid)
             }
         case "terminal/input":
             // Phase D4 — write stdin to a live PTY. Best-effort; a write to a terminal
@@ -236,6 +275,12 @@ public actor ACPAgent {
                 "audio": .bool(false),
                 "embeddedContext": .bool(true),
             ]),
+            // The silent-bypass signal: whether THIS node runs mutating tools without a
+            // phone-side prompt (`ELDR_ACP_ALLOW_UNGATED_TOOLS` / the Huginn "Run tools
+            // without asking permission" toggle). Non-standard ACP field, `eldr`-prefixed
+            // so a spec-compliant client just ignores it. Without this the phone has no
+            // way to know it's being silently bypassed — see WS2.
+            "eldrAllowUngatedTools": .bool(config.allowUngatedTools),
         ]
         // Advertise skills here too (in addition to the post-session/new
         // available_commands_update), so a client that reads commands at initialize
@@ -247,9 +292,12 @@ public actor ACPAgent {
         return .object([
             "protocolVersion": .int(version),
             "agentCapabilities": .object(agentCapabilities),
+            // A4: `version` stays the bare semver (unchanged) for existing clients; the
+            // added `build` stamp lets a client flag a stale installed CLI (WS-B3).
             "agentInfo": .object([
                 "name": .string(Self.agentName),
                 "version": .string(Self.agentVersion),
+                "build": .string(Self.agentBuild),
             ]),
             // We require NO authentication: empty authMethods.
             "authMethods": .array([]),
@@ -271,6 +319,15 @@ public actor ACPAgent {
         // provider) keeps the passthrough path fully inert.
         if Self.advertisesMCPServers(params["mcpServers"]) {
             sessionsWithMCP.insert(sessionId)
+        }
+        // A1 — tool-advertising honesty: a client that declares it CANNOT surface a
+        // permission prompt (`eldrCanPrompt:false` — e.g. the chat bridge with no
+        // route to the owner's phone) gets no mutating tools ADVERTISED this session
+        // (see runTurn). Absent/true means the client can prompt (older clients
+        // included). The C-1 gate itself is untouched — this only stops the model
+        // being offered tools whose every request would bounce off a deny.
+        if params["eldrCanPrompt"]?.boolValue == false {
+            sessionsWithoutPromptCapableClient.insert(sessionId)
         }
         // Resolve this project's persistent context (explicit ELDR_ACP_CONTEXT_FILE,
         // else the auto-discovered per-project eldr.md). Stored once; prepended to
@@ -394,8 +451,28 @@ public actor ACPAgent {
             connection: connection, sessionId: sessionId,
             maxResultBytes: config.maxToolResultBytes,
             maxReadFileBytes: config.maxReadFileBytes,
-            shellTimeoutSeconds: config.shellTimeoutSeconds)
+            shellTimeoutSeconds: config.shellTimeoutSeconds,
+            spillOversizedResults: config.toolResultSpillEnabled)
         var tools = ToolExecutor.toolDefinitions(allowlist: config.toolAllowlist)
+        // WS3e: delegation is advertised ONLY when the operator's hard off-switch is on.
+        // A disabled node must not tempt its model with a tool that always refuses (a
+        // weak local model would burn turns retrying it); the `runOneTool` gate still
+        // refuses a hallucinated call as defense-in-depth.
+        if !config.cloudAgentDelegationEnabled {
+            tools.removeAll { $0.name == ToolExecutor.delegateToCloudAgentTool }
+        }
+        // A1 — the degenerate case of tool-advertising honesty: this session's client
+        // declared it cannot present a permission prompt (`eldrCanPrompt:false`), so
+        // every mutating tool would bounce off C-1's deny. Don't advertise them — a
+        // coding-tuned model would otherwise burn turns retrying — and tell the model
+        // where they ARE available (system line below). `allowUngatedTools` (the
+        // explicit operator escape hatch for trusted prompt-less clients) keeps the
+        // full set: with the gate off, nothing bounces.
+        let mutatingToolsFiltered =
+            sessionsWithoutPromptCapableClient.contains(sessionId) && !config.allowUngatedTools
+        if mutatingToolsFiltered {
+            tools.removeAll { ToolExecutor.needsPermission($0.name) }
+        }
         // Phase D3: merge the phone's MCP chat tools into the advertised set, but
         // ONLY when this session opted in (`mcpServers` advertised) AND a provider is
         // wired. The provider's `toolDefinitions()` lazily handshakes over the relay;
@@ -419,6 +496,23 @@ public actor ACPAgent {
             LLMMessage(
                 role: .system,
                 content: Self.systemPrompt(cwd: cwd, config: config, skill: skill)))
+        // A1 — when mutating tools were filtered above, say so up front (part of the
+        // anchored leading-system run, so ContextBudget.trim never drops it). The
+        // model then answers "I can't change files here, use the coding-agent chat"
+        // instead of hallucinating tool calls it wasn't offered.
+        if mutatingToolsFiltered {
+            messages.append(
+                LLMMessage(
+                    role: .system,
+                    content: """
+                        This session is read-only: tools that modify files or run \
+                        commands (write_file, edit_file, run_shell, open_terminal, \
+                        delegate_to_cloud_agent) are unavailable because this chat \
+                        cannot present approval prompts. If the user asks for changes, \
+                        tell them to use their phone-driven coding-agent chat (the \
+                        paired node conversation), where each action can be approved.
+                        """))
+        }
         // contextgraph (optional): assemble prior context via graph/tag retrieval
         // ahead of the local sliding window. Part of the anchored leading-system
         // run, so ContextBudget.trim never drops it. Unreachable → nil → fall back.
@@ -454,7 +548,8 @@ public actor ACPAgent {
             // long tool loop (and the large results it accumulates) can't outgrow
             // the window. The system prompt + the task are always preserved.
             let outgoing = ContextBudget.trim(
-                messages, maxTurns: config.maxHistoryTurns, maxChars: config.maxContextChars)
+                messages, maxTurns: config.maxHistoryTurns, maxChars: config.maxContextChars,
+                keepRecentToolResults: config.toolResultKeepVerbatim)
 
             // One model call, raced against a timeout and against an in-flight
             // session/cancel so a hung model or a mid-generation cancel aborts the
@@ -560,8 +655,10 @@ public actor ACPAgent {
         } catch {
             // C-6: stderr is an at-rest diagnostic sink (the launcher tees it to a
             // logfile); scrub the error text in case it echoes a request body/header.
-            FileHandle.standardError.write(
-                Data(config.logRedactor("contextgraph assemble failed: \(Self.describe(error))\n").utf8))
+            // Throwing write: a dead tee must not crash the agent (broken-pipe class).
+            try? FileHandle.standardError.write(
+                contentsOf: Data(
+                    config.logRedactor("contextgraph assemble failed: \(Self.describe(error))\n").utf8))
             return nil
         }
     }
@@ -629,15 +726,18 @@ public actor ACPAgent {
         // Phase D4: `open_terminal` is NOT run by the per-turn `ToolExecutor` (a value
         // type can't own a long-lived process). The agent intercepts it and spawns a
         // persistent `PTYProcess` whose output streams to the phone as `terminal_output`
-        // session/updates. The phone has ALREADY gated this through its standing
-        // autonomous-changes consent (the `open_terminal` tool_call carried the `execute`
-        // kind + the interactive-terminal title, and `requestPermission` above returned
-        // true only if the owner consented). The node STILL re-checked C-1 there, so by
-        // the time we reach this line the open-ended shell was explicitly authorized.
+        // session/updates. The phone has ALREADY gated this — the `open_terminal`
+        // tool_call carried the `execute` kind + the interactive-terminal title, and
+        // `requestPermission` above returned true only if the owner allowed it (standing
+        // autonomous-changes consent, or an explicit allow-once/always via the prompt).
+        // The node STILL re-checked C-1 there, so by the time we reach this line the
+        // open-ended shell was explicitly authorized.
         let result: ToolResult
         if name == ToolExecutor.openTerminalTool {
             result = await openInteractiveTerminal(
                 sessionId: sessionId, args: args, cwd: cwd)
+        } else if name == ToolExecutor.delegateToCloudAgentTool {
+            result = await delegateToCloudAgent(sessionId: sessionId, args: args, cwd: cwd)
         } else if let extraTools, Self.isExtraTool(name), sessionsWithMCP.contains(sessionId) {
             // Phase D3: a tool the `extraTools` provider owns (the phone's MCP chat tools,
             // `mcp_`-prefixed) is run by the PROVIDER — a round-trip to the phone over the
@@ -768,26 +868,175 @@ public actor ACPAgent {
                 sessionId: live.sessionId, terminalId: terminalId, exitCode: exitCode))
     }
 
-    /// Fail-closed: kill every interactive terminal owned by `sessionId` (a session/cancel
-    /// landed). No PTY may outlive a cancelled turn.
-    private func terminateTerminals(forSession sessionId: String) {
-        for (id, live) in terminals where live.sessionId == sessionId {
-            live.process.terminate()
-            live.pump.cancel()
-            terminals.removeValue(forKey: id)
+    // MARK: - WS3e: delegate_to_cloud_agent (cloud-CLI brokering)
+
+    /// WS3e — hand a sub-task to an external cloud-CLI harness (Claude Code / Gemini
+    /// CLI) and return its final answer. Two INDEPENDENT gates before anything is
+    /// spawned: (1) `config.cloudAgentDelegationEnabled` — the node operator's hard
+    /// off-switch, default false, checked first; (2) the phone permission card
+    /// `runOneTool` already required to reach this function at all (the same
+    /// allow-once/always/deny path every mutating tool gets — `delegate_to_cloud_agent`
+    /// takes no shortcut around it). Once spawned, the delegated harness's OWN
+    /// file/shell tool calls are proxied through the SAME `requestPermission` the outer
+    /// turn uses — so its actions surface as permission cards on the phone too, never
+    /// auto-approved just because the parent call was. A distinct `toolCallId` per
+    /// delegated request keeps it from colliding with the outer turn's own id.
+    /// A `session/cancel` on the outer session terminates the delegated CLI promptly
+    /// (the prompt is raced against the cancel poll below) — no delegated process may
+    /// outlive the turn that authorized it, same rule as `terminateTerminals` for PTYs.
+    private func delegateToCloudAgent(
+        sessionId: String, args: JSONValue, cwd: String
+    ) async -> ToolResult {
+        guard config.cloudAgentDelegationEnabled else {
+            return ToolResult(
+                text:
+                    "delegate_to_cloud_agent is disabled on this node (requires the operator's explicit opt-in).",
+                isError: true)
         }
+        guard let harnessID = args["harness"]?.stringValue, !harnessID.isEmpty else {
+            return ToolResult(text: "delegate_to_cloud_agent: missing 'harness'.", isError: true)
+        }
+        guard let task = args["task"]?.stringValue, !task.isEmpty else {
+            return ToolResult(text: "delegate_to_cloud_agent: missing 'task'.", isError: true)
+        }
+        guard let descriptor = HarnessRegistry.descriptor(id: harnessID),
+            descriptor.kind == .stdioSpawn || descriptor.kind == .a2aRemote
+        else {
+            return ToolResult(
+                text: "delegate_to_cloud_agent: unknown or unsupported harness \"\(harnessID)\".",
+                isError: true)
+        }
+
+        let transport: any ACPTransport
+        do {
+            transport = try harnessTransportFactory.makeTransport(for: descriptor)
+        } catch {
+            return ToolResult(
+                text:
+                    "delegate_to_cloud_agent: could not launch \(descriptor.displayName): \(Self.describe(error))",
+                isError: true)
+        }
+
+        let accumulator = DelegatedTurnAccumulator()
+        let handler = ACPClientHandler(
+            onAgentMessageChunk: { text in await accumulator.appendText(text) },
+            onToolCallUpdate: { _, status, content, isError in
+                await accumulator.appendActivity(status: status, content: content, isError: isError)
+            },
+            requestPermission: { [weak self] title, kind in
+                guard let self else { return false }  // agent gone → fail closed
+                // WS3f: `ACPCloudDelegation.delegatedActionTitlePrefix` — recognized
+                // phone-side for the DISTINCT cloud-delegation consent, but NOT for the
+                // live indicator (only the OUTER delegate_to_cloud_agent call brackets
+                // "a delegation is running"; this is one action within it).
+                return await self.requestPermission(
+                    sessionId: sessionId, toolCallId: "delegate-\(UUID().uuidString)",
+                    title:
+                        "\(ACPCloudDelegation.delegatedActionTitlePrefix) [\(descriptor.displayName)]: \(title)",
+                    kind: kind)
+            })
+        let driver = ACPClientDriver(transport: transport, handler: handler)
+
+        do {
+            _ = try await driver.start(cwd: cwd)
+        } catch {
+            transport.close()
+            return ToolResult(
+                text:
+                    "delegate_to_cloud_agent: \(descriptor.displayName) failed: \(Self.describe(error))",
+                isError: true)
+        }
+
+        // Race the delegated turn against a session/cancel, mirroring `runModelCall`'s
+        // cancel poll: the phone's cancel must terminate the spawned CLI promptly — the
+        // same fail-closed rule `terminateTerminals` enforces for PTYs — never wait out
+        // a delegated turn that could run for minutes. On cancel, closing the transport
+        // kills the child process, which finishes the driver's inbound stream and
+        // unblocks the losing prompt racer via `failAll` (drained by the group).
+        enum DelegationOutcome { case finished(String), cancelled, failed(Error) }
+        let outcome = await withTaskGroup(of: DelegationOutcome.self) { group -> DelegationOutcome in
+            group.addTask {
+                do { return .finished(try await driver.prompt(task)) } catch {
+                    return .failed(error)
+                }
+            }
+            group.addTask { [weak self] in
+                while !Task.isCancelled {
+                    if await self?.isCancelled(sessionId) ?? true { return .cancelled }
+                    do { try await Task.sleep(nanoseconds: 50_000_000) } catch { break }
+                }
+                return .cancelled
+            }
+            let first = await group.next() ?? .cancelled
+            if case .cancelled = first { transport.close() }
+            group.cancelAll()
+            return first
+        }
+        transport.close()
+
+        switch outcome {
+        case .finished(let stopReason):
+            return ToolResult(
+                text: await accumulator.result(stopReason: stopReason),
+                isError: stopReason == "refusal")
+        case .cancelled:
+            return ToolResult(
+                text:
+                    "delegate_to_cloud_agent: cancelled — the delegated \(descriptor.displayName) process was terminated.",
+                isError: true)
+        case .failed(let error):
+            return ToolResult(
+                text:
+                    "delegate_to_cloud_agent: \(descriptor.displayName) failed: \(Self.describe(error))",
+                isError: true)
+        }
+    }
+
+    /// WS3e — accumulates a delegated harness's streamed text + tool activity into one
+    /// result string, mirroring PQRCAgent's `TurnAccumulator` fold. Kept local here
+    /// (rather than reused) because PQRCACP doesn't depend on PQRCAgent.
+    private actor DelegatedTurnAccumulator {
+        private var text = ""
+        private var activity: [String] = []
+        func appendText(_ chunk: String) { text += chunk }
+        func appendActivity(status: String, content: String?, isError: Bool) {
+            var line = "[tool \(status)"
+            if isError { line += " (error)" }
+            if let content, !content.isEmpty { line += ": \(content)" }
+            line += "]"
+            activity.append(line)
+        }
+        func result(stopReason: String) -> String {
+            let assistant = text.trimmingCharacters(in: .whitespacesAndNewlines)
+            var parts: [String] = []
+            if !assistant.isEmpty { parts.append(assistant) }
+            if !activity.isEmpty { parts.append(activity.joined(separator: "\n")) }
+            if parts.isEmpty {
+                return "(the delegated agent returned no output; stopReason=\(stopReason))"
+            }
+            return parts.joined(separator: "\n\n")
+        }
+    }
+
+    /// Fail-closed: kill every interactive terminal owned by `sessionId` (a session/cancel
+    /// landed). No PTY may outlive a cancelled turn. Routes through `finalizeTerminal` so the
+    /// phone gets a `terminal_closed` for each — `finalizeTerminal` kills the child FIRST
+    /// (synchronously) and only then notifies, so a slow/dead connection can't delay the kill
+    /// or orphan a shell. The `terminals` snapshot is taken before iterating because
+    /// `finalizeTerminal` mutates the map.
+    private func terminateTerminals(forSession sessionId: String) async {
+        let ids = terminals.filter { $0.value.sessionId == sessionId }.map(\.key)
+        for id in ids { await finalizeTerminal(id, exitCode: nil) }
     }
 
     /// Fail-closed teardown: terminate EVERY live interactive terminal (the agent is
     /// shutting down / the transport dropped). Public so the node host can call it when
     /// the owner-verified stream closes — an interactive shell must never survive the
-    /// session that authorized it. Idempotent.
-    public func terminateAllTerminals() {
-        for (_, live) in terminals {
-            live.process.terminate()
-            live.pump.cancel()
-        }
-        terminals.removeAll()
+    /// session that authorized it. Idempotent. Like `terminateTerminals`, each terminal
+    /// goes through `finalizeTerminal` (child killed first, then a best-effort
+    /// `terminal_closed`), so the kill never waits on the notify.
+    public func terminateAllTerminals() async {
+        for id in Array(terminals.keys) { await finalizeTerminal(id, exitCode: nil) }
     }
 
     /// Test-only: how many interactive terminals are currently live.
@@ -914,7 +1163,23 @@ public actor ACPAgent {
                 let streamed = StreamedTextBox()
                 do {
                     let response: LLMResponse
-                    if streaming {
+                    if let scoped = llm as? any SessionScopedLLMClient {
+                        // WS-B5: a session-scoped backend (e.g. sybilclaw's Gateway) buckets its
+                        // OWN history by session key and has no incremental-delta stream of its
+                        // own — always run it through the scoped, one-shot `complete`, keyed by
+                        // THIS ACP session, so two concurrent sessions never share its state.
+                        // When streaming is on, forward the whole answer as one delta (mirrors
+                        // `LLMClient.stream`'s default) so the client still sees `session/update`s.
+                        response = try await scoped.complete(
+                            messages: outgoing, tools: tools, sessionId: sessionId)
+                        if streaming, !response.wantsTools, !response.content.isEmpty {
+                            await streamed.append(response.content)
+                            await connection.notify(
+                                method: "session/update",
+                                params: ACPWire.agentMessageChunk(
+                                    sessionId: sessionId, text: response.content))
+                        }
+                    } else if streaming {
                         response = try await llm.stream(messages: outgoing, tools: tools) { delta in
                             await streamed.append(delta)
                             await connection.notify(

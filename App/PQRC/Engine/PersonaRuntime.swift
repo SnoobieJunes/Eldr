@@ -50,6 +50,22 @@ enum RuntimeEvent: Sendable {
     /// Phase D4 — an interactive terminal ended (child exited or killed via Stop /
     /// fail-closed teardown). The UI removes the terminal view.
     case acpTerminalClosed(conversationID: String, terminalID: String, exitCode: Int?)
+    /// The node advertised its slash-commands/skills for the session
+    /// (`available_commands_update`). Drives the quick-action chip row in the
+    /// interactive-terminal view. Re-sent in full on each change.
+    case acpAvailableCommands(conversationID: String, commands: [String])
+    /// WS2 — the node's `allowUngatedTools` state, advertised at `initialize`: `true`
+    /// means it runs mutating tools WITHOUT a phone-side prompt. Drives the persistent
+    /// silent-bypass banner in the conversation.
+    case acpUngatedToolsAdvertised(conversationID: String, allowed: Bool)
+    /// WS3f — the OUTER `delegate_to_cloud_agent` tool_call entered `pending`/
+    /// `in_progress`: a cloud-CLI delegation is now live on the node. Drives the
+    /// persistent "cloud agent running" indicator. `toolCallId` correlates with the
+    /// matching `.acpCloudDelegationEnded` so an unrelated tool's completion can't
+    /// clear a still-live delegation.
+    case acpCloudDelegationStarted(conversationID: String, toolCallId: String, harness: String)
+    /// WS3f — that SAME tool_call reached `completed`/`failed`: the delegation ended.
+    case acpCloudDelegationEnded(conversationID: String, toolCallId: String)
 }
 
 /// One configured relay's URL paired with its current connection health.
@@ -390,7 +406,29 @@ actor PersonaRuntime {
                     plansContinuation?.yield(
                         .acpTerminalClosed(
                             conversationID: nodeHex, terminalID: terminalId, exitCode: exitCode))
-                case .assistantText, .toolCall, .toolCallUpdate, .availableCommands:
+                case .availableCommands(let commands):
+                    plansContinuation?.yield(
+                        .acpAvailableCommands(conversationID: nodeHex, commands: commands))
+                case .ungatedToolsAdvertised(let allowed):
+                    plansContinuation?.yield(
+                        .acpUngatedToolsAdvertised(conversationID: nodeHex, allowed: allowed))
+                // WS3f — the outer delegate_to_cloud_agent tool_call brackets a live
+                // cloud-CLI delegation. Only the OUTER call's title matches
+                // `delegateTitlePrefix` exactly (a nested action inside it uses the
+                // DIFFERENT `delegatedActionTitlePrefix` — see `ACPCloudDelegation` —
+                // so this can't mistake one of the delegate's own file/shell actions
+                // for the start of a new delegation).
+                case .toolCall(let id, let title, _, _)
+                where title.hasPrefix(ACPCloudDelegation.delegateTitlePrefix):
+                    plansContinuation?.yield(
+                        .acpCloudDelegationStarted(
+                            conversationID: nodeHex, toolCallId: id,
+                            harness: Self.harnessName(fromDelegationTitle: title)))
+                case .toolCallUpdate(let id, let status, _, _)
+                where status == "completed" || status == "failed":
+                    plansContinuation?.yield(
+                        .acpCloudDelegationEnded(conversationID: nodeHex, toolCallId: id))
+                case .assistantText, .toolCall, .toolCallUpdate:
                     break  // folded into the reply message; not a live UI signal here
                 }
             },
@@ -439,6 +477,21 @@ actor PersonaRuntime {
     private func decidePermission(
         nodeHex: String, silo: String, title: String, kind: String
     ) async -> Bool {
+        // WS3f: a delegate_to_cloud_agent request (the outer call OR one of the
+        // delegated harness's own actions) checks its OWN distinct standing consent —
+        // enabling autonomous file/shell changes must never silently also authorize
+        // handing tasks to an external cloud CLI (a different trust boundary: it reads
+        // the project and talks to its OWN vendor, not just this Mac).
+        if ACPCloudDelegation.isDelegationTitle(title) {
+            if AppSession.cloudAgentDelegationConsent(nodeID: nodeHex, siloID: silo) { return true }
+            guard let asker = permissionAsker else { return false }  // no UI → fail closed
+            let decision = await asker.request(
+                PermissionRequest(id: UUID().uuidString, nodeHex: nodeHex, title: title, kind: kind))
+            if decision == .allowAlways {
+                AppSession.setCloudAgentDelegationConsent(true, nodeID: nodeHex, siloID: silo)
+            }
+            return decision != .deny
+        }
         if AppSession.autonomousChangesConsent(nodeID: nodeHex, siloID: silo) { return true }
         guard let asker = permissionAsker else { return false }  // no UI → fail closed
         let decision = await asker.request(
@@ -449,28 +502,15 @@ actor PersonaRuntime {
         return decision != .deny
     }
 
-    /// Phase D4 — the GATE for opening an interactive PTY terminal on the node (the
-    /// project's highest-risk surface: a persistent interactive shell on the user's Mac,
-    /// driven from the phone). Unlike `decidePermission` for one-shot mutating tools,
-    /// there is NO per-action allow-once path: an open-ended shell can't be meaningfully
-    /// approved one keystroke at a time, so it requires the SAME standing
-    /// `autonomousChangesConsent` the user explicitly opted into (Settings ▸ the node's
-    /// "autonomous changes" toggle). With that consent OFF, PTY creation FAILS CLOSED — no
-    /// terminal is ever opened. `nonisolated static` + pure so the `@Sendable` permission
-    /// handler can call it without hopping the actor (matching `isMutatingACPToolKind`).
-    /// The node independently re-checks C-1 (deny-on-timeout) and keeps its own cwd jail,
-    /// so this is the phone-owned last brake on the escape hatch, not the only one.
-    nonisolated static func decideInteractivePTY(nodeHex: String, silo: String) -> Bool {
-        AppSession.autonomousChangesConsent(nodeID: nodeHex, siloID: silo)
-    }
-
-    /// Whether an ACP permission request's `title` is an interactive-PTY (`open_terminal`)
-    /// request — matched against `ACPTerminal.interactiveTerminalTitlePrefix` (iOS-available,
-    /// the same prefix the node attaches to every such request). The ACP ToolKind
-    /// (`execute`) can't distinguish it from `run_shell`, so the title is the signal that
-    /// routes it to the stronger `decideInteractivePTY` gate. `nonisolated static` + pure.
-    nonisolated static func isInteractiveTerminalTitle(_ title: String) -> Bool {
-        title.hasPrefix(ACPTerminal.interactiveTerminalTitlePrefix)
+    /// WS3f — pull the harness name out of an outer delegation title, e.g.
+    /// `"Delegate to cloud agent (claude-code): fix the build"` → `"claude-code"`, for
+    /// the live indicator's label. Falls back to the raw title if the shape is
+    /// unexpected (display-only; never gates anything). `nonisolated static` + pure.
+    nonisolated static func harnessName(fromDelegationTitle title: String) -> String {
+        guard let open = title.firstIndex(of: "("), let close = title.firstIndex(of: ")"),
+            open < close
+        else { return title }
+        return String(title[title.index(after: open)..<close])
     }
 
     /// (Phase 3 — intelligent task routing.) Keep the AI-selection policy in sync with the
@@ -3210,6 +3250,35 @@ actor PersonaRuntime {
         if RelayMCPTransport.isMCPFrame(body.text) {
             if let host = await ensureRelayMCPHost(nodeHex: senderHex) {
                 await host.deliverInbound(body.text)
+            }
+            return
+        }
+
+        // A1 — a chat-bridge PERMISSION request from the paired Mac node
+        // (`ACPPermissionChannel`): its My-AI-chat agent wants to run a mutating tool
+        // and needs the owner's Allow / Always / Deny. Routed through the SAME
+        // `decidePermission` ladder as the phone-driven coding path (standing
+        // autonomous-changes consent → allow; else the approval card; no asker →
+        // deny), then answered with a response frame. Serviced ONLY for a paired
+        // `coding_agent` contact; like MCP frames, a recognized frame is ALWAYS
+        // swallowed (control channel, never chat) — an unpaired sender's frame is
+        // dropped unanswered, so their tool call just times out to deny on the node
+        // and they learn nothing. The decision runs on its own Task so a human
+        // prompt can never stall the receive pump.
+        if ACPPermissionChannel.isFrame(body.text) {
+            if let request = ACPPermissionChannel.parseRequest(body.text),
+                contactType(senderHex) == "coding_agent"
+            {
+                let silo = siloID
+                Task { [weak self] in
+                    guard let self else { return }
+                    let allowed = await self.decidePermission(
+                        nodeHex: senderHex, silo: silo,
+                        title: request.title, kind: request.kind)
+                    let frame = ACPPermissionChannel.responseFrame(
+                        id: request.id, allowed: allowed)
+                    try? await self.sendRelayACPFrame(frame, to: senderHex)
+                }
             }
             return
         }

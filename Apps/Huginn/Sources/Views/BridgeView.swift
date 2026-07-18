@@ -1,25 +1,38 @@
 import AppKit
 import CoreImage
 import CoreImage.CIFilterBuiltins
+import PQRCACP
 import SwiftUI
 
 /// EldrChat bridge: pair the Configurator's coding agent into EldrChat conversations
 /// so a group (your phone, teammates) sees the agent's activity over the existing
 /// PQRC E2EE stack. Agent messages always render as AI-authored (invariant 8).
 struct BridgeView: View {
-    @StateObject private var bridge = ACPBridgeService()
+    @EnvironmentObject private var store: ConfigurationStore
+    // WS-B2: owned by HuginnApp now (shared with the Relay tab) — was a private
+    // @StateObject here.
+    @EnvironmentObject private var bridge: ACPBridgeService
+    // WS-B3: owned by HuginnApp now (shared with the menu-bar StatusBarView's
+    // pending-approval badge + the notification observer) — was a private
+    // @StateObject here.
+    @EnvironmentObject private var a2aHost: A2AServerHost
+    /// Are-you-sure step for A2A auto-approve (mirrors the Security tab's
+    /// ungated-tools dialog): ON only through explicit confirmation, OFF instantly.
+    @State private var confirmA2AAutoApprove = false
     @State private var copied = false
     @State private var manualOwnerHex = ""
+    @State private var a2aBearerField = ""
 
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 16) {
-                Label("EldrChat Bridge", systemImage: "antenna.radiowaves.left.and.right")
+                Label("Bridge (phone tether)", systemImage: "antenna.radiowaves.left.and.right")
                     .font(.title3.weight(.semibold))
 
                 Text("Add the coding agent to an EldrChat conversation as a first-class participant. The activity you opt into is delivered over the same post-quantum, end-to-end-encrypted PQRC channel EldrChat already uses — no server required to start.")
                     .foregroundStyle(.secondary)
 
+                tetherCard
                 stateBox
                 if case .advertising = bridge.bridgeState { pairingBox }
                 if !bridge.activeConversations.isEmpty { conversationsBox }
@@ -32,11 +45,146 @@ struct BridgeView: View {
 
                 Text("Privacy: nothing is shared until you pair, pick a conversation, and enable a message type. The agent never self-activates — you are sharing your own coding session.")
                     .font(.caption).foregroundStyle(.secondary)
+
+                a2aServingBox
             }
             .padding(20)
-            .frame(maxWidth: 640, alignment: .leading)
+            // Wide enough to actually use a desktop window (the old 640 left half a
+            // 1200-pt window as dead margin); the cap only bites on very wide panes.
+            .frame(maxWidth: 1100, alignment: .leading)
             .frame(maxWidth: .infinity)
         }
+        .task {
+            // Wire the A2A server's dependencies to this Bridge's live selections — same
+            // backend the phone's remote-drive session uses (WS3c), so serving one agent
+            // over A2A answers with whatever the operator has configured here.
+            a2aHost.descriptorProvider = {
+                ConfigurationStore.resolvedHarnessDescriptor(id: bridge.relayHarnessID) ?? .builtIn
+            }
+            a2aHost.llmProvider = {
+                let config = ACPBridgeService.relayHostLLMConfig()
+                return InspectingLLMClient(
+                    wrapping: OpenAICompatibleLLMClient(config: config), model: config.model)
+            }
+            a2aHost.toolEnvironmentProvider = {
+                ToolEnvironment(
+                    workdir: bridge.agentWorkdir, baseEnvironment: ProcessInfo.processInfo.environment)
+            }
+            // Always `.default` here, deliberately NOT the operator's tuned `store.agentConfig`
+            // (which may carry `allowUngatedTools: true`): a remote HTTP caller's tasks stay
+            // fail-closed regardless of that Mac-local convenience toggle — the ONLY thing that
+            // authorizes a mutating tool on this surface is the per-task "allow tool use"
+            // checkbox in the approval UI (default off), or — for auto-approved headless
+            // tasks — the operator's confirmed AC108 toggle via the provider below.
+            a2aHost.agentConfigProvider = { .default }
+            a2aHost.autoApproveProvider = { store.a2aAutoApprove }
+            a2aHost.autoApproveAllowsToolsProvider = {
+                ACPBridgeService.operatorAllowsUngatedTools()
+            }
+        }
+    }
+
+    // MARK: - A2A serving (surface b — this Mac serves an A2A endpoint other clients call)
+
+    /// ON routes through the are-you-sure dialog; OFF applies immediately (same
+    /// shape as `ConfigurationView.ungatedToolsBinding`).
+    private var a2aAutoApproveBinding: Binding<Bool> {
+        Binding(
+            get: { store.a2aAutoApprove },
+            set: { on in
+                if on {
+                    confirmA2AAutoApprove = true
+                } else {
+                    store.a2aAutoApprove = false
+                }
+            })
+    }
+
+    private var a2aServingBox: some View {
+        GroupBox("A2A serving") {
+            VStack(alignment: .leading, spacing: 8) {
+                Text(
+                    "Expose this Mac's coding agent as an Agent2Agent (A2A) v1.0 endpoint other tools can call. Off by default — every submitted task still needs your explicit approval below before it runs."
+                )
+                .font(.caption).foregroundStyle(.secondary)
+
+                Toggle(
+                    "Serve A2A",
+                    isOn: Binding(
+                        get: { a2aHost.isServing },
+                        set: { newValue in Task { newValue ? await a2aHost.start() : await a2aHost.stop() } }
+                    ))
+
+                Toggle("Auto-approve inbound tasks (headless/CLI)", isOn: a2aAutoApproveBinding)
+                    .confirmationDialog(
+                        "Run inbound A2A tasks without asking?",
+                        isPresented: $confirmA2AAutoApprove, titleVisibility: .visible
+                    ) {
+                        Button("Enable — I accept the risk", role: .destructive) {
+                            store.a2aAutoApprove = true
+                        }
+                        Button("Cancel", role: .cancel) {}
+                    } message: {
+                        Text(
+                            "Any local process holding the bearer token can run tasks on your agent immediately, with no approval prompt. Tool use inside those tasks still follows Security ▸ \u{201C}Run tools without asking permission\u{201D}. This does not expire; it stays on until you switch it off here."
+                        )
+                    }
+                if store.a2aAutoApprove {
+                    Label(
+                        "Inbound tasks run WITHOUT per-task approval. Tool use follows the Security tab's ungated-tools toggle.",
+                        systemImage: "exclamationmark.triangle.fill"
+                    )
+                    .font(.caption).foregroundStyle(.orange)
+                }
+
+                LabeledContent("Port") {
+                    TextField(
+                        "port", value: $a2aHost.port, format: .number.grouping(.never)
+                    )
+                    .textFieldStyle(.roundedBorder).frame(width: 90)
+                    .disabled(a2aHost.isServing)
+                }
+
+                HStack {
+                    Text("Token").font(.caption.weight(.medium))
+                    Text(a2aHost.bearerToken).font(.caption.monospaced()).textSelection(.enabled)
+                        .lineLimit(1).truncationMode(.middle)
+                    Spacer()
+                    Button("Copy") {
+                        NSPasteboard.general.clearContents()
+                        NSPasteboard.general.setString(a2aHost.bearerToken, forType: .string)
+                    }.controlSize(.small)
+                    Button("Regenerate") { a2aHost.regenerateToken() }.controlSize(.small)
+                }
+
+                if a2aHost.isServing {
+                    Label(
+                        "Serving on http://127.0.0.1:\(a2aHost.port)/a2a",
+                        systemImage: "checkmark.circle.fill"
+                    ).font(.caption).foregroundStyle(.green)
+                }
+                if let error = a2aHost.lastError {
+                    Text(error).font(.caption).foregroundStyle(.red)
+                }
+
+                if !a2aHost.pendingApprovals.isEmpty {
+                    Divider()
+                    Text("Pending task approvals").font(.caption.weight(.medium))
+                    ForEach(a2aHost.pendingApprovals) { item in
+                        pendingApprovalRow(item)
+                    }
+                }
+
+                Divider()
+                Text("Caution: anyone on this Mac who has the token can submit tasks to this agent.")
+                    .font(.caption2).foregroundStyle(.orange)
+            }
+            .padding(4)
+        }
+    }
+
+    private func pendingApprovalRow(_ item: InboundTaskGate.PendingApproval) -> some View {
+        PendingApprovalRow(item: item, a2aHost: a2aHost)
     }
 
     private var stateBox: some View {
@@ -48,6 +196,72 @@ struct BridgeView: View {
             }
             .padding(4)
         }
+    }
+
+    /// WS-B4: the tether's home. `relayACPServing` was published but rendered nowhere
+    /// (the old `tetherChip` this replaces was a late add-on, easy to miss) — this is a
+    /// proper card up top so "is my phone actually tethered to this Mac right now, and
+    /// when did it last talk?" has a one-glance answer without checking logs. Serving =
+    /// the phone's REMOTE-drive session (the full ACP protocol served over the relay by
+    /// `ACPRelayHost`, distinct from the watch-along mirror below); Paired = a device has
+    /// paired with this Mac (persisted owner pin, or a live paired conversation this
+    /// session — the same signal `ownerBox` already gates on); Last activity =
+    /// `lastTetherActivity`, host/timing only, never payload (invariant 12).
+    private var tetherCard: some View {
+        GroupBox("Phone tether") {
+            VStack(alignment: .leading, spacing: 8) {
+                tetherRow(
+                    label: "Serving",
+                    isOn: bridge.relayACPServing,
+                    onText: "Your phone can drive this agent remotely over the relay",
+                    offText: "Pin an owner + configure a model to serve the phone's remote-drive session")
+                tetherRow(
+                    label: "Paired",
+                    isOn: isPhonePaired,
+                    onText: "A phone has paired with this Mac",
+                    offText: "No phone has paired yet — scan the QR code below to pair one")
+                HStack(spacing: 8) {
+                    Image(systemName: "clock").foregroundStyle(.secondary)
+                    Group {
+                        if let last = bridge.lastTetherActivity {
+                            HStack(spacing: 4) {
+                                Text("Last activity:")
+                                Text(last, style: .relative)
+                                Text("ago")
+                            }
+                        } else {
+                            Text("Last activity: none yet")
+                        }
+                    }
+                    .font(.caption).foregroundStyle(.secondary)
+                    Spacer()
+                }
+            }
+            .padding(4)
+        }
+    }
+
+    private func tetherRow(label: String, isOn: Bool, onText: String, offText: String)
+        -> some View
+    {
+        HStack(alignment: .top, spacing: 8) {
+            Image(systemName: isOn ? "checkmark.circle.fill" : "circle")
+                .foregroundStyle(isOn ? .green : .secondary)
+            VStack(alignment: .leading, spacing: 1) {
+                Text(label).font(.caption.weight(.medium))
+                Text(isOn ? onText : offText).font(.caption2).foregroundStyle(.secondary)
+            }
+            Spacer()
+        }
+    }
+
+    /// Whether a phone has paired with this Mac: either a live paired conversation this
+    /// session, or a persisted owner pin from a prior session (the same "configured vs
+    /// not" signal `ownerBox`'s visibility already gates on below) — `bridgeState` alone
+    /// only reflects the CURRENT link/advertising status, not whether pairing ever
+    /// happened, so it isn't the right source for this.
+    private var isPhonePaired: Bool {
+        !bridge.activeConversations.isEmpty || bridge.ownerIdentityHex != nil
     }
 
     private var pairingBox: some View {
@@ -207,8 +421,51 @@ struct BridgeView: View {
                         : "eldr-acp: the owner drives our agent (its own configured LLM) — works even without sybilclaw."
                 )
                 .font(.caption2).foregroundStyle(.secondary)
+
+                Divider()
+                // WS3c — DISTINCT from "Mac-side responder" above: this picks what
+                // answers the phone's REMOTE-drive session (full tool-calling ACP,
+                // permission cards and all), not what drafts into the watch-along mirror.
+                Picker("Cloud coding agent", selection: $bridge.relayHarnessID) {
+                    ForEach(HarnessRegistry.all) { descriptor in
+                        Text(descriptor.displayName).tag(descriptor.id)
+                    }
+                }
+                .pickerStyle(.menu)
+                .accessibilityIdentifier("bridge-relay-harness")
+                Text(relayHarnessCaption)
+                    .font(.caption2).foregroundStyle(.secondary)
+
+                if let selected = HarnessRegistry.descriptor(id: bridge.relayHarnessID),
+                    selected.kind == .a2aRemote
+                {
+                    LabeledContent("Bearer token (optional)") {
+                        SecureField("(leave blank if the agent needs no auth)", text: $a2aBearerField)
+                            .textFieldStyle(.roundedBorder)
+                            .onChange(of: a2aBearerField) { _, newValue in
+                                store.setA2ABearerToken(newValue, for: selected.id)
+                            }
+                    }
+                    .task(id: selected.id) { a2aBearerField = store.a2aBearerToken(for: selected.id) }
+                    Text(
+                        "Sent as `Authorization: Bearer …` to \(selected.a2aCardURL ?? "the agent's card URL"). Stored in the Keychain, never this app's environment."
+                    )
+                    .font(.caption2).foregroundStyle(.secondary)
+                }
             }
             .padding(4)
+        }
+    }
+
+    private var relayHarnessCaption: String {
+        guard let selected = HarnessRegistry.descriptor(id: bridge.relayHarnessID) else { return "" }
+        switch selected.kind {
+        case .builtIn:
+            return "The phone's remote-drive session (full tool access, every action a permission card) runs our built-in agent."
+        case .a2aRemote:
+            return "Bridges to a remote Agent2Agent (A2A) v1.0 agent over HTTPS JSON-RPC — no subprocess. Every action it takes still surfaces as a permission card on your phone."
+        case .stdioSpawn:
+            return "Spawns the installed CLI directly (must be on THIS app's PATH). Its vendor key (Settings ▸ Cloud coding agents) is injected ONLY into that process, never this app's shell. Its every file/shell action still surfaces as a permission card on your phone."
         }
     }
 
@@ -305,6 +562,31 @@ struct BridgeView: View {
         case .advertising: return "Advertising — waiting for EldrChat to pair"
         case .paired(let name): return "Paired with \(name)"
         case .error(let message): return "Error: \(message)"
+        }
+    }
+
+    private struct PendingApprovalRow: View {
+        let item: InboundTaskGate.PendingApproval
+        @ObservedObject var a2aHost: A2AServerHost
+        @State private var allowToolUse = false
+
+        var body: some View {
+            VStack(alignment: .leading, spacing: 4) {
+                Text(item.summary).font(.caption.monospaced()).lineLimit(3)
+                Text("from \(item.peer)").font(.caption2).foregroundStyle(.secondary)
+                Toggle("Allow this task to use tools (write/edit/shell)", isOn: $allowToolUse)
+                    .font(.caption2)
+                HStack {
+                    Button("Deny", role: .destructive) {
+                        Task { await a2aHost.deny(item) }
+                    }.controlSize(.small)
+                    Button("Approve") {
+                        Task { await a2aHost.approve(item, allowToolUse: allowToolUse) }
+                    }.controlSize(.small).keyboardShortcut(.defaultAction)
+                }
+            }
+            .padding(6)
+            .background(Color.secondary.opacity(0.08), in: RoundedRectangle(cornerRadius: 6))
         }
     }
 

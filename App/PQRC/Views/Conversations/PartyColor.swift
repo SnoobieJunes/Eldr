@@ -43,12 +43,16 @@ enum PartyColor {
     /// "you" stays consistent with the rest of the app's outgoing styling.
     static func palette(forIdentity identityHex: String, isSelf: Bool) -> Palette {
         if isSelf {
-            // "You" = the literal app accent for the solid (exactly what the
-            // outgoing bubble already used, audit-approved), with the AI variant
-            // derived from the accent's own hue so my AIs read as cousins of me.
+            // "You" anchors on the app accent so my bubbles stay recognizably
+            // mine, but the SOLID is the accent deepened by a fixed black mix:
+            // white text on the RAW accent measures ~4.0:1 (under WCAG AA 4.5) —
+            // the old "audit-approved" belief was an occlusion artifact, exposed
+            // once threads showed the same bubble mid-screen. 22 % black puts the
+            // default accents comfortably past 6:1 while reading as "the accent,
+            // one shade deeper". The AI variants keep the undarkened accent hue.
             let base = Color.accentColor
             return Palette(
-                solid: base,
+                solid: base.mix(with: .black, by: 0.22),
                 aiFill: aiTint(base),
                 aiStroke: aiStrokeShade(base),
                 aiLabel: aiLabelShade(base))

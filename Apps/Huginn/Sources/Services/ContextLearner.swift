@@ -31,7 +31,6 @@ final class ContextLearner: ObservableObject {
     /// regression). Injected via `init`/`setMetadataKey`, so an external launch that lacks
     /// the master key degrades gracefully. Never logged/persisted in the clear (invariant 12).
     private var metadataKey: Data?
-    private let queue = DispatchQueue(label: "chat.eldr.configurator.contextlearner")
 
     private var eventsHandle: FileHandle?
     private var eventsSource: DispatchSourceFileSystemObject?
@@ -73,9 +72,12 @@ final class ContextLearner: ObservableObject {
         // Only react to NEW events (don't replay history into eldr.md on every launch).
         offset = (try? handle.seekToEnd()) ?? 0
 
+        // Main-queue delivery: this class is @MainActor, so the handler closure is
+        // @MainActor-inferred and Swift 6's dynamic isolation check traps if a
+        // background queue invokes it (the LogTailer crash class — see LogTailerTests).
         let source = DispatchSource.makeFileSystemObjectSource(
             fileDescriptor: handle.fileDescriptor,
-            eventMask: [.write, .extend, .rename, .delete], queue: queue)
+            eventMask: [.write, .extend, .rename, .delete], queue: .main)
         source.setEventHandler { [weak self] in
             let mask = source.data
             Task { @MainActor [weak self] in self?.readEvents(mask) }
@@ -167,7 +169,7 @@ final class ContextLearner: ObservableObject {
         let fd = open(path, O_EVTONLY)
         guard fd >= 0 else { return }
         let source = DispatchSource.makeFileSystemObjectSource(
-            fileDescriptor: fd, eventMask: [.write, .delete, .rename], queue: queue)
+            fileDescriptor: fd, eventMask: [.write, .delete, .rename], queue: .main)
         source.setEventHandler { [weak self] in
             Task { @MainActor [weak self] in self?.fileChanged(path, cwd: cwd) }
         }

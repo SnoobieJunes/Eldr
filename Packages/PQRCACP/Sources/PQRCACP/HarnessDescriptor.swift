@@ -24,6 +24,12 @@ public enum HarnessKind: Sendable, Equatable {
     /// pipes the phone's verified, decrypted ACP line-stream to/from its stdin/stdout with
     /// `runACPProxy`.
     case stdioSpawn
+    /// An Agent2Agent (A2A) v1.0 agent reached over HTTPS JSON-RPC — no subprocess. `runHarness`
+    /// builds its `ACPTransport` via `A2AACPBridge` (the `A2AHarness` target, which is the only
+    /// place in this package that depends on `SwiftA2A`; `PQRCACP` itself stays dependency-free
+    /// — see `HarnessTransportFactory.swift`). The bridge translates ACP `session/prompt` turns
+    /// into A2A `message/send`/`message/stream` calls against the agent named by `a2aCardURL`.
+    case a2aRemote
 }
 
 /// A data-only description of one selectable ACP backend. The `command`/`args`/`env` shape
@@ -51,6 +57,24 @@ public struct HarnessDescriptor: Sendable, Equatable, Identifiable {
     /// the launch commands are best-effort scaffolding data, not verified). The built-in and
     /// the locally-installed Xcode/OpenClaw launchers are not provisional.
     public let isProvisional: Bool
+    /// WS3b — the environment variable name this harness reads its vendor API key from
+    /// (e.g. `ANTHROPIC_API_KEY`), or nil for a harness that needs none (`.builtIn`, the
+    /// installed launchers, which bring their own model config). This is NOT the key
+    /// itself — `env` never carries a secret at rest in the static registry. The node
+    /// host looks the key up from ITS OWN Keychain by `id` and merges
+    /// `[vendorKeyEnvVar: key]` into a COPY of this descriptor's `env` at launch time
+    /// (see `withVendorKey`), so the secret exists only for the duration of one spawn.
+    public let vendorKeyEnvVar: String?
+    /// `.a2aRemote` only: the agent-card URL (e.g.
+    /// `https://host/.well-known/agent-card.json`) `A2AACPBridge` resolves to discover the
+    /// agent's JSON-RPC endpoint and capabilities. `nil` for every other kind.
+    public let a2aCardURL: String?
+    /// `.a2aRemote` only, and NEVER set in the static registry — mirrors `vendorKeyEnvVar` /
+    /// `withVendorKey`'s launch-scoped-secret pattern, not env-var-name-as-data: this field
+    /// carries the bearer token ITSELF, but only ever via a copy produced by `withBearerToken`
+    /// at launch time. The node host sources the token from its OWN Keychain by `id`, exactly
+    /// as it does for `vendorKeyEnvVar`; this descriptor type carries no secret storage.
+    public let a2aBearerToken: String?
 
     public init(
         id: String,
@@ -59,7 +83,10 @@ public struct HarnessDescriptor: Sendable, Equatable, Identifiable {
         command: String = "",
         args: [String] = [],
         env: [String: String] = [:],
-        isProvisional: Bool = false
+        isProvisional: Bool = false,
+        vendorKeyEnvVar: String? = nil,
+        a2aCardURL: String? = nil,
+        a2aBearerToken: String? = nil
     ) {
         self.id = id
         self.displayName = displayName
@@ -68,6 +95,39 @@ public struct HarnessDescriptor: Sendable, Equatable, Identifiable {
         self.args = args
         self.env = env
         self.isProvisional = isProvisional
+        self.vendorKeyEnvVar = vendorKeyEnvVar
+        self.a2aCardURL = a2aCardURL
+        self.a2aBearerToken = a2aBearerToken
+    }
+
+    /// WS3b — a copy of this descriptor with `key` merged into `env` under
+    /// `vendorKeyEnvVar`. No-op (returns self unchanged) when this harness declares no
+    /// vendor-key env var, or `key` is nil/empty (no key on file yet — the harness still
+    /// launches, just without one, so a missing Keychain entry fails open to "no key"
+    /// rather than blocking the launch). The caller is responsible for sourcing `key`
+    /// from ITS OWN Keychain — this type carries no secret storage itself.
+    public func withVendorKey(_ key: String?) -> HarnessDescriptor {
+        guard let envVar = vendorKeyEnvVar, let key, !key.isEmpty else { return self }
+        var merged = env
+        merged[envVar] = key
+        return HarnessDescriptor(
+            id: id, displayName: displayName, kind: kind, command: command, args: args,
+            env: merged, isProvisional: isProvisional, vendorKeyEnvVar: vendorKeyEnvVar,
+            a2aCardURL: a2aCardURL, a2aBearerToken: a2aBearerToken)
+    }
+
+    /// A copy of this descriptor with `token` merged in as `a2aBearerToken`, mirroring
+    /// `withVendorKey`'s launch-scoped-secret pattern for `.a2aRemote`. No-op (returns self
+    /// unchanged) for any other `kind`, or when `token` is nil/empty (the bridge still
+    /// connects, just unauthenticated — a missing credential fails open to "no auth" rather
+    /// than blocking the delegation, same policy as `withVendorKey`). The caller sources
+    /// `token` from ITS OWN Keychain by `id`; this type carries no secret storage itself.
+    public func withBearerToken(_ token: String?) -> HarnessDescriptor {
+        guard kind == .a2aRemote, let token, !token.isEmpty else { return self }
+        return HarnessDescriptor(
+            id: id, displayName: displayName, kind: kind, command: command, args: args,
+            env: env, isProvisional: isProvisional, vendorKeyEnvVar: vendorKeyEnvVar,
+            a2aCardURL: a2aCardURL, a2aBearerToken: token)
     }
 
     /// The built-in EldrChat reference harness (bring-your-own-model). Convenience so the node
@@ -83,15 +143,35 @@ public struct HarnessDescriptor: Sendable, Equatable, Identifiable {
 /// descriptors with no architecture change." A real Phase-2 integration adds an entry here
 /// (and confirms its `command`); nothing else in the proxy/transport path changes.
 ///
-/// IMPORTANT — the `.stdioSpawn` commands below are of two confidences:
+/// IMPORTANT — the `.stdioSpawn` commands below are of three confidences:
 ///   • NOT provisional — `eldr-acp-xcode` / `eldr-acp-openclaw`: the launchers the
 ///     Huginn actually installs into `~/.local/bin` (see `ConfigPaths.launcher`
 ///     / `.openClawLauncher`). These exist on this machine today.
-///   • Provisional (`isProvisional: true`) — Claude Code, Codex, Gemini CLI, OpenCode,
-///     Cursor: SCAFFOLDING DATA. The commands/args are the tools' *conventional* ACP launch
-///     invocations and MUST be confirmed against each installed tool before Phase-2 wiring;
-///     they are NOT verified here (none of these harnesses is installed). They exist so the
-///     registry is the drop-in point.
+///   • NOT provisional (WS3d, verified) — Claude Code, Gemini CLI: `command`+`args`
+///     confirmed by actually installing each (`npm install -g
+///     @zed-industries/claude-code-acp @google/gemini-cli`) and driving a REAL
+///     `initialize` handshake through the exact production path (`runHarness` →
+///     `StdioHarnessTransport`), not just a hand-typed shell probe — both returned a
+///     well-formed ACP `initialize` result. What's still UNVERIFIED: an actual
+///     `session/prompt` (needs a real vendor credential — `claude /login` or
+///     `ANTHROPIC_API_KEY` / `GEMINI_API_KEY` — neither obtained here) and the
+///     `@zed-industries/claude-code-acp` package is npm-flagged DEPRECATED in favor
+///     of `@agentclientprotocol/claude-agent-acp`, whose bin is named
+///     `claude-agent-acp` (not `claude-code-acp`) — if the operator installs the
+///     successor instead, this descriptor's `command` must be updated to match.
+///     OPERATIONAL CAVEAT (the actual blocker in practice): `npm install -g` under
+///     nvm lands the binary in `~/.nvm/versions/node/<v>/bin`, which is NOT on a
+///     GUI-launched Huginn.app's (or launchd-spawned eldr-node's) default PATH —
+///     confirmed by spawning with the system default PATH (`/etc/paths` +
+///     `/etc/paths.d`, no `~/.local/bin`/nvm) and getting `No such file or
+///     directory`. A bare command name here only resolves if the operator installs
+///     via a PATH-visible method (Homebrew, system Node) or the node's own PATH is
+///     extended — this is a real per-Mac setup step, not a code bug.
+///   • Still provisional (`isProvisional: true`) — Codex, OpenCode, Cursor:
+///     SCAFFOLDING DATA. The commands/args are the tools' *conventional* ACP launch
+///     invocations and MUST be confirmed against each installed tool before Phase-2
+///     wiring; they are NOT verified here (none of these harnesses is installed).
+///     They exist so the registry is the drop-in point.
 public enum HarnessRegistry {
     /// `~/.local/bin/<name>` — where the Configurator installs the launchers (mirrors
     /// `ConfigPaths.binDir`). Resolved per-user so the descriptors point at the real scripts.
@@ -123,15 +203,30 @@ public enum HarnessRegistry {
             kind: .stdioSpawn,
             command: localBin("eldr-acp-openclaw")),
 
-        // ── Phase-2 placeholders (PROVISIONAL — commands are defaults to confirm). ──
-        // Claude Code: Anthropic's CLI exposes an ACP server mode.
+        // ── WS3d-verified: command+args confirmed against the real installed binary. ──
+        // Claude Code: `@agentclientprotocol/claude-agent-acp` (the maintained successor
+        // of the npm-deprecated `@zed-industries/claude-code-acp`; installed on this
+        // machine 2026-07-18, bin `claude-agent-acp`, symlinked into `~/.local/bin`).
+        // Auth: uses the `claude` CLI's own login when no `ANTHROPIC_API_KEY` is set.
         HarnessDescriptor(
             id: "claude-code",
             displayName: "Claude Code",
             kind: .stdioSpawn,
-            command: "claude-code-acp",
+            command: "claude-agent-acp",
             args: [],
-            isProvisional: true),
+            isProvisional: false,
+            vendorKeyEnvVar: "ANTHROPIC_API_KEY"),
+        // Gemini CLI: Google's `@google/gemini-cli`, ACP mode over stdio.
+        HarnessDescriptor(
+            id: "gemini-cli",
+            displayName: "Gemini CLI",
+            kind: .stdioSpawn,
+            command: "gemini",
+            args: ["--experimental-acp"],
+            isProvisional: false,
+            vendorKeyEnvVar: "GEMINI_API_KEY"),
+
+        // ── Phase-2 placeholders (still PROVISIONAL — commands are defaults to confirm). ──
         // Codex: OpenAI's `codex` CLI, ACP/stdio subcommand.
         HarnessDescriptor(
             id: "codex",
@@ -139,14 +234,6 @@ public enum HarnessRegistry {
             kind: .stdioSpawn,
             command: "codex",
             args: ["acp"],
-            isProvisional: true),
-        // Gemini CLI: Google's `gemini` CLI run as an ACP experiment/server over stdio.
-        HarnessDescriptor(
-            id: "gemini-cli",
-            displayName: "Gemini CLI",
-            kind: .stdioSpawn,
-            command: "gemini",
-            args: ["--experimental-acp"],
             isProvisional: true),
         // OpenCode: the `opencode` CLI's ACP/agent stdio mode.
         HarnessDescriptor(
@@ -164,6 +251,18 @@ public enum HarnessRegistry {
             command: "cursor-agent",
             args: ["acp"],
             isProvisional: true),
+
+        // ── A2A (still PROVISIONAL — one example entry for interop testing). ──
+        // Targets the a2aproject/a2a-samples "helloworld" reference agent
+        // (https://github.com/a2aproject/a2a-samples) run locally on the default sample
+        // port — NOT a real vendor. Confirms the `.a2aRemote` seam end-to-end against a
+        // known-good agent card before any real A2A provider is registered.
+        HarnessDescriptor(
+            id: "a2a-local-sample",
+            displayName: "A2A Agent (local sample)",
+            kind: .a2aRemote,
+            isProvisional: true,
+            a2aCardURL: "http://127.0.0.1:9999/.well-known/agent-card.json"),
     ]
 
     /// Look up a descriptor by its stable `id` (router selection / restore).

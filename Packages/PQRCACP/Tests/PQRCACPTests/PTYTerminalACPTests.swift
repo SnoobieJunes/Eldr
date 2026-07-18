@@ -221,6 +221,11 @@ struct PTYTerminalACPTests {
         // transport drops): every live PTY is killed.
         await agent.terminateAllTerminals()
         #expect(await agent.liveTerminalCount() == 0)
+        // Teardown announces closure too (fix #5): the phone's terminal view resolves to
+        // closed instead of silently freezing when the transport drops.
+        #expect(
+            await waitUntil { await sink.sawClosed() },
+            "teardown must emit a terminal_closed update")
 
         let pidForClosure = childPID
         let childGone = await waitUntil(5_000) { kill(pidForClosure, 0) != 0 }
@@ -251,6 +256,11 @@ struct PTYTerminalACPTests {
         #expect(
             await agent.liveTerminalCount() == 0,
             "a cancelled session must not leave an interactive shell running")
+        // A cancel emits terminal_closed too (fix #5), so the phone's terminal view
+        // resolves to closed rather than hanging on a shell that's already gone.
+        #expect(
+            await waitUntil { await sink.sawClosed() },
+            "session/cancel must emit a terminal_closed update")
     }
 
     // MARK: - (5) C-6: no PTY output is written to the at-rest events log

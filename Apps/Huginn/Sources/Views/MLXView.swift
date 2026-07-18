@@ -1,0 +1,1066 @@
+import AppKit
+import SwiftUI
+
+/// The MLX tab: a full GUI over the `mlx_lm` CLI surface — environment
+/// install, OpenAI-compatible server (wired into the Eldr LLM seam with one
+/// click), Hugging Face model manager, convert/quantize, a one-shot generate
+/// playground, and LoRA fine-tune + fuse. Everything runs through `MLXService`;
+/// long operations are exclusive "jobs" whose terminal output renders inline in
+/// the section that started them.
+///
+/// WS-M0 layout: each section is its own Equatable child view taking narrow
+/// values/bindings, so a (batched) job-log append or probe change re-evaluates
+/// only the section it belongs to — not the whole six-section Form, which is
+/// what visibly froze the tab. The service rides along as a plain UNOBSERVED
+/// reference for actions; everything a section displays arrives as a value its
+/// `==` compares.
+struct MLXView: View {
+    @EnvironmentObject private var store: ConfigurationStore
+    /// The ONE app-wide MLX engine (owns the server child, jobs, and the log tail).
+    /// Deliberately not a `@StateObject`: a recreated tab view must observe the same
+    /// instance, not spawn a second service that lost the running server.
+    @ObservedObject private var service = MLXService.shared
+
+    /// Cross-section state: the Models section's "Try" seeds the Playground model.
+    @State private var playModel = ""
+    @State private var playModelSeeded = false
+    /// Cross-section state: rows request deletion; the dialog presents Form-wide.
+    @State private var deleteCandidate: MLXCachedModel?
+
+    var body: some View {
+        Form {
+            MLXEnvironmentSection(
+                service: service,
+                envState: service.envState,
+                mlxDir: service.mlxDir,
+                jobRunning: service.activeJob != nil,
+                pane: service.jobPaneState(for: [.installEnvironment]))
+            MLXServerSection(
+                service: service,
+                store: store,
+                managed: service.managesServer,
+                config: $service.serverConfig,
+                serverState: service.serverState,
+                probeStatus: service.probeStatus,
+                serverWarning: service.serverWarning,
+                launchedConfig: service.launchedServerConfig,
+                autostart: service.autostartEnabled,
+                envReady: service.envState.isReady,
+                cachedModels: service.cachedModels,
+                logWindow: service.serverLogWindow,
+                logPath: service.serverLogPath)
+            MLXModelsSection(
+                service: service,
+                cachedModels: service.cachedModels,
+                searchResults: service.searchResults,
+                isSearching: service.isSearching,
+                modelsError: service.modelsError,
+                cacheDir: service.cacheDir,
+                jobRunning: service.activeJob != nil,
+                pane: service.jobPaneState(for: [.download]),
+                playModel: $playModel,
+                deleteCandidate: $deleteCandidate)
+            MLXConvertSection(
+                service: service,
+                envReady: service.envState.isReady,
+                jobRunning: service.activeJob != nil,
+                pane: service.jobPaneState(for: [.convert]))
+            MLXPlaygroundSection(
+                service: service,
+                envReady: service.envState.isReady,
+                jobRunning: service.activeJob != nil,
+                serverModel: service.serverConfig.model,
+                pane: service.jobPaneState(for: [.generate]),
+                playModel: $playModel,
+                playModelValue: playModel)
+            MLXFineTuneSection(
+                service: service,
+                envReady: service.envState.isReady,
+                jobRunning: service.activeJob != nil,
+                fineTunePane: service.jobPaneState(for: [.finetune]),
+                fusePane: service.jobPaneState(for: [.fuse]))
+        }
+        .formStyle(.grouped)
+        .frame(maxWidth: 1100, alignment: .leading)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+        .task {
+            if !playModelSeeded {
+                playModelSeeded = true
+                playModel = service.serverConfig.model
+            }
+            service.refreshCachedModels()
+            await service.refreshEnvironment()
+        }
+        .confirmationDialog(
+            "Delete model?", isPresented: deleteConfirmationShown, presenting: deleteCandidate
+        ) { model in
+            Button("Move \(model.repoID) to the Trash", role: .destructive) {
+                service.deleteCachedModel(model)
+            }
+        } message: { model in
+            Text(
+                "Frees \(model.sizeBytes.formatted(.byteCount(style: .file))) from the Hugging Face cache. The folder is moved to the Trash when possible (deleted permanently if the Trash is unavailable, e.g. on some external volumes)."
+            )
+        }
+    }
+
+    private var deleteConfirmationShown: Binding<Bool> {
+        Binding(
+            get: { deleteCandidate != nil },
+            set: { if !$0 { deleteCandidate = nil } })
+    }
+}
+
+// MARK: - Environment
+
+private struct MLXEnvironmentSection: View, Equatable {
+    let service: MLXService
+    let envState: MLXService.EnvironmentState
+    let mlxDir: String
+    let jobRunning: Bool
+    let pane: MLXService.JobPaneState
+
+    nonisolated static func == (lhs: Self, rhs: Self) -> Bool {
+        lhs.envState == rhs.envState && lhs.jobRunning == rhs.jobRunning && lhs.pane == rhs.pane
+    }
+
+    var body: some View {
+        Section("MLX environment") {
+            HStack(spacing: 8) {
+                Circle().fill(envColor).frame(width: 8, height: 8)
+                Text(envText).font(.caption).foregroundStyle(.secondary)
+                Spacer()
+                Button("Check") { Task { await service.refreshEnvironment() } }
+                    .controlSize(.small)
+            }
+            Text(
+                "A private Python environment (uv preferred, python3 fallback) with the mlx-lm toolkit, installed under \(mlxDir). Everything in this tab runs through it; your system Python is untouched."
+            )
+            .font(.caption).foregroundStyle(.secondary)
+            HStack {
+                Button(installButtonTitle) { service.installEnvironment() }
+                    .disabled(jobRunning || !installAvailable)
+                Spacer()
+                Button("Reveal in Finder") {
+                    NSWorkspace.shared.activateFileViewerSelecting(
+                        [URL(fileURLWithPath: mlxDir)])
+                }
+            }
+            MLXJobPane(service: service, state: pane)
+        }
+    }
+
+    private var installAvailable: Bool {
+        if case .unsupported = envState { return false }
+        return true
+    }
+
+    private var installButtonTitle: String {
+        switch envState {
+        case .ready: return "Update mlx-lm"
+        case .broken: return "Repair install"
+        default: return "Install mlx-lm"
+        }
+    }
+
+    private var envColor: Color {
+        switch envState {
+        case .ready: return .green
+        case .notInstalled: return .orange
+        case .broken, .unsupported: return .red
+        case .unknown: return .secondary
+        }
+    }
+
+    private var envText: String {
+        switch envState {
+        case .ready(let version): return "mlx-lm \(version) — ready"
+        case .notInstalled: return "Not installed yet"
+        case .broken(let why): return why
+        case .unsupported(let why): return why
+        case .unknown: return "Checking…"
+        }
+    }
+}
+
+// MARK: - Server
+
+private struct MLXServerSection: View, Equatable {
+    let service: MLXService
+    /// Observed (not just referenced): the OFF card binds its URL/model fields
+    /// straight to the store, so its edits must re-render this section. The store
+    /// only publishes on user edits — no periodic churn rides in through it.
+    @ObservedObject var store: ConfigurationStore
+    let managed: Bool
+    @Binding var config: MLXServerConfig
+    /// Value copy of `config` taken at construction (same parent-body read that
+    /// made the binding): a nonisolated `==` may not read a Binding, and the two
+    /// can't diverge — any config change republishes the service and rebuilds
+    /// this struct with a fresh copy.
+    let currentConfig: MLXServerConfig
+    let serverState: MLXService.ServerState
+    let probeStatus: LLMHealthChecker.HealthResult
+    let serverWarning: String?
+    let launchedConfig: MLXServerConfig?
+    let autostart: Bool
+    let envReady: Bool
+    let cachedModels: [MLXCachedModel]
+    let logWindow: [MLXLogRow]
+    let logPath: String
+
+    // Server "Advanced" numeric fields are optionals in the config; SwiftUI's
+    // numeric TextFields fight mid-typing round-trips, so these seed once (State
+    // initial values latch at first render) and write through on change.
+    @State private var advMaxTokens: String
+    @State private var advTemperature: String
+    @State private var advTopP: String
+
+    /// Confirmation caption captured at click time (so later config edits can't
+    /// make it claim something that wasn't written).
+    @State private var backendNote: String?
+
+    init(
+        service: MLXService, store: ConfigurationStore, managed: Bool,
+        config: Binding<MLXServerConfig>, serverState: MLXService.ServerState,
+        probeStatus: LLMHealthChecker.HealthResult, serverWarning: String?,
+        launchedConfig: MLXServerConfig?, autostart: Bool, envReady: Bool,
+        cachedModels: [MLXCachedModel], logWindow: [MLXLogRow], logPath: String
+    ) {
+        self.service = service
+        self.store = store
+        self.managed = managed
+        self._config = config
+        self.currentConfig = config.wrappedValue
+        self.serverState = serverState
+        self.probeStatus = probeStatus
+        self.serverWarning = serverWarning
+        self.launchedConfig = launchedConfig
+        self.autostart = autostart
+        self.envReady = envReady
+        self.cachedModels = cachedModels
+        self.logWindow = logWindow
+        self.logPath = logPath
+        _advMaxTokens = State(initialValue: config.wrappedValue.maxTokens.map(String.init) ?? "")
+        _advTemperature = State(
+            initialValue: config.wrappedValue.temperature.map(MLXCommand.formatNumber) ?? "")
+        _advTopP = State(initialValue: config.wrappedValue.topP.map(MLXCommand.formatNumber) ?? "")
+    }
+
+    nonisolated static func == (lhs: Self, rhs: Self) -> Bool {
+        lhs.managed == rhs.managed && lhs.currentConfig == rhs.currentConfig
+            && lhs.serverState == rhs.serverState && lhs.probeStatus == rhs.probeStatus
+            && lhs.serverWarning == rhs.serverWarning && lhs.launchedConfig == rhs.launchedConfig
+            && lhs.autostart == rhs.autostart && lhs.envReady == rhs.envReady
+            && lhs.cachedModels == rhs.cachedModels && lhs.logWindow == rhs.logWindow
+    }
+
+    var body: some View {
+        Section("Server (OpenAI-compatible, mlx_lm.server)") {
+            Toggle("Huginn manages the model server", isOn: managedBinding)
+            Text(
+                managed
+                    ? "On: Huginn runs mlx_lm.server as configured below and can point the whole Eldr stack at it."
+                    : "Off: the MLX server is stopped and its health checks and log tail idle. Eldr talks to the external server below instead — turning this back on restores the MLX config and rewires the backend to it."
+            )
+            .font(.caption).foregroundStyle(.secondary)
+
+            if managed {
+                managedContent
+            } else {
+                unmanagedCard
+            }
+        }
+    }
+
+    private var managedBinding: Binding<Bool> {
+        Binding(
+            get: { managed },
+            set: { on in Task { await service.setManagesServer(on, store: store) } })
+    }
+
+    // MARK: Managed (historical) contents
+
+    @ViewBuilder
+    private var managedContent: some View {
+        LabeledContent("Model") {
+            HStack(spacing: 6) {
+                TextField("mlx-community/… or /path/to/model", text: $config.model)
+                    .textFieldStyle(.roundedBorder)
+                if !cachedModels.isEmpty {
+                    Menu("Cached") {
+                        ForEach(cachedModels) { model in
+                            Button(model.repoID) { config.model = model.repoID }
+                        }
+                    }
+                    .fixedSize()
+                }
+                Button("Browse…") { pickFolder { config.model = $0 } }
+            }
+        }
+        LabeledContent("Host") {
+            TextField("127.0.0.1", text: $config.host)
+                .textFieldStyle(.roundedBorder).frame(maxWidth: 160)
+        }
+        LabeledContent("Port") {
+            TextField("8080", value: $config.port, format: .number.grouping(.never))
+                .textFieldStyle(.roundedBorder).frame(maxWidth: 90)
+        }
+
+        DisclosureGroup("Advanced") {
+            LabeledContent("Default max tokens") {
+                TextField("server default", text: $advMaxTokens)
+                    .textFieldStyle(.roundedBorder).frame(maxWidth: 120)
+                    .onChange(of: advMaxTokens) { _, new in
+                        config.maxTokens = Int(new.trimmingCharacters(in: .whitespaces))
+                    }
+            }
+            LabeledContent("Default temperature") {
+                TextField("unset", text: $advTemperature)
+                    .textFieldStyle(.roundedBorder).frame(maxWidth: 120)
+                    .onChange(of: advTemperature) { _, new in
+                        config.temperature = parseDouble(new)
+                    }
+            }
+            LabeledContent("Default top-p") {
+                TextField("unset", text: $advTopP)
+                    .textFieldStyle(.roundedBorder).frame(maxWidth: 120)
+                    .onChange(of: advTopP) { _, new in
+                        config.topP = parseDouble(new)
+                    }
+            }
+            Text(
+                "Sampling defaults need a recent mlx-lm. Leave blank to omit the flags — an older server rejects them with an argparse error (visible in the log)."
+            )
+            .font(.caption).foregroundStyle(.secondary)
+            Toggle("Trust remote code (--trust-remote-code)", isOn: $config.trustRemoteCode)
+            Toggle("Use the tokenizer's default chat template", isOn: $config.useDefaultChatTemplate)
+            VStack(alignment: .leading, spacing: 4) {
+                Text("Chat template override (Jinja, passed verbatim to --chat-template)")
+                    .font(.caption).foregroundStyle(.secondary)
+                TextEditor(text: $config.chatTemplate)
+                    .font(.system(.caption, design: .monospaced))
+                    .frame(minHeight: 40)
+                    .border(.quaternary)
+            }
+            LabeledContent("Adapter path") {
+                HStack {
+                    TextField("(none)", text: $config.adapterPath)
+                        .textFieldStyle(.roundedBorder)
+                    Button("Browse…") { pickFolder { config.adapterPath = $0 } }
+                }
+            }
+            LabeledContent("Extra arguments") {
+                TextField("--log-level DEBUG", text: $config.extraArguments)
+                    .textFieldStyle(.roundedBorder)
+            }
+            Text("Extra arguments are whitespace-split — no shell quoting.")
+                .font(.caption).foregroundStyle(.secondary)
+        }
+
+        HStack(spacing: 8) {
+            Circle().fill(serverColor).frame(width: 8, height: 8)
+            Text(serverText).font(.caption).foregroundStyle(.secondary)
+            Spacer()
+        }
+
+        if let warning = serverWarning {
+            Label(warning, systemImage: "exclamationmark.triangle.fill")
+                .font(.caption).foregroundStyle(.orange)
+        }
+
+        if restartHintVisible {
+            Label("Settings changed since launch — press \(startButtonTitle) to apply.",
+                systemImage: "arrow.triangle.2.circlepath")
+                .font(.caption).foregroundStyle(.orange)
+        }
+
+        HStack {
+            Button(startButtonTitle) { service.startServer() }
+                .disabled(!envReady || config.model.isEmpty)
+            Button("Stop") { service.stopServer() }
+                .disabled(!serverStoppable)
+            Spacer()
+            Button("Use as Eldr LLM backend") {
+                service.useAsEldrBackend(store: store)
+                backendNote =
+                    "Configuration ▸ Local LLM now points at \(config.baseURL) (\(config.model))."
+            }
+            .disabled(config.model.isEmpty)
+        }
+        if let backendNote {
+            Label(backendNote, systemImage: "checkmark.circle")
+                .font(.caption).foregroundStyle(.green)
+        }
+
+        Toggle("Start at login (launchd)", isOn: autostartBinding)
+        Text(
+            autostart
+                ? "launchd owns the server process: Start/Restart rewrites the LaunchAgent and relaunches it; Stop sends SIGTERM through launchctl."
+                : "Off: the server runs as a child of this app and stops when Huginn quits."
+        )
+        .font(.caption).foregroundStyle(.secondary)
+
+        VStack(alignment: .leading, spacing: 4) {
+            Text("Server log (\(logPath))")
+                .font(.caption).foregroundStyle(.secondary)
+            MLXLogPane(rows: logWindow)
+        }
+    }
+
+    // MARK: Unmanaged (kill-switch OFF) card
+
+    @ViewBuilder
+    private var unmanagedCard: some View {
+        Label(
+            "MLX is off — Eldr uses \(store.llmURL.isEmpty ? "no backend yet" : store.llmURL)",
+            systemImage: "moon.zzz.fill"
+        )
+        .font(.callout)
+        LabeledContent("Backend URL") {
+            TextField("http://127.0.0.1:1234/v1", text: $store.llmURL)
+                .textFieldStyle(.roundedBorder)
+        }
+        LabeledContent("Model") {
+            TextField("model id, as that server reports it", text: $store.llmModel)
+                .textFieldStyle(.roundedBorder)
+        }
+        Text(
+            "Written straight to Configuration ▸ Local LLM — the same seam \u{201C}Use as Eldr LLM backend\u{201D} writes. LM Studio's own server default is http://127.0.0.1:1234/v1; or run its server on port \(String(config.port)) and nothing else needs to change. The model library and downloads below stay usable — they don't need the server."
+        )
+        .font(.caption).foregroundStyle(.secondary)
+    }
+
+    // MARK: Derived display state
+
+    private var autostartBinding: Binding<Bool> {
+        Binding(
+            get: { autostart },
+            set: { on in Task { await service.setAutostart(on) } })
+    }
+
+    private var startButtonTitle: String {
+        if autostart { return "Start / Restart (launchd)" }
+        if case .stopped = serverState { return "Start" }
+        if case .failed = serverState { return "Start" }
+        return "Restart"
+    }
+
+    private var serverStoppable: Bool {
+        if autostart { return true }
+        switch serverState {
+        case .starting, .running: return true
+        default: return false
+        }
+    }
+
+    private var restartHintVisible: Bool {
+        guard let launched = launchedConfig else { return false }
+        guard launched != config else { return false }
+        if autostart { return true }
+        switch serverState {
+        case .starting, .running: return true
+        default: return false
+        }
+    }
+
+    private var serverColor: Color {
+        if autostart {
+            return probeStatus.isReachable ? .green : .orange
+        }
+        switch serverState {
+        case .running(let healthy): return healthy ? .green : .orange
+        case .starting: return .yellow
+        case .failed: return .red
+        case .stopped: return .secondary
+        }
+    }
+
+    private var serverText: String {
+        if autostart {
+            return probeStatus.isReachable
+                ? "Running (launchd) — answering on \(config.baseURL)"
+                : "launchd-managed — not answering on \(config.baseURL) yet"
+        }
+        switch serverState {
+        case .stopped: return "Stopped"
+        case .starting: return "Starting — waiting for \(config.baseURL)/models…"
+        case .running(true): return "Running — answering on \(config.baseURL)"
+        case .running(false): return "Process alive but not answering — see the log"
+        case .failed(let why): return why
+        }
+    }
+}
+
+// MARK: - Models
+
+private struct MLXModelsSection: View, Equatable {
+    let service: MLXService
+    let cachedModels: [MLXCachedModel]
+    let searchResults: [MLXHubModel]
+    let isSearching: Bool
+    let modelsError: String?
+    let cacheDir: String
+    let jobRunning: Bool
+    let pane: MLXService.JobPaneState
+    @Binding var playModel: String
+    @Binding var deleteCandidate: MLXCachedModel?
+
+    @State private var searchQuery = ""
+    @State private var searchPublisher = "mlx-community"
+    @State private var searchMLXOnly = true
+    @State private var searchSort = "downloads"
+
+    nonisolated static func == (lhs: Self, rhs: Self) -> Bool {
+        lhs.cachedModels == rhs.cachedModels && lhs.searchResults == rhs.searchResults
+            && lhs.isSearching == rhs.isSearching && lhs.modelsError == rhs.modelsError
+            && lhs.jobRunning == rhs.jobRunning && lhs.pane == rhs.pane
+    }
+
+    var body: some View {
+        Section("Models — Hugging Face cache") {
+            HStack {
+                Text("\(cachedModels.count) cached — \(totalCacheLabel)")
+                    .font(.caption).foregroundStyle(.secondary)
+                Spacer()
+                Button("Refresh") { service.refreshCachedModels() }.controlSize(.small)
+                Button("Reveal") {
+                    NSWorkspace.shared.activateFileViewerSelecting(
+                        [URL(fileURLWithPath: cacheDir)])
+                }
+                .controlSize(.small)
+            }
+            Text(cacheDir)
+                .font(.system(.caption2, design: .monospaced)).foregroundStyle(.secondary)
+                .lineLimit(1).truncationMode(.middle)
+
+            ForEach(cachedModels) { model in
+                HStack {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(model.repoID).font(.callout)
+                        Text(model.sizeBytes.formatted(.byteCount(style: .file)))
+                            .font(.caption).foregroundStyle(.secondary)
+                    }
+                    Spacer()
+                    Button("Serve") { service.serverConfig.model = model.repoID }
+                        .controlSize(.small)
+                    Button("Try") { playModel = model.repoID }
+                        .controlSize(.small)
+                    Button(role: .destructive) {
+                        deleteCandidate = model
+                    } label: {
+                        Image(systemName: "trash")
+                    }
+                    .controlSize(.small)
+                    .accessibilityLabel("Delete \(model.repoID)")
+                }
+            }
+            if cachedModels.isEmpty {
+                Text("No models cached yet — search below and download one (small 4-bit instruct models from mlx-community are a good start).")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+
+            Divider()
+
+            HStack {
+                TextField("Search Hugging Face models…", text: $searchQuery)
+                    .textFieldStyle(.roundedBorder)
+                    .onSubmit { runSearch() }
+                Button("Search") { runSearch() }.disabled(isSearching)
+            }
+            HStack(spacing: 12) {
+                Picker("Source", selection: $searchPublisher) {
+                    Text("Any publisher").tag("")
+                    ForEach(MLXCommand.searchPublishers.filter { !$0.isEmpty }, id: \.self) {
+                        Text($0).tag($0)
+                    }
+                }
+                .fixedSize()
+                Picker("Sort", selection: $searchSort) {
+                    ForEach(MLXCommand.searchSorts, id: \.value) { sort in
+                        Text(sort.label).tag(sort.value)
+                    }
+                }
+                .fixedSize()
+                Toggle("MLX format only", isOn: $searchMLXOnly)
+                Spacer()
+            }
+            .onChange(of: searchPublisher) { _, _ in refreshSearchIfActive() }
+            .onChange(of: searchSort) { _, _ in refreshSearchIfActive() }
+            .onChange(of: searchMLXOnly) { _, _ in refreshSearchIfActive() }
+            Text(
+                "Only MLX-format builds run on mlx_lm — keep the filter on unless you plan to Convert. mlx-community, lmstudio-community, and unsloth publish ready-quantized MLX models."
+            )
+            .font(.caption).foregroundStyle(.secondary)
+            if isSearching {
+                HStack { ProgressView().controlSize(.small); Text("Searching…").font(.caption) }
+            }
+            if let error = modelsError {
+                Label(error, systemImage: "exclamationmark.triangle.fill")
+                    .font(.caption).foregroundStyle(.orange)
+            }
+            ForEach(searchResults) { result in
+                HStack {
+                    VStack(alignment: .leading, spacing: 2) {
+                        HStack(spacing: 6) {
+                            Text(result.id).font(.callout)
+                            if let quant = result.quantLabel {
+                                Text(quant)
+                                    .font(.caption2).padding(.horizontal, 4).padding(.vertical, 1)
+                                    .background(.quaternary, in: Capsule())
+                            }
+                            if !result.isMLX && searchMLXOnly == false {
+                                Text("not MLX")
+                                    .font(.caption2).padding(.horizontal, 4).padding(.vertical, 1)
+                                    .background(.orange.opacity(0.2), in: Capsule())
+                            }
+                        }
+                        Text(searchResultCaption(result)).font(.caption).foregroundStyle(.secondary)
+                    }
+                    Spacer()
+                    if let page = URL(string: "https://huggingface.co/\(result.id)") {
+                        Link(destination: page) { Image(systemName: "safari") }
+                            .controlSize(.small)
+                            .accessibilityLabel("Open \(result.id) on Hugging Face")
+                    }
+                    Button("Download") { service.downloadModel(result.id) }
+                        .controlSize(.small)
+                        .disabled(jobRunning)
+                }
+            }
+            MLXJobPane(service: service, state: pane)
+        }
+    }
+
+    /// Re-run the current search when a filter changes and results are showing (the
+    /// LM Studio behavior — filters act on the live list, not just the next search).
+    private func refreshSearchIfActive() {
+        if !searchResults.isEmpty || !searchQuery.isEmpty { runSearch() }
+    }
+
+    private var totalCacheLabel: String {
+        cachedModels.map(\.sizeBytes).reduce(0, +)
+            .formatted(.byteCount(style: .file))
+    }
+
+    private func searchResultCaption(_ result: MLXHubModel) -> String {
+        var parts: [String] = []
+        if let downloads = result.downloads { parts.append("\(downloads.formatted()) downloads") }
+        if let likes = result.likes { parts.append("\(likes.formatted()) likes") }
+        if let updated = result.lastModified?.prefix(10) { parts.append("updated \(updated)") }
+        return parts.isEmpty ? "—" : parts.joined(separator: " · ")
+    }
+
+    private func runSearch() {
+        Task {
+            await service.searchHub(
+                query: searchQuery, author: searchPublisher.isEmpty ? nil : searchPublisher,
+                mlxOnly: searchMLXOnly, sort: searchSort)
+        }
+    }
+}
+
+// MARK: - Convert
+
+private struct MLXConvertSection: View, Equatable {
+    let service: MLXService
+    let envReady: Bool
+    let jobRunning: Bool
+    let pane: MLXService.JobPaneState
+
+    @State private var convertConfig = MLXConvertConfig()
+
+    nonisolated static func == (lhs: Self, rhs: Self) -> Bool {
+        lhs.envReady == rhs.envReady && lhs.jobRunning == rhs.jobRunning && lhs.pane == rhs.pane
+    }
+
+    var body: some View {
+        Section("Convert / quantize (mlx_lm.convert)") {
+            LabeledContent("Source model") {
+                HStack {
+                    TextField("HF repo id or local folder", text: $convertConfig.hfPath)
+                        .textFieldStyle(.roundedBorder)
+                    Button("Browse…") { pickFolder { convertConfig.hfPath = $0 } }
+                }
+            }
+            LabeledContent("Output folder") {
+                HStack {
+                    TextField("new folder for the MLX model", text: $convertConfig.mlxPath)
+                        .textFieldStyle(.roundedBorder)
+                    Button("Choose…") {
+                        pickSaveLocation(defaultName: suggestedConvertFolderName) {
+                            convertConfig.mlxPath = $0
+                        }
+                    }
+                }
+            }
+            Toggle("Quantize", isOn: $convertConfig.quantize)
+            if convertConfig.quantize {
+                Picker("Bits", selection: $convertConfig.qBits) {
+                    Text("4-bit").tag(4)
+                    Text("8-bit").tag(8)
+                }
+                .pickerStyle(.segmented).frame(maxWidth: 240)
+                Picker("Group size", selection: $convertConfig.qGroupSize) {
+                    Text("32").tag(32)
+                    Text("64").tag(64)
+                    Text("128").tag(128)
+                }
+                .pickerStyle(.segmented).frame(maxWidth: 240)
+            }
+            Picker("dtype", selection: $convertConfig.dtype) {
+                Text("default").tag("")
+                Text("float16").tag("float16")
+                Text("bfloat16").tag("bfloat16")
+                Text("float32").tag("float32")
+            }
+            .frame(maxWidth: 240)
+            LabeledContent("Upload to HF (optional)") {
+                TextField("your-org/your-model", text: $convertConfig.uploadRepo)
+                    .textFieldStyle(.roundedBorder)
+            }
+            HStack {
+                Button("Convert") { service.startConvert(convertConfig) }
+                    .disabled(jobRunning || !envReady)
+                Spacer()
+            }
+            MLXJobPane(service: service, state: pane)
+        }
+    }
+
+    private var suggestedConvertFolderName: String {
+        let base = (convertConfig.hfPath as NSString).lastPathComponent
+        let name = base.isEmpty ? "model" : base
+        return convertConfig.quantize ? "\(name)-\(convertConfig.qBits)bit-mlx" : "\(name)-mlx"
+    }
+}
+
+// MARK: - Playground
+
+private struct MLXPlaygroundSection: View, Equatable {
+    let service: MLXService
+    let envReady: Bool
+    let jobRunning: Bool
+    let serverModel: String
+    let pane: MLXService.JobPaneState
+    @Binding var playModel: String
+    /// Value copy of `playModel` for the nonisolated `==` (same rationale as
+    /// MLXServerSection.currentConfig) — the field must re-render when the Models
+    /// section's "Try" writes the shared state.
+    let playModelValue: String
+
+    @State private var playPrompt = ""
+    @State private var playMaxTokens = 512
+    @State private var playTemperature = ""
+    @State private var playTopP = ""
+    @State private var playAdapter = ""
+
+    nonisolated static func == (lhs: Self, rhs: Self) -> Bool {
+        lhs.envReady == rhs.envReady && lhs.jobRunning == rhs.jobRunning
+            && lhs.serverModel == rhs.serverModel && lhs.pane == rhs.pane
+            && lhs.playModelValue == rhs.playModelValue
+    }
+
+    var body: some View {
+        Section("Playground (one-shot mlx_lm.generate)") {
+            LabeledContent("Model") {
+                HStack {
+                    TextField("mlx-community/… or /path/to/model", text: $playModel)
+                        .textFieldStyle(.roundedBorder)
+                    Button("Use server model") { playModel = serverModel }
+                        .disabled(serverModel.isEmpty)
+                }
+            }
+            VStack(alignment: .leading, spacing: 4) {
+                Text("Prompt").font(.caption).foregroundStyle(.secondary)
+                TextEditor(text: $playPrompt)
+                    .font(.system(.body, design: .monospaced))
+                    .frame(minHeight: 70)
+                    .border(.quaternary)
+            }
+            HStack(spacing: 16) {
+                LabeledContent("Max tokens") {
+                    TextField("512", value: $playMaxTokens, format: .number.grouping(.never))
+                        .textFieldStyle(.roundedBorder).frame(width: 80)
+                }
+                LabeledContent("Temp") {
+                    TextField("default", text: $playTemperature)
+                        .textFieldStyle(.roundedBorder).frame(width: 70)
+                }
+                LabeledContent("Top-p") {
+                    TextField("default", text: $playTopP)
+                        .textFieldStyle(.roundedBorder).frame(width: 70)
+                }
+            }
+            LabeledContent("Adapter (optional)") {
+                HStack {
+                    TextField("LoRA adapter folder", text: $playAdapter)
+                        .textFieldStyle(.roundedBorder)
+                    Button("Browse…") { pickFolder { playAdapter = $0 } }
+                }
+            }
+            HStack {
+                Button("Generate") {
+                    service.runGenerate(
+                        MLXGenerateConfig(
+                            model: playModel.trimmingCharacters(in: .whitespacesAndNewlines),
+                            prompt: playPrompt,
+                            maxTokens: max(1, playMaxTokens),
+                            temperature: parseDouble(playTemperature),
+                            topP: parseDouble(playTopP),
+                            adapterPath: playAdapter.trimmingCharacters(in: .whitespacesAndNewlines)))
+                }
+                .disabled(jobRunning || !envReady)
+                Spacer()
+                Text("Exercises a model directly — no server, no agent.")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+            MLXJobPane(service: service, state: pane)
+        }
+    }
+}
+
+// MARK: - Fine-tune / fuse
+
+private struct MLXFineTuneSection: View, Equatable {
+    let service: MLXService
+    let envReady: Bool
+    let jobRunning: Bool
+    let fineTunePane: MLXService.JobPaneState
+    let fusePane: MLXService.JobPaneState
+
+    @State private var fineTuneConfig = MLXFineTuneConfig()
+    @State private var fuseModel = ""
+    @State private var fuseAdapters = ""
+    @State private var fuseSavePath = ""
+
+    nonisolated static func == (lhs: Self, rhs: Self) -> Bool {
+        lhs.envReady == rhs.envReady && lhs.jobRunning == rhs.jobRunning
+            && lhs.fineTunePane == rhs.fineTunePane && lhs.fusePane == rhs.fusePane
+    }
+
+    var body: some View {
+        Section("Fine-tune (mlx_lm.lora) + fuse") {
+            LabeledContent("Base model") {
+                HStack {
+                    TextField("mlx-community/… or /path/to/model", text: $fineTuneConfig.model)
+                        .textFieldStyle(.roundedBorder)
+                    Button("Browse…") { pickFolder { fineTuneConfig.model = $0 } }
+                }
+            }
+            LabeledContent("Data folder") {
+                HStack {
+                    TextField("folder with train.jsonl + valid.jsonl", text: $fineTuneConfig.dataDir)
+                        .textFieldStyle(.roundedBorder)
+                    Button("Browse…") { pickFolder { fineTuneConfig.dataDir = $0 } }
+                }
+            }
+            if let status = dataDirStatus {
+                Label(status.text, systemImage: status.ok ? "checkmark.circle" : "exclamationmark.triangle")
+                    .font(.caption)
+                    .foregroundStyle(status.ok ? Color.green : Color.orange)
+            }
+            LabeledContent("Adapter output") {
+                HStack {
+                    TextField("(auto — under the MLX folder)", text: $fineTuneConfig.adapterPath)
+                        .textFieldStyle(.roundedBorder)
+                    Button("Choose…") {
+                        pickSaveLocation(defaultName: "adapters") { fineTuneConfig.adapterPath = $0 }
+                    }
+                }
+            }
+            Picker("Type", selection: $fineTuneConfig.fineTuneType) {
+                Text("LoRA").tag("lora")
+                Text("DoRA").tag("dora")
+                Text("Full").tag("full")
+            }
+            .pickerStyle(.segmented).frame(maxWidth: 240)
+            HStack(spacing: 16) {
+                Stepper("Layers: \(fineTuneConfig.numLayers)", value: $fineTuneConfig.numLayers, in: 1...128)
+                Stepper("Batch: \(fineTuneConfig.batchSize)", value: $fineTuneConfig.batchSize, in: 1...32)
+            }
+            HStack(spacing: 16) {
+                LabeledContent("Iterations") {
+                    TextField("600", value: $fineTuneConfig.iters, format: .number.grouping(.never))
+                        .textFieldStyle(.roundedBorder).frame(width: 80)
+                }
+                LabeledContent("Learning rate") {
+                    TextField("1e-5", value: $fineTuneConfig.learningRate, format: .number)
+                        .textFieldStyle(.roundedBorder).frame(width: 100)
+                }
+            }
+            if fineTuneConfig.fineTuneType != "full" {
+                HStack(spacing: 16) {
+                    LabeledContent("Rank") {
+                        TextField("8", value: $fineTuneConfig.loraRank, format: .number.grouping(.never))
+                            .textFieldStyle(.roundedBorder).frame(width: 60)
+                    }
+                    LabeledContent("Scale") {
+                        TextField("20", value: $fineTuneConfig.loraScale, format: .number)
+                            .textFieldStyle(.roundedBorder).frame(width: 60)
+                    }
+                    LabeledContent("Dropout") {
+                        TextField("0", value: $fineTuneConfig.loraDropout, format: .number)
+                            .textFieldStyle(.roundedBorder).frame(width: 60)
+                    }
+                }
+            }
+            HStack {
+                Button("Start fine-tune") { service.startFineTune(fineTuneConfig) }
+                    .disabled(jobRunning || !envReady)
+                Spacer()
+                Text("Live train/val loss streams below; Cancel stops the run (adapters checkpoint as they go).")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+            MLXJobPane(service: service, state: fineTunePane)
+
+            Divider()
+
+            Text("Fuse — bake trained adapters into a standalone model (usable in the sections above).")
+                .font(.caption).foregroundStyle(.secondary)
+            LabeledContent("Model") {
+                HStack {
+                    TextField("base model", text: $fuseModel).textFieldStyle(.roundedBorder)
+                    Button("From fine-tune") {
+                        fuseModel = fineTuneConfig.model
+                        fuseAdapters = fineTuneConfig.adapterPath
+                    }
+                    .disabled(fineTuneConfig.model.isEmpty)
+                }
+            }
+            LabeledContent("Adapters") {
+                HStack {
+                    TextField("adapter folder", text: $fuseAdapters).textFieldStyle(.roundedBorder)
+                    Button("Browse…") { pickFolder { fuseAdapters = $0 } }
+                }
+            }
+            LabeledContent("Save to") {
+                HStack {
+                    TextField("new folder for the fused model", text: $fuseSavePath)
+                        .textFieldStyle(.roundedBorder)
+                    Button("Choose…") {
+                        pickSaveLocation(defaultName: "fused-model") { fuseSavePath = $0 }
+                    }
+                }
+            }
+            HStack {
+                Button("Fuse") {
+                    service.startFuse(model: fuseModel, adapterPath: fuseAdapters, savePath: fuseSavePath)
+                }
+                .disabled(jobRunning || !envReady)
+                Spacer()
+            }
+            MLXJobPane(service: service, state: fusePane)
+        }
+    }
+
+    private var dataDirStatus: (ok: Bool, text: String)? {
+        let dir = fineTuneConfig.dataDir.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !dir.isEmpty else { return nil }
+        let fm = FileManager.default
+        let train = fm.fileExists(atPath: (dir as NSString).appendingPathComponent("train.jsonl"))
+        let valid = fm.fileExists(atPath: (dir as NSString).appendingPathComponent("valid.jsonl"))
+        if train && valid { return (true, "train.jsonl and valid.jsonl found") }
+        var missing: [String] = []
+        if !train { missing.append("train.jsonl") }
+        if !valid { missing.append("valid.jsonl") }
+        return (false, "Missing \(missing.joined(separator: " and ")) in that folder")
+    }
+}
+
+// MARK: - Shared pieces
+
+/// The inline job card: progress + cancel while a matching job runs, its result
+/// label afterwards, and the terminal output whenever the (already
+/// section-filtered) window is non-empty. Equatable on the pane state alone so a
+/// job streaming in one section never re-lays-out the others.
+private struct MLXJobPane: View, Equatable {
+    let service: MLXService
+    let state: MLXService.JobPaneState
+
+    nonisolated static func == (lhs: Self, rhs: Self) -> Bool { lhs.state == rhs.state }
+
+    var body: some View {
+        if let job = state.activeJob {
+            HStack(spacing: 8) {
+                ProgressView().controlSize(.small)
+                Text(job.title).font(.caption)
+                Text(job.startedAt, style: .timer)
+                    .font(.caption).monospacedDigit().foregroundStyle(.secondary)
+                Spacer()
+                Button("Cancel") { service.cancelActiveJob() }.controlSize(.small)
+            }
+        } else if let result = state.lastResult {
+            Label(
+                result.message,
+                systemImage: result.success ? "checkmark.circle.fill" : "exclamationmark.triangle.fill"
+            )
+            .font(.caption)
+            .foregroundStyle(result.success ? Color.green : Color.orange)
+        }
+        if !state.logWindow.isEmpty {
+            MLXLogPane(rows: state.logWindow)
+        }
+    }
+}
+
+/// Terminal-style pane: one `Text` PER LINE in a `LazyVStack`, ids stable across
+/// appends so unchanged rows aren't re-laid-out. Rows arrive precomputed
+/// (MLXService's bounded 300-line windows) — no per-body suffix/map here.
+private struct MLXLogPane: View, Equatable {
+    let rows: [MLXLogRow]
+
+    var body: some View {
+        ScrollView {
+            LazyVStack(alignment: .leading, spacing: 0) {
+                if rows.isEmpty {
+                    Text("(no output yet)")
+                        .font(.system(.caption2, design: .monospaced))
+                        .foregroundStyle(.secondary)
+                } else {
+                    ForEach(rows) { line in
+                        Text(line.text.isEmpty ? " " : line.text)
+                            .font(.system(.caption2, design: .monospaced))
+                            .textSelection(.enabled)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                    }
+                }
+            }
+            .padding(2)
+        }
+        .defaultScrollAnchor(.bottom)
+        .frame(height: 150)
+        .border(.quaternary)
+    }
+}
+
+private func parseDouble(_ raw: String) -> Double? {
+    Double(raw.replacingOccurrences(of: ",", with: ".").trimmingCharacters(in: .whitespaces))
+}
+
+@MainActor
+private func pickFolder(_ assign: @escaping (String) -> Void) {
+    let panel = NSOpenPanel()
+    panel.canChooseDirectories = true
+    panel.canChooseFiles = false
+    panel.allowsMultipleSelection = false
+    // Models overwhelmingly live under DOT-directories (~/.cache/huggingface/hub,
+    // ~/.lmstudio, our own ~/.config/eldr-acp/mlx) — an open panel that hides them
+    // makes every model folder unreachable without knowing ⌘⇧. .
+    panel.showsHiddenFiles = true
+    panel.treatsFilePackagesAsDirectories = true
+    panel.prompt = "Select"
+    if panel.runModal() == .OK, let url = panel.url { assign(url.path) }
+}
+
+/// Pick a NEW folder location (the mlx tools create it; convert refuses an
+/// existing one).
+@MainActor
+private func pickSaveLocation(defaultName: String, _ assign: @escaping (String) -> Void) {
+    let panel = NSSavePanel()
+    panel.canCreateDirectories = true
+    panel.showsHiddenFiles = true
+    panel.treatsFilePackagesAsDirectories = true
+    panel.nameFieldStringValue = defaultName
+    panel.prompt = "Choose"
+    if panel.runModal() == .OK, let url = panel.url { assign(url.path) }
+}

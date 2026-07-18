@@ -59,6 +59,19 @@ struct KeychainBox: Sendable {
         guard status == errSecSuccess else { throw KeychainBoxError.status(status) }
     }
 
+    /// Attribute-only existence probe — never touches the secret data, so it cannot
+    /// trigger a keychain ACL prompt (data reads of another creator's item can).
+    func hasItem(account: String) -> Bool {
+        var query: [String: Any] = keychainSelector
+        query[kSecClass as String] = kSecClassGenericPassword
+        query[kSecAttrService as String] = service
+        query[kSecAttrAccount as String] = account
+        query[kSecReturnAttributes as String] = true
+        query[kSecMatchLimit as String] = kSecMatchLimitOne
+        var result: CFTypeRef?
+        return SecItemCopyMatching(query as CFDictionary, &result) == errSecSuccess
+    }
+
     func load(account: String) -> Data? {
         var query: [String: Any] = keychainSelector
         query[kSecClass as String] = kSecClassGenericPassword
