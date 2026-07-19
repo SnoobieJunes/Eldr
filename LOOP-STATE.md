@@ -1,5 +1,83 @@
 # LOOP-STATE — end-to-end configuration bring-up
 
+## 2026-07-18 (MLX overhaul): WS-M3 model library polish — DONE (AC118)
+
+Suite 197/197, green on TWO consecutive full runs (21 new tests). Shipped in the
+Models library: a determinate download `ProgressView` driven by a tqdm parser + a
+free-disk guard before the job starts (AC103f); format-honesty warnings on non-MLX
+search results when the filter is off (the NVFP4 lesson); a per-model detail
+popover (size / last used / quant / path + Reveal / Serve / Try); and a
+cache-hygiene sort (Largest / Recently used / Name, Largest = the "free up space"
+default).
+
+PREMISES VERIFIED against the live venv (mlx-lm 0.31.3, hf_hub 1.24.0) — one was
+FALSE, per the AC116 lesson:
+
+- **Download output reality:** the plan's "percent/rate parsed from the tqdm
+  line" implied a byte bar. Captured by running the app's EXACT `snapshot_download`
+  command through a non-TTY pipe: hf_hub 1.24.0 emits a **file-count** bar
+  (`Fetching N files: P%|…| x/N [el<rem, rate]`); per-file byte bars are suppressed
+  off a TTY. So progress is files-based and the rate is files/s — the ProgressView
+  is captioned in tqdm's own wording, NOT a fake MB%/MB-rate. 4 real frames + the
+  0%+unauth-Warning concatenation frozen as fixtures.
+- The plan's example id `mlx-community/SmolLM2-135M-Instruct-4bit` DOESN'T EXIST
+  (401). Used `mlx-community/SmolLM2-135M-Instruct` — downloaded (273.9 MB), loads
+  (0.318 GB peak). That is the 2nd loadable MLX model WS-M1's NEEDS-OWNER wanted on
+  this Mac. Also captured a real `RepositoryNotFoundError` (401) failure frame.
+- **Format truth** (read the 0.31.3 loader): `load_model` requires
+  `model*.safetensors` and there is NO GGUF path in generate/server/utils → GGUF
+  cannot load; `compressed-tensors` is force-mapped to affine 4-bit, which can't
+  unpack NVFP4 (`unsloth/…-NVFP4`: has safetensors, arch `qwen3_5` = SAME as the
+  working model, no `mlx` tag). Classifier keys off tag+id: mlx → loads; gguf →
+  cannot; nvfp4 → cannot; else → "not an MLX build". NVFP4-cannot-load is taken
+  from the plan + code inspection, **NOT re-verified by a live load** (27B + the
+  resident 15 GB :1337 server = OOM risk).
+- **Last used:** atime IS live on this APFS volume (probe: +1 s on read; the
+  working model's blob atime 02:21 > mtime 02:02 from the server's load).
+  `scanModels` now captures max atime in the SAME walk that sums size; nil → "—".
+- **Disk guard:** `volumeAvailableCapacityForImportantUsage` (112 GiB free now) +
+  true size from the HF tree API (sum of file sizes = 273.9 MB, verified;
+  `usedStorage` over-counts — 75 GB vs ~23 GB actual — rejected). The guard is a
+  pure fn: block only when free < size+margin; unknown size → warn-if-low, never
+  block; nil free → never block. The live BLOCK path is NOT triggerable at 112 GiB
+  free — pure-tested only.
+
+LOOP 2 (adversarial) + the full-suite self-check CAUGHT a REAL regression + bugs:
+
+- **Keychain interaction (the big one):** the first full run failed 6 keychain/
+  token tests. Proven via git-stash it was MINE, not environmental — clean HEAD
+  full = green (those 6 pass), my tree = red, the 6 also pass in isolation on HEAD.
+  The Huginn keychain tests carry a PRE-EXISTING parallelism sensitivity
+  (concurrent securityd/SecItem under Swift-Testing parallelism → `load == nil`
+  after save); a WS-M3 test that spawned a subprocess tipped it. A first patch
+  (empty `cacheDir` + echo-exit wiring test) passed ONCE (196) then FAILED AGAIN
+  the next run — proving the subprocess itself was the trigger, not the cache scan.
+  FINAL fix: WS-M3 tests now spawn ZERO subprocesses — the download-wiring test was
+  replaced by a pure `latestProgress` unit test (frame-picking covered without a
+  child process). Green twice after (197 ×2). The pre-existing keychain flake is
+  flagged for a future test-infra cleanup (serialize the keychain suites) — out of
+  WS-M3 scope.
+- quant "full precision" over-claim → "—" (nil quant also covers an unreadable
+  config, so asserting full-precision would sometimes be false).
+- integer-overflow traps in `downloadDiskGuard`'s margin add + `sumTreeDownloadBytes`'s
+  running sum on hostile/absurd network sizes → `addingReportingOverflow`,
+  clamp-and-block (matching the AC116 trap discipline).
+- a force-unwrap in the atime walk → `.map`.
+
+Publish hygiene held: `downloadProgress` dedupe-guarded, set only on a real change
+in `flushJobLog` (`.download` only), reset in `startJob`, cleared in `finishJob`;
+`MLXModelsSection ==` gains `downloadProgress` so only that section re-renders on a
+tick. Library stays usable with `mlx.managed` OFF (only Serve is gated). No new
+payload log sinks (inv. 12). `cacheDir` made an injectable init param (no test
+scans the real cache).
+
+NEEDS OWNER: (1) on-device feel of the ProgressView / detail popover / sort at
+desk. (2) the free-disk BLOCK path can't be exercised here (112 GiB free) —
+pure-tested only. (3) NVFP4-cannot-load is code+plan-inferred, not live-loaded
+(OOM risk). (4) the pre-existing keychain-parallelism flake — WS-M3 no longer
+triggers it; serialize the keychain suites in a future cleanup. Next: WS-M4 (owner
+sends it — context kept, NOT started).
+
 ## 2026-07-18 (MLX overhaul): WS-M1 serve surface — DONE (AC116)
 
 Suite 138/138 (21 new tests). Shipped: `MLXBrainCard` (model/state/uptime/RSS/

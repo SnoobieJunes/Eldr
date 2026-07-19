@@ -97,6 +97,93 @@ struct MLXFineTuneConfig: Equatable, Sendable {
     var loraDropout: Double = 0.0
 }
 
+// MARK: - Model-library value types (WS-M3)
+
+/// A parsed download-progress frame, as it appears in the job log. Through the
+/// app's non-TTY pipe, `huggingface_hub` 1.24.0 emits a FILE-COUNT tqdm bar
+/// (`Fetching N files: P%|…| x/N [elapsed<remaining, rate]`) — the per-file byte
+/// bars are suppressed off a TTY (verified live). So `fraction` is files-based,
+/// not bytes, and the caption keeps tqdm's own honest wording.
+struct MLXDownloadProgress: Equatable, Sendable {
+    /// 0…1 (percent/100).
+    var fraction: Double
+    /// Plain-language line, e.g. "Fetching 10 files · 3.24s/it".
+    var caption: String
+}
+
+/// Whether `mlx_lm` can load a model of a given format — used to warn honestly on
+/// non-MLX search results when the "MLX format only" filter is off (the NVFP4
+/// lesson). Truth derived from the installed mlx-lm 0.31.3 loader: it needs
+/// `model*.safetensors` (no GGUF path anywhere in generate/server/utils), and its
+/// quant handling force-maps `compressed-tensors` to affine 4-bit — which can't
+/// unpack NVFP4-packed weights.
+enum MLXModelFormat: Equatable, Sendable {
+    /// Tagged `mlx` — a ready MLX build; loads.
+    case mlx
+    /// A format mlx_lm genuinely cannot load (GGUF, NVFP4). Carries the reason.
+    case cannotLoad(reason: String)
+    /// Plain non-MLX safetensors: MIGHT load (fp16, awq, gptq, mxfp4) or might
+    /// not (exotic quants), and always heavier than an MLX build.
+    case notMLXBuild
+
+    /// The user-facing advisory shown under the result (nil for MLX builds).
+    var advisory: String? {
+        switch self {
+        case .mlx:
+            return nil
+        case .cannotLoad(let reason):
+            return reason
+        case .notMLXBuild:
+            return
+                "Not a pre-built MLX model. mlx_lm may fail to load it (some quantizations, e.g. NVFP4, aren't supported) or run it slower than an MLX build — prefer the mlx-community equivalent, or Convert it in Advanced."
+        }
+    }
+
+    /// Short capsule label (nil for MLX builds).
+    var badge: String? {
+        switch self {
+        case .mlx: return nil
+        case .cannotLoad: return "can't load"
+        case .notMLXBuild: return "not MLX"
+        }
+    }
+
+    /// True only for formats that positively cannot load — a hard (red) warning
+    /// vs the softer "not an MLX build" caution.
+    var isBlocking: Bool {
+        if case .cannotLoad = self { return true }
+        return false
+    }
+}
+
+/// The pre-download free-disk verdict — a pure decision so it's unit-testable; the
+/// measurement (volume free bytes) and the size lookup (HF tree API) are the
+/// impure edges in MLXService.
+enum MLXDiskGuard: Equatable, Sendable {
+    /// Enough room (or we can't tell and it isn't critically low) — proceed.
+    case ok
+    /// Proceed, but surface the caution (size unknown + low disk).
+    case warn(String)
+    /// Refuse: the model clearly won't fit.
+    case block(String)
+}
+
+/// How the cached-model list is ordered — the "free up space" affordance defaults
+/// to `.largest` so the biggest models to delete are on top.
+enum MLXModelSort: String, CaseIterable, Sendable {
+    case largest
+    case lastUsed
+    case name
+
+    var label: String {
+        switch self {
+        case .largest: return "Largest"
+        case .lastUsed: return "Recently used"
+        case .name: return "Name"
+        }
+    }
+}
+
 // MARK: - Command construction
 
 enum MLXCommand {
@@ -531,6 +618,167 @@ enum MLXCommand {
     private static func yamlQuote(_ s: String) -> String {
         "'" + s.replacingOccurrences(of: "'", with: "''") + "'"
     }
+
+    // MARK: Model library (WS-M3)
+
+    /// Parse ONE collapsed tqdm line into a progress frame, or nil if the line
+    /// isn't a progress bar. Anchors on the percent that immediately precedes the
+    /// bar pipe (`P%|`), so stray "%" in surrounding text can't false-match; the
+    /// rate is the numeric token after the last comma inside `[…]` (absent on the
+    /// opening `?it/s` frame). Locale-proof: tqdm never localizes these digits.
+    static func parseTqdmProgress(_ raw: String) -> MLXDownloadProgress? {
+        guard let percentMatch = raw.firstMatch(of: /(\d{1,3})%\|/),
+            let percent = Int(percentMatch.output.1), percent <= 100
+        else { return nil }
+        let description = String(raw[raw.startIndex..<percentMatch.range.lowerBound])
+            .trimmingCharacters(in: CharacterSet(charactersIn: " \t:"))
+        var rate: String?
+        // The `/` in the rate unit (s/it, it/s, MB/s) is escaped so it doesn't
+        // close the regex literal.
+        if let rateMatch = raw.firstMatch(of: /,\s*([0-9][0-9.]*[A-Za-z\/]+)\]/) {
+            rate = String(rateMatch.output.1)
+        }
+        var caption = description.isEmpty ? "Downloading" : description
+        if let rate { caption += " · \(rate)" }
+        return MLXDownloadProgress(fraction: Double(percent) / 100, caption: caption)
+    }
+
+    /// The latest download-progress frame in a job log — the live (`\r`-collapsed)
+    /// tqdm line is the last committed/pending row, so scan the tail backward and
+    /// take the first that parses. Nil until a frame appears (so the caller keeps
+    /// the prior frame rather than clearing it).
+    static func latestProgress(inLines lines: [String]) -> MLXDownloadProgress? {
+        lines.suffix(6).reversed().lazy.compactMap(parseTqdmProgress).first
+    }
+
+    /// Classify a search result's format from its id + HF tags. `mlx` tag ⇒ a
+    /// ready MLX build; a GGUF/NVFP4 signal ⇒ genuinely unloadable; everything else
+    /// is plain non-MLX safetensors (might load, always heavier).
+    static func classifyFormat(id: String, tags: [String]?) -> MLXModelFormat {
+        let tagSet = Set((tags ?? []).map { $0.lowercased() })
+        let lowerID = id.lowercased()
+        if tagSet.contains("mlx") { return .mlx }
+        if tagSet.contains("gguf") || lowerID.contains("gguf") {
+            return .cannotLoad(
+                reason:
+                    "GGUF is a llama.cpp / LM Studio format — mlx_lm can't load it. Look for an mlx-community MLX build, or Convert a source model in Advanced."
+            )
+        }
+        if tagSet.contains("nvfp4") || lowerID.contains("nvfp4") {
+            return .cannotLoad(
+                reason:
+                    "NVFP4 — mlx_lm can't load this quantization. Use the mlx-community MLX build of this model instead."
+            )
+        }
+        return .notMLXBuild
+    }
+
+    /// The HF model file-tree endpoint (recursive), for a validated repo id.
+    static func treeURL(repoID: String, revision: String = "main") -> URL? {
+        guard isValidRepoID(repoID) else { return nil }
+        return URL(
+            string: "https://huggingface.co/api/models/\(repoID)/tree/\(revision)?recursive=true")
+    }
+
+    /// Sum the real download bytes from the HF tree JSON (`size` already equals
+    /// `lfs.size` for LFS files). Nil when the JSON has no files (so the guard
+    /// treats size as unknown rather than "0 bytes").
+    static func sumTreeDownloadBytes(fromJSON data: Data) -> Int64? {
+        struct Entry: Decodable {
+            let type: String?
+            let size: Int64?
+        }
+        guard let entries = try? JSONDecoder().decode([Entry].self, from: data) else { return nil }
+        var total: Int64 = 0
+        var sawFile = false
+        for entry in entries where entry.type == "file" {
+            if let size = entry.size, size >= 0 {
+                // Overflow-safe: a pathological (or hostile) response summing past
+                // Int64.max clamps to "enormous" (which the guard then blocks)
+                // instead of trapping.
+                let (sum, overflow) = total.addingReportingOverflow(size)
+                total = overflow ? .max : sum
+                sawFile = true
+            }
+        }
+        return sawFile ? total : nil
+    }
+
+    /// Pre-download free-disk decision. Blocks only when the model clearly won't
+    /// fit (near-certain mid-download failure that would strand a huge
+    /// `.incomplete`); an unknown size never blocks — it only warns when disk is
+    /// already critically low. A nil `freeBytes` (our own probe failed) never
+    /// blocks the user. `floorBytes` is the "critically low" threshold.
+    static func downloadDiskGuard(
+        freeBytes: Int64?, estimatedBytes: Int64?, floorBytes: Int64 = 5 << 30
+    ) -> MLXDiskGuard {
+        guard let free = freeBytes else { return .ok }
+        let human: (Int64) -> String = { $0.formatted(.byteCount(style: .file)) }
+        if let need = estimatedBytes, need > 0 {
+            // Headroom for the `.incomplete` staging + non-weight files. Overflow-
+            // safe: an enormous `need` (past Int64.max once the margin is added)
+            // can't fit any disk, so it blocks rather than trapping.
+            let (required, overflow) = need.addingReportingOverflow(max(2 << 30, need / 10))
+            if overflow || free < required {
+                return .block(
+                    "This model needs about \(human(need)) but only \(human(free)) is free. Free up space (delete a cached model below) and try again."
+                )
+            }
+            return .ok
+        }
+        if free < floorBytes {
+            return .warn(
+                "Only \(human(free)) free and this model's size is unknown — MLX models are often several GB, so the download may fail if there isn't room."
+            )
+        }
+        return .ok
+    }
+
+    /// The quantization label for a cached model, from its `config.json`: MLX
+    /// builds carry `quantization.bits`; upstream quantized checkpoints carry
+    /// `quantization_config.quant_method` (e.g. NVFP4's `compressed-tensors`).
+    /// Nil for an unquantized (full-precision) model.
+    static func quantLabel(fromConfigJSON data: Data) -> String? {
+        guard let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            return nil
+        }
+        if let quantization = object["quantization"] as? [String: Any],
+            let bits = quantization["bits"] as? Int
+        {
+            return "\(bits)-bit"
+        }
+        let quantConfig =
+            (object["quantization_config"] as? [String: Any])
+            ?? ((object["text_config"] as? [String: Any])?["quantization_config"] as? [String: Any])
+        if let quantConfig {
+            if let bits = quantConfig["bits"] as? Int { return "\(bits)-bit" }
+            if let method = quantConfig["quant_method"] as? String { return method }
+        }
+        return nil
+    }
+
+    /// Order cached models for display. `.largest` (the "free up space" default)
+    /// and `.name` are total; `.lastUsed` puts known-used first (newest first),
+    /// unknown-atime models last, size-broken ties.
+    static func sortedModels(_ models: [MLXCachedModel], by sort: MLXModelSort) -> [MLXCachedModel] {
+        switch sort {
+        case .largest:
+            return models.sorted { $0.sizeBytes > $1.sizeBytes }
+        case .name:
+            return models.sorted {
+                $0.repoID.localizedCaseInsensitiveCompare($1.repoID) == .orderedAscending
+            }
+        case .lastUsed:
+            return models.sorted {
+                switch ($0.lastUsed, $1.lastUsed) {
+                case let (lhs?, rhs?): return lhs > rhs
+                case (_?, nil): return true
+                case (nil, _?): return false
+                case (nil, nil): return $0.sizeBytes > $1.sizeBytes
+                }
+            }
+        }
+    }
 }
 
 // MARK: - Hugging Face hub cache
@@ -543,6 +791,25 @@ struct MLXCachedModel: Identifiable, Equatable, Sendable {
     let path: String
     let sizeBytes: Int64
     let modified: Date?
+    /// Most-recent access time across the model's files (HF's `scan-cache`
+    /// "last used" — blob atime). Nil when the volume doesn't track atime, so the
+    /// UI shows "—" rather than a wrong date (WS-M3).
+    var lastUsed: Date?
+    /// Quantization label from `config.json` ("4-bit", "compressed-tensors", …),
+    /// or nil for a full-precision model (WS-M3).
+    var quant: String?
+
+    init(
+        repoID: String, path: String, sizeBytes: Int64, modified: Date?,
+        lastUsed: Date? = nil, quant: String? = nil
+    ) {
+        self.repoID = repoID
+        self.path = path
+        self.sizeBytes = sizeBytes
+        self.modified = modified
+        self.lastUsed = lastUsed
+        self.quant = quant
+    }
 }
 
 /// Native reader of the Hugging Face hub cache layout — the same directories
@@ -594,31 +861,67 @@ enum HFCache {
             }
             let modified =
                 (try? fm.attributesOfItem(atPath: path)[.modificationDate]) as? Date
+            let usage = directoryUsage(path)
             models.append(
                 MLXCachedModel(
                     repoID: repoID, path: path,
-                    sizeBytes: directorySize(path), modified: modified))
+                    sizeBytes: usage.bytes, modified: modified,
+                    lastUsed: usage.lastUsed, quant: quantLabel(forModelAt: path)))
         }
         return models.sorted { $0.sizeBytes > $1.sizeBytes }
     }
 
     /// Recursive size of regular files, symlinks excluded (not followed, not counted).
     static func directorySize(_ path: String) -> Int64 {
+        directoryUsage(path).bytes
+    }
+
+    /// One file walk yielding both the on-disk size (regular files only; symlinks
+    /// excluded so snapshot trees don't double-count) AND the newest access time
+    /// (blob atime — HF's "last used"). Combining them means the atime read costs
+    /// no extra traversal.
+    static func directoryUsage(_ path: String) -> (bytes: Int64, lastUsed: Date?) {
         let url = URL(fileURLWithPath: path)
-        let keys: [URLResourceKey] = [.isRegularFileKey, .isSymbolicLinkKey, .fileSizeKey]
+        let keys: [URLResourceKey] = [
+            .isRegularFileKey, .isSymbolicLinkKey, .fileSizeKey, .contentAccessDateKey,
+        ]
         guard
             let enumerator = FileManager.default.enumerator(
                 at: url, includingPropertiesForKeys: keys, options: [])
-        else { return 0 }
+        else { return (0, nil) }
         var total: Int64 = 0
+        var lastUsed: Date?
         for case let item as URL in enumerator {
             guard let values = try? item.resourceValues(forKeys: Set(keys)),
                 values.isSymbolicLink != true,
                 values.isRegularFile == true
             else { continue }
             total += Int64(values.fileSize ?? 0)
+            if let accessed = values.contentAccessDate,
+                lastUsed.map({ accessed > $0 }) ?? true
+            {
+                lastUsed = accessed
+            }
         }
-        return total
+        return (total, lastUsed)
+    }
+
+    /// The quant label from the first snapshot's `config.json` (a symlink into
+    /// `blobs/`, transparently followed by a read). Nil when there's no config or
+    /// it isn't quantized.
+    static func quantLabel(forModelAt path: String) -> String? {
+        let snapshots = (path as NSString).appendingPathComponent("snapshots")
+        guard let hashes = try? FileManager.default.contentsOfDirectory(atPath: snapshots) else {
+            return nil
+        }
+        for hash in hashes.sorted() {
+            let configPath = ((snapshots as NSString).appendingPathComponent(hash) as NSString)
+                .appendingPathComponent("config.json")
+            if let data = try? Data(contentsOf: URL(fileURLWithPath: configPath)) {
+                return MLXCommand.quantLabel(fromConfigJSON: data)
+            }
+        }
+        return nil
     }
 }
 
@@ -636,6 +939,10 @@ struct MLXHubModel: Identifiable, Equatable, Sendable, Decodable {
     }
 
     var isMLX: Bool { tags?.contains("mlx") ?? false }
+
+    /// Whether mlx_lm can load this build — drives the format-honesty warning
+    /// when the "MLX format only" filter is off (WS-M3).
+    var format: MLXModelFormat { MLXCommand.classifyFormat(id: id, tags: tags) }
 }
 
 // MARK: - Log-pane rows

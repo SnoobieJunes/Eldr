@@ -170,6 +170,10 @@ final class MLXService: ObservableObject {
     @Published private(set) var searchResults: [MLXHubModel] = []
     @Published private(set) var isSearching = false
     @Published private(set) var modelsError: String?
+    /// WS-M3: the live download-progress frame (files-based percent + caption),
+    /// parsed from the tqdm line in the job log while a `.download` job runs.
+    /// Dedupe-guarded like all published state — a redraw only on a real change.
+    @Published private(set) var downloadProgress: MLXDownloadProgress?
 
     // MARK: - Paths / plumbing
 
@@ -223,7 +227,8 @@ final class MLXService: ObservableObject {
         paths: ConfigPaths = .standard,
         defaults: UserDefaults = .standard,
         launchAgentsDir: String? = nil,
-        jobLogFlushInterval: Duration = .milliseconds(250)
+        jobLogFlushInterval: Duration = .milliseconds(250),
+        cacheDir: String? = nil
     ) {
         self.defaults = defaults
         self.jobLogFlushInterval = jobLogFlushInterval
@@ -232,7 +237,9 @@ final class MLXService: ObservableObject {
         venvPython = ((paths.mlxDir as NSString).appendingPathComponent("venv") as NSString)
             .appendingPathComponent("bin/python3")
         serverLogPath = Self.serverLogPath(paths: paths)
-        cacheDir = HFCache.defaultCacheDir()
+        // Injectable so a unit test never scans the user's real multi-GB HF cache
+        // (production defaults to it); production callers pass nothing.
+        self.cacheDir = cacheDir ?? HFCache.defaultCacheDir()
         let agentsDir =
             launchAgentsDir
             ?? (NSHomeDirectory() as NSString).appendingPathComponent("Library/LaunchAgents")
@@ -257,7 +264,7 @@ final class MLXService: ObservableObject {
         // every /v1/models request die with a traceback until the first download
         // created it (observed live in mlx-server.log).
         try? FileManager.default.createDirectory(
-            atPath: cacheDir, withIntermediateDirectories: true)
+            atPath: self.cacheDir, withIntermediateDirectories: true)
         // Kill-switch off ⇒ nothing to monitor or tail: the probes and the tailer
         // stay idle until `setManagesServer(true)` (their churn was itself a perf
         // cost the toggle exists to remove).
@@ -1116,7 +1123,9 @@ final class MLXService: ObservableObject {
     }
 
     /// Pre-download (warm the HF cache) so server startup / playground runs don't
-    /// block on a silent multi-GB fetch.
+    /// block on a silent multi-GB fetch. WS-M3: a free-disk guard runs BEFORE the
+    /// job starts (AC103f) — it blocks a download that clearly won't fit rather
+    /// than stranding a huge `.incomplete`.
     func downloadModel(_ repoID: String) {
         let trimmed = repoID.trimmingCharacters(in: .whitespacesAndNewlines)
         guard MLXCommand.isValidRepoID(trimmed) else {
@@ -1127,13 +1136,65 @@ final class MLXService: ObservableObject {
             modelsError = "Install the MLX environment first — downloads run through its huggingface_hub."
             return
         }
+        guard activeJob == nil else {
+            modelsError = "Another MLX task is still running — wait for it or cancel it first."
+            return
+        }
+        modelsError = nil
+        Task { [weak self] in await self?.beginDownload(trimmed) }
+    }
+
+    /// The disk-guard preamble: measure free space on the cache volume, look up
+    /// the model's true download size (HF tree API, best-effort), and let the pure
+    /// guard decide. Runs off the main flow so the network lookup doesn't block the
+    /// button; the job's own exclusivity is re-checked after the await.
+    private func beginDownload(_ repoID: String) async {
+        let free = Self.volumeFreeBytes(atPath: cacheDir)
+        let size = await Self.fetchDownloadSize(repoID: repoID)
+        switch MLXCommand.downloadDiskGuard(freeBytes: free, estimatedBytes: size) {
+        case .block(let message):
+            modelsError = message
+            diagnostics.record(.mlx, .warn, "Download blocked — not enough disk", message)
+            return
+        case .warn(let message):
+            modelsError = message
+            diagnostics.record(.mlx, .warn, "Download proceeding on low disk", message)
+        case .ok:
+            break
+        }
+        guard activeJob == nil else {
+            modelsError = "Another MLX task is still running — wait for it or cancel it first."
+            return
+        }
         let python = venvPython
         startJob(
-            .download, "Download \(trimmed)",
+            .download, "Download \(repoID)",
             onFinish: { [weak self] _ in self?.refreshCachedModels() }
         ) { [self] in
-            try await runJobStep(python, MLXCommand.downloadArguments(repoID: trimmed))
+            try await runJobStep(python, MLXCommand.downloadArguments(repoID: repoID))
         }
+    }
+
+    /// Free bytes on the volume backing `path` (the "important usage" figure macOS
+    /// lets an app reclaim). Nil when the volume can't be queried — the guard then
+    /// declines to block on our own probe failure.
+    nonisolated static func volumeFreeBytes(atPath path: String) -> Int64? {
+        let url = URL(fileURLWithPath: path)
+        return (try? url.resourceValues(forKeys: [.volumeAvailableCapacityForImportantUsageKey]))?
+            .volumeAvailableCapacityForImportantUsage
+    }
+
+    /// Best-effort true download size from the HF file tree (sum of file sizes).
+    /// Nil (⇒ size unknown, guard uses the floor) on any network/HTTP/decoding
+    /// failure — never fatal to a download the user asked for.
+    nonisolated static func fetchDownloadSize(repoID: String) async -> Int64? {
+        guard let url = MLXCommand.treeURL(repoID: repoID) else { return nil }
+        var request = URLRequest(url: url)
+        request.timeoutInterval = 10
+        guard let (data, response) = try? await URLSession.shared.data(for: request),
+            let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode)
+        else { return nil }
+        return MLXCommand.sumTreeDownloadBytes(fromJSON: data)
     }
 
     // MARK: - Convert / quantize
@@ -1276,6 +1337,7 @@ final class MLXService: ObservableObject {
         jobLogWindow = []
         jobLogKind = kind
         lastJobResult = nil
+        if downloadProgress != nil { downloadProgress = nil }
         Self.log.info("MLX job started: \(kind.rawValue, privacy: .public)")
         diagnostics.record(.mlx, .info, "\(title) started")
         jobTask = Task { [weak self] in
@@ -1311,6 +1373,8 @@ final class MLXService: ObservableObject {
         // Flush synchronously so the pane shows the complete output the moment the
         // result label appears (and so tests see a settled state after finish).
         flushJobLogNow()
+        // The job is over — the result label replaces the determinate bar.
+        if downloadProgress != nil { downloadProgress = nil }
         Self.log.info(
             "MLX job finished: \(job.kind.rawValue, privacy: .public) success=\(error == nil)")
         onFinish?(error == nil)
@@ -1342,6 +1406,18 @@ final class MLXService: ObservableObject {
         jobLog.feed(pendingJobLogChunk)
         pendingJobLogChunk = ""
         jobLogWindow = Self.window(of: jobLog.lines)
+        if jobLogKind == .download { updateDownloadProgress() }
+    }
+
+    /// Publish the latest tqdm frame from the download log (pure pick in
+    /// `MLXCommand.latestProgress`). A publish only on a real change (WS-M0
+    /// hygiene); if nothing parses yet, the prior frame stands.
+    private func updateDownloadProgress() {
+        if let parsed = MLXCommand.latestProgress(inLines: jobLog.lines),
+            downloadProgress != parsed
+        {
+            downloadProgress = parsed
+        }
     }
 
     // MARK: - Window projection (WS-M0)

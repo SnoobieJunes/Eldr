@@ -70,6 +70,7 @@ struct MLXView: View {
                 brainSwapAvailable: service.managesServer && service.envState.isReady
                     && !service.brainSwap.isWorking,
                 pane: service.jobPaneState(for: [.download]),
+                downloadProgress: service.downloadProgress,
                 playModel: $playModel,
                 deleteCandidate: $deleteCandidate)
             MLXConvertSection(
@@ -734,6 +735,8 @@ private struct MLXModelsSection: View, Equatable {
     /// "Serve as my AI's brain" buttons).
     let brainSwapAvailable: Bool
     let pane: MLXService.JobPaneState
+    /// Live download progress (files-based percent), nil when not downloading.
+    let downloadProgress: MLXDownloadProgress?
     @Binding var playModel: String
     @Binding var deleteCandidate: MLXCachedModel?
 
@@ -741,12 +744,15 @@ private struct MLXModelsSection: View, Equatable {
     @State private var searchPublisher = "mlx-community"
     @State private var searchMLXOnly = true
     @State private var searchSort = "downloads"
+    /// Cache-hygiene ordering; `.largest` first surfaces the models to delete.
+    @State private var cacheSort: MLXModelSort = .largest
 
     nonisolated static func == (lhs: Self, rhs: Self) -> Bool {
         lhs.cachedModels == rhs.cachedModels && lhs.searchResults == rhs.searchResults
             && lhs.isSearching == rhs.isSearching && lhs.modelsError == rhs.modelsError
             && lhs.jobRunning == rhs.jobRunning && lhs.pane == rhs.pane
             && lhs.brainSwapAvailable == rhs.brainSwapAvailable
+            && lhs.downloadProgress == rhs.downloadProgress
     }
 
     var body: some View {
@@ -766,32 +772,22 @@ private struct MLXModelsSection: View, Equatable {
                 .font(.system(.caption2, design: .monospaced)).foregroundStyle(.secondary)
                 .lineLimit(1).truncationMode(.middle)
 
-            ForEach(cachedModels) { model in
-                HStack {
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text(model.repoID).font(.callout)
-                        Text(model.sizeBytes.formatted(.byteCount(style: .file)))
-                            .font(.caption).foregroundStyle(.secondary)
-                    }
-                    Spacer()
-                    Button("Serve as my AI's brain") {
-                        Task { await service.makeBrain(model: model.repoID, store: store) }
-                    }
-                    .controlSize(.small)
-                    .disabled(!brainSwapAvailable)
-                    .help(
-                        "One click: start the server on this model, wait until it answers, and wire it as the Eldr backend. Progress shows in the card at the top."
-                    )
-                    Button("Try") { playModel = model.repoID }
-                        .controlSize(.small)
-                    Button(role: .destructive) {
-                        deleteCandidate = model
-                    } label: {
-                        Image(systemName: "trash")
-                    }
-                    .controlSize(.small)
-                    .accessibilityLabel("Delete \(model.repoID)")
+            if cachedModels.count > 1 {
+                Picker("Sort", selection: $cacheSort) {
+                    ForEach(MLXModelSort.allCases, id: \.self) { Text($0.label).tag($0) }
                 }
+                .pickerStyle(.menu).fixedSize()
+                .help(
+                    "Largest first is the fastest way to free up space — the biggest models are on top to delete.")
+            }
+
+            ForEach(MLXCommand.sortedModels(cachedModels, by: cacheSort)) { model in
+                MLXCachedModelRow(
+                    model: model,
+                    brainSwapAvailable: brainSwapAvailable,
+                    onServe: { Task { await service.makeBrain(model: model.repoID, store: store) } },
+                    onTry: { playModel = model.repoID },
+                    onDelete: { deleteCandidate = model })
             }
             if cachedModels.isEmpty {
                 Text("No models cached yet — search below and download one (small 4-bit instruct models from mlx-community are a good start).")
@@ -838,32 +834,63 @@ private struct MLXModelsSection: View, Equatable {
                     .font(.caption).foregroundStyle(.orange)
             }
             ForEach(searchResults) { result in
-                HStack {
-                    VStack(alignment: .leading, spacing: 2) {
-                        HStack(spacing: 6) {
-                            Text(result.id).font(.callout)
-                            if let quant = result.quantLabel {
-                                Text(quant)
-                                    .font(.caption2).padding(.horizontal, 4).padding(.vertical, 1)
-                                    .background(.quaternary, in: Capsule())
+                let format = result.format
+                VStack(alignment: .leading, spacing: 3) {
+                    HStack {
+                        VStack(alignment: .leading, spacing: 2) {
+                            HStack(spacing: 6) {
+                                Text(result.id).font(.callout)
+                                if let quant = result.quantLabel {
+                                    Text(quant)
+                                        .font(.caption2).padding(.horizontal, 4).padding(.vertical, 1)
+                                        .background(.quaternary, in: Capsule())
+                                }
+                                if searchMLXOnly == false, let badge = format.badge {
+                                    Text(badge)
+                                        .font(.caption2).padding(.horizontal, 4).padding(.vertical, 1)
+                                        .background(
+                                            (format.isBlocking ? Color.red : Color.orange)
+                                                .opacity(0.2), in: Capsule())
+                                }
                             }
-                            if !result.isMLX && searchMLXOnly == false {
-                                Text("not MLX")
-                                    .font(.caption2).padding(.horizontal, 4).padding(.vertical, 1)
-                                    .background(.orange.opacity(0.2), in: Capsule())
-                            }
+                            Text(searchResultCaption(result)).font(.caption).foregroundStyle(
+                                .secondary)
                         }
-                        Text(searchResultCaption(result)).font(.caption).foregroundStyle(.secondary)
-                    }
-                    Spacer()
-                    if let page = URL(string: "https://huggingface.co/\(result.id)") {
-                        Link(destination: page) { Image(systemName: "safari") }
+                        Spacer()
+                        if let page = URL(string: "https://huggingface.co/\(result.id)") {
+                            Link(destination: page) { Image(systemName: "safari") }
+                                .controlSize(.small)
+                                .accessibilityLabel("Open \(result.id) on Hugging Face")
+                        }
+                        Button("Download") { service.downloadModel(result.id) }
                             .controlSize(.small)
-                            .accessibilityLabel("Open \(result.id) on Hugging Face")
+                            .disabled(jobRunning)
                     }
-                    Button("Download") { service.downloadModel(result.id) }
-                        .controlSize(.small)
-                        .disabled(jobRunning)
+                    // Format honesty (the NVFP4 lesson): when the MLX filter is off,
+                    // spell out what mlx_lm can't load and name the alternative.
+                    if searchMLXOnly == false, let advisory = format.advisory {
+                        Label(
+                            advisory,
+                            systemImage: format.isBlocking
+                                ? "xmark.octagon.fill" : "exclamationmark.triangle.fill"
+                        )
+                        .font(.caption2)
+                        .foregroundStyle(format.isBlocking ? Color.red : Color.orange)
+                        .fixedSize(horizontal: false, vertical: true)
+                    }
+                }
+            }
+
+            // Determinate download progress (WS-M3): a real ProgressView driven by
+            // the tqdm frame in the log. Files-based (per-file byte bars are
+            // suppressed off a TTY), captioned in tqdm's own honest wording.
+            if pane.activeJob?.kind == .download, let progress = downloadProgress {
+                VStack(alignment: .leading, spacing: 2) {
+                    ProgressView(value: progress.fraction) {
+                        Text(progress.caption).font(.caption)
+                    }
+                    Text("\(Int((progress.fraction * 100).rounded()))%")
+                        .font(.caption2).foregroundStyle(.secondary).monospacedDigit()
                 }
             }
             MLXJobPane(service: service, state: pane)
@@ -894,6 +921,114 @@ private struct MLXModelsSection: View, Equatable {
             await service.searchHub(
                 query: searchQuery, author: searchPublisher.isEmpty ? nil : searchPublisher,
                 mlxOnly: searchMLXOnly, sort: searchSort)
+        }
+    }
+}
+
+/// One cached-model row with an ⓘ detail popover (size / last used / quant / path
+/// + Reveal / Serve / Try). Owns its own popover flag so the popover anchors to
+/// the row's info button (WS-M3). Actions arrive as closures from the section.
+private struct MLXCachedModelRow: View {
+    let model: MLXCachedModel
+    let brainSwapAvailable: Bool
+    let onServe: () -> Void
+    let onTry: () -> Void
+    let onDelete: () -> Void
+
+    @State private var showDetail = false
+
+    var body: some View {
+        HStack {
+            VStack(alignment: .leading, spacing: 2) {
+                Text(model.repoID).font(.callout)
+                HStack(spacing: 6) {
+                    Text(model.sizeBytes.formatted(.byteCount(style: .file)))
+                    if let quant = model.quant {
+                        Text(quant)
+                            .padding(.horizontal, 4).padding(.vertical, 1)
+                            .background(.quaternary, in: Capsule())
+                    }
+                }
+                .font(.caption).foregroundStyle(.secondary)
+            }
+            Spacer()
+            Button { showDetail = true } label: {
+                Image(systemName: "info.circle")
+            }
+            .buttonStyle(.plain).foregroundStyle(.secondary)
+            .accessibilityLabel("Details for \(model.repoID)")
+            .popover(isPresented: $showDetail, arrowEdge: .top) { detail }
+            Button("Serve as my AI's brain") { onServe() }
+                .controlSize(.small)
+                .disabled(!brainSwapAvailable)
+                .help(
+                    "One click: start the server on this model, wait until it answers, and wire it as the Eldr backend. Progress shows in the card at the top."
+                )
+            Button("Try") { onTry() }
+                .controlSize(.small)
+            Button(role: .destructive) { onDelete() } label: {
+                Image(systemName: "trash")
+            }
+            .controlSize(.small)
+            .accessibilityLabel("Delete \(model.repoID)")
+        }
+    }
+
+    @ViewBuilder
+    private var detail: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text(model.repoID).font(.headline).textSelection(.enabled)
+            Grid(alignment: .leadingFirstTextBaseline, horizontalSpacing: 12, verticalSpacing: 4) {
+                detailRow("Size", model.sizeBytes.formatted(.byteCount(style: .file)))
+                GridRow {
+                    Text("Last used").foregroundStyle(.secondary)
+                    if let lastUsed = model.lastUsed {
+                        Text(lastUsed, format: .relative(presentation: .named))
+                    } else {
+                        Text("—").foregroundStyle(.secondary)
+                    }
+                }
+                // nil quant means "no quantization tag in config.json" — which is
+                // usually a full-precision model but also covers an unreadable
+                // config, so show "—" rather than over-claim "full precision".
+                detailRow("Quant", model.quant ?? "—")
+            }
+            .font(.caption)
+            VStack(alignment: .leading, spacing: 2) {
+                Text("Path").font(.caption).foregroundStyle(.secondary)
+                Text(model.path)
+                    .font(.system(.caption2, design: .monospaced))
+                    .textSelection(.enabled)
+                    .lineLimit(2).truncationMode(.middle)
+            }
+            Divider()
+            HStack {
+                Button("Reveal") {
+                    NSWorkspace.shared.activateFileViewerSelecting(
+                        [URL(fileURLWithPath: model.path)])
+                    showDetail = false
+                }
+                Button("Serve") {
+                    onServe()
+                    showDetail = false
+                }
+                .disabled(!brainSwapAvailable)
+                Button("Try") {
+                    onTry()
+                    showDetail = false
+                }
+                Spacer()
+            }
+            .controlSize(.small)
+        }
+        .padding()
+        .frame(minWidth: 320, maxWidth: 460)
+    }
+
+    private func detailRow(_ label: String, _ value: String) -> some View {
+        GridRow {
+            Text(label).foregroundStyle(.secondary)
+            Text(value).textSelection(.enabled)
         }
     }
 }
