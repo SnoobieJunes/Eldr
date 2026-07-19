@@ -1355,3 +1355,236 @@ struct MLXCacheMetadataTests {
         #expect(model.sizeBytes == Int64(42 + configData.count))
     }
 }
+
+// WS-M4 — teachable fine-tune. Loss fixtures are the REAL ANSI-colored rich
+// output captured from a live `mlx_lm lora` 0.31.3 run through a pipe (its
+// trainer emits color even off a TTY); the plan's `Iter N: Train loss …` format
+// is stale. \u{1B} = ESC, \u{25BC}/\u{25B2} = the ▼/▲ trend arrows.
+
+@Suite("MLX loss parser (WS-M4)")
+struct MLXLossParserTests {
+
+    @Test func stripsANSIEscapes() {
+        let line = "\u{1B}[38;5;244m   5\u{1B}[0m    \u{1B}[1;32m3.459 \u{25BC}\u{1B}[0m"
+        #expect(MLXCommand.stripANSI(line) == "   5    3.459 \u{25BC}")
+        // No ESC → returned unchanged (fast path); box-art unicode is left intact.
+        #expect(MLXCommand.stripANSI("plain line") == "plain line")
+    }
+
+    @Test func parsesRealTrainValSaveLines() {
+        let valLine =
+            "  \u{1B}[38;5;244m   1\u{1B}[0m    \u{1B}[1;35mval\u{1B}[0m \u{1B}[1m4.073\u{1B}[0m    \u{1B}[38;5;244m0.53s\u{1B}[0m"
+        #expect(MLXCommand.parseLossLine(valLine) == .val(iter: 1, loss: 4.073))
+
+        let trainDown =
+            "  \u{1B}[38;5;244m   5\u{1B}[0m    \u{1B}[1;32m3.459 \u{25BC}\u{1B}[0m    \u{1B}[1m  191\u{1B}[0m    \u{1B}[38;5;244m  0.5k\u{1B}[0m"
+        #expect(MLXCommand.parseLossLine(trainDown) == .train(iter: 5, loss: 3.459))
+
+        // ▲ (loss went up) still parses as a train row.
+        let trainUp =
+            "  \u{1B}[38;5;244m  30\u{1B}[0m    \u{1B}[1;33m0.186 \u{25B2}\u{1B}[0m    \u{1B}[1m4,331\u{1B}[0m"
+        #expect(MLXCommand.parseLossLine(trainUp) == .train(iter: 30, loss: 0.186))
+
+        let saveLine =
+            "  \u{1B}[1;32msave\u{1B}[0m  \u{1B}[38;5;244m0000010_adapters.safetensors\u{1B}[0m"
+        #expect(
+            MLXCommand.parseLossLine(saveLine) == .save(checkpoint: "0000010_adapters.safetensors"))
+    }
+
+    @Test func rejectsNonLossLines() {
+        #expect(MLXCommand.parseLossLine("Loading pretrained model") == nil)
+        #expect(MLXCommand.parseLossLine("  iter   train_loss     tok/s     tokens") == nil)
+        #expect(
+            MLXCommand.parseLossLine("Trainable parameters: 0.242% (0.326M/134.515M)") == nil)
+        #expect(MLXCommand.parseLossLine("") == nil)
+    }
+
+    @Test func buildsHistoryAndDedupesCheckpoints() {
+        let lines = [
+            "  \u{1B}[38;5;244m   1\u{1B}[0m    \u{1B}[1;35mval\u{1B}[0m \u{1B}[1m4.073\u{1B}[0m    0.53s",
+            "   5    3.459 \u{25BC}    191    0.5k",
+            "  save  0000010_adapters.safetensors",
+            "  save  0000010_adapters.safetensors",  // a re-parse must not double it
+            "  10    val 0.803    0.05s",
+        ]
+        let history = MLXCommand.parseLossHistory(fromLines: lines)
+        #expect(history.train.map(\.iter) == [5])
+        #expect(history.val.map(\.iter) == [1, 10])
+        #expect(history.val.map(\.loss) == [4.073, 0.803])
+        #expect(history.checkpoints == ["0000010_adapters.safetensors"])
+    }
+
+    @Test func trendReadsDirection() {
+        var history = MLXLossHistory()
+        history.val = [MLXLossPoint(iter: 1, loss: 4.0), MLXLossPoint(iter: 10, loss: 0.5)]
+        #expect(MLXCommand.lossTrend(history).contains("learning"))
+        history.val = [MLXLossPoint(iter: 1, loss: 0.2), MLXLossPoint(iter: 10, loss: 0.9)]
+        #expect(MLXCommand.lossTrend(history).lowercased().contains("rising"))
+        history.val = [MLXLossPoint(iter: 1, loss: 0.50), MLXLossPoint(iter: 10, loss: 0.49)]
+        #expect(MLXCommand.lossTrend(history).lowercased().contains("flat"))
+        #expect(MLXCommand.lossTrend(MLXLossHistory()).contains("Waiting"))
+    }
+}
+
+@Suite("MLX fine-tune presets + YAML (WS-M4)")
+struct MLXFineTunePresetTests {
+
+    @Test func presetsApplyKnobsAndKeepIdentity() {
+        var base = MLXFineTuneConfig()
+        base.model = "m"
+        base.dataDir = "/d"
+        base.fineTuneType = "dora"
+        base.loraRank = 16
+        let quick = MLXFineTunePreset.quickTest.applied(to: base)
+        #expect(quick.iters == 100 && quick.batchSize == 2 && quick.numLayers == 8)
+        // Identity fields (model / data / type / rank) are untouched by the preset.
+        #expect(quick.model == "m" && quick.dataDir == "/d")
+        #expect(quick.fineTuneType == "dora" && quick.loraRank == 16)
+        let thorough = MLXFineTunePreset.thorough.applied(to: base)
+        #expect(thorough.iters == 1500 && thorough.numLayers == 32)
+    }
+
+    @Test func yamlEmitsNewKeysAndSkipsLoraForFull() {
+        var config = MLXFineTuneConfig()
+        config.model = "m"
+        config.dataDir = "/d"
+        config.adapterPath = "/a"
+        config.saveEvery = 50
+        config.valEvery = 25
+        config.maxSeqLength = 1024
+        config.gradCheckpoint = true
+        let yaml = MLXCommand.loraConfigYAML(config)
+        // Line-structure (not just substring) — YAML is indentation-sensitive and
+        // each key must be on its OWN unindented line (guards the multiline
+        // trailing-newline / concatenation trap the plain contains-checks miss).
+        #expect(yaml.contains("\nmodel: "))  // top-level, no leading indent
+        #expect(yaml.contains("\nsave_every: 50\n"))
+        #expect(yaml.contains("\nsteps_per_eval: 25\n"))
+        #expect(yaml.contains("\nmax_seq_length: 1024\n"))
+        #expect(yaml.contains("grad_checkpoint: true\n"))
+        #expect(yaml.contains("\nlora_parameters:\n"))
+        #expect(yaml.contains("\n  rank: 8\n"))  // indented 2 under lora_parameters
+
+        // Full fine-tuning omits the LoRA-only block (there's nothing to configure).
+        config.fineTuneType = "full"
+        let fullYAML = MLXCommand.loraConfigYAML(config)
+        #expect(!fullYAML.contains("lora_parameters:"))
+        #expect(fullYAML.contains("fine_tune_type: full"))
+    }
+}
+
+@Suite("MLX dataset assistant (WS-M4)")
+struct MLXDatasetAssistantTests {
+
+    @Test func detectsFormatsWithMLXPrecedence() {
+        let comp = """
+            {"prompt":"a","completion":"b"}
+            {"prompt":"c","completion":"d"}
+            """
+        let r1 = MLXCommand.validateDataset(Data(comp.utf8))
+        #expect(r1.format == .completions && r1.recordCount == 2 && r1.ok)
+
+        #expect(
+            MLXCommand.validateDataset(
+                Data("{\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}]}".utf8)).format == .chat
+        )
+        #expect(MLXCommand.validateDataset(Data("{\"text\":\"hello\"}".utf8)).format == .text)
+
+        // Precedence: prompt+completion wins even when `text` is also present.
+        #expect(
+            MLXCommand.validateDataset(
+                Data("{\"prompt\":\"a\",\"completion\":\"b\",\"text\":\"c\"}".utf8)).format
+                == .completions)
+    }
+
+    @Test func reportsErrorsByLineAndKindOnly() {
+        let data = """
+            {"prompt":"secret","completion":"b"}
+            notjson
+            {"foo":1}
+            """
+        let report = MLXCommand.validateDataset(Data(data.utf8))
+        #expect(report.recordCount == 1)
+        #expect(report.errors.count == 2)
+        #expect(report.errors[0] == MLXDatasetError(line: 2, kind: "not a JSON object"))
+        #expect(report.errors[1].line == 3)
+        // Privacy (inv. 12 / SPEC §0): no record CONTENT leaks — the bad records'
+        // bodies never appear in an error kind (only line numbers + fixed kinds).
+        #expect(
+            !report.errors.contains {
+                $0.kind.contains("secret") || $0.kind.contains("notjson") || $0.kind.contains("foo")
+            })
+    }
+
+    @Test func splitAndCSVBuilder() {
+        let records = (0..<10).map { "{\"prompt\":\"p\($0)\",\"completion\":\"c\($0)\"}" }
+        let split = MLXCommand.splitJSONL(records, validFraction: 0.2)
+        #expect(split.train.count == 8 && split.valid.count == 2)
+        #expect(split.valid == Array(records[8...]))  // validation from the tail
+
+        // CSV with a header row + a quoted field containing a comma.
+        let csv = """
+            prompt,completion
+            Hello,"Bonjour, ami"
+            Bye,Au revoir
+            """
+        let built = MLXCommand.completionsFromCSV(csv)
+        #expect(built.count == 2)  // header skipped
+        #expect(built[0].contains("Bonjour, ami"))
+        // Each built row is valid JSON with the right keys.
+        let obj = try? JSONSerialization.jsonObject(with: Data(built[0].utf8)) as? [String: String]
+        #expect(obj?["prompt"] == "Hello")
+        #expect(obj?["completion"] == "Bonjour, ami")
+    }
+
+    @Test func templatesAreValidJSON() {
+        for format in [MLXDatasetFormat.completions, .chat, .text] {
+            let firstLine =
+                MLXCommand.datasetTemplate(format).split(separator: "\n").first.map(String.init) ?? ""
+            #expect((try? JSONSerialization.jsonObject(with: Data(firstLine.utf8))) != nil)
+        }
+    }
+}
+
+@Suite("MLX memory preflight (WS-M4)")
+struct MLXMemoryPreflightTests {
+
+    private let gib: Int64 = 1 << 30
+
+    @Test func estimateScalesWithTypeAndIsOverflowSafe() {
+        let base = 10 * gib
+        let lora = MLXCommand.estimateTrainingPeakBytes(baseModelBytes: base, fineTuneType: "lora")
+        let full = MLXCommand.estimateTrainingPeakBytes(baseModelBytes: base, fineTuneType: "full")
+        let loraPeak = try? #require(lora)
+        let fullPeak = try? #require(full)
+        #expect((loraPeak ?? 0) > 0 && (fullPeak ?? 0) > (loraPeak ?? 0))
+        // Unknown / zero base ⇒ nil (verdict then says "unknown").
+        #expect(MLXCommand.estimateTrainingPeakBytes(baseModelBytes: nil, fineTuneType: "lora") == nil)
+        #expect(MLXCommand.estimateTrainingPeakBytes(baseModelBytes: 0, fineTuneType: "lora") == nil)
+        // Absurd base clamps to .max, never traps (AC116/AC118 discipline).
+        #expect(
+            MLXCommand.estimateTrainingPeakBytes(baseModelBytes: .max, fineTuneType: "full") == .max)
+    }
+
+    @Test func verdictBuckets() {
+        #expect(
+            MLXCommand.memoryVerdict(availableBytes: 64 * gib, estimatedPeakBytes: 10 * gib).level
+                == .comfortable)
+        #expect(
+            MLXCommand.memoryVerdict(availableBytes: 12 * gib, estimatedPeakBytes: 10 * gib).level
+                == .tight)
+        #expect(
+            MLXCommand.memoryVerdict(availableBytes: 8 * gib, estimatedPeakBytes: 10 * gib).level
+                == .risky)
+        #expect(
+            MLXCommand.memoryVerdict(availableBytes: nil, estimatedPeakBytes: 10 * gib).level
+                == .unknown)
+        #expect(
+            MLXCommand.memoryVerdict(availableBytes: 64 * gib, estimatedPeakBytes: nil).level
+                == .unknown)
+        // Every non-unknown message is hedged as an estimate.
+        #expect(
+            MLXCommand.memoryVerdict(availableBytes: 64 * gib, estimatedPeakBytes: 10 * gib)
+                .message.contains("Estimate"))
+    }
+}

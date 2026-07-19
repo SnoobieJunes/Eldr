@@ -95,6 +95,13 @@ struct MLXFineTuneConfig: Equatable, Sendable {
     var loraRank: Int = 8
     var loraScale: Double = 20.0
     var loraDropout: Double = 0.0
+    /// WS-M4 keys (verified in mlx-lm 0.31.3 CONFIG_DEFAULTS): checkpoint cadence,
+    /// validation cadence (`steps_per_eval`), max sequence length, and gradient
+    /// checkpointing (trades compute for a big activation-memory saving).
+    var saveEvery: Int = 100
+    var valEvery: Int = 200
+    var maxSeqLength: Int = 2048
+    var gradCheckpoint: Bool = false
 }
 
 // MARK: - Model-library value types (WS-M3)
@@ -182,6 +189,135 @@ enum MLXModelSort: String, CaseIterable, Sendable {
         case .name: return "Name"
         }
     }
+}
+
+// MARK: - Fine-tune value types (WS-M4)
+
+/// One parsed line from `mlx_lm.lora`'s (rich-console) training output.
+enum MLXLossEvent: Equatable, Sendable {
+    case train(iter: Int, loss: Double)
+    case val(iter: Int, loss: Double)
+    case save(checkpoint: String)
+}
+
+/// One point on the loss chart.
+struct MLXLossPoint: Equatable, Sendable, Identifiable {
+    let iter: Int
+    let loss: Double
+    var id: Int { iter }
+}
+
+/// The training run's parsed loss curves + checkpoints, rebuilt from the job log.
+struct MLXLossHistory: Equatable, Sendable {
+    var train: [MLXLossPoint] = []
+    var val: [MLXLossPoint] = []
+    var checkpoints: [String] = []
+
+    var isEmpty: Bool { train.isEmpty && val.isEmpty && checkpoints.isEmpty }
+}
+
+/// Guided-mode presets — the user picks base model → data → preset, and the
+/// numeric knobs are set from here. Values are deliberate but conservative
+/// starting points, each labeled in the UI.
+enum MLXFineTunePreset: String, CaseIterable, Sendable {
+    case quickTest
+    case balanced
+    case thorough
+
+    var label: String {
+        switch self {
+        case .quickTest: return "Quick test"
+        case .balanced: return "Balanced"
+        case .thorough: return "Thorough"
+        }
+    }
+
+    var summary: String {
+        switch self {
+        case .quickTest:
+            return "≈100 iters, small — a fast sanity check that the data trains at all."
+        case .balanced:
+            return "≈600 iters — the usual starting point for a real adapter."
+        case .thorough:
+            return "≈1500 iters, more layers, gentler LR — for larger datasets."
+        }
+    }
+
+    /// Overlay the preset's cadence/knobs onto a config, leaving model / data /
+    /// type / adapter path / LoRA rank·scale·dropout untouched.
+    func applied(to config: MLXFineTuneConfig) -> MLXFineTuneConfig {
+        var c = config
+        switch self {
+        case .quickTest:
+            c.iters = 100
+            c.batchSize = 2
+            c.numLayers = 8
+            c.learningRate = 2e-4
+            c.saveEvery = 50
+            c.valEvery = 25
+        case .balanced:
+            c.iters = 600
+            c.batchSize = 4
+            c.numLayers = 16
+            c.learningRate = 1e-4
+            c.saveEvery = 100
+            c.valEvery = 100
+        case .thorough:
+            c.iters = 1500
+            c.batchSize = 4
+            c.numLayers = 32
+            c.learningRate = 5e-5
+            c.saveEvery = 200
+            c.valEvery = 200
+        }
+        return c
+    }
+}
+
+/// The JSONL shapes `mlx_lm` accepts, in its own precedence order (verified
+/// against the installed `tuner/datasets.py`): prompt+completion, then messages,
+/// then text.
+enum MLXDatasetFormat: String, Sendable {
+    case completions
+    case chat
+    case text
+
+    var label: String {
+        switch self {
+        case .completions: return "prompt + completion"
+        case .chat: return "chat messages"
+        case .text: return "plain text"
+        }
+    }
+}
+
+/// One dataset problem — line number + kind ONLY. Record BODIES are never
+/// captured here (SPEC §0 / inv. 12): the validator must not surface content.
+struct MLXDatasetError: Equatable, Sendable {
+    let line: Int
+    let kind: String
+}
+
+/// Result of validating a JSONL dataset sample.
+struct MLXDatasetReport: Equatable, Sendable {
+    var format: MLXDatasetFormat?
+    var recordCount: Int
+    var errors: [MLXDatasetError]
+    /// True when a format was detected, records were found, and nothing errored.
+    var ok: Bool { format != nil && recordCount > 0 && errors.isEmpty }
+}
+
+enum MLXMemoryLevel: String, Sendable {
+    case comfortable
+    case tight
+    case risky
+    case unknown
+}
+
+/// A memory-preflight verdict — ALWAYS an estimate, never a guarantee.
+struct MLXMemoryVerdict: Equatable, Sendable {
+    let level: MLXMemoryLevel
+    let message: String
 }
 
 // MARK: - Command construction
@@ -318,23 +454,38 @@ enum MLXCommand {
     }
 
     static func loraConfigYAML(_ c: MLXFineTuneConfig) -> String {
-        """
-        # Written by Huginn (MLX fine-tune). Keys mirror mlx_lm.lora's CONFIG_DEFAULTS.
-        model: \(yamlQuote(c.model))
-        train: true
-        fine_tune_type: \(c.fineTuneType)
-        data: \(yamlQuote(c.dataDir))
-        adapter_path: \(yamlQuote(c.adapterPath))
-        num_layers: \(c.numLayers)
-        batch_size: \(c.batchSize)
-        iters: \(c.iters)
-        learning_rate: \(formatNumber(c.learningRate))
-        lora_parameters:
-          rank: \(c.loraRank)
-          scale: \(formatNumber(c.loraScale))
-          dropout: \(formatNumber(c.loraDropout))
+        var yaml = """
+            # Written by Huginn (MLX fine-tune). Keys mirror mlx_lm.lora's CONFIG_DEFAULTS.
+            model: \(yamlQuote(c.model))
+            train: true
+            fine_tune_type: \(c.fineTuneType)
+            data: \(yamlQuote(c.dataDir))
+            adapter_path: \(yamlQuote(c.adapterPath))
+            num_layers: \(c.numLayers)
+            batch_size: \(c.batchSize)
+            iters: \(c.iters)
+            learning_rate: \(formatNumber(c.learningRate))
+            save_every: \(c.saveEvery)
+            steps_per_eval: \(c.valEvery)
+            max_seq_length: \(c.maxSeqLength)
 
-        """
+            """
+        // The blank line above matters: it makes the block end with a trailing
+        // newline, so the appends below start on their own line (Swift strips a
+        // multiline string's final newline). A line-structure test pins this.
+        if c.gradCheckpoint { yaml += "grad_checkpoint: true\n" }
+        // LoRA/DoRA rank/scale/dropout live under lora_parameters (config-only —
+        // there are no CLI flags). `full` fine-tuning ignores this block.
+        if c.fineTuneType != "full" {
+            yaml += """
+                lora_parameters:
+                  rank: \(c.loraRank)
+                  scale: \(formatNumber(c.loraScale))
+                  dropout: \(formatNumber(c.loraDropout))
+
+                """
+        }
+        return yaml
     }
 
     static func fuseArguments(model: String, adapterPath: String, savePath: String) -> [String] {
@@ -777,6 +928,332 @@ enum MLXCommand {
                 case (nil, nil): return $0.sizeBytes > $1.sizeBytes
                 }
             }
+        }
+    }
+
+    // MARK: Fine-tune (WS-M4)
+
+    /// Strip ANSI SGR escape sequences (`ESC [ … m`) that `mlx_lm.lora`'s
+    /// rich-console output emits even through a pipe. A small state machine (no
+    /// Regex — this runs on every log line): the `[` after ESC introduces the CSI,
+    /// params (0x30–0x3F) continue it, a final byte (0x40–0x7E, e.g. `m`) ends it.
+    static func stripANSI(_ s: String) -> String {
+        guard s.unicodeScalars.contains("\u{1B}") else { return s }
+        enum State { case normal, escaped, csi }
+        var state = State.normal
+        var out = String.UnicodeScalarView()
+        for scalar in s.unicodeScalars {
+            switch state {
+            case .normal:
+                if scalar == "\u{1B}" { state = .escaped } else { out.append(scalar) }
+            case .escaped:
+                state = (scalar == "[") ? .csi : .normal
+            case .csi:
+                if (0x40...0x7E).contains(scalar.value) { state = .normal }
+            }
+        }
+        return String(out)
+    }
+
+    /// Parse ONE training line (after stripping ANSI) into a loss event, or nil.
+    /// Real 0.31.3 formats (rich console, verified live):
+    ///   train: `   5    3.459 ▼      191      0.5k`  (▼/▲ marks a train row)
+    ///   val:   `   1    val 4.073    0.53s`
+    ///   save:  `  save  0000010_adapters.safetensors`
+    static func parseLossLine(_ raw: String) -> MLXLossEvent? {
+        let line = stripANSI(raw)
+        if let match = line.firstMatch(of: /\bsave\b\s+(\S+\.safetensors)/) {
+            return .save(checkpoint: String(match.output.1))
+        }
+        if let match = line.firstMatch(of: /^\s*(\d+)\s+val\s+([0-9]*\.?[0-9]+)/),
+            let iter = Int(match.output.1), let loss = Double(match.output.2)
+        {
+            return .val(iter: iter, loss: loss)
+        }
+        // The ▼ / ▲ trend arrow after the number is what marks a train row.
+        if let match = line.firstMatch(of: /^\s*(\d+)\s+([0-9]*\.?[0-9]+)\s*[▼▲]/),
+            let iter = Int(match.output.1), let loss = Double(match.output.2)
+        {
+            return .train(iter: iter, loss: loss)
+        }
+        return nil
+    }
+
+    /// Rebuild the full loss history from a job log's lines (checkpoints deduped).
+    static func parseLossHistory(fromLines lines: [String]) -> MLXLossHistory {
+        var history = MLXLossHistory()
+        for line in lines {
+            switch parseLossLine(line) {
+            case .train(let iter, let loss):
+                history.train.append(MLXLossPoint(iter: iter, loss: loss))
+            case .val(let iter, let loss):
+                history.val.append(MLXLossPoint(iter: iter, loss: loss))
+            case .save(let checkpoint):
+                if !history.checkpoints.contains(checkpoint) {
+                    history.checkpoints.append(checkpoint)
+                }
+            case nil:
+                break
+            }
+        }
+        return history
+    }
+
+    /// Plain-language read of the training trend — prefers the val curve
+    /// (generalization); falls back to train.
+    static func lossTrend(_ history: MLXLossHistory) -> String {
+        let series = history.val.count >= 2 ? history.val : history.train
+        let usingVal = history.val.count >= 2
+        guard let first = series.first, let last = series.last, series.count >= 2 else {
+            return "Waiting for the first loss numbers…"
+        }
+        let label = usingVal ? "Validation loss" : "Training loss"
+        if last.loss <= first.loss * 0.9 {
+            return
+                "\(label) is falling (\(formatNumber(first.loss)) → \(formatNumber(last.loss))) — the model is learning."
+        }
+        if last.loss >= first.loss * 1.1 {
+            return
+                "\(label) is rising (\(formatNumber(first.loss)) → \(formatNumber(last.loss))) — the learning rate may be too high, or it's overfitting."
+        }
+        return
+            "\(label) is roughly flat (\(formatNumber(last.loss))) — it may be done, or the learning rate is too low."
+    }
+
+    // MARK: Dataset assistant (WS-M4)
+
+    /// Validate a JSONL dataset SAMPLE (first `sampleLimit` records). Detects the
+    /// format via `mlx_lm`'s real precedence (prompt+completion > messages > text)
+    /// and reports problems by LINE NUMBER + KIND ONLY — never record content
+    /// (SPEC §0 / inv. 12). Blank lines are allowed and skipped.
+    static func validateDataset(_ data: Data, sampleLimit: Int = 100) -> MLXDatasetReport {
+        let text = String(decoding: data, as: UTF8.self)
+        var report = MLXDatasetReport(format: nil, recordCount: 0, errors: [])
+        var detected: MLXDatasetFormat?
+        var lineNumber = 0
+        for rawLine in text.split(separator: "\n", omittingEmptySubsequences: false) {
+            lineNumber += 1
+            let line = String(rawLine).trimmingCharacters(in: .whitespaces)
+            if line.isEmpty { continue }
+            if report.recordCount >= sampleLimit { break }
+            guard
+                let object = try? JSONSerialization.jsonObject(with: Data(line.utf8))
+                    as? [String: Any]
+            else {
+                report.errors.append(MLXDatasetError(line: lineNumber, kind: "not a JSON object"))
+                continue
+            }
+            let format: MLXDatasetFormat?
+            if object["prompt"] != nil, object["completion"] != nil {
+                format = .completions
+            } else if object["messages"] != nil {
+                format = .chat
+            } else if object["text"] != nil {
+                format = .text
+            } else {
+                format = nil
+            }
+            guard let format else {
+                report.errors.append(
+                    MLXDatasetError(
+                        line: lineNumber,
+                        kind: "no \"prompt\"+\"completion\", \"messages\", or \"text\" key"))
+                continue
+            }
+            if let detected, detected != format {
+                report.errors.append(
+                    MLXDatasetError(
+                        line: lineNumber,
+                        kind: "\(format.rawValue) record in a \(detected.rawValue) file"))
+            } else if detected == nil {
+                detected = format
+            }
+            report.recordCount += 1
+        }
+        report.format = detected
+        return report
+    }
+
+    /// An example JSONL record for each accepted format (the schema, not the
+    /// user's data).
+    static func datasetTemplate(_ format: MLXDatasetFormat) -> String {
+        switch format {
+        case .completions:
+            return """
+                {"prompt": "Translate to French: Good morning", "completion": "Bonjour"}
+                {"prompt": "Capital of Japan?", "completion": "Tokyo"}
+                """
+        case .chat:
+            return """
+                {"messages": [{"role": "user", "content": "Who wrote Dune?"}, {"role": "assistant", "content": "Frank Herbert."}]}
+                """
+        case .text:
+            return """
+                {"text": "A full passage the model should learn to continue or imitate."}
+                """
+        }
+    }
+
+    /// Split records into train/valid (validation taken from the TAIL, at least
+    /// one record). Blank/whitespace lines are dropped first.
+    static func splitJSONL(_ lines: [String], validFraction: Double = 0.1) -> (
+        train: [String], valid: [String]
+    ) {
+        let records = lines.map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
+        guard records.count >= 2 else { return (records, []) }
+        let fraction = min(max(validFraction, 0), 0.5)
+        let validCount = min(records.count - 1, max(1, Int((Double(records.count) * fraction).rounded())))
+        let cut = records.count - validCount
+        return (Array(records[..<cut]), Array(records[cut...]))
+    }
+
+    /// Build completions JSONL from CSV rows (`prompt,completion`, first row may be
+    /// a header). Minimal CSV: quoted fields with embedded commas/quotes handled;
+    /// rows without two columns are skipped. The user's text stays local — this is
+    /// a pure transform.
+    static func completionsFromCSV(_ csv: String) -> [String] {
+        var records: [String] = []
+        var isFirst = true
+        for rawRow in csv.split(separator: "\n", omittingEmptySubsequences: true) {
+            let fields = parseCSVRow(String(rawRow))
+            guard fields.count >= 2 else { continue }
+            let a = fields[0].trimmingCharacters(in: .whitespaces)
+            let b = fields[1].trimmingCharacters(in: .whitespaces)
+            // Skip an obvious header row.
+            if isFirst {
+                isFirst = false
+                if a.lowercased() == "prompt", b.lowercased() == "completion" { continue }
+            }
+            guard !a.isEmpty, !b.isEmpty else { continue }
+            if let data = try? JSONSerialization.data(
+                withJSONObject: ["prompt": a, "completion": b]),
+                let json = String(data: data, encoding: .utf8)
+            {
+                records.append(json)
+            }
+        }
+        return records
+    }
+
+    /// One CSV row → fields, honoring `"…"` quoting and `""` escapes.
+    private static func parseCSVRow(_ row: String) -> [String] {
+        var fields: [String] = []
+        var current = ""
+        var inQuotes = false
+        var iterator = row.makeIterator()
+        var pending = iterator.next()
+        while let char = pending {
+            pending = iterator.next()
+            if inQuotes {
+                if char == "\"" {
+                    if pending == "\"" {  // escaped quote
+                        current.append("\"")
+                        pending = iterator.next()
+                    } else {
+                        inQuotes = false
+                    }
+                } else {
+                    current.append(char)
+                }
+            } else {
+                switch char {
+                case "\"": inQuotes = true
+                case ",":
+                    fields.append(current)
+                    current = ""
+                default: current.append(char)
+                }
+            }
+        }
+        fields.append(current)
+        return fields
+    }
+
+    // MARK: Memory preflight (WS-M4)
+
+    /// A ROUGH peak-memory estimate for training — labeled an estimate everywhere
+    /// it surfaces. LoRA/DoRA load the base once plus adapter/optimizer/activation
+    /// overhead; `full` also holds gradients + optimizer state (~4× base). Nil when
+    /// the base size is unknown. Overflow-safe (clamps).
+    static func estimateTrainingPeakBytes(baseModelBytes: Int64?, fineTuneType: String) -> Int64? {
+        guard let base = baseModelBytes, base > 0 else { return nil }
+        let multiplier: Double = (fineTuneType == "full") ? 4.0 : 1.3
+        let scaled = Double(base) * multiplier
+        // `Int64(Double)` traps at/above 2^63; clamp absurd inputs to .max (which
+        // the verdict then reads as "won't fit"). 9.0e18 < Int64.max, so the
+        // conversion below is always safe.
+        guard scaled.isFinite, scaled < 9.0e18 else { return .max }
+        let overhead: Int64 = 2 << 30
+        let (sum, overflow) = Int64(scaled).addingReportingOverflow(overhead)
+        return overflow ? .max : sum
+    }
+
+    /// Compare an estimated training peak against available RAM. Every message is
+    /// hedged — this is guidance, not a guarantee.
+    static func memoryVerdict(availableBytes: Int64?, estimatedPeakBytes: Int64?)
+        -> MLXMemoryVerdict
+    {
+        let human: (Int64) -> String = { $0.formatted(.byteCount(style: .memory)) }
+        guard let peak = estimatedPeakBytes else {
+            return MLXMemoryVerdict(
+                level: .unknown,
+                message:
+                    "Base model size unknown, so the training-memory estimate can't be computed — watch the log for out-of-memory errors."
+            )
+        }
+        guard let available = availableBytes else {
+            return MLXMemoryVerdict(
+                level: .unknown,
+                message:
+                    "Estimated peak ≈ \(human(peak)) (rough). Couldn't read free memory to compare — treat as a guess."
+            )
+        }
+        let comfortableCeiling = Int64(Double(available) * 0.7)
+        if peak < comfortableCeiling {
+            return MLXMemoryVerdict(
+                level: .comfortable,
+                message:
+                    "Estimated peak ≈ \(human(peak)), and about \(human(available)) is free — comfortable. (Estimate; actual peak depends on batch × sequence length.)"
+            )
+        }
+        if peak < available {
+            return MLXMemoryVerdict(
+                level: .tight,
+                message:
+                    "Estimated peak ≈ \(human(peak)) vs about \(human(available)) free — tight. Lower batch size / layers / max sequence length, or close other apps. (Estimate.)"
+            )
+        }
+        return MLXMemoryVerdict(
+            level: .risky,
+            message:
+                "Estimated peak ≈ \(human(peak)) exceeds about \(human(available)) free — likely to run out of memory. Lower batch / layers / sequence length, stop other models, or pick a smaller base. (Estimate.)"
+        )
+    }
+
+    /// In-place explanations for the expert knobs: what it does · safe range ·
+    /// symptom when wrong. Copy only.
+    static func knobHelp(_ knob: String) -> String {
+        switch knob {
+        case "type":
+            return "LoRA trains small adapter matrices (fast, tiny files). DoRA is LoRA plus a learned magnitude (a bit better, a bit slower). Full retrains all weights (best fidelity, far more memory/time). Start with LoRA."
+        case "layers":
+            return "How many of the model's top layers to adapt. More layers = more capacity but more memory/time. Safe: 8–32; -1 means all. Too few = underfits; too many = slow / overfits."
+        case "batch":
+            return "Examples per step. Bigger = smoother, steadier loss but more memory. Safe: 1–8. Too big = out-of-memory; too small = noisy loss."
+        case "iters":
+            return "Total training steps. More = more learning, up to a point. Safe: a few hundred to a couple thousand. Too few = underfits; too many = overfits (val loss turns back up)."
+        case "learningRate":
+            return "How big each update is. Safe: 1e-5 to 3e-4. Too high = loss spikes/diverges; too low = loss barely moves."
+        case "rank":
+            return "Adapter size (capacity). Safe: 4–32. Higher = more capacity + bigger adapter; too high can overfit small datasets."
+        case "scale":
+            return "How strongly the adapter is applied (alpha). Safe: 8–32. Too high can destabilize; too low weakens the effect."
+        case "dropout":
+            return "Regularization on the adapter. Safe: 0–0.1. Raise a little if it overfits (train loss ≪ val loss)."
+        case "maxSeq":
+            return "Longest example (in tokens) kept in one step. Higher fits longer examples but costs a lot of memory. Lower it first if training runs out of memory."
+        default:
+            return ""
         }
     }
 }

@@ -1,5 +1,70 @@
 # LOOP-STATE — end-to-end configuration bring-up
 
+## 2026-07-18 (MLX overhaul): WS-M4 teachable fine-tune — DONE (AC119)
+
+Suite 210/210 (green TWICE — loop 1 + loop 2; 13 new tests, ALL pure — the WS-M3
+keychain-flake lesson applied).
+Shipped the teachable fine-tune surface (new `FineTuneGuideView.swift`): Guided
+(default) / Expert modes; every expert knob explained in place (`.help`); a dataset
+assistant (schema examples, JSONL validator, CSV→train/valid builder); a live
+Swift-Charts loss curve with a plain-language trend + checkpoints; a memory
+preflight (estimate-labeled); and an after-run "Try with adapter" / guided Fuse.
+
+PREMISES VERIFIED against the installed venv (mlx-lm 0.31.3) — one FALSE (the
+AC116/AC118 track record):
+
+- **Loss/checkpoint format — plan was STALE.** The plan's `Iter N: Train loss …`
+  does not exist in 0.31.3. Captured from a REAL tiny LoRA run through a pipe:
+  `mlx_lm.lora`'s trainer uses a rich-console UI that emits ANSI color EVEN off a
+  TTY. Real lines (ANSI-stripped): train `<iter> <loss> ▼/▲ <tok/s> <tokens>k`, val
+  `<iter> val <loss> <time>s`, save `save <NNNNNNN>_adapters.safetensors`. The
+  parser strips ANSI (a state machine, no Regex) then reads iter+loss; the ▼/▲
+  trend arrow marks a train row. Real lines frozen as fixtures.
+- **CLI/YAML:** `lora` fine_tune_type choices are [lora, dora, full] — DoRA EXISTS
+  (`tuner/dora.py`). Keys verified in CONFIG_DEFAULTS; added save_every /
+  steps_per_eval / max_seq_length / grad_checkpoint; `full` omits lora_parameters.
+- **Dataset formats:** read `tuner/datasets.py` — precedence is completions
+  (prompt+completion) > chat (messages) > text; files train/valid/test.jsonl. The
+  validator mirrors that precedence and reports line + kind ONLY, never record
+  content (SPEC §0 / inv. 12).
+- **Try-with-adapter:** `generate --adapter-path` CONFIRMED — the adapter made
+  SmolLM2 answer "Widget 3 is amber." (a fact only the synthetic training data
+  taught), peak 0.312 GB.
+- **Memory:** available RAM = `host_statistics64` (free+inactive+purgeable+
+  speculative) × `getpagesize()`, LABELED an estimate; peak = base × (1.3 LoRA/DoRA
+  · 4.0 full) + 2 GB, overflow-safe; "stop the server" is offered ONLY for a
+  Huginn-managed server — a detached/foreign server shows up as pressure Huginn
+  can't control (implicit in the available-RAM figure).
+
+ACCEPTANCE RUN (dev-time, the plan's requirement): `python -m mlx_lm lora --config
+ft.yaml --train` on mlx-community/SmolLM2-135M-Instruct, 30 iters · batch 2 · 4
+layers · LoRA rank 8 · lr 1e-4 · steps_per_report 5 · steps_per_eval 10 · save_every
+10. Trainable 0.242% (0.326M/134.515M). Val loss 4.073 (it1) → 0.803 (10) → 0.203
+(20) → 0.264 (30) — it LEARNED. Adapters + 0000010/20/30 checkpoints saved; exit 0;
+seconds of compute. :1337 brain untouched.
+
+Perf/discipline: `lossHistory` is dedupe-guarded, re-parsed per coalesced flush,
+published only on a NEW point (sparse — well under 4 Hz); the loss chart is its own
+Equatable child; guided/expert are @State-driven; the fine-tune section re-renders
+only on its inputs. Jobs stay exclusive (AC103f); the preflight is a button, before
+the job. SPEC §0: the dataset assistant never touches chat history / memory.
+
+LOOP-2 (adversarial) CAUGHT + fixed: (1) the dataset-count copy over-claimed the
+file total for sampled files → "records checked / first N / a sample"; (2) the
+CSV-import write used `try?` yet claimed success → do/catch, honest failure; (3) the
+loss chart was wiped by ANY job start → reset scoped to fine-tune only (a download /
+Playground generate no longer erases the last run's curve); (4) `estimateTrainingPeakBytes`
+could `Int64(Double)`-trap on an absurd base → clamp (AC116/AC118 trap discipline);
+(5) strengthened the loraConfigYAML test to pin LINE STRUCTURE — the plain
+contains-checks were blind to a multiline trailing-newline / concatenation trap
+(verified NOT present, now pinned).
+
+NEEDS OWNER: on-device feel of the guided flow / loss chart / dataset assistant /
+memory card; the preflight numbers are estimates; a real GUIDED-mode LoRA run
+through the app UI (the CLI acceptance run proves the pipeline; the UI wiring is
+unit-tested). WS-M4 is the last of the fine-tune scope; WS-M5 (demotion + docs
+riders) remains.
+
 ## 2026-07-18 (MLX overhaul): WS-M3 model library polish — DONE (AC118)
 
 Suite 197/197, green on TWO consecutive full runs (21 new tests). Shipped in the

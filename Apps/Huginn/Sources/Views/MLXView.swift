@@ -24,8 +24,22 @@ struct MLXView: View {
     /// Cross-section state: the Models section's "Try" seeds the Playground model.
     @State private var playModel = ""
     @State private var playModelSeeded = false
+    /// Cross-section state: the fine-tune after-run "Try with adapter" seeds the
+    /// Playground adapter (WS-M4).
+    @State private var playAdapter = ""
     /// Cross-section state: rows request deletion; the dialog presents Form-wide.
     @State private var deleteCandidate: MLXCachedModel?
+
+    /// Whether a Huginn-MANAGED server is up (the only server the fine-tune memory
+    /// preflight may offer to stop; a detached/foreign server isn't Huginn's).
+    private var managedServerRunning: Bool {
+        guard service.managesServer else { return false }
+        if service.autostartEnabled { return service.probeStatus.isReachable }
+        switch service.serverState {
+        case .running, .starting: return true
+        default: return false
+        }
+    }
 
     var body: some View {
         Form {
@@ -85,13 +99,21 @@ struct MLXView: View {
                 serverModel: service.serverConfig.model,
                 pane: service.jobPaneState(for: [.generate]),
                 playModel: $playModel,
-                playModelValue: playModel)
+                playModelValue: playModel,
+                playAdapter: $playAdapter,
+                playAdapterValue: playAdapter)
             MLXFineTuneSection(
                 service: service,
                 envReady: service.envState.isReady,
                 jobRunning: service.activeJob != nil,
                 fineTunePane: service.jobPaneState(for: [.finetune]),
-                fusePane: service.jobPaneState(for: [.fuse]))
+                fusePane: service.jobPaneState(for: [.fuse]),
+                lossHistory: service.lossHistory,
+                cachedModels: service.cachedModels,
+                managedServerRunning: managedServerRunning,
+                serverMemoryBytes: service.serverMemoryBytes,
+                playModel: $playModel,
+                playAdapter: $playAdapter)
         }
         .formStyle(.grouped)
         .frame(maxWidth: 1100, alignment: .leading)
@@ -1121,12 +1143,15 @@ private struct MLXPlaygroundSection: View, Equatable {
     /// MLXServerSection.currentConfig) — the field must re-render when the Models
     /// section's "Try" writes the shared state.
     let playModelValue: String
+    /// Shared with the fine-tune after-run "Try with adapter" (WS-M4), same pattern
+    /// as playModel: a binding to write + a value copy for the nonisolated `==`.
+    @Binding var playAdapter: String
+    let playAdapterValue: String
 
     @State private var playPrompt = ""
     @State private var playMaxTokens = 512
     @State private var playTemperature = ""
     @State private var playTopP = ""
-    @State private var playAdapter = ""
     // KV-cache controls (WS-M1): generate is where mlx_lm's quantized-KV flags
     // actually exist (the server has none — verified against 0.31.3).
     @State private var playKVBits: Int?
@@ -1138,6 +1163,7 @@ private struct MLXPlaygroundSection: View, Equatable {
         lhs.envReady == rhs.envReady && lhs.jobRunning == rhs.jobRunning
             && lhs.serverModel == rhs.serverModel && lhs.pane == rhs.pane
             && lhs.playModelValue == rhs.playModelValue
+            && lhs.playAdapterValue == rhs.playAdapterValue
     }
 
     var body: some View {
@@ -1246,143 +1272,33 @@ private struct MLXFineTuneSection: View, Equatable {
     let jobRunning: Bool
     let fineTunePane: MLXService.JobPaneState
     let fusePane: MLXService.JobPaneState
-
-    @State private var fineTuneConfig = MLXFineTuneConfig()
-    @State private var fuseModel = ""
-    @State private var fuseAdapters = ""
-    @State private var fuseSavePath = ""
+    let lossHistory: MLXLossHistory
+    let cachedModels: [MLXCachedModel]
+    let managedServerRunning: Bool
+    let serverMemoryBytes: Int64?
+    @Binding var playModel: String
+    @Binding var playAdapter: String
 
     nonisolated static func == (lhs: Self, rhs: Self) -> Bool {
         lhs.envReady == rhs.envReady && lhs.jobRunning == rhs.jobRunning
             && lhs.fineTunePane == rhs.fineTunePane && lhs.fusePane == rhs.fusePane
+            && lhs.lossHistory == rhs.lossHistory && lhs.cachedModels == rhs.cachedModels
+            && lhs.managedServerRunning == rhs.managedServerRunning
+            && lhs.serverMemoryBytes == rhs.serverMemoryBytes
     }
 
     var body: some View {
         Section("Fine-tune (mlx_lm.lora) + fuse") {
-            LabeledContent("Base model") {
-                HStack {
-                    TextField("mlx-community/… or /path/to/model", text: $fineTuneConfig.model)
-                        .textFieldStyle(.roundedBorder)
-                    Button("Browse…") { pickFolder { fineTuneConfig.model = $0 } }
-                }
-            }
-            LabeledContent("Data folder") {
-                HStack {
-                    TextField("folder with train.jsonl + valid.jsonl", text: $fineTuneConfig.dataDir)
-                        .textFieldStyle(.roundedBorder)
-                    Button("Browse…") { pickFolder { fineTuneConfig.dataDir = $0 } }
-                }
-            }
-            if let status = dataDirStatus {
-                Label(status.text, systemImage: status.ok ? "checkmark.circle" : "exclamationmark.triangle")
-                    .font(.caption)
-                    .foregroundStyle(status.ok ? Color.green : Color.orange)
-            }
-            LabeledContent("Adapter output") {
-                HStack {
-                    TextField("(auto — under the MLX folder)", text: $fineTuneConfig.adapterPath)
-                        .textFieldStyle(.roundedBorder)
-                    Button("Choose…") {
-                        pickSaveLocation(defaultName: "adapters") { fineTuneConfig.adapterPath = $0 }
-                    }
-                }
-            }
-            Picker("Type", selection: $fineTuneConfig.fineTuneType) {
-                Text("LoRA").tag("lora")
-                Text("DoRA").tag("dora")
-                Text("Full").tag("full")
-            }
-            .pickerStyle(.segmented).frame(maxWidth: 240)
-            HStack(spacing: 16) {
-                Stepper("Layers: \(fineTuneConfig.numLayers)", value: $fineTuneConfig.numLayers, in: 1...128)
-                Stepper("Batch: \(fineTuneConfig.batchSize)", value: $fineTuneConfig.batchSize, in: 1...32)
-            }
-            HStack(spacing: 16) {
-                LabeledContent("Iterations") {
-                    TextField("600", value: $fineTuneConfig.iters, format: .number.grouping(.never))
-                        .textFieldStyle(.roundedBorder).frame(width: 80)
-                }
-                LabeledContent("Learning rate") {
-                    TextField("1e-5", value: $fineTuneConfig.learningRate, format: .number)
-                        .textFieldStyle(.roundedBorder).frame(width: 100)
-                }
-            }
-            if fineTuneConfig.fineTuneType != "full" {
-                HStack(spacing: 16) {
-                    LabeledContent("Rank") {
-                        TextField("8", value: $fineTuneConfig.loraRank, format: .number.grouping(.never))
-                            .textFieldStyle(.roundedBorder).frame(width: 60)
-                    }
-                    LabeledContent("Scale") {
-                        TextField("20", value: $fineTuneConfig.loraScale, format: .number)
-                            .textFieldStyle(.roundedBorder).frame(width: 60)
-                    }
-                    LabeledContent("Dropout") {
-                        TextField("0", value: $fineTuneConfig.loraDropout, format: .number)
-                            .textFieldStyle(.roundedBorder).frame(width: 60)
-                    }
-                }
-            }
-            HStack {
-                Button("Start fine-tune") { service.startFineTune(fineTuneConfig) }
-                    .disabled(jobRunning || !envReady)
-                Spacer()
-                Text("Live train/val loss streams below; Cancel stops the run (adapters checkpoint as they go).")
-                    .font(.caption).foregroundStyle(.secondary)
-            }
-            MLXJobPane(service: service, state: fineTunePane)
-
-            Divider()
-
-            Text("Fuse — bake trained adapters into a standalone model (usable in the sections above).")
-                .font(.caption).foregroundStyle(.secondary)
-            LabeledContent("Model") {
-                HStack {
-                    TextField("base model", text: $fuseModel).textFieldStyle(.roundedBorder)
-                    Button("From fine-tune") {
-                        fuseModel = fineTuneConfig.model
-                        fuseAdapters = fineTuneConfig.adapterPath
-                    }
-                    .disabled(fineTuneConfig.model.isEmpty)
-                }
-            }
-            LabeledContent("Adapters") {
-                HStack {
-                    TextField("adapter folder", text: $fuseAdapters).textFieldStyle(.roundedBorder)
-                    Button("Browse…") { pickFolder { fuseAdapters = $0 } }
-                }
-            }
-            LabeledContent("Save to") {
-                HStack {
-                    TextField("new folder for the fused model", text: $fuseSavePath)
-                        .textFieldStyle(.roundedBorder)
-                    Button("Choose…") {
-                        pickSaveLocation(defaultName: "fused-model") { fuseSavePath = $0 }
-                    }
-                }
-            }
-            HStack {
-                Button("Fuse") {
-                    service.startFuse(model: fuseModel, adapterPath: fuseAdapters, savePath: fuseSavePath)
-                }
-                .disabled(jobRunning || !envReady)
-                Spacer()
-            }
-            MLXJobPane(service: service, state: fusePane)
+            // WS-M4: guided/expert modes, dataset assistant, memory preflight, live
+            // loss chart, after-run try/fuse — all in FineTuneGuideView (its own
+            // file). This section stays a narrow Equatable wrapper.
+            FineTuneGuideView(
+                service: service, envReady: envReady, jobRunning: jobRunning,
+                fineTunePane: fineTunePane, fusePane: fusePane,
+                lossHistory: lossHistory, cachedModels: cachedModels,
+                managedServerRunning: managedServerRunning, serverMemoryBytes: serverMemoryBytes,
+                playModel: $playModel, playAdapter: $playAdapter)
         }
-    }
-
-    private var dataDirStatus: (ok: Bool, text: String)? {
-        let dir = fineTuneConfig.dataDir.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !dir.isEmpty else { return nil }
-        let fm = FileManager.default
-        let train = fm.fileExists(atPath: (dir as NSString).appendingPathComponent("train.jsonl"))
-        let valid = fm.fileExists(atPath: (dir as NSString).appendingPathComponent("valid.jsonl"))
-        if train && valid { return (true, "train.jsonl and valid.jsonl found") }
-        var missing: [String] = []
-        if !train { missing.append("train.jsonl") }
-        if !valid { missing.append("valid.jsonl") }
-        return (false, "Missing \(missing.joined(separator: " and ")) in that folder")
     }
 }
 
@@ -1392,7 +1308,8 @@ private struct MLXFineTuneSection: View, Equatable {
 /// label afterwards, and the terminal output whenever the (already
 /// section-filtered) window is non-empty. Equatable on the pane state alone so a
 /// job streaming in one section never re-lays-out the others.
-private struct MLXJobPane: View, Equatable {
+/// Internal so FineTuneGuideView (a separate file) reuses it.
+struct MLXJobPane: View, Equatable {
     let service: MLXService
     let state: MLXService.JobPaneState
 
@@ -1456,8 +1373,9 @@ private func parseDouble(_ raw: String) -> Double? {
     Double(raw.replacingOccurrences(of: ",", with: ".").trimmingCharacters(in: .whitespaces))
 }
 
+// Internal (not private) so FineTuneGuideView (a separate file) reuses them.
 @MainActor
-private func pickFolder(_ assign: @escaping (String) -> Void) {
+func pickFolder(_ assign: @escaping (String) -> Void) {
     let panel = NSOpenPanel()
     panel.canChooseDirectories = true
     panel.canChooseFiles = false
@@ -1474,12 +1392,24 @@ private func pickFolder(_ assign: @escaping (String) -> Void) {
 /// Pick a NEW folder location (the mlx tools create it; convert refuses an
 /// existing one).
 @MainActor
-private func pickSaveLocation(defaultName: String, _ assign: @escaping (String) -> Void) {
+func pickSaveLocation(defaultName: String, _ assign: @escaping (String) -> Void) {
     let panel = NSSavePanel()
     panel.canCreateDirectories = true
     panel.showsHiddenFiles = true
     panel.treatsFilePackagesAsDirectories = true
     panel.nameFieldStringValue = defaultName
     panel.prompt = "Choose"
+    if panel.runModal() == .OK, let url = panel.url { assign(url.path) }
+}
+
+/// Pick an existing FILE (dataset validation, CSV/text import for the assistant).
+@MainActor
+func pickFile(_ assign: @escaping (String) -> Void) {
+    let panel = NSOpenPanel()
+    panel.canChooseDirectories = false
+    panel.canChooseFiles = true
+    panel.allowsMultipleSelection = false
+    panel.showsHiddenFiles = true
+    panel.prompt = "Select"
     if panel.runModal() == .OK, let url = panel.url { assign(url.path) }
 }

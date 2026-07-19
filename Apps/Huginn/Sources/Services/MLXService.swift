@@ -175,6 +175,12 @@ final class MLXService: ObservableObject {
     /// Dedupe-guarded like all published state — a redraw only on a real change.
     @Published private(set) var downloadProgress: MLXDownloadProgress?
 
+    /// WS-M4: the fine-tune run's parsed loss curves + checkpoints, rebuilt from
+    /// the job log on each coalesced flush and published only when it CHANGES (loss
+    /// lines are sparse — every `steps_per_report` iters — so this is far below
+    /// 4 Hz in practice).
+    @Published private(set) var lossHistory = MLXLossHistory()
+
     // MARK: - Paths / plumbing
 
     nonisolated let mlxDir: String
@@ -1184,6 +1190,29 @@ final class MLXService: ObservableObject {
             .volumeAvailableCapacityForImportantUsage
     }
 
+    /// Best-effort "available RAM" for the WS-M4 memory preflight: (free +
+    /// inactive + purgeable + speculative) pages × page size — roughly what
+    /// Activity Monitor calls available. It is an ESTIMATE (macOS compresses and
+    /// reclaims under pressure); the UI always labels it so. `mach`, no subprocess.
+    nonisolated static func availableMemoryBytes() -> Int64? {
+        var stats = vm_statistics64_data_t()
+        var count = mach_msg_type_number_t(
+            MemoryLayout<vm_statistics64_data_t>.stride / MemoryLayout<integer_t>.stride)
+        let result = withUnsafeMutablePointer(to: &stats) { pointer in
+            pointer.withMemoryRebound(to: integer_t.self, capacity: Int(count)) {
+                host_statistics64(mach_host_self(), HOST_VM_INFO64, $0, &count)
+            }
+        }
+        guard result == KERN_SUCCESS else { return nil }
+        // `getpagesize()` (a function) instead of the `vm_page_size` global var,
+        // which is not concurrency-safe under Swift 6 strict concurrency.
+        let pageSize = Int64(getpagesize())
+        let pages =
+            Int64(stats.free_count) + Int64(stats.inactive_count)
+            + Int64(stats.purgeable_count) + Int64(stats.speculative_count)
+        return pages * pageSize
+    }
+
     /// Best-effort true download size from the HF file tree (sum of file sizes).
     /// Nil (⇒ size unknown, guard uses the floor) on any network/HTTP/decoding
     /// failure — never fatal to a download the user asked for.
@@ -1338,6 +1367,9 @@ final class MLXService: ObservableObject {
         jobLogKind = kind
         lastJobResult = nil
         if downloadProgress != nil { downloadProgress = nil }
+        // Only a NEW fine-tune clears the loss chart — an unrelated job (e.g. a
+        // download or a Playground generate) must not wipe the last run's curve.
+        if kind == .finetune, !lossHistory.isEmpty { lossHistory = MLXLossHistory() }
         Self.log.info("MLX job started: \(kind.rawValue, privacy: .public)")
         diagnostics.record(.mlx, .info, "\(title) started")
         jobTask = Task { [weak self] in
@@ -1407,6 +1439,15 @@ final class MLXService: ObservableObject {
         pendingJobLogChunk = ""
         jobLogWindow = Self.window(of: jobLog.lines)
         if jobLogKind == .download { updateDownloadProgress() }
+        if jobLogKind == .finetune { updateLossHistory() }
+    }
+
+    /// Rebuild the loss history from the fine-tune log and publish only on change
+    /// (WS-M0 hygiene). Full re-parse is cheap: the buffer is bounded (2 000
+    /// lines) and only a handful are loss rows.
+    private func updateLossHistory() {
+        let parsed = MLXCommand.parseLossHistory(fromLines: jobLog.lines)
+        if parsed != lossHistory { lossHistory = parsed }
     }
 
     /// Publish the latest tqdm frame from the download log (pure pick in
