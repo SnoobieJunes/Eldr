@@ -1008,6 +1008,18 @@ enum MLXCommand {
             return "Waiting for the first loss numbers…"
         }
         let label = usingVal ? "Validation loss" : "Training loss"
+        // Overfit turnaround: the val curve bottomed out at an interior minimum and
+        // is climbing again — the checkpoint nearest the minimum is the one to
+        // keep. Val only (train loss bounces normally), else a first-vs-last read
+        // would call a 4.0→0.2→0.35 run "learning" while it's already overfitting.
+        if usingVal, series.count >= 3,
+            let minPoint = series.min(by: { $0.loss < $1.loss }),
+            minPoint.iter > first.iter, minPoint.iter < last.iter,
+            last.loss > minPoint.loss * 1.15
+        {
+            return
+                "Validation loss bottomed at \(formatNumber(minPoint.loss)) around iter \(minPoint.iter) and is rising again — likely overfitting; prefer the checkpoint nearest iter \(minPoint.iter)."
+        }
         if last.loss <= first.loss * 0.9 {
             return
                 "\(label) is falling (\(formatNumber(first.loss)) → \(formatNumber(last.loss))) — the model is learning."
@@ -1022,6 +1034,16 @@ enum MLXCommand {
 
     // MARK: Dataset assistant (WS-M4)
 
+    /// Split into lines treating LF, CRLF, and lone CR as separators. Swift's
+    /// `split(separator: "\n")` does NOT split CRLF text — "\r\n" is a single
+    /// grapheme cluster, so a Windows-origin file would arrive as ONE "line" and
+    /// validate as garbage (review-pass catch, proven by test before the fix).
+    private static func splitLines(_ text: String, omittingEmpty: Bool) -> [Substring] {
+        text.split(
+            omittingEmptySubsequences: omittingEmpty,
+            whereSeparator: { $0 == "\n" || $0 == "\r\n" || $0 == "\r" })
+    }
+
     /// Validate a JSONL dataset SAMPLE (first `sampleLimit` records). Detects the
     /// format via `mlx_lm`'s real precedence (prompt+completion > messages > text)
     /// and reports problems by LINE NUMBER + KIND ONLY — never record content
@@ -1031,9 +1053,10 @@ enum MLXCommand {
         var report = MLXDatasetReport(format: nil, recordCount: 0, errors: [])
         var detected: MLXDatasetFormat?
         var lineNumber = 0
-        for rawLine in text.split(separator: "\n", omittingEmptySubsequences: false) {
+        for rawLine in splitLines(text, omittingEmpty: false) {
             lineNumber += 1
-            let line = String(rawLine).trimmingCharacters(in: .whitespaces)
+            // `.whitespacesAndNewlines` so mixed endings can't leave a stray \r.
+            let line = String(rawLine).trimmingCharacters(in: .whitespacesAndNewlines)
             if line.isEmpty { continue }
             if report.recordCount >= sampleLimit { break }
             guard
@@ -1074,6 +1097,28 @@ enum MLXCommand {
         return report
     }
 
+    /// Read at most `limit` bytes of a file for validation sampling — a picked
+    /// train.jsonl can be gigabytes, and `Data(contentsOf:)` would balloon memory
+    /// (review-pass catch). When the file is bigger than the window, the sample is
+    /// cut at the last complete line so a mid-record truncation can't masquerade
+    /// as a corrupt record. Nil when the file can't be opened.
+    static func boundedSample(fileAt path: String, limit: Int = 4 << 20) -> (
+        data: Data, truncated: Bool
+    )? {
+        guard let handle = FileHandle(forReadingAtPath: path) else { return nil }
+        defer { try? handle.close() }
+        // At EOF `read(upToCount:)` reports nil — an empty file is a valid, empty
+        // sample, not a read failure.
+        let read = (try? handle.read(upToCount: limit + 1)) ?? nil
+        var data = read ?? Data()
+        guard data.count > limit else { return (data, false) }
+        data.removeLast()
+        if let lastNewline = data.lastIndex(of: UInt8(ascii: "\n")) {
+            data = Data(data.prefix(through: lastNewline))
+        }
+        return (data, true)
+    }
+
     /// An example JSONL record for each accepted format (the schema, not the
     /// user's data).
     static func datasetTemplate(_ format: MLXDatasetFormat) -> String {
@@ -1099,7 +1144,8 @@ enum MLXCommand {
     static func splitJSONL(_ lines: [String], validFraction: Double = 0.1) -> (
         train: [String], valid: [String]
     ) {
-        let records = lines.map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
+        let records = lines.map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
         guard records.count >= 2 else { return (records, []) }
         let fraction = min(max(validFraction, 0), 0.5)
         let validCount = min(records.count - 1, max(1, Int((Double(records.count) * fraction).rounded())))
@@ -1109,30 +1155,41 @@ enum MLXCommand {
 
     /// Build completions JSONL from CSV rows (`prompt,completion`, first row may be
     /// a header). Minimal CSV: quoted fields with embedded commas/quotes handled;
-    /// rows without two columns are skipped. The user's text stays local — this is
-    /// a pure transform.
-    static func completionsFromCSV(_ csv: String) -> [String] {
+    /// multi-line quoted cells are NOT (one row per line). Rows that don't yield
+    /// two non-empty columns are counted in `skippedRows` so the UI can say so
+    /// honestly instead of dropping them silently. The user's text stays local —
+    /// this is a pure transform.
+    static func completionsFromCSV(_ csv: String) -> (records: [String], skippedRows: Int) {
         var records: [String] = []
+        var skipped = 0
         var isFirst = true
-        for rawRow in csv.split(separator: "\n", omittingEmptySubsequences: true) {
+        for rawRow in splitLines(csv, omittingEmpty: true) {
             let fields = parseCSVRow(String(rawRow))
-            guard fields.count >= 2 else { continue }
-            let a = fields[0].trimmingCharacters(in: .whitespaces)
-            let b = fields[1].trimmingCharacters(in: .whitespaces)
+            // `.whitespacesAndNewlines`: belt-and-suspenders for mixed endings a
+            // quoted field can still smuggle to a field edge.
+            let a =
+                fields.isEmpty ? "" : fields[0].trimmingCharacters(in: .whitespacesAndNewlines)
+            let b =
+                fields.count < 2 ? "" : fields[1].trimmingCharacters(in: .whitespacesAndNewlines)
             // Skip an obvious header row.
             if isFirst {
                 isFirst = false
                 if a.lowercased() == "prompt", b.lowercased() == "completion" { continue }
             }
-            guard !a.isEmpty, !b.isEmpty else { continue }
+            guard fields.count >= 2, !a.isEmpty, !b.isEmpty else {
+                skipped += 1
+                continue
+            }
             if let data = try? JSONSerialization.data(
                 withJSONObject: ["prompt": a, "completion": b]),
                 let json = String(data: data, encoding: .utf8)
             {
                 records.append(json)
+            } else {
+                skipped += 1
             }
         }
-        return records
+        return (records, skipped)
     }
 
     /// One CSV row → fields, honoring `"…"` quoting and `""` escapes.
@@ -1355,8 +1412,9 @@ enum HFCache {
 
     /// One file walk yielding both the on-disk size (regular files only; symlinks
     /// excluded so snapshot trees don't double-count) AND the newest access time
-    /// (blob atime — HF's "last used"). Combining them means the atime read costs
-    /// no extra traversal.
+    /// across WEIGHT-CLASS files (≥ 1 MiB — weight shards, tokenizer blobs: what a
+    /// real load reads). Combining them means the atime read costs no extra
+    /// traversal.
     static func directoryUsage(_ path: String) -> (bytes: Int64, lastUsed: Date?) {
         let url = URL(fileURLWithPath: path)
         let keys: [URLResourceKey] = [
@@ -1373,8 +1431,14 @@ enum HFCache {
                 values.isSymbolicLink != true,
                 values.isRegularFile == true
             else { continue }
-            total += Int64(values.fileSize ?? 0)
-            if let accessed = values.contentAccessDate,
+            let size = Int64(values.fileSize ?? 0)
+            total += size
+            // "Last used" tracks weight-class files ONLY (≥ 1 MiB). Small metadata
+            // (config.json, ~1 KB) is read by the library scan ITSELF (quantLabel
+            // follows the snapshot symlink to the blob), which bumps its atime —
+            // including it would turn every model's "last used" into "when the
+            // library last refreshed" from the second scan on (review-pass catch).
+            if size >= 1 << 20, let accessed = values.contentAccessDate,
                 lastUsed.map({ accessed > $0 }) ?? true
             {
                 lastUsed = accessed

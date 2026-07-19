@@ -174,6 +174,10 @@ final class MLXService: ObservableObject {
     /// parsed from the tqdm line in the job log while a `.download` job runs.
     /// Dedupe-guarded like all published state — a redraw only on a real change.
     @Published private(set) var downloadProgress: MLXDownloadProgress?
+    /// Non-nil while the pre-download size/disk check runs — the HF tree lookup
+    /// can take seconds, and without this the button tap looked dead (and a second
+    /// tap raced into a confusing "another task is running") (review-pass catch).
+    @Published private(set) var downloadPreflight: String?
 
     /// WS-M4: the fine-tune run's parsed loss curves + checkpoints, rebuilt from
     /// the job log on each coalesced flush and published only when it CHANGES (loss
@@ -1146,6 +1150,9 @@ final class MLXService: ObservableObject {
             modelsError = "Another MLX task is still running — wait for it or cancel it first."
             return
         }
+        // A preflight is already in flight (the button is disabled; this catches
+        // the race of a tap landing before the publish) — drop the duplicate.
+        guard downloadPreflight == nil else { return }
         modelsError = nil
         Task { [weak self] in await self?.beginDownload(trimmed) }
     }
@@ -1155,8 +1162,11 @@ final class MLXService: ObservableObject {
     /// guard decide. Runs off the main flow so the network lookup doesn't block the
     /// button; the job's own exclusivity is re-checked after the await.
     private func beginDownload(_ repoID: String) async {
+        downloadPreflight = "Checking size and free disk space…"
+        defer { if downloadPreflight != nil { downloadPreflight = nil } }
         let free = Self.volumeFreeBytes(atPath: cacheDir)
         let size = await Self.fetchDownloadSize(repoID: repoID)
+        var lowDiskWarning: String?
         switch MLXCommand.downloadDiskGuard(freeBytes: free, estimatedBytes: size) {
         case .block(let message):
             modelsError = message
@@ -1164,6 +1174,7 @@ final class MLXService: ObservableObject {
             return
         case .warn(let message):
             modelsError = message
+            lowDiskWarning = message
             diagnostics.record(.mlx, .warn, "Download proceeding on low disk", message)
         case .ok:
             break
@@ -1175,7 +1186,15 @@ final class MLXService: ObservableObject {
         let python = venvPython
         startJob(
             .download, "Download \(repoID)",
-            onFinish: { [weak self] _ in self?.refreshCachedModels() }
+            onFinish: { [weak self] success in
+                // The low-disk caution was about THIS download; once it has
+                // succeeded, leaving it up reads as a stale error (review-pass
+                // catch). A different message (a real failure) is left alone.
+                if success, let lowDiskWarning, self?.modelsError == lowDiskWarning {
+                    self?.modelsError = nil
+                }
+                self?.refreshCachedModels()
+            }
         ) { [self] in
             try await runJobStep(python, MLXCommand.downloadArguments(repoID: repoID))
         }
@@ -1207,9 +1226,13 @@ final class MLXService: ObservableObject {
         // `getpagesize()` (a function) instead of the `vm_page_size` global var,
         // which is not concurrency-safe under Swift 6 strict concurrency.
         let pageSize = Int64(getpagesize())
+        // `free_count` already INCLUDES speculative pages (that's why `vm_stat`
+        // SUBTRACTS speculative to display "Pages free" — verified against vm_stat
+        // on this Mac). Adding speculative_count again would double-count toward
+        // optimism, the wrong direction for an OOM preflight (review-pass catch).
         let pages =
             Int64(stats.free_count) + Int64(stats.inactive_count)
-            + Int64(stats.purgeable_count) + Int64(stats.speculative_count)
+            + Int64(stats.purgeable_count)
         return pages * pageSize
     }
 

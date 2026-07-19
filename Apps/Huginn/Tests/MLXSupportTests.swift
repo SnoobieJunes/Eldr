@@ -1343,16 +1343,29 @@ struct MLXCacheMetadataTests {
         let configData = Data("{\"quantization\":{\"bits\":4}}".utf8)
         try configData.write(
             to: URL(fileURLWithPath: (snap as NSString).appendingPathComponent("config.json")))
-        try Data(repeating: 7, count: 42).write(
+        // Weight-class file (≥ 1 MiB): the ONLY thing "last used" may read from —
+        // small metadata's atime is bumped by the scan itself (the quantLabel
+        // read), which would turn "last used" into "last refreshed".
+        let weightCount = (1 << 20) + 1
+        try Data(repeating: 7, count: weightCount).write(
             to: URL(fileURLWithPath: (snap as NSString).appendingPathComponent("model.safetensors")))
 
+        // A second cached model with ONLY small files must report no "last used".
+        let smallEntry = (root as NSString).appendingPathComponent("models--x--SmallOnly")
+        let smallSnap = (smallEntry as NSString).appendingPathComponent("snapshots/def")
+        try fm.createDirectory(atPath: smallSnap, withIntermediateDirectories: true)
+        try Data("{}".utf8).write(
+            to: URL(fileURLWithPath: (smallSnap as NSString).appendingPathComponent("config.json")))
+
         let models = HFCache.scanModels(cacheDir: root)
-        let model = try #require(models.first)
-        #expect(model.repoID == "mlx-community/Q")
+        #expect(models.count == 2)
+        let model = try #require(models.first { $0.repoID == "mlx-community/Q" })
         #expect(model.quant == "4-bit")
-        // Files were just written, so atime is present on this volume.
+        // The weight file was just written, so its atime is present on this volume.
         #expect(model.lastUsed != nil)
-        #expect(model.sizeBytes == Int64(42 + configData.count))
+        #expect(model.sizeBytes == Int64(weightCount + configData.count))
+        let smallOnly = try #require(models.first { $0.repoID == "x/SmallOnly" })
+        #expect(smallOnly.lastUsed == nil)
     }
 }
 
@@ -1529,10 +1542,13 @@ struct MLXDatasetAssistantTests {
             Bye,Au revoir
             """
         let built = MLXCommand.completionsFromCSV(csv)
-        #expect(built.count == 2)  // header skipped
-        #expect(built[0].contains("Bonjour, ami"))
+        #expect(built.records.count == 2)  // header skipped
+        #expect(built.skippedRows == 0)
+        #expect(built.records[0].contains("Bonjour, ami"))
         // Each built row is valid JSON with the right keys.
-        let obj = try? JSONSerialization.jsonObject(with: Data(built[0].utf8)) as? [String: String]
+        let obj =
+            try? JSONSerialization.jsonObject(with: Data(built.records[0].utf8))
+            as? [String: String]
         #expect(obj?["prompt"] == "Hello")
         #expect(obj?["completion"] == "Bonjour, ami")
     }
@@ -1586,5 +1602,75 @@ struct MLXMemoryPreflightTests {
         #expect(
             MLXCommand.memoryVerdict(availableBytes: 64 * gib, estimatedPeakBytes: 10 * gib)
                 .message.contains("Estimate"))
+    }
+}
+
+// Review-pass fixes over WS-M3/WS-M4 (AC120): CRLF honesty, skipped-row counts,
+// the overfit-turnaround trend, and the bounded validation sample.
+
+@Suite("MLX review-pass fixes (WS-M3/M4)")
+struct MLXReviewFixTests {
+
+    /// CRLF (Excel-style) CSVs: without trimming newlines, the header goes
+    /// unrecognized and every completion is baked with a trailing \r.
+    @Test func csvHandlesCRLFAndCountsSkippedRows() throws {
+        let csv = "prompt,completion\r\nHello,World\r\nonly-one-column\r\n"
+        let built = MLXCommand.completionsFromCSV(csv)
+        #expect(built.records.count == 1)  // header skipped, bad row counted
+        #expect(built.skippedRows == 1)
+        let obj = try #require(
+            (try? JSONSerialization.jsonObject(with: Data(built.records[0].utf8)))
+                as? [String: String])
+        #expect(obj["prompt"] == "Hello")
+        #expect(obj["completion"] == "World")  // no trailing \r
+    }
+
+    @Test func validatorAndSplitterHandleCRLF() {
+        let crlf = "{\"text\":\"a\"}\r\n{\"text\":\"b\"}\r\n"
+        let report = MLXCommand.validateDataset(Data(crlf.utf8))
+        #expect(report.recordCount == 2)
+        #expect(report.ok)
+        let split = MLXCommand.splitJSONL(["{\"text\":\"a\"}\r", "{\"text\":\"b\"}\r"])
+        #expect(split.train == ["{\"text\":\"a\"}"])
+        #expect(split.valid == ["{\"text\":\"b\"}"])
+    }
+
+    /// A val curve that bottoms out and climbs again must be called overfitting
+    /// (naming the best iter), not "learning" off a first-vs-last comparison.
+    @Test func trendFlagsOverfitTurnaround() {
+        var history = MLXLossHistory()
+        history.val = [
+            MLXLossPoint(iter: 1, loss: 4.0), MLXLossPoint(iter: 10, loss: 0.5),
+            MLXLossPoint(iter: 20, loss: 0.9),
+        ]
+        let trend = MLXCommand.lossTrend(history)
+        #expect(trend.contains("overfitting"))
+        #expect(trend.contains("iter 10"))
+        // A still-falling curve keeps the plain "learning" read.
+        history.val = [
+            MLXLossPoint(iter: 1, loss: 4.0), MLXLossPoint(iter: 10, loss: 1.0),
+            MLXLossPoint(iter: 20, loss: 0.5),
+        ]
+        #expect(MLXCommand.lossTrend(history).contains("learning"))
+    }
+
+    /// The validation sample is read bounded (a picked train.jsonl can be GBs) and
+    /// cut at a whole line so truncation can't fake a corrupt record.
+    @Test func boundedSampleCutsAtWholeLines() throws {
+        let fm = FileManager.default
+        let path = (NSTemporaryDirectory() as NSString)
+            .appendingPathComponent("eldr-sample-\(UUID().uuidString).jsonl")
+        defer { try? fm.removeItem(atPath: path) }
+        try Data("aaa\nbbb\nccc\n".utf8).write(to: URL(fileURLWithPath: path))
+
+        let full = try #require(MLXCommand.boundedSample(fileAt: path, limit: 64))
+        #expect(full.truncated == false)
+        #expect(full.data == Data("aaa\nbbb\nccc\n".utf8))
+
+        let cut = try #require(MLXCommand.boundedSample(fileAt: path, limit: 7))
+        #expect(cut.truncated)
+        #expect(cut.data == Data("aaa\n".utf8))  // whole lines only
+
+        #expect(MLXCommand.boundedSample(fileAt: path + ".missing") == nil)
     }
 }

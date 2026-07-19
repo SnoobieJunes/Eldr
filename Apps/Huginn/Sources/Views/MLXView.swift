@@ -85,6 +85,7 @@ struct MLXView: View {
                     && !service.brainSwap.isWorking,
                 pane: service.jobPaneState(for: [.download]),
                 downloadProgress: service.downloadProgress,
+                downloadPreflight: service.downloadPreflight,
                 playModel: $playModel,
                 deleteCandidate: $deleteCandidate)
             MLXConvertSection(
@@ -759,6 +760,8 @@ private struct MLXModelsSection: View, Equatable {
     let pane: MLXService.JobPaneState
     /// Live download progress (files-based percent), nil when not downloading.
     let downloadProgress: MLXDownloadProgress?
+    /// Non-nil while the pre-download size/disk check runs (disables Download).
+    let downloadPreflight: String?
     @Binding var playModel: String
     @Binding var deleteCandidate: MLXCachedModel?
 
@@ -775,6 +778,7 @@ private struct MLXModelsSection: View, Equatable {
             && lhs.jobRunning == rhs.jobRunning && lhs.pane == rhs.pane
             && lhs.brainSwapAvailable == rhs.brainSwapAvailable
             && lhs.downloadProgress == rhs.downloadProgress
+            && lhs.downloadPreflight == rhs.downloadPreflight
     }
 
     var body: some View {
@@ -886,7 +890,7 @@ private struct MLXModelsSection: View, Equatable {
                         }
                         Button("Download") { service.downloadModel(result.id) }
                             .controlSize(.small)
-                            .disabled(jobRunning)
+                            .disabled(jobRunning || downloadPreflight != nil)
                     }
                     // Format honesty (the NVFP4 lesson): when the MLX filter is off,
                     // spell out what mlx_lm can't load and name the alternative.
@@ -903,6 +907,10 @@ private struct MLXModelsSection: View, Equatable {
                 }
             }
 
+            if let downloadPreflight {
+                Label(downloadPreflight, systemImage: "externaldrive.badge.questionmark")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
             // Determinate download progress (WS-M3): a real ProgressView driven by
             // the tqdm frame in the log. Files-based (per-file byte bars are
             // suppressed off a TTY), captioned in tqdm's own honest wording.

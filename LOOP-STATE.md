@@ -1,5 +1,35 @@
 # LOOP-STATE — end-to-end configuration bring-up
 
+## 2026-07-18 (MLX overhaul): adversarial review of WS-M3+WS-M4 — DONE (AC120)
+
+Suite 214/214 after fixes (4 new review tests; run log in the session scratchpad).
+Independent hostile review of the delegated agent's AC118/AC119 diffs: 10
+findings, 9 fixed, 1 suspected bug PROVEN a non-issue (the LR field parses
+"1e-4" fine — probed before "fixing"). The catches, worst first: (1) WS-M3
+"last used" would have become "last refreshed" for every model from the second
+library scan on — the scan's own config.json quant read bumps the blob atime the
+metric was built from; now weight-class (≥1 MiB) files only. (2) CRLF datasets
+were broken at the SPLIT layer, not just trims — Swift's split(separator:"\n")
+treats "\r\n" as one grapheme and never splits, so a Windows train.jsonl
+validated as garbage and a CRLF CSV became one mangled row; new splitLines
+(LF/CRLF/CR) in validator + CSV builder. My own first fix (trims) was proven
+insufficient by the new tests failing — the tests were written to fail first on
+purpose. (3) The memory preflight double-counted speculative pages
+(free_count already includes them — proven vs vm_stat on this Mac), biasing an
+OOM guard toward optimism. (4) validatePicked slurped whole multi-GB files →
+bounded 4 MiB sample cut at a whole line. (5) After-run "Try/Fuse this adapter"
+used the LIVE form fields, not the run's — now captures the started pair.
+(6) Silent CSV row drops now surface as a skipped count + rule. (7) Loss trend
+gains the overfit-turnaround read (interior val minimum → "prefer checkpoint
+near iter N"). (8) Download preflight got a visible state + disabled buttons
+(was up to ~10 s of dead air + a misleading double-tap error). (9) Stale
+low-disk warning cleared after a successful download. (10) Fuse with empty
+fields (pre-existing papercut) disabled. Details: DEVIATIONS AC120.
+NEEDS OWNER: unchanged from AC118/AC119 (on-device feel checks; guided-mode UI
+LoRA run; free-disk BLOCK path untestable at 112 GiB free). WS-M5 (demote
+Convert/Playground under Advanced + docs riders incl. stale T5) remains the last
+MLX-overhaul workstream.
+
 ## 2026-07-18 (MLX overhaul): WS-M4 teachable fine-tune — DONE (AC119)
 
 Suite 210/210 (green TWICE — loop 1 + loop 2; 13 new tests, ALL pure — the WS-M3

@@ -41,6 +41,13 @@ struct FineTuneGuideView: View {
     @State private var fuseAdapters = ""
     @State private var fuseSavePath = ""
 
+    /// The model + adapter pair the LAST started run actually used. The after-run
+    /// card offers THESE, not the live fields — otherwise editing the form after a
+    /// run makes "Try with adapter" load a pair that was never trained together
+    /// (review-pass catch).
+    @State private var lastRunModel = ""
+    @State private var lastRunAdapter = ""
+
     // Grouped into a handful of @ViewBuilder blocks so each stays under SwiftUI's
     // 10-child ViewBuilder limit; Group/tuple children still flatten to Form rows.
     var body: some View {
@@ -283,17 +290,17 @@ struct FineTuneGuideView: View {
                 .font(.caption).foregroundStyle(.green)
             HStack {
                 Button("Try with adapter") {
-                    playModel = config.model
-                    playAdapter = resolvedAdapterPath
+                    playModel = lastRunModel
+                    playAdapter = lastRunAdapter
                 }
                 .controlSize(.small)
-                .disabled(config.model.isEmpty || resolvedAdapterPath.isEmpty)
+                .disabled(lastRunModel.isEmpty || lastRunAdapter.isEmpty)
                 Button("Fuse this adapter") {
-                    fuseModel = config.model
-                    fuseAdapters = resolvedAdapterPath
+                    fuseModel = lastRunModel
+                    fuseAdapters = lastRunAdapter
                 }
                 .controlSize(.small)
-                .disabled(config.model.isEmpty || resolvedAdapterPath.isEmpty)
+                .disabled(lastRunModel.isEmpty || lastRunAdapter.isEmpty)
                 Spacer()
             }
             Text("“Try with adapter” fills the Playground with this base + adapter; clear the adapter there to compare against the base.")
@@ -337,7 +344,13 @@ struct FineTuneGuideView: View {
             Button("Fuse") {
                 service.startFuse(model: fuseModel, adapterPath: fuseAdapters, savePath: fuseSavePath)
             }
-            .disabled(jobRunning || !envReady)
+            // Empty fields = a guaranteed argparse failure in the pane — disable
+            // until all three are set (long-standing papercut, fixed in review).
+            .disabled(
+                jobRunning || !envReady
+                    || fuseModel.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                    || fuseAdapters.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                    || fuseSavePath.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
             Spacer()
         }
         MLXJobPane(service: service, state: fusePane)
@@ -506,6 +519,8 @@ struct FineTuneGuideView: View {
             run.adapterPath = (service.mlxDir as NSString).appendingPathComponent("adapters-\(stamp)")
         }
         config = run  // reflect the resolved knobs/path back into the UI
+        lastRunModel = run.model
+        lastRunAdapter = run.adapterPath
         service.startFineTune(run)
     }
 
@@ -518,15 +533,18 @@ struct FineTuneGuideView: View {
 
     private func validatePicked() {
         pickFile { path in
-            guard let data = try? Data(contentsOf: URL(fileURLWithPath: path)) else {
+            // Bounded read: a picked train.jsonl can be gigabytes; only the sample
+            // window is loaded (cut at a whole line when truncated).
+            guard let sample = MLXCommand.boundedSample(fileAt: path) else {
                 datasetNote = "Couldn't read that file."
                 return
             }
-            let report = MLXCommand.validateDataset(data)
+            let report = MLXCommand.validateDataset(sample.data)
             datasetReport = report
+            let sampled = sample.truncated || report.recordCount >= 100
             datasetNote =
                 report.ok
-                ? "The first \(report.recordCount) records validate as \(report.format?.label ?? "") (a sample — large files aren't fully scanned)."
+                ? "\(report.recordCount) records validate as \(report.format?.label ?? "")\(sampled ? " — a sample; the rest of the file wasn't scanned" : "")."
                 : "Found \(report.errors.count) problem(s) in the sample — see the report under the Data folder field."
         }
     }
@@ -537,12 +555,15 @@ struct FineTuneGuideView: View {
                 datasetNote = "Couldn't read that file."
                 return
             }
-            let records = MLXCommand.completionsFromCSV(text)
-            guard records.count >= 2 else {
-                datasetNote = "Need at least 2 prompt,completion rows to make train + valid."
+            let built = MLXCommand.completionsFromCSV(text)
+            guard built.records.count >= 2 else {
+                datasetNote =
+                    built.skippedRows > 0
+                    ? "Need at least 2 prompt,completion rows — \(built.skippedRows) row(s) were skipped (each line needs two non-empty columns; multi-line cells aren't supported)."
+                    : "Need at least 2 prompt,completion rows to make train + valid."
                 return
             }
-            let split = MLXCommand.splitJSONL(records)
+            let split = MLXCommand.splitJSONL(built.records)
             pickSaveLocation(defaultName: "dataset") { folder in
                 let fm = FileManager.default
                 let trainPath = (folder as NSString).appendingPathComponent("train.jsonl")
@@ -556,6 +577,9 @@ struct FineTuneGuideView: View {
                     config.dataDir = folder
                     datasetNote =
                         "Wrote \(split.train.count) train + \(split.valid.count) valid records to that folder."
+                        + (built.skippedRows > 0
+                            ? " \(built.skippedRows) row(s) skipped — each line needs two non-empty columns."
+                            : "")
                 } catch {
                     datasetNote = "Couldn't write the dataset files: \(error.localizedDescription)"
                 }
