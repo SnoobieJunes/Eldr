@@ -19,6 +19,9 @@ struct FineTuneGuideView: View {
     /// A Huginn-managed server is running (so "stop it during training" is offered).
     let managedServerRunning: Bool
     let serverMemoryBytes: Int64?
+    /// WS-M5: "Try with adapter" seeds the Playground, which now lives behind the
+    /// Advanced disclosure — this opens it so the seeded section is visible.
+    let openAdvanced: () -> Void
     @Binding var playModel: String
     @Binding var playAdapter: String
 
@@ -292,6 +295,7 @@ struct FineTuneGuideView: View {
                 Button("Try with adapter") {
                     playModel = lastRunModel
                     playAdapter = lastRunAdapter
+                    openAdvanced()
                 }
                 .controlSize(.small)
                 .disabled(lastRunModel.isEmpty || lastRunAdapter.isEmpty)

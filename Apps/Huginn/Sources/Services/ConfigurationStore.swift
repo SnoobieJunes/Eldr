@@ -119,6 +119,46 @@ final class ConfigurationStore: ObservableObject {
         saveOrDelete(token, account: Self.a2aBearerAccount(for: descriptorID))
     }
 
+    // MARK: AC94 — harness executable overrides (defaults + env-file mirror)
+
+    /// Per-descriptor absolute-executable overrides, keyed by descriptor id. A path
+    /// is not a secret, so UserDefaults (not Keychain); mirrored into the agent env
+    /// file (`ELDR_HARNESS_CMD_<ID>`) so the CLI-side `delegate_to_cloud_agent`
+    /// resolves the SAME binary as Huginn's own spawns.
+    static let harnessCommandOverridesKey = "harnessCommandOverrides"
+
+    /// The operator-pinned executable for a `.stdioSpawn` harness, or "" when the
+    /// registry default stands.
+    static func harnessCommandOverride(
+        for id: String, defaults: UserDefaults = .standard
+    ) -> String {
+        (defaults.dictionary(forKey: harnessCommandOverridesKey) as? [String: String])?[id] ?? ""
+    }
+
+    func harnessCommandOverride(for id: String) -> String {
+        Self.harnessCommandOverride(for: id, defaults: defaults)
+    }
+
+    /// Persist (empty = clear) the executable override for `id`, then rewrite the env
+    /// file so launchd/CLI consumers see it without waiting for the next Save.
+    func setHarnessCommandOverride(_ path: String, for id: String) {
+        var overrides =
+            (defaults.dictionary(forKey: Self.harnessCommandOverridesKey) as? [String: String])
+            ?? [:]
+        let trimmed = path.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmed.isEmpty {
+            overrides.removeValue(forKey: id)
+        } else {
+            overrides[id] = trimmed
+        }
+        if overrides.isEmpty {
+            defaults.removeObject(forKey: Self.harnessCommandOverridesKey)
+        } else {
+            defaults.set(overrides, forKey: Self.harnessCommandOverridesKey)
+        }
+        writeEnvFile()
+    }
+
     // MARK: sybilclaw gateway (Huginn-only pref — NOT an eldr-acp env var)
     /// The port sybilclaw's gateway daemon listens on (default 18789). Used by the
     /// Connections panel's status probe (and, later, the gateway bridge). `eldr-acp`
@@ -210,7 +250,14 @@ final class ConfigurationStore: ObservableObject {
     private let keychain: KeychainBox
     private static let tokenAccount = "llm-token"
 
-    init(paths: ConfigPaths = .standard, keychain: KeychainBox = KeychainBox()) {
+    /// AC94: injectable so tests keep harness-command overrides out of the real defaults.
+    private let defaults: UserDefaults
+
+    init(
+        paths: ConfigPaths = .standard, keychain: KeychainBox = KeychainBox(),
+        defaults: UserDefaults = .standard
+    ) {
+        self.defaults = defaults
         self.paths = paths
         self.keychain = keychain
 
@@ -374,6 +421,15 @@ final class ConfigurationStore: ObservableObject {
             export("ELDR_ACP_CONTEXTGRAPH_URL", contextGraphURL),
             export("ELDR_ACP_CONTEXTGRAPH_AGENT", contextGraphAgentName),
         ]
+        // AC94: mirror the operator's harness-executable overrides so the CLI-side
+        // delegate_to_cloud_agent resolves the same binaries (HarnessRegistry reads
+        // these back via `resolvedDescriptor`). Sorted for a stable file.
+        let overrides =
+            (defaults.dictionary(forKey: Self.harnessCommandOverridesKey) as? [String: String])
+            ?? [:]
+        for (id, path) in overrides.sorted(by: { $0.key < $1.key }) {
+            lines.append(export(HarnessRegistry.commandOverrideEnvVar(for: id), path))
+        }
         lines.append("")
         writeFile(paths.envFile, contents: lines.joined(separator: "\n"))
     }
@@ -423,7 +479,7 @@ final class ConfigurationStore: ObservableObject {
     /// (`HarnessDescriptor.withVendorKey`) — the single place a host asks "what do I
     /// actually launch for this id". Returns nil for an unknown id.
     func resolvedHarnessDescriptor(id: String) -> HarnessDescriptor? {
-        Self.resolvedHarnessDescriptor(id: id, keychain: keychain)
+        Self.resolvedHarnessDescriptor(id: id, keychain: keychain, defaults: defaults)
     }
 
     /// Static counterpart, for a caller that doesn't hold a live `ConfigurationStore`
@@ -431,9 +487,12 @@ final class ConfigurationStore: ObservableObject {
     /// the Keychain directly via the default `KeychainBox()` — same service/account
     /// convention, so it sees whatever the instance last saved).
     static func resolvedHarnessDescriptor(
-        id: String, keychain: KeychainBox = KeychainBox()
+        id: String, keychain: KeychainBox = KeychainBox(), defaults: UserDefaults = .standard
     ) -> HarnessDescriptor? {
-        guard let descriptor = HarnessRegistry.descriptor(id: id) else { return nil }
+        guard var descriptor = HarnessRegistry.descriptor(id: id) else { return nil }
+        // AC94: the operator-pinned executable path applies before any launch-scoped
+        // secret merge (`withCommand` is `.stdioSpawn`-only, so a2a/builtIn pass through).
+        descriptor = descriptor.withCommand(harnessCommandOverride(for: id, defaults: defaults))
         if descriptor.kind == .a2aRemote {
             let token = keychain.load(account: a2aBearerAccount(for: descriptor.id))
                 .flatMap { String(data: $0, encoding: .utf8) }

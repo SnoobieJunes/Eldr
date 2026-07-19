@@ -1,5 +1,31 @@
 # LOOP-STATE — end-to-end configuration bring-up
 
+## 2026-07-19 (MLX overhaul): WS-M5 demotion + AC riders + docs — DONE (AC121). MLX OVERHAUL COMPLETE.
+
+Huginn 215/215; PQRCACP 264/49-suites + 8 green (its first change this effort:
+AC94's override seam). Shipped: (1) Convert + Playground demoted behind a
+persisted bottom-of-tab "Advanced" disclosure (`mlx.advancedExpanded`, default
+collapsed; code intact; every Try affordance calls openAdvanced() explicitly —
+an onChange heuristic would false-fire on the launch-time playModel seed); both
+demoted sections gained in-place .help on every control; post-demotion convert
+smoke-tested with the byte-identical app argv (SmolLM2 → 4-bit, exit 0, 76 MB,
+4.503 bpw). (2) AC106: Configuration probes the installed CLI's --version and
+warns on MISMATCH (equality, not order — summaries aren't semver) next to the
+existing Reinstall. (3) AC94: HarnessDescriptor.withCommand +
+ELDR_HARNESS_CMD_<ID> env seam read by delegate_to_cloud_agent; Huginn stores
+per-id overrides (injectable defaults), applies them in resolvedHarnessDescriptor,
+mirrors them into the agent env file, and edits them in Bridge (Browse shows
+hidden files — nvm is a dot-dir; not-executable warning). (4) AC104: Bridge
+workdir box shows spilled tool-results size + confirmed Clean of
+<workdir>/.eldr/tool-results (ToolExecutor.spillDirRelative made public — one
+constant, no drift; current workdir only). (5) Docs: stale T5 corrected in
+place; SwiftA2A Package.swift preamble rewritten to AC112 reality (internal
+SDK). Details: DEVIATIONS AC121.
+NEEDS OWNER: desk feel of the Advanced disclosure + Bridge rows; a live
+delegation through a pinned override; Clean against a real spill; the version
+warning against a genuinely stale binary; plus the standing AC118–AC120
+on-device items. The MLX overhaul plan (WS-M0…M5) is now fully implemented.
+
 ## 2026-07-18 (MLX overhaul): adversarial review of WS-M3+WS-M4 — DONE (AC120)
 
 Suite 214/214 after fixes (4 new review tests; run log in the session scratchpad).

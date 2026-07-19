@@ -190,3 +190,52 @@ struct RelayOverrideValidationTests {
         #expect(ConfigurationStore.validateRelayOverride("not a url") == .failure(.invalidURL))
     }
 }
+
+// AC94 — the harness executable override: stored in (injected) defaults, applied by
+// `resolvedHarnessDescriptor`, and mirrored into the env file so the CLI-side
+// `delegate_to_cloud_agent` resolves the same binary from a GUI/launchd launch.
+@Suite("AC94: harness executable override")
+struct HarnessOverrideStoreTests {
+    @MainActor
+    @Test func overrideAppliesToResolutionAndEnvFile() throws {
+        let tmp = (NSTemporaryDirectory() as NSString).appendingPathComponent(
+            "eldr-ac94-\(UUID().uuidString)")
+        let paths = ConfigPaths(configDir: tmp, binDir: tmp)
+        let kc = KeychainBox(service: "test-ac94-\(UUID().uuidString)")
+        let suite = "test-ac94-\(UUID().uuidString)"
+        let defaults = try #require(UserDefaults(suiteName: suite))
+        defer {
+            defaults.removePersistentDomain(forName: suite)
+            try? FileManager.default.removeItem(atPath: tmp)
+        }
+
+        let store = ConfigurationStore(paths: paths, keychain: kc, defaults: defaults)
+        store.setHarnessCommandOverride("/opt/nvm/bin/claude-agent-acp", for: "claude-code")
+
+        // Resolution: the override replaces the bare registry command; other
+        // harnesses are untouched.
+        let resolved = ConfigurationStore.resolvedHarnessDescriptor(
+            id: "claude-code", keychain: kc, defaults: defaults)
+        #expect(resolved?.command == "/opt/nvm/bin/claude-agent-acp")
+        let gemini = ConfigurationStore.resolvedHarnessDescriptor(
+            id: "gemini-cli", keychain: kc, defaults: defaults)
+        #expect(gemini?.command == HarnessRegistry.descriptor(id: "gemini-cli")?.command)
+
+        // The env file mirrors it for the CLI side (HarnessRegistry reads it back).
+        let env = ConfigurationStore.parseEnvFile(at: paths.envFile)
+        #expect(env["ELDR_HARNESS_CMD_CLAUDE_CODE"] == "/opt/nvm/bin/claude-agent-acp")
+        #expect(
+            HarnessRegistry.resolvedDescriptor(id: "claude-code", environment: env)?.command
+                == "/opt/nvm/bin/claude-agent-acp")
+
+        // Clearing restores the registry default and drops the env line.
+        store.setHarnessCommandOverride("", for: "claude-code")
+        #expect(
+            ConfigurationStore.resolvedHarnessDescriptor(
+                id: "claude-code", keychain: kc, defaults: defaults
+            )?.command == HarnessRegistry.descriptor(id: "claude-code")?.command)
+        #expect(
+            ConfigurationStore.parseEnvFile(at: paths.envFile)["ELDR_HARNESS_CMD_CLAUDE_CODE"]
+                == nil)
+    }
+}

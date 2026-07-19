@@ -23,6 +23,8 @@ struct ConfigurationView: View {
     @State private var newestPQRCACPSourceDate: Date?
     @State private var reinstalling = false
     @State private var reinstallError: String?
+    /// AC106: what the installed binary's `--version` reports (nil = missing/unprobed).
+    @State private var installedVersion: String?
     /// Are-you-sure step for the persistent ungated-tools toggle: the switch flips
     /// only after explicit confirmation; turning it OFF never asks.
     @State private var confirmUngatedTools = false
@@ -419,6 +421,7 @@ struct ConfigurationView: View {
         gatewayRegistered = HarnessRegistration.isRegistered(
             path: store.paths.defaultGatewayConfig(for: store.gatewayFlavor))
         installedCLIModDate = installer.installedBinaryModificationDate()
+        installedVersion = await store.installedAgentVersion()
         await connections.probeGateway(port: store.sybilclawGatewayPort)
         await connections.probeContextGraph(urlString: store.contextGraphURL)
         // File-system scan off the main actor — cheap, but no reason to block it.
@@ -537,6 +540,24 @@ struct ConfigurationView: View {
                     .font(.caption).foregroundStyle(.orange)
             }
 
+            // AC106 (the WS-B3-descoped staleness warning): what the binary REPORTS
+            // vs what this app was built against. Compared for EQUALITY, not order —
+            // the summaries aren't semver, and drift in either direction means the
+            // installed CLI isn't the one this app's seams were tested with.
+            if let installedVersion {
+                Text(
+                    "Reports \(installedVersion) · this app expects \(ConfigurationStore.expectedAgentVersion)"
+                )
+                .font(.caption).foregroundStyle(.secondary)
+                if installedVersion != ConfigurationStore.expectedAgentVersion {
+                    Label(
+                        "Installed CLI version doesn't match this app — Reinstall to update it.",
+                        systemImage: "exclamationmark.triangle.fill"
+                    )
+                    .font(.caption).foregroundStyle(.orange)
+                }
+            }
+
             if cliIsStale {
                 Label(
                     "Older than the newest Packages/PQRCACP source changes — reinstall to pick them up.",
@@ -581,6 +602,7 @@ struct ConfigurationView: View {
         do {
             try await installer.install()
             installedCLIModDate = installer.installedBinaryModificationDate()
+            installedVersion = await store.installedAgentVersion()
         } catch {
             reinstallError = "Reinstall failed: \(error.localizedDescription)"
         }

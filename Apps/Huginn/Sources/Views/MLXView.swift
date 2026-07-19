@@ -27,6 +27,10 @@ struct MLXView: View {
     /// Cross-section state: the fine-tune after-run "Try with adapter" seeds the
     /// Playground adapter (WS-M4).
     @State private var playAdapter = ""
+    /// WS-M5: Convert + Playground live behind this persisted disclosure — occasional
+    /// workshop tools, kept fully intact but out of the everyday path (demotion only).
+    /// The "Try" affordances open it explicitly so their target is never invisible.
+    @AppStorage("mlx.advancedExpanded") private var advancedExpanded = false
     /// Cross-section state: rows request deletion; the dialog presents Form-wide.
     @State private var deleteCandidate: MLXCachedModel?
 
@@ -86,23 +90,9 @@ struct MLXView: View {
                 pane: service.jobPaneState(for: [.download]),
                 downloadProgress: service.downloadProgress,
                 downloadPreflight: service.downloadPreflight,
+                openAdvanced: { advancedExpanded = true },
                 playModel: $playModel,
                 deleteCandidate: $deleteCandidate)
-            MLXConvertSection(
-                service: service,
-                envReady: service.envState.isReady,
-                jobRunning: service.activeJob != nil,
-                pane: service.jobPaneState(for: [.convert]))
-            MLXPlaygroundSection(
-                service: service,
-                envReady: service.envState.isReady,
-                jobRunning: service.activeJob != nil,
-                serverModel: service.serverConfig.model,
-                pane: service.jobPaneState(for: [.generate]),
-                playModel: $playModel,
-                playModelValue: playModel,
-                playAdapter: $playAdapter,
-                playAdapterValue: playAdapter)
             MLXFineTuneSection(
                 service: service,
                 envReady: service.envState.isReady,
@@ -113,8 +103,51 @@ struct MLXView: View {
                 cachedModels: service.cachedModels,
                 managedServerRunning: managedServerRunning,
                 serverMemoryBytes: service.serverMemoryBytes,
+                openAdvanced: { advancedExpanded = true },
                 playModel: $playModel,
                 playAdapter: $playAdapter)
+            // WS-M5 demotion: the model workshop (Convert / quantize + Playground) is
+            // code-intact but tucked behind this disclosure — serving, library, and
+            // fine-tune stay first-class above.
+            Section("Advanced") {
+                Button {
+                    withAnimation { advancedExpanded.toggle() }
+                } label: {
+                    HStack(spacing: 6) {
+                        Image(systemName: advancedExpanded ? "chevron.down" : "chevron.right")
+                            .font(.caption)
+                        Text(
+                            advancedExpanded
+                                ? "Hide the model workshop"
+                                : "Show the model workshop — Convert / quantize + Playground")
+                        Spacer()
+                    }
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .accessibilityIdentifier("mlx-advanced-toggle")
+                Text(
+                    "Occasional tools: convert a source model to MLX, or exercise a model one-shot without the server. \"Try\" buttons above open this automatically."
+                )
+                .font(.caption).foregroundStyle(.secondary)
+            }
+            if advancedExpanded {
+                MLXConvertSection(
+                    service: service,
+                    envReady: service.envState.isReady,
+                    jobRunning: service.activeJob != nil,
+                    pane: service.jobPaneState(for: [.convert]))
+                MLXPlaygroundSection(
+                    service: service,
+                    envReady: service.envState.isReady,
+                    jobRunning: service.activeJob != nil,
+                    serverModel: service.serverConfig.model,
+                    pane: service.jobPaneState(for: [.generate]),
+                    playModel: $playModel,
+                    playModelValue: playModel,
+                    playAdapter: $playAdapter,
+                    playAdapterValue: playAdapter)
+            }
         }
         .formStyle(.grouped)
         .frame(maxWidth: 1100, alignment: .leading)
@@ -762,6 +795,9 @@ private struct MLXModelsSection: View, Equatable {
     let downloadProgress: MLXDownloadProgress?
     /// Non-nil while the pre-download size/disk check runs (disables Download).
     let downloadPreflight: String?
+    /// WS-M5: "Try" seeds the demoted Playground — this opens the Advanced
+    /// disclosure so the seeded section is actually visible.
+    let openAdvanced: () -> Void
     @Binding var playModel: String
     @Binding var deleteCandidate: MLXCachedModel?
 
@@ -812,7 +848,10 @@ private struct MLXModelsSection: View, Equatable {
                     model: model,
                     brainSwapAvailable: brainSwapAvailable,
                     onServe: { Task { await service.makeBrain(model: model.repoID, store: store) } },
-                    onTry: { playModel = model.repoID },
+                    onTry: {
+                        playModel = model.repoID
+                        openAdvanced()
+                    },
                     onDelete: { deleteCandidate = model })
             }
             if cachedModels.isEmpty {
@@ -1086,6 +1125,9 @@ private struct MLXConvertSection: View, Equatable {
                     Button("Browse…") { pickFolder { convertConfig.hfPath = $0 } }
                 }
             }
+            .help(
+                "The model to convert: a Hugging Face repo id (downloads first) or a local folder of safetensors weights. GGUF can't be converted — start from the original (non-GGUF) release."
+            )
             LabeledContent("Output folder") {
                 HStack {
                     TextField("new folder for the MLX model", text: $convertConfig.mlxPath)
@@ -1097,19 +1139,31 @@ private struct MLXConvertSection: View, Equatable {
                     }
                 }
             }
+            .help(
+                "Where the converted MLX model lands — must be a NEW folder (mlx_lm.convert refuses an existing one)."
+            )
             Toggle("Quantize", isOn: $convertConfig.quantize)
+                .help(
+                    "Shrinks the weights to 4- or 8-bit. Roughly quarters (4-bit) or halves (8-bit) the size and memory at a small quality cost — what the mlx-community builds do."
+                )
             if convertConfig.quantize {
                 Picker("Bits", selection: $convertConfig.qBits) {
                     Text("4-bit").tag(4)
                     Text("8-bit").tag(8)
                 }
                 .pickerStyle(.segmented).frame(maxWidth: 240)
+                .help(
+                    "4-bit = smallest and fastest, slight quality cost. 8-bit = nearly lossless, twice the size."
+                )
                 Picker("Group size", selection: $convertConfig.qGroupSize) {
                     Text("32").tag(32)
                     Text("64").tag(64)
                     Text("128").tag(128)
                 }
                 .pickerStyle(.segmented).frame(maxWidth: 240)
+                .help(
+                    "How many weights share one quantization scale. Smaller tracks the weights closer (better quality, slightly bigger file); 64 is the usual default."
+                )
             }
             Picker("dtype", selection: $convertConfig.dtype) {
                 Text("default").tag("")
@@ -1118,10 +1172,16 @@ private struct MLXConvertSection: View, Equatable {
                 Text("float32").tag("float32")
             }
             .frame(maxWidth: 240)
+            .help(
+                "Floating-point type for UN-quantized weights. Default keeps the source's; bfloat16 is the safe modern pick; float32 doubles the size for little gain on Apple silicon."
+            )
             LabeledContent("Upload to HF (optional)") {
                 TextField("your-org/your-model", text: $convertConfig.uploadRepo)
                     .textFieldStyle(.roundedBorder)
             }
+            .help(
+                "Pushes the converted model to this Hugging Face repo when set (needs hf auth login in the venv). Blank = keep it local."
+            )
             HStack {
                 Button("Convert") { service.startConvert(convertConfig) }
                     .disabled(jobRunning || !envReady)
@@ -1184,6 +1244,9 @@ private struct MLXPlaygroundSection: View, Equatable {
                         .disabled(serverModel.isEmpty)
                 }
             }
+            .help(
+                "The model to run one-shot — loaded fresh for this generation (first run on a big model takes a while), independent of the server."
+            )
             VStack(alignment: .leading, spacing: 4) {
                 Text("Prompt").font(.caption).foregroundStyle(.secondary)
                 TextEditor(text: $playPrompt)
@@ -1195,14 +1258,21 @@ private struct MLXPlaygroundSection: View, Equatable {
                 LabeledContent("Max tokens") {
                     TextField("512", value: $playMaxTokens, format: .number.grouping(.never))
                         .textFieldStyle(.roundedBorder).frame(width: 80)
+                        .help("Cap on the generated length. The run stops here even mid-sentence.")
                 }
                 LabeledContent("Temp") {
                     TextField("default", text: $playTemperature)
                         .textFieldStyle(.roundedBorder).frame(width: 70)
+                        .help(
+                            "Sampling randomness: 0 = deterministic, ~0.7 = normal chat, higher = wilder. Blank = the model default."
+                        )
                 }
                 LabeledContent("Top-p") {
                     TextField("default", text: $playTopP)
                         .textFieldStyle(.roundedBorder).frame(width: 70)
+                        .help(
+                            "Nucleus sampling: only the most likely tokens summing to this probability are considered. Blank = the model default."
+                        )
                 }
             }
             LabeledContent("Adapter (optional)") {
@@ -1212,6 +1282,9 @@ private struct MLXPlaygroundSection: View, Equatable {
                     Button("Browse…") { pickFolder { playAdapter = $0 } }
                 }
             }
+            .help(
+                "A trained LoRA/DoRA adapter folder to apply on top of the model — how you feel a fine-tune before fusing. Clear it to compare against the plain base."
+            )
             DisclosureGroup("KV cache (advanced)") {
                 Picker("KV quantization", selection: $playKVBits) {
                     Text("Off (16-bit)").tag(Int?.none)
@@ -1284,6 +1357,9 @@ private struct MLXFineTuneSection: View, Equatable {
     let cachedModels: [MLXCachedModel]
     let managedServerRunning: Bool
     let serverMemoryBytes: Int64?
+    /// WS-M5: opens the demoted Advanced disclosure (the after-run "Try with
+    /// adapter" seeds the Playground, which lives there now).
+    let openAdvanced: () -> Void
     @Binding var playModel: String
     @Binding var playAdapter: String
 
@@ -1305,6 +1381,7 @@ private struct MLXFineTuneSection: View, Equatable {
                 fineTunePane: fineTunePane, fusePane: fusePane,
                 lossHistory: lossHistory, cachedModels: cachedModels,
                 managedServerRunning: managedServerRunning, serverMemoryBytes: serverMemoryBytes,
+                openAdvanced: openAdvanced,
                 playModel: $playModel, playAdapter: $playAdapter)
         }
     }

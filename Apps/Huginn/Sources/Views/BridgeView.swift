@@ -22,6 +22,12 @@ struct BridgeView: View {
     @State private var copied = false
     @State private var manualOwnerHex = ""
     @State private var a2aBearerField = ""
+    /// AC94: the executable-override field for the selected `.stdioSpawn` harness.
+    @State private var harnessCommandField = ""
+    /// AC104: spilled tool-results size under the current workdir (nil = probing).
+    @State private var spillBytes: Int64?
+    @State private var confirmCleanSpill = false
+    @State private var spillNote: String?
 
     var body: some View {
         ScrollView {
@@ -452,6 +458,45 @@ struct BridgeView: View {
                     )
                     .font(.caption2).foregroundStyle(.secondary)
                 }
+
+                if let selected = HarnessRegistry.descriptor(id: bridge.relayHarnessID),
+                    selected.kind == .stdioSpawn
+                {
+                    // AC94: GUI/launchd processes get a minimal PATH (no nvm/npm
+                    // dirs), so a bare command name here often can't resolve — let
+                    // the operator pin the absolute executable.
+                    LabeledContent("Executable") {
+                        HStack {
+                            TextField(selected.command, text: $harnessCommandField)
+                                .textFieldStyle(.roundedBorder)
+                                .font(.callout.monospaced())
+                                .onChange(of: harnessCommandField) { _, newValue in
+                                    store.setHarnessCommandOverride(newValue, for: selected.id)
+                                }
+                            Button("Browse…") { pickHarnessExecutable() }
+                                .controlSize(.small)
+                        }
+                    }
+                    .task(id: selected.id) {
+                        harnessCommandField = store.harnessCommandOverride(for: selected.id)
+                    }
+                    if !harnessCommandField.isEmpty,
+                        !FileManager.default.isExecutableFile(atPath: harnessCommandField)
+                    {
+                        Label(
+                            "Nothing executable at that path — the spawn will fail until it points at the real binary.",
+                            systemImage: "exclamationmark.triangle.fill"
+                        )
+                        .font(.caption2).foregroundStyle(.orange)
+                    }
+                    Text(
+                        harnessCommandField.isEmpty
+                            ? "Blank = the default (\(selected.command)), resolved on this app's PATH — which for a GUI or launchd launch omits nvm/npm dirs. Pin an absolute path if the CLI lives there; it's also written to the agent env file so delegate_to_cloud_agent finds it."
+                            : "Overrides the default (\(selected.command)) for Huginn's spawns AND, via the agent env file, for delegate_to_cloud_agent inside eldr-acp."
+                    )
+                    .font(.caption2).foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                }
             }
             .padding(4)
         }
@@ -506,6 +551,37 @@ struct BridgeView: View {
                             .controlSize(.small)
                     }
                 }
+                // AC104: oversized tool results spill to <workdir>/.eldr/tool-results
+                // with no automatic GC — show the size and offer a confirmed clean.
+                if let dir = bridge.agentWorkdir {
+                    let spillPath = (dir as NSString)
+                        .appendingPathComponent(ToolExecutor.spillDirRelative)
+                    Divider()
+                    HStack(spacing: 8) {
+                        Text("Spilled tool results: \(spillSizeLabel)")
+                            .font(.caption).foregroundStyle(.secondary)
+                        Button("Clean…") { confirmCleanSpill = true }
+                            .controlSize(.small)
+                            .disabled((spillBytes ?? 0) == 0)
+                        Spacer()
+                    }
+                    .task(id: dir) { await refreshSpillSize(dir: dir) }
+                    .confirmationDialog(
+                        "Delete \(spillSizeLabel) of spilled tool results?",
+                        isPresented: $confirmCleanSpill
+                    ) {
+                        Button("Delete \(ToolExecutor.spillDirRelative)", role: .destructive) {
+                            cleanSpill(path: spillPath, workdir: dir)
+                        }
+                    } message: {
+                        Text(
+                            "Removes \(spillPath) — overflow copies of past tool outputs the agent could read back. The agent recreates the folder when it next spills."
+                        )
+                    }
+                    if let spillNote {
+                        Text(spillNote).font(.caption2).foregroundStyle(.orange)
+                    }
+                }
             }
             .padding(4)
         }
@@ -521,6 +597,49 @@ struct BridgeView: View {
         if panel.runModal() == .OK, let url = panel.url {
             bridge.setAgentWorkdir(url.path)
         }
+    }
+
+    /// AC94: pick the harness CLI binary. Hidden files shown — nvm installs live
+    /// under dot-directories (`~/.nvm/versions/node/<v>/bin`).
+    private func pickHarnessExecutable() {
+        let panel = NSOpenPanel()
+        panel.canChooseDirectories = false
+        panel.canChooseFiles = true
+        panel.allowsMultipleSelection = false
+        panel.showsHiddenFiles = true
+        panel.prompt = "Use this executable"
+        panel.message = "Pick the harness CLI binary (an absolute path survives GUI/launchd PATH)."
+        if panel.runModal() == .OK, let url = panel.url {
+            harnessCommandField = url.path  // onChange persists + mirrors to the env file
+        }
+    }
+
+    // MARK: AC104 — spilled tool-results hygiene
+
+    private var spillSizeLabel: String {
+        guard let spillBytes else { return "…" }
+        return spillBytes == 0 ? "none" : spillBytes.formatted(.byteCount(style: .file))
+    }
+
+    private func refreshSpillSize(dir: String) async {
+        let path = (dir as NSString).appendingPathComponent(ToolExecutor.spillDirRelative)
+        spillBytes = await Task.detached(priority: .utility) {
+            var isDir: ObjCBool = false
+            guard FileManager.default.fileExists(atPath: path, isDirectory: &isDir),
+                isDir.boolValue
+            else { return Int64(0) }
+            return HFCache.directorySize(path)
+        }.value
+    }
+
+    private func cleanSpill(path: String, workdir: String) {
+        do {
+            try FileManager.default.removeItem(atPath: path)
+            spillNote = nil
+        } catch {
+            spillNote = "Couldn't delete: \(error.localizedDescription)"
+        }
+        Task { await refreshSpillSize(dir: workdir) }
     }
 
     private var togglesBox: some View {

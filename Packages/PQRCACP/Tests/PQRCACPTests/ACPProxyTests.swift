@@ -245,3 +245,58 @@ struct ACPProxyTests {
         #expect(HarnessRegistry.descriptor(id: "gemini-cli")?.isProvisional == false)
     }
 }
+
+// AC94 — the executable-path override: GUI/launchd processes get a minimal PATH, so
+// bare nvm/npm command names in the registry only resolve when the operator pins an
+// absolute path (Huginn UI → UserDefaults + the agent env file → this seam).
+@Suite("HarnessRegistry command override (AC94)")
+struct HarnessCommandOverrideTests {
+
+    @Test func envVarNameDerivesFromID() {
+        #expect(
+            HarnessRegistry.commandOverrideEnvVar(for: "claude-code")
+                == "ELDR_HARNESS_CMD_CLAUDE_CODE")
+        #expect(HarnessRegistry.commandOverrideEnvVar(for: "codex") == "ELDR_HARNESS_CMD_CODEX")
+    }
+
+    @Test func overrideReplacesCommandAndKeepsEverythingElse() {
+        let env = [
+            "ELDR_HARNESS_CMD_CLAUDE_CODE": "/Users/op/.nvm/versions/node/v25/bin/claude-agent-acp"
+        ]
+        let resolved = HarnessRegistry.resolvedDescriptor(id: "claude-code", environment: env)
+        #expect(resolved?.command == "/Users/op/.nvm/versions/node/v25/bin/claude-agent-acp")
+        // Identity, args, and the vendor-key declaration survive the copy.
+        let original = HarnessRegistry.descriptor(id: "claude-code")!
+        #expect(resolved?.id == original.id)
+        #expect(resolved?.args == original.args)
+        #expect(resolved?.vendorKeyEnvVar == original.vendorKeyEnvVar)
+    }
+
+    @Test func noOverrideAndEmptyOverrideKeepTheRegistryCommand() {
+        let original = HarnessRegistry.descriptor(id: "gemini-cli")!
+        #expect(
+            HarnessRegistry.resolvedDescriptor(id: "gemini-cli", environment: [:])?.command
+                == original.command)
+        #expect(
+            HarnessRegistry.resolvedDescriptor(
+                id: "gemini-cli", environment: ["ELDR_HARNESS_CMD_GEMINI_CLI": "  "]
+            )?.command == original.command)
+    }
+
+    @Test func overrideIsStdioSpawnOnly() {
+        // `.builtIn` has no executable; an override must not invent one.
+        let builtIn = HarnessDescriptor.builtIn.withCommand("/tmp/evil")
+        #expect(builtIn.command.isEmpty)
+        // `.a2aRemote` is reached over HTTP; same rule.
+        let a2a = HarnessRegistry.descriptor(id: "a2a-local-sample")!.withCommand("/tmp/x")
+        #expect(a2a.command.isEmpty)
+    }
+
+    @Test func vendorKeyStacksOnTopOfCommandOverride() {
+        let env = ["ELDR_HARNESS_CMD_CLAUDE_CODE": "/opt/bin/claude-agent-acp"]
+        let resolved = HarnessRegistry.resolvedDescriptor(id: "claude-code", environment: env)!
+            .withVendorKey("sk-test")
+        #expect(resolved.command == "/opt/bin/claude-agent-acp")
+        #expect(resolved.env["ANTHROPIC_API_KEY"] == "sk-test")
+    }
+}
