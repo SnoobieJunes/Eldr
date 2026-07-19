@@ -38,6 +38,17 @@ final class LogTailer: ObservableObject {
     /// the observable "tailer is idle" signal the MLX kill-switch tests assert).
     var isTailing: Bool { source != nil }
 
+    /// WS-M2: byte offset of the first line the current seed retained — the
+    /// anchor the log console's "Load older" back-scroll reads BEFORE. Only valid
+    /// for the current `fileGeneration`.
+    private(set) var earliestSeedOffset: UInt64 = 0
+
+    /// WS-M2: bumped whenever a fresh tail seed REPLACES earlier content
+    /// (rotation, or a stop/start gap too large to resume through). The console
+    /// accumulates lines across publishes; a generation change tells it the
+    /// accumulated history no longer matches the file and must be dropped.
+    private(set) var fileGeneration = 0
+
     private let path: String
     /// Cap retained lines so a long-running session doesn't grow unbounded in memory.
     private let maxLines = 2000
@@ -140,10 +151,18 @@ final class LogTailer: ObservableObject {
             let seedStart = size > maxSeedBytes ? size - maxSeedBytes : 0
             try? h.seek(toOffset: seedStart)
             var existing = (try? h.readToEnd()) ?? Data()
+            var firstLineOffset = seedStart
             if seedStart > 0, let firstNewline = existing.firstIndex(of: UInt8(ascii: "\n")) {
                 // Started mid-line: drop the partial first line.
+                let dropped = existing.distance(from: existing.startIndex, to: firstNewline) + 1
                 existing = existing[existing.index(after: firstNewline)...]
+                firstLineOffset = seedStart + UInt64(dropped)
             }
+            // A fresh tail seed that REPLACES earlier content (rotation, or a
+            // stop/start gap too large to resume through) starts a new
+            // generation: back-scroll anchors from the old file/window are void.
+            if nextID > 0 { fileGeneration += 1 }
+            earliestSeedOffset = firstLineOffset
             offset = (try? h.offset()) ?? size
             ingest(existing, seeding: true)
         }

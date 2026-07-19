@@ -1,0 +1,417 @@
+import Foundation
+import SwiftUI
+import Testing
+
+@testable import Huginn
+
+// WS-M2: the log console's pure logic — classification/markup, the search
+// model, remediation matching, and the bounded on-disk reads that let the
+// console scroll and search past the tailer's 64 KB seed.
+
+@MainActor
+@Suite("Log markup classification")
+struct LogMarkupTests {
+
+    @Test func pythonLoggingLineGetsTimestampAndLevel() {
+        let line = "2026-07-18 10:22:33,123 - INFO - Starting httpd at 127.0.0.1 on port 1337"
+        let lineClass = LogMarkup.classify(line)
+        #expect(lineClass.timestampLength == "2026-07-18 10:22:33,123".count)
+        #expect(lineClass.level == .info)
+        #expect(lineClass.httpStatus == nil)
+        #expect(!lineClass.isTraceback)
+    }
+
+    @Test func levelTokensClassify() {
+        #expect(LogMarkup.classify("ERROR: model load failed").level == .error)
+        #expect(LogMarkup.classify("request failed after 3 retries").level == .error)
+        #expect(LogMarkup.classify("WARNING: --temp needs a newer mlx-lm").level == .warn)
+        #expect(LogMarkup.classify("DEBUG prompt cache hit").level == .debug)
+        #expect(LogMarkup.classify("plain informational output").level == .none)
+    }
+
+    @Test func httpAccessLineStatusWinsOverTokens() {
+        let ok = LogMarkup.classify(
+            #"127.0.0.1 - - [18/Jul/2026 10:22:33] "POST /v1/chat/completions HTTP/1.1" 200 -"#)
+        #expect(ok.httpStatus == 200)
+        #expect(ok.level == .none)
+
+        // "error" in the path must not paint a routine 200 red.
+        let errorPath = LogMarkup.classify(#"127.0.0.1 - - "GET /error HTTP/1.1" 200 -"#)
+        #expect(errorPath.httpStatus == 200)
+        #expect(errorPath.level == .none)
+
+        #expect(LogMarkup.classify(#""GET /v1/models HTTP/1.1" 404 -"#).level == .warn)
+        #expect(LogMarkup.classify(#""GET /v1/models HTTP/1.1" 500 -"#).level == .error)
+    }
+
+    @Test func tracebackShapesAreErrors() {
+        #expect(LogMarkup.classify("Traceback (most recent call last):").isTraceback)
+        #expect(LogMarkup.classify("Traceback (most recent call last):").level == .error)
+        let frame = LogMarkup.classify(#"  File "/x/server.py", line 3, in <module>"#)
+        #expect(frame.isTraceback)
+        #expect(frame.level == .error)
+        #expect(LogMarkup.classify("ValueError: bad model path").level == .error)
+    }
+
+    @Test func attributedStylesTimestampAndHighlights() throws {
+        let text = "2026-07-18 10:22:33 INFO hello"
+        let lineClass = LogMarkup.classify(text)
+        let attributed = LogMarkup.attributed(text, lineClass: lineClass)
+        // Timestamp prefix renders secondary, the rest in the base color — at
+        // least two distinct runs, the first one secondary.
+        #expect(attributed.runs.count >= 2)
+        #expect(attributed.runs.first?.foregroundColor == .secondary)
+
+        let range = try #require(text.range(of: "hello"))
+        let highlighted = LogMarkup.attributed(
+            text, lineClass: lineClass, matches: [range], currentMatch: range)
+        #expect(highlighted.runs.contains { $0.backgroundColor != nil })
+    }
+
+    @Test func carriageReturnsCollapseToLastSegment() {
+        #expect(
+            LogConsoleRow(id: 0, rawText: "10%\rdownloading 50%\rdownloading 99%").text
+                == "downloading 99%")
+        #expect(LogConsoleRow(id: 0, rawText: "done\r").text == "done")
+        #expect(LogConsoleRow(id: 0, rawText: "\r\r").text == "")
+        #expect(LogConsoleRow(id: 0, rawText: "untouched line").text == "untouched line")
+    }
+}
+
+@MainActor
+@Suite("Log search model")
+struct LogSearchTests {
+
+    private func rows(_ texts: [String]) -> [LogConsoleRow] {
+        texts.enumerated().map { LogConsoleRow(id: $0.offset, rawText: $0.element) }
+    }
+
+    @Test func plainSearchIsCaseInsensitiveByDefault() throws {
+        let matches = try #require(
+            LogSearch.matches(
+                in: rows(["Alpha error", "beta ERROR two", "clean"]),
+                query: "error", options: LogSearchOptions()))
+        #expect(matches.count == 2)
+        #expect(matches.map(\.rowID) == [0, 1])
+    }
+
+    @Test func multipleOccurrencesInOneRowAllCount() throws {
+        let matches = try #require(
+            LogSearch.matches(
+                in: rows(["error then error again"]), query: "error",
+                options: LogSearchOptions()))
+        #expect(matches.count == 2)
+        #expect(matches.allSatisfy { $0.rowID == 0 })
+    }
+
+    @Test func caseSensitiveMatchesExactCaseOnly() throws {
+        let matches = try #require(
+            LogSearch.matches(
+                in: rows(["Alpha error", "beta ERROR"]), query: "ERROR",
+                options: LogSearchOptions(caseSensitive: true)))
+        #expect(matches.map(\.rowID) == [1])
+    }
+
+    @Test func regexSearchWorksAndInvalidPatternReturnsNil() {
+        let found = LogSearch.matches(
+            in: rows(["err123 and err9"]), query: #"err\d+"#,
+            options: LogSearchOptions(isRegex: true))
+        #expect(found?.count == 2)
+
+        let invalid = LogSearch.matches(
+            in: rows(["anything"]), query: "(", options: LogSearchOptions(isRegex: true))
+        #expect(invalid == nil)
+    }
+
+    @Test func zeroWidthRegexMatchesAreDropped() throws {
+        let matches = try #require(
+            LogSearch.matches(
+                in: rows(["axa"]), query: "x*", options: LogSearchOptions(isRegex: true)))
+        #expect(matches.count == 1)
+        #expect(matches.allSatisfy { !$0.range.isEmpty })
+    }
+
+    @Test func emptyQueryMatchesNothing() throws {
+        let matches = try #require(
+            LogSearch.matches(in: rows(["anything"]), query: "", options: LogSearchOptions()))
+        #expect(matches.isEmpty)
+    }
+
+    @Test func stepWrapsAroundBothDirections() {
+        #expect(LogSearch.step(from: nil, count: 3, forward: true) == 0)
+        #expect(LogSearch.step(from: nil, count: 3, forward: false) == 2)
+        #expect(LogSearch.step(from: 2, count: 3, forward: true) == 0)
+        #expect(LogSearch.step(from: 0, count: 3, forward: false) == 2)
+        #expect(LogSearch.step(from: 1, count: 3, forward: true) == 2)
+        #expect(LogSearch.step(from: nil, count: 0, forward: true) == nil)
+    }
+}
+
+@Suite("Remediation catalog")
+struct LogRemediationTests {
+
+    @Test func knownPatternsProduceTheirHints() {
+        #expect(
+            LogRemediationCatalog.hint(
+                for: "ModuleNotFoundError: No module named 'mlx_lm'")?.id == "env-broken")
+        #expect(
+            LogRemediationCatalog.hint(
+                for: "huggingface_hub.utils._cache_manager.CacheNotFound: Cache directory not found"
+            )?.id == "cache-missing")
+        #expect(
+            LogRemediationCatalog.hint(
+                for: "huggingface_hub.errors.HFValidationError: Repo id must be in the form"
+            )?.id == "bad-model-id")
+        #expect(
+            LogRemediationCatalog.hint(for: "FileNotFoundError: No safetensors found in")?.id
+                == "wrong-format")
+        #expect(
+            LogRemediationCatalog.hint(for: "OSError: [Errno 48] Address already in use")?.id
+                == "port-taken")
+        #expect(
+            LogRemediationCatalog.hint(for: "Exception in thread Thread-1:")?.id
+                == "thread-crash")
+        #expect(LogRemediationCatalog.hint(for: "routine INFO output") == nil)
+    }
+
+    @Test func perLineOrderPrefersTheSpecificPattern() {
+        // A line carrying both the generic and a specific marker resolves to the
+        // specific one (catalog order is most-specific-first).
+        let hint = LogRemediationCatalog.hint(
+            for: "Exception in thread while raising CacheNotFound")
+        #expect(hint?.id == "cache-missing")
+    }
+
+    @Test func latestHintScansFromTheEnd() {
+        let lines = [
+            "Exception in thread Thread-1:",
+            "Traceback (most recent call last):",
+            "huggingface_hub.utils._cache_manager.CacheNotFound: missing",
+            "routine line after",
+        ]
+        // The CacheNotFound line is the most recent recognizable failure — the
+        // earlier generic thread-crash must not win.
+        #expect(LogRemediationCatalog.latestHint(in: lines)?.id == "cache-missing")
+        #expect(LogRemediationCatalog.latestHint(in: ["all", "benign"]) == nil)
+    }
+}
+
+@Suite("Backscroll chunk reads")
+struct LogBackscrollTests {
+
+    /// Writes `line-0` … `line-<count-1>` and returns (path, per-line offsets).
+    private func makeLineFile(count: Int) throws -> (path: String, offsets: [UInt64]) {
+        let path = (NSTemporaryDirectory() as NSString)
+            .appendingPathComponent("eldr-backscroll-\(UUID().uuidString).log")
+        var content = ""
+        var offsets: [UInt64] = []
+        var position: UInt64 = 0
+        for index in 0..<count {
+            let line = "line-\(index)\n"
+            offsets.append(position)
+            position += UInt64(line.utf8.count)
+            content += line
+        }
+        try content.write(toFile: path, atomically: true, encoding: .utf8)
+        return (path, offsets)
+    }
+
+    @Test func chainedChunksReachTheBeginningExactlyOnce() throws {
+        let (path, offsets) = try makeLineFile(count: 100)
+        defer { try? FileManager.default.removeItem(atPath: path) }
+
+        // Pretend the in-memory window starts at line 90; walk backwards in
+        // small chunks and verify we recover lines 0–89 in order, no gaps, no
+        // duplicates, every chunk line-aligned.
+        var collected: [String] = []
+        var end = offsets[90]
+        while end > 0 {
+            let chunk = try #require(
+                LogBackscroll.readChunk(path: path, endingAt: end, maxBytes: 128))
+            #expect(!chunk.lines.isEmpty, "no progress at offset \(end)")
+            #expect(chunk.lines.first?.hasPrefix("line-") == true, "torn head line leaked")
+            collected.insert(contentsOf: chunk.lines, at: 0)
+            #expect(chunk.startOffset < end)
+            end = chunk.startOffset
+        }
+        #expect(collected == (0..<90).map { "line-\($0)" })
+    }
+
+    @Test func beginningOfFileKeepsTheFirstLine() throws {
+        let (path, offsets) = try makeLineFile(count: 5)
+        defer { try? FileManager.default.removeItem(atPath: path) }
+        let chunk = try #require(
+            LogBackscroll.readChunk(path: path, endingAt: offsets[2], maxBytes: 65_536))
+        #expect(chunk.lines == ["line-0", "line-1"])
+        #expect(chunk.startOffset == 0)
+    }
+
+    @Test func nothingBeforeZero() {
+        #expect(LogBackscroll.readChunk(path: "/nonexistent", endingAt: 0) == nil)
+    }
+
+    @Test func giantSingleLineReportsNoProgress() throws {
+        let path = (NSTemporaryDirectory() as NSString)
+            .appendingPathComponent("eldr-backscroll-giant-\(UUID().uuidString).log")
+        defer { try? FileManager.default.removeItem(atPath: path) }
+        try String(repeating: "x", count: 8_192).write(
+            toFile: path, atomically: true, encoding: .utf8)
+        let chunk = try #require(
+            LogBackscroll.readChunk(path: path, endingAt: 8_192, maxBytes: 1_024))
+        #expect(chunk.lines.isEmpty)
+        #expect(chunk.startOffset == 8_192, "no line boundary found ⇒ must report no progress")
+    }
+}
+
+@Suite("On-disk stream search")
+struct LogDiskSearchTests {
+
+    private func makeFile(_ lines: [String]) throws -> (path: String, offsets: [UInt64]) {
+        let path = (NSTemporaryDirectory() as NSString)
+            .appendingPathComponent("eldr-disksearch-\(UUID().uuidString).log")
+        var offsets: [UInt64] = []
+        var position: UInt64 = 0
+        var content = ""
+        for line in lines {
+            offsets.append(position)
+            position += UInt64(line.utf8.count + 1)
+            content += line + "\n"
+        }
+        try content.write(toFile: path, atomically: true, encoding: .utf8)
+        return (path, offsets)
+    }
+
+    @Test func countsOccurrencesAndReportsEarliestLineOffset() throws {
+        let (path, offsets) = try makeFile(
+            ["aaa", "match one", "bbb", "match two match three", "ccc"])
+        defer { try? FileManager.default.removeItem(atPath: path) }
+        let size = offsets[4] + UInt64("ccc\n".utf8.count)
+
+        let all = LogBackscroll.searchOnDisk(
+            path: path, query: "match", options: LogSearchOptions(), before: size)
+        #expect(all.matchCount == 3)
+        #expect(all.earliestMatchOffset == offsets[1])
+        #expect(!all.truncated)
+
+        // Region ends where the in-memory window starts: later matches excluded.
+        let before = LogBackscroll.searchOnDisk(
+            path: path, query: "match", options: LogSearchOptions(), before: offsets[3])
+        #expect(before.matchCount == 1)
+        #expect(before.earliestMatchOffset == offsets[1])
+    }
+
+    @Test func regexQueriesWork() throws {
+        let (path, offsets) = try makeFile(["m1tch", "match", "mxtch"])
+        defer { try? FileManager.default.removeItem(atPath: path) }
+        let size = offsets[2] + UInt64("mxtch\n".utf8.count)
+        let result = LogBackscroll.searchOnDisk(
+            path: path, query: "m[a-z]tch", options: LogSearchOptions(isRegex: true),
+            before: size)
+        #expect(result.matchCount == 2)
+        #expect(result.earliestMatchOffset == offsets[1])
+    }
+
+    @Test func boundedScanSkipsTornHeadAndFlagsTruncation() throws {
+        let (path, offsets) = try makeFile(["match early", "padding line", "match late"])
+        defer { try? FileManager.default.removeItem(atPath: path) }
+        let size = offsets[2] + UInt64("match late\n".utf8.count)
+        // Cap the scan so it starts INSIDE line 0: the torn head line must be
+        // skipped (its "match" not counted) and the result flagged truncated.
+        let cap = Int(size - 3)
+        let result = LogBackscroll.searchOnDisk(
+            path: path, query: "match", options: LogSearchOptions(), before: size,
+            maxScanBytes: cap)
+        #expect(result.truncated)
+        #expect(result.matchCount == 1)
+        #expect(result.earliestMatchOffset == offsets[2])
+    }
+
+    @Test func chunkBoundariesDoNotSplitMatches() throws {
+        // Force many tiny read chunks; lines spanning chunk boundaries must still
+        // match exactly once each.
+        let lines = (0..<50).map { "prefix-\($0) match suffix" }
+        let (path, offsets) = try makeFile(lines)
+        defer { try? FileManager.default.removeItem(atPath: path) }
+        let size = offsets[49] + UInt64((lines[49] + "\n").utf8.count)
+        let result = LogBackscroll.searchOnDisk(
+            path: path, query: "match", options: LogSearchOptions(), before: size,
+            chunkBytes: 7)
+        #expect(result.matchCount == 50)
+        #expect(result.earliestMatchOffset == offsets[0])
+    }
+}
+
+@Suite("LogTailer backscroll anchors")
+struct LogTailerAnchorTests {
+
+    @MainActor
+    @Test func smallFileSeedAnchorsAtZero() throws {
+        let path = (NSTemporaryDirectory() as NSString)
+            .appendingPathComponent("eldr-anchor-\(UUID().uuidString).log")
+        defer { try? FileManager.default.removeItem(atPath: path) }
+        try "one\ntwo\n".write(toFile: path, atomically: true, encoding: .utf8)
+
+        let tailer = LogTailer(path: path)
+        tailer.start()
+        defer { tailer.stop() }
+        #expect(tailer.earliestSeedOffset == 0)
+        #expect(tailer.fileGeneration == 0)
+    }
+
+    @MainActor
+    @Test func boundedSeedAnchorsAtALineStart() throws {
+        let path = (NSTemporaryDirectory() as NSString)
+            .appendingPathComponent("eldr-anchor-big-\(UUID().uuidString).log")
+        defer { try? FileManager.default.removeItem(atPath: path) }
+        var blob = ""
+        for index in 0..<5_000 { blob += "line-\(index)\n" }
+        try blob.write(toFile: path, atomically: true, encoding: .utf8)
+
+        let tailer = LogTailer(path: path, maxSeedBytes: 4_096)
+        tailer.start()
+        defer { tailer.stop() }
+
+        #expect(tailer.earliestSeedOffset > 0)
+        // The anchor points exactly at the tailer's first retained line.
+        let handle = try #require(FileHandle(forReadingAtPath: path))
+        try handle.seek(toOffset: tailer.earliestSeedOffset)
+        let data = try #require(try handle.read(upToCount: 64))
+        try handle.close()
+        let text = String(decoding: data, as: UTF8.self)
+        let firstLine = try #require(tailer.lines.first?.text)
+        #expect(text.hasPrefix(firstLine + "\n"), "anchor not at the first retained line")
+    }
+
+    @MainActor
+    @Test func resumeKeepsGenerationAndReseedBumpsIt() throws {
+        let path = (NSTemporaryDirectory() as NSString)
+            .appendingPathComponent("eldr-anchor-gen-\(UUID().uuidString).log")
+        defer { try? FileManager.default.removeItem(atPath: path) }
+        try "one\ntwo\n".write(toFile: path, atomically: true, encoding: .utf8)
+
+        let tailer = LogTailer(path: path, maxSeedBytes: 64)
+        tailer.start()
+        #expect(tailer.fileGeneration == 0)
+
+        // Small append while stopped → resume path, same generation.
+        tailer.stop()
+        let handle = try #require(FileHandle(forWritingAtPath: path))
+        handle.seekToEndOfFile()
+        try handle.write(contentsOf: Data("three\n".utf8))
+        tailer.start()
+        #expect(tailer.fileGeneration == 0)
+        #expect(tailer.lines.map(\.text) == ["one", "two", "three"])
+
+        // A gap larger than maxSeedBytes while stopped → fresh tail seed, new
+        // generation (the accumulated console history no longer joins up).
+        tailer.stop()
+        for index in 0..<40 {
+            try handle.write(contentsOf: Data("filler-line-\(index)\n".utf8))
+        }
+        try handle.close()
+        tailer.start()
+        defer { tailer.stop() }
+        #expect(tailer.fileGeneration == 1)
+        #expect(tailer.earliestSeedOffset > 0)
+    }
+}
