@@ -1,3 +1,4 @@
+import Combine
 import Foundation
 import SwiftUI
 
@@ -497,5 +498,329 @@ enum LogBackscroll {
         }
         return DiskSearchResult(
             matchCount: matchCount, earliestMatchOffset: earliest, truncated: truncated)
+    }
+}
+
+// MARK: - Console sources
+
+/// What a console can show: the two file-backed tool logs, or the in-memory
+/// diagnostics bus. Codable+Hashable because "Open as window" routes a source
+/// value through a `WindowGroup(for:)` scene.
+enum LogConsoleSource: String, CaseIterable, Codable, Hashable, Identifiable, Sendable {
+    case mlxServer
+    case agent
+    case diagnostics
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .mlxServer: return "MLX server"
+        case .agent: return "Agent (eldr-acp)"
+        case .diagnostics: return "Diagnostics"
+        }
+    }
+
+    /// On-disk log file, nil for the in-memory diagnostics source. Paths are
+    /// parameterized so tests point a model at temp files, never the real
+    /// config dir. (@MainActor: `MLXService.serverLogPath` lives on a MainActor
+    /// class, and every caller — model, view — is main-isolated anyway.)
+    @MainActor
+    func filePath(paths: ConfigPaths) -> String? {
+        switch self {
+        case .mlxServer: return MLXService.serverLogPath(paths: paths)
+        case .agent: return paths.logFile
+        case .diagnostics: return nil
+        }
+    }
+}
+
+// MARK: - Console model
+
+/// The live state behind ONE console surface (the MLX tab's embedded pane, the
+/// Logs tab, an expanded sheet, a standalone window). Each surface owns its own
+/// model — and its own `LogTailer` — so visibility drives file watching per
+/// surface, and nothing couples to `MLXService.serverLog` (whose lifecycle
+/// belongs to the kill-switch and the failure scan, not to what the user is
+/// currently looking at).
+///
+/// Rows ACCUMULATE across tailer publishes (up to `maxRows`), so the console's
+/// scrollback outlives the tailer's own 2000-line retention window; a tailer
+/// `fileGeneration` change (rotation / oversized resume gap) resets the history
+/// because the accumulated lines no longer join up with the file.
+@MainActor
+final class LogConsoleModel: ObservableObject {
+
+    static let maxRows = 10_000
+
+    @Published private(set) var source: LogConsoleSource
+    @Published private(set) var rows: [LogConsoleRow] = []
+    /// Latest recognized failure (dismissable; a DIFFERENT failure re-arms it).
+    @Published private(set) var remediation: LogRemediation?
+    /// Sticks the view to the newest rows. Searching suspends the stickiness
+    /// (`searchActive`) — match navigation and auto-scroll would fight.
+    @Published var followTail = true
+    @Published var wrapLines = true
+
+    // Search state. The view binds the query/options; matches recompute
+    // debounced on edits and inline on row batches while a search is active.
+    @Published var query = ""
+    @Published var caseSensitive = false
+    @Published var useRegex = false
+    @Published private(set) var queryInvalid = false
+    @Published private(set) var matchesByRow: [Int: [Range<String.Index>]] = [:]
+    @Published private(set) var matchCount = 0
+    @Published private(set) var currentMatch: LogSearchMatch?
+    /// 1-based position for the "3 of 17" label; 0 when nothing is current.
+    @Published private(set) var currentMatchOrdinal = 0
+
+    var searchActive: Bool { !query.isEmpty }
+
+    private var orderedMatches: [LogSearchMatch] = []
+    private var currentIndex: Int?
+    private var tailer: LogTailer?
+    private var lastIngestedID = -1
+    private var knownGeneration = 0
+    private var started = false
+    private var dismissedRemediationID: String?
+    private var cancellables: Set<AnyCancellable> = []
+    private let paths: ConfigPaths
+    private let diagnostics: DiagnosticsLog
+
+    /// The file behind the current source (Reveal in Finder target); nil for
+    /// the in-memory diagnostics source.
+    var currentFilePath: String? { source.filePath(paths: paths) }
+
+    init(
+        source: LogConsoleSource, paths: ConfigPaths = .standard,
+        diagnostics: DiagnosticsLog = .shared
+    ) {
+        self.source = source
+        self.paths = paths
+        self.diagnostics = diagnostics
+        attach(to: source)
+        rebindSearchDebounce()
+    }
+
+    // MARK: Lifecycle
+
+    func start() {
+        started = true
+        tailer?.start()
+        // The diagnostics subscription is gated on `started` (a hidden console
+        // must not rebuild 500 rows per event) — catch up now.
+        if source == .diagnostics { rebuildFromDiagnostics(diagnostics.events) }
+    }
+
+    func stop() {
+        started = false
+        tailer?.stop()
+    }
+
+    /// Swap what this console shows (the source picker). Tears down the old
+    /// source's watcher and state, keeps the search query (searching the same
+    /// term across sources is the common flow when hunting a failure).
+    func switchSource(_ newSource: LogConsoleSource) {
+        guard newSource != source else { return }
+        tailer?.stop()
+        tailer = nil
+        cancellables.removeAll()
+        source = newSource
+        resetContent()
+        attach(to: newSource)
+        rebindSearchDebounce()
+        if started { tailer?.start() }
+        recomputeMatches(resetPosition: true)
+    }
+
+    /// Clear the source: file logs truncate on disk (the tailer's own Clear
+    /// semantics), diagnostics clears the in-memory bus.
+    func clear() {
+        switch source {
+        case .mlxServer, .agent:
+            tailer?.clear()
+            // The tailer bumps its generation on the reseed; drop our copy now
+            // so the view empties immediately rather than on the next publish.
+            resetContent()
+        case .diagnostics:
+            diagnostics.clear()
+            resetContent()
+        }
+    }
+
+    var allText: String { rows.map(\.text).joined(separator: "\n") }
+
+    func dismissRemediation() {
+        dismissedRemediationID = remediation?.id
+        remediation = nil
+    }
+
+    // MARK: Search navigation
+
+    func stepMatch(forward: Bool) {
+        currentIndex = LogSearch.step(from: currentIndex, count: orderedMatches.count, forward: forward)
+        syncCurrentMatch()
+    }
+
+    // MARK: Wiring
+
+    private func attach(to source: LogConsoleSource) {
+        switch source {
+        case .mlxServer, .agent:
+            guard let path = source.filePath(paths: paths) else { return }
+            let tailer = LogTailer(path: path)
+            self.tailer = tailer
+            knownGeneration = tailer.fileGeneration
+            tailer.$lines
+                .receive(on: RunLoop.main)
+                .sink { [weak self] lines in self?.ingest(lines) }
+                .store(in: &cancellables)
+        case .diagnostics:
+            diagnostics.$events
+                .receive(on: RunLoop.main)
+                .sink { [weak self] events in self?.rebuildFromDiagnostics(events) }
+                .store(in: &cancellables)
+        }
+    }
+
+    /// Debounced re-search on query/option edits (typing must not scan 10k rows
+    /// per keystroke); dropFirst skips the initial published values. Called from
+    /// init AND after `switchSource` clears `cancellables` (killing the old
+    /// source's subscription takes this pipeline with it).
+    private func rebindSearchDebounce() {
+        Publishers.CombineLatest3($query, $caseSensitive, $useRegex)
+            .dropFirst()
+            .debounce(for: .milliseconds(250), scheduler: RunLoop.main)
+            .sink { [weak self] _, _, _ in self?.recomputeMatches(resetPosition: true) }
+            .store(in: &cancellables)
+    }
+
+    private func resetContent() {
+        rows = []
+        lastIngestedID = -1
+        remediation = nil
+        dismissedRemediationID = nil
+        orderedMatches = []
+        matchesByRow = [:]
+        matchCount = 0
+        currentIndex = nil
+        currentMatch = nil
+        currentMatchOrdinal = 0
+    }
+
+    // MARK: Ingest — file tailer
+
+    private func ingest(_ lines: [LogLine]) {
+        guard let tailer else { return }
+        if tailer.fileGeneration != knownGeneration {
+            // Rotation or reseed: the accumulated history no longer joins up
+            // with what the tailer now shows.
+            knownGeneration = tailer.fileGeneration
+            resetContent()
+        }
+        let fresh = lines.filter { $0.id > lastIngestedID }
+        guard !fresh.isEmpty else { return }
+        lastIngestedID = fresh.last?.id ?? lastIngestedID
+        appendRows(fresh.map { LogConsoleRow(id: $0.id, rawText: $0.text) })
+    }
+
+    // MARK: Ingest — diagnostics bus
+
+    private func rebuildFromDiagnostics(_ events: [DiagnosticsLog.Event]) {
+        // Only while visible — the bus publishes per event, and an invisible
+        // console rebuilding its rows for each one is pure waste (start() does
+        // a catch-up rebuild when the surface comes back).
+        guard started else { return }
+        // The bus is small (cap 500) and publishes per event — a full rebuild
+        // keeps ids aligned with its head-trimming without bookkeeping.
+        rows = events.enumerated().map {
+            LogConsoleRow(id: $0.offset, rawText: Self.formatDiagnostics($0.element))
+        }
+        refreshRemediation()
+        if searchActive { recomputeMatches(resetPosition: false) }
+    }
+
+    @MainActor private static let timeFormatter: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.dateFormat = "HH:mm:ss"
+        return formatter
+    }()
+
+    /// Render a diagnostics event as a log line. The severity becomes a level
+    /// TOKEN so the shared markup styles it like any other log — no special
+    /// diagnostics rendering path.
+    static func formatDiagnostics(_ event: DiagnosticsLog.Event) -> String {
+        let time = timeFormatter.string(from: event.at)
+        let severity: String
+        switch event.severity {
+        case .error: severity = "ERROR "
+        case .warn: severity = "WARNING "
+        case .info, .success: severity = ""
+        }
+        let detail = event.detail.isEmpty ? "" : " — \(event.detail)"
+        return "\(time) \(severity)[\(event.category.rawValue)] \(event.title)\(detail)"
+    }
+
+    // MARK: Shared append path
+
+    private func appendRows(_ newRows: [LogConsoleRow]) {
+        guard !newRows.isEmpty else { return }
+        var updated = rows
+        updated.append(contentsOf: newRows)
+        if updated.count > Self.maxRows {
+            updated.removeFirst(updated.count - Self.maxRows)
+        }
+        rows = updated
+        refreshRemediation()
+        if searchActive { recomputeMatches(resetPosition: false) }
+    }
+
+    private func refreshRemediation() {
+        // Only the recent past matters for the chip — a failure from a thousand
+        // lines ago shouldn't hover over a now-healthy log.
+        let recent = rows.suffix(200).map(\.text)
+        guard let hint = LogRemediationCatalog.latestHint(in: recent) else {
+            if remediation != nil { remediation = nil }
+            return
+        }
+        if hint.id == dismissedRemediationID { return }
+        if remediation != hint { remediation = hint }
+    }
+
+    // MARK: Search
+
+    private func recomputeMatches(resetPosition: Bool) {
+        let options = LogSearchOptions(caseSensitive: caseSensitive, isRegex: useRegex)
+        guard let all = LogSearch.matches(in: rows, query: query, options: options) else {
+            queryInvalid = true
+            orderedMatches = []
+            matchesByRow = [:]
+            matchCount = 0
+            currentIndex = nil
+            syncCurrentMatch()
+            return
+        }
+        queryInvalid = false
+        orderedMatches = all
+        matchCount = all.count
+        var byRow: [Int: [Range<String.Index>]] = [:]
+        for match in all { byRow[match.rowID, default: []].append(match.range) }
+        matchesByRow = byRow
+        if resetPosition {
+            currentIndex = all.isEmpty ? nil : 0
+        } else if let index = currentIndex, index >= all.count {
+            currentIndex = all.isEmpty ? nil : all.count - 1
+        }
+        syncCurrentMatch()
+    }
+
+    private func syncCurrentMatch() {
+        if let index = currentIndex, index < orderedMatches.count {
+            currentMatch = orderedMatches[index]
+            currentMatchOrdinal = index + 1
+        } else {
+            currentMatch = nil
+            currentMatchOrdinal = 0
+        }
     }
 }

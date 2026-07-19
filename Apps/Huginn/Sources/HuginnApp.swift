@@ -90,6 +90,15 @@ struct HuginnApp: App {
         .windowResizability(.contentMinSize)
         .commands { CommandGroup(replacing: .newItem) {} }  // no "New Window"
 
+        // WS-M2: "Open as window" target for the log console — one scene, the
+        // routed LogConsoleSource picks which log it shows (each source gets its
+        // own window; opening an already-open source focuses it).
+        WindowGroup("Log console", id: LogConsoleView.windowID, for: LogConsoleSource.self) {
+            $source in
+            LogConsoleWindow(source: source ?? .agent)
+        }
+        .defaultSize(width: 1000, height: 640)
+
         // Menu-bar presence (the modern, state-sharing replacement for NSStatusItem).
         MenuBarExtra("Eldr node", systemImage: "wrench.and.screwdriver") {
             StatusBarView()
@@ -143,7 +152,9 @@ struct MainWindow: View {
             AgentInspectorView()
                 .tabItem { Label("Inspector", systemImage: "scope") }
                 .tag(Tab.inspector)
-            LogView()
+            // WS-M2: the reusable console replaced LogView — same default source
+            // (eldr-acp.log), plus source switching, search, markup, remediation.
+            LogConsoleView(source: .agent, style: .full)
                 .tabItem { Label("Logs", systemImage: "text.alignleft") }
                 .tag(Tab.logs)
             BridgeView()

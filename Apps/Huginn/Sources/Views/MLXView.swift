@@ -57,9 +57,7 @@ struct MLXView: View {
                 launchedConfig: service.launchedServerConfig,
                 autostart: service.autostartEnabled,
                 envReady: service.envState.isReady,
-                cachedModels: service.cachedModels,
-                logWindow: service.serverLogWindow,
-                logPath: service.serverLogPath)
+                cachedModels: service.cachedModels)
             MLXModelsSection(
                 service: service,
                 store: store,
@@ -400,8 +398,6 @@ private struct MLXServerSection: View, Equatable {
     let autostart: Bool
     let envReady: Bool
     let cachedModels: [MLXCachedModel]
-    let logWindow: [MLXLogRow]
-    let logPath: String
 
     // Server "Advanced" numeric fields are optionals in the config; SwiftUI's
     // numeric TextFields fight mid-typing round-trips, so these seed once (State
@@ -421,7 +417,7 @@ private struct MLXServerSection: View, Equatable {
         config: Binding<MLXServerConfig>, serverState: MLXService.ServerState,
         probeStatus: LLMHealthChecker.HealthResult, serverWarning: String?,
         launchedConfig: MLXServerConfig?, autostart: Bool, envReady: Bool,
-        cachedModels: [MLXCachedModel], logWindow: [MLXLogRow], logPath: String
+        cachedModels: [MLXCachedModel]
     ) {
         self.service = service
         self.store = store
@@ -435,8 +431,6 @@ private struct MLXServerSection: View, Equatable {
         self.autostart = autostart
         self.envReady = envReady
         self.cachedModels = cachedModels
-        self.logWindow = logWindow
-        self.logPath = logPath
         _advMaxTokens = State(initialValue: config.wrappedValue.maxTokens.map(String.init) ?? "")
         _advTemperature = State(
             initialValue: config.wrappedValue.temperature.map(MLXCommand.formatNumber) ?? "")
@@ -453,7 +447,7 @@ private struct MLXServerSection: View, Equatable {
             && lhs.serverState == rhs.serverState && lhs.probeStatus == rhs.probeStatus
             && lhs.serverWarning == rhs.serverWarning && lhs.launchedConfig == rhs.launchedConfig
             && lhs.autostart == rhs.autostart && lhs.envReady == rhs.envReady
-            && lhs.cachedModels == rhs.cachedModels && lhs.logWindow == rhs.logWindow
+            && lhs.cachedModels == rhs.cachedModels
     }
 
     var body: some View {
@@ -631,9 +625,12 @@ private struct MLXServerSection: View, Equatable {
         .font(.caption).foregroundStyle(.secondary)
 
         VStack(alignment: .leading, spacing: 4) {
-            Text("Server log (\(logPath))")
+            Text("Server log")
                 .font(.caption).foregroundStyle(.secondary)
-            MLXLogPane(rows: logWindow)
+            // WS-M2: the reusable console replaced the read-only MLXLogPane here.
+            // It owns its own tailer (visibility-driven), so this section's ==
+            // stays free of log churn, and Expand/search/remediation come along.
+            LogConsoleView(source: .mlxServer, style: .embedded)
         }
     }
 

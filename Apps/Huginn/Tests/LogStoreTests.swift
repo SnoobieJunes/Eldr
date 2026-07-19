@@ -341,6 +341,210 @@ struct LogDiskSearchTests {
     }
 }
 
+@MainActor
+@Suite("Log console model")
+struct LogConsoleModelTests {
+
+    /// Scratch ConfigPaths (agent log + mlx dir both live under one temp root).
+    private func makePaths() throws -> (paths: ConfigPaths, root: String) {
+        let root = (NSTemporaryDirectory() as NSString)
+            .appendingPathComponent("eldr-console-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(
+            atPath: (root as NSString).appendingPathComponent("mlx"),
+            withIntermediateDirectories: true)
+        return (ConfigPaths(configDir: root, binDir: root), root)
+    }
+
+    private func append(_ text: String, to path: String) throws {
+        if !FileManager.default.fileExists(atPath: path) {
+            FileManager.default.createFile(atPath: path, contents: nil)
+        }
+        let handle = try #require(FileHandle(forWritingAtPath: path))
+        handle.seekToEndOfFile()
+        try handle.write(contentsOf: Data(text.utf8))
+        try handle.close()
+    }
+
+    private func poll(
+        deadlineMilliseconds: Int = 4_000, _ what: Comment, until condition: () -> Bool
+    ) async throws {
+        for _ in 0..<(deadlineMilliseconds / 20) {
+            if condition() { return }
+            try await Task.sleep(for: .milliseconds(20))
+        }
+        #expect(condition(), what)
+    }
+
+    @Test func accumulatesPastTheTailersRetentionWindow() async throws {
+        let (paths, root) = try makePaths()
+        defer { try? FileManager.default.removeItem(atPath: root) }
+        let model = LogConsoleModel(source: .agent, paths: paths)
+        model.start()
+        defer { model.stop() }
+
+        // Three appended batches totalling 2 400 lines: the tailer retains only
+        // its last 2 000, but the console saw every publish and must keep all.
+        var written = 0
+        for _ in 0..<3 {
+            var chunk = ""
+            for _ in 0..<800 {
+                chunk += "flood-line-\(written)\n"
+                written += 1
+            }
+            try append(chunk, to: paths.logFile)
+            let target = written
+            try await poll("batch of \(target) never fully ingested") {
+                model.rows.count == target
+            }
+        }
+        #expect(model.rows.count == 2_400)
+        #expect(model.rows.first?.text == "flood-line-0")
+        #expect(model.rows.last?.text == "flood-line-2399")
+        // Ids stay unique and ordered across the whole accumulation.
+        let ids = model.rows.map(\.id)
+        #expect(ids == ids.sorted() && Set(ids).count == ids.count)
+    }
+
+    @Test func clearEmptiesTheConsoleAndKeepsIngesting() async throws {
+        let (paths, root) = try makePaths()
+        defer { try? FileManager.default.removeItem(atPath: root) }
+        try append("before-clear\n", to: paths.logFile)
+        let model = LogConsoleModel(source: .agent, paths: paths)
+        model.start()
+        defer { model.stop() }
+        try await poll("seed never arrived") { model.rows.count == 1 }
+
+        model.clear()
+        #expect(model.rows.isEmpty)
+
+        try append("after-clear\n", to: paths.logFile)
+        try await poll("post-clear line never arrived") {
+            model.rows.map(\.text) == ["after-clear"]
+        }
+    }
+
+    @Test func switchSourceSwapsTailersAndKeepsTheQuery() async throws {
+        let (paths, root) = try makePaths()
+        defer { try? FileManager.default.removeItem(atPath: root) }
+        try append("agent-line\n", to: paths.logFile)
+        let mlxLog = MLXService.serverLogPath(paths: paths)
+        try append("mlx-line\n", to: mlxLog)
+
+        let model = LogConsoleModel(source: .agent, paths: paths)
+        model.start()
+        defer { model.stop() }
+        try await poll("agent seed never arrived") {
+            model.rows.map(\.text) == ["agent-line"]
+        }
+        #expect(model.currentFilePath == paths.logFile)
+
+        model.query = "line"
+        model.switchSource(.mlxServer)
+        #expect(model.source == .mlxServer)
+        #expect(model.query == "line", "switching sources must keep the search")
+        #expect(model.currentFilePath == mlxLog)
+        try await poll("mlx seed never arrived") {
+            model.rows.map(\.text) == ["mlx-line"]
+        }
+        try await poll("matches never recomputed for the new source") {
+            model.matchCount == 1
+        }
+    }
+
+    @Test func diagnosticsSourceRendersTheBusLive() async throws {
+        let (paths, root) = try makePaths()
+        defer { try? FileManager.default.removeItem(atPath: root) }
+        let bus = DiagnosticsLog()
+        let model = LogConsoleModel(source: .diagnostics, paths: paths, diagnostics: bus)
+        model.start()
+        defer { model.stop() }
+
+        bus.record(.mlx, .error, "MLX server exited", "status 1")
+        try await poll("event never rendered") { model.rows.count == 1 }
+        let text = try #require(model.rows.first?.text)
+        #expect(text.contains("ERROR [MLX] MLX server exited — status 1"))
+        #expect(model.rows.first?.lineClass.level == .error)
+        #expect(model.currentFilePath == nil)
+
+        model.clear()
+        #expect(bus.events.isEmpty)
+        #expect(model.rows.isEmpty)
+    }
+
+    @Test func formatDiagnosticsMapsSeverityToLevelTokens() {
+        let warn = DiagnosticsLog.Event(
+            at: Date(), category: .relay, severity: .warn, title: "Relay flapping", detail: "")
+        #expect(LogConsoleModel.formatDiagnostics(warn).contains("WARNING [Relay] Relay flapping"))
+        let info = DiagnosticsLog.Event(
+            at: Date(), category: .node, severity: .info, title: "Node started", detail: "")
+        let rendered = LogConsoleModel.formatDiagnostics(info)
+        #expect(rendered.contains("[Node] Node started"))
+        #expect(!rendered.contains("ERROR") && !rendered.contains("WARNING"))
+    }
+
+    @Test func remediationChipTracksLatestFailureAndDismisses() async throws {
+        let (paths, root) = try makePaths()
+        defer { try? FileManager.default.removeItem(atPath: root) }
+        let model = LogConsoleModel(source: .agent, paths: paths)
+        model.start()
+        defer { model.stop() }
+
+        try append("OSError: [Errno 48] Address already in use\n", to: paths.logFile)
+        try await poll("port-taken hint never appeared") {
+            model.remediation?.id == "port-taken"
+        }
+
+        model.dismissRemediation()
+        #expect(model.remediation == nil)
+
+        // The SAME failure class stays dismissed…
+        try append("OSError: [Errno 48] Address already in use\n", to: paths.logFile)
+        try await poll("second port line never ingested") { model.rows.count == 2 }
+        #expect(model.remediation == nil)
+
+        // …a DIFFERENT one re-arms the chip.
+        try append("huggingface_hub.errors.HFValidationError: bad repo id\n", to: paths.logFile)
+        try await poll("bad-model-id hint never appeared") {
+            model.remediation?.id == "bad-model-id"
+        }
+    }
+
+    @Test func searchTracksAppendsWithoutLosingPosition() async throws {
+        let (paths, root) = try makePaths()
+        defer { try? FileManager.default.removeItem(atPath: root) }
+        try append("match one\nplain\nmatch two\n", to: paths.logFile)
+        let model = LogConsoleModel(source: .agent, paths: paths)
+        model.start()
+        defer { model.stop() }
+        try await poll("seed never arrived") { model.rows.count == 3 }
+
+        model.query = "match"
+        #expect(model.searchActive)
+        try await poll("debounced search never ran") { model.matchCount == 2 }
+        #expect(model.currentMatchOrdinal == 1)
+
+        model.stepMatch(forward: true)
+        #expect(model.currentMatchOrdinal == 2)
+
+        // New matching rows extend the count; the current position holds.
+        try append("match three\n", to: paths.logFile)
+        try await poll("append never joined the search") { model.matchCount == 3 }
+        #expect(model.currentMatchOrdinal == 2)
+
+        // Wraparound reaches the new match, then cycles back to the first.
+        model.stepMatch(forward: true)
+        #expect(model.currentMatchOrdinal == 3)
+        model.stepMatch(forward: true)
+        #expect(model.currentMatchOrdinal == 1)
+
+        // An invalid regex reports itself instead of silently matching nothing.
+        model.useRegex = true
+        model.query = "("
+        try await poll("invalid regex never flagged") { model.queryInvalid }
+        #expect(model.matchCount == 0)
+    }
+}
+
 @Suite("LogTailer backscroll anchors")
 struct LogTailerAnchorTests {
 

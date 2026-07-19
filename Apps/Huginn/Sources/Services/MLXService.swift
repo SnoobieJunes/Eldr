@@ -139,10 +139,11 @@ final class MLXService: ObservableObject {
 
     // MARK: - Precomputed log windows (WS-M0 publish hygiene)
 
-    /// Last `logWindowMaxLines` rows of the server log / job log, recomputed once
-    /// per (coalesced) publish. Views render these arrays as-is — the old per-body
+    /// Last `logWindowMaxLines` rows of the job log, recomputed once per
+    /// (coalesced) publish. Views render the array as-is — the old per-body
     /// `suffix(300).map` re-projected the window on EVERY Form re-evaluation.
-    @Published private(set) var serverLogWindow: [MLXLogRow] = []
+    /// (The server log's window is gone: WS-M2's LogConsoleView tails the file
+    /// itself; the service keeps its tailer only for the failure scan.)
     @Published private(set) var jobLogWindow: [MLXLogRow] = []
     static let logWindowMaxLines = 300
 
@@ -266,11 +267,7 @@ final class MLXService: ObservableObject {
         }
         logScanCancellable = serverLog.$lines
             .receive(on: RunLoop.main)
-            .sink { [weak self] lines in
-                guard let self else { return }
-                self.serverLogWindow = Self.window(of: lines)
-                self.scanServerLog(lines)
-            }
+            .sink { [weak self] lines in self?.scanServerLog(lines) }
         // A child server must not outlive the app (the UI promises "stops when
         // Huginn quits", and an orphan would hold the port hostage for the next
         // session). launchd-managed servers deliberately DO survive quit. The
@@ -1356,11 +1353,6 @@ final class MLXService: ObservableObject {
         return lines.suffix(logWindowMaxLines).enumerated().map {
             MLXLogRow(id: base + $0.offset, text: $0.element)
         }
-    }
-
-    /// Server-log window: rows keep the tailer's own stable line ids.
-    private static func window(of lines: [LogLine]) -> [MLXLogRow] {
-        lines.suffix(logWindowMaxLines).map { MLXLogRow(id: $0.id, text: $0.text) }
     }
 
     /// Run one child process as part of the active job, streaming its merged

@@ -641,10 +641,10 @@ struct MLXHubModel: Identifiable, Equatable, Sendable, Decodable {
 // MARK: - Log-pane rows
 
 /// One rendered log-pane row, id stable across appends so SwiftUI's diff keeps
-/// unchanged rows. WS-M0: MLXService precomputes bounded windows of these
-/// (`serverLogWindow` / `jobLogWindow`) at publish time, so the 300-row
-/// suffix+map runs once per (coalesced) publish instead of once per Form
-/// re-evaluation.
+/// unchanged rows. WS-M0: MLXService precomputes a bounded window of these
+/// (`jobLogWindow`) at publish time, so the 300-row suffix+map runs once per
+/// (coalesced) publish instead of once per Form re-evaluation. (The server-log
+/// window moved to WS-M2's LogConsoleView, which tails the file itself.)
 struct MLXLogRow: Identifiable, Equatable, Sendable {
     let id: Int
     let text: String
