@@ -230,13 +230,21 @@ struct LogConsoleView: View {
     // MARK: Log pane
 
     private var visibleRows: [LogConsoleRow] {
-        style == .embedded ? Array(model.rows.suffix(Self.embeddedWindow)) : model.rows
+        // The embedded 300-row bound is a streaming-perf measure, not a truth
+        // bound: while a search is active it must yield, or match navigation
+        // would "jump" to rows that aren't rendered (scrollTo on an absent id
+        // is a silent no-op) while the count claims otherwise.
+        if style == .embedded && !model.searchActive {
+            return Array(model.rows.suffix(Self.embeddedWindow))
+        }
+        return model.rows
     }
 
     private var pane: some View {
         ScrollViewReader { proxy in
             ScrollView(model.wrapLines ? .vertical : [.vertical, .horizontal]) {
                 LazyVStack(alignment: .leading, spacing: 1) {
+                    olderControls
                     if visibleRows.isEmpty {
                         Text(emptyText)
                             .font(.caption).foregroundStyle(.secondary)
@@ -269,10 +277,62 @@ struct LogConsoleView: View {
             .onChange(of: model.followTail) { _, on in
                 if on, let last = model.rows.last { proxy.scrollTo(last.id, anchor: .bottom) }
             }
+            .onChange(of: model.lastPrependSeamID) { _, seam in
+                // After "Load older", pin the old top row to the bottom so the
+                // freshly loaded chunk is what fills the view.
+                if let seam { proxy.scrollTo(seam, anchor: .bottom) }
+            }
         }
         .frame(minHeight: style == .embedded ? 220 : 240)
         .frame(maxHeight: style == .embedded ? 220 : .infinity)
         .border(.quaternary)
+    }
+
+    /// Top-of-scrollback affordances: back-scroll past the seed, and the
+    /// on-disk search verdict for the region the console doesn't hold. Full
+    /// style only — the embedded pane's render window would hide what a
+    /// prepend loads; Expand is its route to the deep history.
+    @ViewBuilder private var olderControls: some View {
+        if style == .full,
+            model.canLoadOlder || model.isLoadingOlder || model.loadOlderBroken
+                || model.diskSearch != .idle
+        {
+            HStack(spacing: 8) {
+                if model.isLoadingOlder {
+                    ProgressView().controlSize(.mini)
+                }
+                if model.canLoadOlder {
+                    Button("Load older") { model.loadOlder() }
+                        .controlSize(.small)
+                        .disabled(model.isLoadingOlder)
+                        .help(
+                            "Read the log file before what's shown — the console seeds from the file's last 64 KB."
+                        )
+                }
+                switch model.diskSearch {
+                case .found(let count, _):
+                    Button("\(count) older match\(count == 1 ? "" : "es") on disk — load & jump") {
+                        model.loadOlderToDiskMatch()
+                    }
+                    .controlSize(.small)
+                    .disabled(model.isLoadingOlder || !model.canLoadOlder)
+                case .searching:
+                    Text("searching the file on disk…")
+                        .font(.caption2).foregroundStyle(.secondary)
+                case .noneFound:
+                    Text("no older matches on disk")
+                        .font(.caption2).foregroundStyle(.secondary)
+                case .idle:
+                    EmptyView()
+                }
+                if model.loadOlderBroken {
+                    Text("older history unavailable here — Reveal in Finder for the full file")
+                        .font(.caption2).foregroundStyle(.secondary)
+                }
+                Spacer()
+            }
+            .padding(.vertical, 2)
+        }
     }
 
     private var emptyText: String {

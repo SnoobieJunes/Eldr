@@ -158,6 +158,17 @@ final class LogTailer: ObservableObject {
                 existing = existing[existing.index(after: firstNewline)...]
                 firstLineOffset = seedStart + UInt64(dropped)
             }
+            // Cap the seed by the retention cap IN DATA SPACE too: a 64 KB seed
+            // of short lines can exceed maxLines, and `publish` would trim the
+            // head AFTER ingest — leaving `earliestSeedOffset` pointing below
+            // the first line actually kept, so WS-M2's "Load older" would
+            // splice older history in with a silent gap at the seam.
+            let boundedStart = Self.tailLineStart(existing, maxLines: maxLines)
+            if boundedStart > existing.startIndex {
+                firstLineOffset += UInt64(
+                    existing.distance(from: existing.startIndex, to: boundedStart))
+                existing = existing[boundedStart...]
+            }
             // A fresh tail seed that REPLACES earlier content (rotation, or a
             // stop/start gap too large to resume through) starts a new
             // generation: back-scroll anchors from the old file/window are void.
@@ -203,6 +214,29 @@ final class LogTailer: ObservableObject {
             stop()
             offset = 0
             openAndPrime()
+        }
+    }
+
+    /// Start index of the last `maxLines` PHYSICAL lines in `data` (a trailing
+    /// newline terminates the final line; a partial final line counts as one).
+    /// Empty lines count here even though ingest's split omits them from
+    /// display — what matters is that the returned index is a true line start,
+    /// so byte offsets derived from it stay exact.
+    static func tailLineStart(_ data: Data, maxLines: Int) -> Data.Index {
+        guard maxLines > 0, !data.isEmpty else { return data.startIndex }
+        var position = data.index(before: data.endIndex)
+        if data[position] == UInt8(ascii: "\n") {
+            guard position > data.startIndex else { return data.startIndex }
+            position = data.index(before: position)
+        }
+        var linesSeen = 0
+        while true {
+            if data[position] == UInt8(ascii: "\n") {
+                linesSeen += 1
+                if linesSeen == maxLines { return data.index(after: position) }
+            }
+            guard position > data.startIndex else { return data.startIndex }
+            position = data.index(before: position)
         }
     }
 

@@ -576,6 +576,34 @@ final class LogConsoleModel: ObservableObject {
 
     var searchActive: Bool { !query.isEmpty }
 
+    // Back-scroll past the tailer's 64 KB seed (file sources only). The anchor
+    // is the byte offset of the oldest line the console holds; "Load older"
+    // prepends the file region before it (negative ids keep ordering stable).
+    @Published private(set) var canLoadOlder = false
+    @Published private(set) var isLoadingOlder = false
+    /// True once older history became unreachable: the row cap trimmed the head
+    /// (a prepend would no longer join up), a chunk made no line-aligned
+    /// progress, or the file couldn't be read. Reveal in Finder is the fallback.
+    @Published private(set) var loadOlderBroken = false
+    /// Seam of the latest single "Load older": the id of the row that USED to be
+    /// oldest — the view anchors it to the bottom so the loaded chunk is what
+    /// appears. (Not published during load-and-jump; the match scroll wins.)
+    @Published private(set) var lastPrependSeamID: Int?
+
+    /// Stream search of the on-disk region the console doesn't hold.
+    enum DiskSearchState: Equatable {
+        case idle
+        case searching
+        case found(count: Int, earliestOffset: UInt64)
+        case noneFound
+    }
+    @Published private(set) var diskSearch: DiskSearchState = .idle
+
+    private var oldestLoadedOffset: UInt64?
+    private var nextOlderID = -1
+    private var diskSearchTask: Task<Void, Never>?
+    private var diskSearchToken = 0
+
     private var orderedMatches: [LogSearchMatch] = []
     private var currentIndex: Int?
     private var tailer: LogTailer?
@@ -706,6 +734,15 @@ final class LogConsoleModel: ObservableObject {
         currentIndex = nil
         currentMatch = nil
         currentMatchOrdinal = 0
+        oldestLoadedOffset = nil
+        nextOlderID = -1
+        loadOlderBroken = false
+        lastPrependSeamID = nil
+        isLoadingOlder = false
+        diskSearchTask?.cancel()
+        diskSearchToken += 1
+        diskSearch = .idle
+        refreshCanLoadOlder()
     }
 
     // MARK: Ingest — file tailer
@@ -717,6 +754,12 @@ final class LogConsoleModel: ObservableObject {
             // with what the tailer now shows.
             knownGeneration = tailer.fileGeneration
             resetContent()
+        }
+        if oldestLoadedOffset == nil {
+            // First content of this generation: anchor back-scroll where the
+            // tailer's seed began.
+            oldestLoadedOffset = tailer.earliestSeedOffset
+            refreshCanLoadOlder()
         }
         let fresh = lines.filter { $0.id > lastIngestedID }
         guard !fresh.isEmpty else { return }
@@ -769,10 +812,134 @@ final class LogConsoleModel: ObservableObject {
         updated.append(contentsOf: newRows)
         if updated.count > Self.maxRows {
             updated.removeFirst(updated.count - Self.maxRows)
+            // The head just fell off: the byte offset of the new first row is
+            // unknown, so any further prepend would leave a silent gap.
+            if !loadOlderBroken {
+                loadOlderBroken = true
+                refreshCanLoadOlder()
+            }
         }
         rows = updated
         refreshRemediation()
         if searchActive { recomputeMatches(resetPosition: false) }
+    }
+
+    // MARK: Back-scroll ("Load older")
+
+    private func refreshCanLoadOlder() {
+        let can =
+            source != .diagnostics && !loadOlderBroken && (oldestLoadedOffset ?? 0) > 0
+        if canLoadOlder != can { canLoadOlder = can }
+    }
+
+    func loadOlder() {
+        guard canLoadOlder, !isLoadingOlder else { return }
+        isLoadingOlder = true
+        Task { [weak self] in
+            _ = await self?.loadOlderStep(publishSeam: true)
+            guard let self else { return }
+            self.isLoadingOlder = false
+            if self.searchActive {
+                self.recomputeMatches(resetPosition: false)
+                self.kickDiskSearch()
+            }
+        }
+    }
+
+    /// Walk chunks backwards until the earliest on-disk match is loaded, then
+    /// land the selection on the oldest match. Bounded at 128 chunks (= the
+    /// 8 MB disk-search window), so a click can't read a gigabyte file whole.
+    func loadOlderToDiskMatch() {
+        guard case .found(_, let target) = diskSearch, canLoadOlder, !isLoadingOlder
+        else { return }
+        isLoadingOlder = true
+        Task { [weak self] in
+            var steps = 0
+            while let self, let current = self.oldestLoadedOffset, current > target,
+                steps < 128
+            {
+                guard await self.loadOlderStep(publishSeam: false) else { break }
+                steps += 1
+            }
+            guard let self else { return }
+            self.isLoadingOlder = false
+            self.recomputeMatches(resetPosition: false)
+            if !self.orderedMatches.isEmpty {
+                self.currentIndex = 0  // the oldest loaded match — what was asked for
+                self.syncCurrentMatch()
+            }
+            self.kickDiskSearch()
+        }
+    }
+
+    /// One chunk of older history: read off-main, prepend with descending
+    /// negative ids. Returns false when no line-aligned progress was possible
+    /// (which also retires the affordance).
+    private func loadOlderStep(publishSeam: Bool) async -> Bool {
+        guard !loadOlderBroken, let path = currentFilePath,
+            let end = oldestLoadedOffset, end > 0
+        else { return false }
+        let sourceAtStart = source
+        let chunk = await Task.detached { LogBackscroll.readChunk(path: path, endingAt: end) }
+            .value
+        // The source/generation may have moved while we read — a stale chunk
+        // must not splice into fresh content. The offset alone isn't identity
+        // (a switched source's fresh anchor could coincidentally equal it), so
+        // the source is checked too.
+        guard source == sourceAtStart, oldestLoadedOffset == end else { return false }
+        guard let chunk, !chunk.lines.isEmpty, chunk.startOffset < end else {
+            loadOlderBroken = true
+            refreshCanLoadOlder()
+            return false
+        }
+        guard rows.count + chunk.lines.count <= Self.maxRows else {
+            loadOlderBroken = true  // cap reached — Finder has the rest
+            refreshCanLoadOlder()
+            return false
+        }
+        let base = nextOlderID - chunk.lines.count + 1
+        let prepended = chunk.lines.enumerated().map {
+            LogConsoleRow(id: base + $0.offset, rawText: $0.element)
+        }
+        nextOlderID = base - 1
+        let seamID = rows.first?.id
+        rows.insert(contentsOf: prepended, at: 0)
+        oldestLoadedOffset = chunk.startOffset
+        refreshCanLoadOlder()
+        if publishSeam { lastPrependSeamID = seamID }
+        return true
+    }
+
+    // MARK: On-disk stream search
+
+    /// Re-scan the file region the console doesn't hold for the current query.
+    /// Kicked when a query settles and after back-scroll changes the region;
+    /// results carry a token so a stale scan can't overwrite a newer one.
+    private func kickDiskSearch() {
+        diskSearchTask?.cancel()
+        diskSearchToken += 1
+        let token = diskSearchToken
+        guard searchActive, !queryInvalid, source != .diagnostics, !loadOlderBroken,
+            let path = currentFilePath, let end = oldestLoadedOffset, end > 0
+        else {
+            if diskSearch != .idle { diskSearch = .idle }
+            return
+        }
+        let query = self.query
+        let options = LogSearchOptions(caseSensitive: caseSensitive, isRegex: useRegex)
+        diskSearch = .searching
+        diskSearchTask = Task { [weak self] in
+            let result = await Task.detached {
+                LogBackscroll.searchOnDisk(
+                    path: path, query: query, options: options, before: end)
+            }.value
+            guard let self, !Task.isCancelled, self.diskSearchToken == token else { return }
+            if result.matchCount > 0, let earliest = result.earliestMatchOffset {
+                self.diskSearch = .found(count: result.matchCount, earliestOffset: earliest)
+            } else {
+                self.diskSearch = .noneFound
+            }
+        }
     }
 
     private func refreshRemediation() {
@@ -798,9 +965,11 @@ final class LogConsoleModel: ObservableObject {
             matchCount = 0
             currentIndex = nil
             syncCurrentMatch()
+            kickDiskSearch()
             return
         }
         queryInvalid = false
+        let previous = currentMatch
         orderedMatches = all
         matchCount = all.count
         var byRow: [Int: [Range<String.Index>]] = [:]
@@ -808,10 +977,15 @@ final class LogConsoleModel: ObservableObject {
         matchesByRow = byRow
         if resetPosition {
             currentIndex = all.isEmpty ? nil : 0
+        } else if let previous, let kept = all.firstIndex(of: previous) {
+            // The selected match survived (appends extend the list; prepends
+            // shift indices) — follow it by identity, not by position.
+            currentIndex = kept
         } else if let index = currentIndex, index >= all.count {
             currentIndex = all.isEmpty ? nil : all.count - 1
         }
         syncCurrentMatch()
+        if resetPosition { kickDiskSearch() }
     }
 
     private func syncCurrentMatch() {

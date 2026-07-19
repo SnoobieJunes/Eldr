@@ -545,6 +545,130 @@ struct LogConsoleModelTests {
     }
 }
 
+@MainActor
+@Suite("Console back-scroll + disk search + flood")
+struct LogConsoleBackscrollTests {
+
+    private func makePaths() throws -> (paths: ConfigPaths, root: String) {
+        let root = (NSTemporaryDirectory() as NSString)
+            .appendingPathComponent("eldr-console-bs-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(
+            atPath: (root as NSString).appendingPathComponent("mlx"),
+            withIntermediateDirectories: true)
+        return (ConfigPaths(configDir: root, binDir: root), root)
+    }
+
+    private func poll(
+        deadlineMilliseconds: Int = 5_000, _ what: Comment, until condition: () -> Bool
+    ) async throws {
+        for _ in 0..<(deadlineMilliseconds / 20) {
+            if condition() { return }
+            try await Task.sleep(for: .milliseconds(20))
+        }
+        #expect(condition(), what)
+    }
+
+    /// A file well past the 64 KB seed: "needle-target" sits ONCE at the given
+    /// index, everything else is numbered filler.
+    private func writeBigLog(to path: String, lines: Int = 20_000, needleAt: Int = 5) throws {
+        var blob = ""
+        for index in 0..<lines {
+            blob += index == needleAt ? "needle-target hiding here\n" : "line-\(index)\n"
+        }
+        try blob.write(toFile: path, atomically: true, encoding: .utf8)
+    }
+
+    private func lineNumber(of text: String) -> Int? {
+        text.hasPrefix("line-") ? Int(text.dropFirst("line-".count)) : nil
+    }
+
+    @Test func loadOlderPrependsContiguousHistory() async throws {
+        let (paths, root) = try makePaths()
+        defer { try? FileManager.default.removeItem(atPath: root) }
+        try writeBigLog(to: paths.logFile)
+
+        let model = LogConsoleModel(source: .agent, paths: paths)
+        model.start()
+        defer { model.stop() }
+        try await poll("seed never arrived") { !model.rows.isEmpty }
+        #expect(model.canLoadOlder, "a 64 KB-seeded big file must offer Load older")
+
+        let seamRow = try #require(model.rows.first)
+        let seamNumber = try #require(lineNumber(of: seamRow.text))
+
+        model.loadOlder()
+        try await poll("older chunk never prepended") { model.rows.first?.id ?? 0 < 0 }
+        try await poll("load flag never cleared") { !model.isLoadingOlder }
+
+        // The seam must be EXACTLY contiguous: the row before the old top is the
+        // previous line of the file — no gap, no duplicate.
+        let seamIndex = try #require(model.rows.firstIndex(where: { $0.id == seamRow.id }))
+        #expect(seamIndex > 0)
+        let before = try #require(lineNumber(of: model.rows[seamIndex - 1].text))
+        #expect(before == seamNumber - 1, "seam gap: line-\(before) then line-\(seamNumber)")
+        #expect(model.lastPrependSeamID == seamRow.id)
+        // Ids remain strictly ordered.
+        let ids = model.rows.map(\.id)
+        #expect(ids == ids.sorted() && Set(ids).count == ids.count)
+    }
+
+    @Test func diskSearchFindsOlderMatchAndJumpLoadsIt() async throws {
+        let (paths, root) = try makePaths()
+        defer { try? FileManager.default.removeItem(atPath: root) }
+        // The needle must be outside the seeded window but INSIDE the row-cap
+        // budget the jump may load (maxRows 10k − seed 2k): 7 000 lines back.
+        try writeBigLog(to: paths.logFile, needleAt: 13_000)
+
+        let model = LogConsoleModel(source: .agent, paths: paths)
+        model.start()
+        defer { model.stop() }
+        try await poll("seed never arrived") { !model.rows.isEmpty }
+        #expect(!model.rows.contains { $0.text.contains("needle-target") },
+            "the needle must start OUTSIDE the seeded window for this test to mean anything")
+
+        model.query = "needle-target"
+        try await poll("disk search never found the older match") {
+            if case .found(let count, _) = model.diskSearch { return count == 1 }
+            return false
+        }
+        #expect(model.matchCount == 0, "in-memory search must not see the on-disk needle")
+
+        model.loadOlderToDiskMatch()
+        try await poll(deadlineMilliseconds: 10_000, "jump never landed on the needle") {
+            model.currentMatch != nil && model.matchCount == 1
+        }
+        let matchRow = try #require(
+            model.rows.first(where: { $0.id == model.currentMatch?.rowID }))
+        #expect(matchRow.text.contains("needle-target"))
+        #expect(model.currentMatchOrdinal == 1)
+    }
+
+    @Test func floodPublishesStayBatchedThroughTheModel() async throws {
+        let (paths, root) = try makePaths()
+        defer { try? FileManager.default.removeItem(atPath: root) }
+        FileManager.default.createFile(atPath: paths.logFile, contents: nil)
+        let model = LogConsoleModel(source: .agent, paths: paths)
+        model.start()
+        defer { model.stop() }
+
+        var publishes = 0
+        let cancellable = model.$rows.dropFirst().sink { _ in publishes += 1 }
+        defer { cancellable.cancel() }
+
+        // 50 separate writes land as a handful of coalesced row batches — the
+        // tailer's ~4 Hz publish hygiene must carry through the console model.
+        let handle = try #require(FileHandle(forWritingAtPath: paths.logFile))
+        for index in 0..<50 {
+            try handle.write(contentsOf: Data("flood-\(index)\n".utf8))
+        }
+        try handle.close()
+        try await poll("flood never fully ingested") { model.rows.count == 50 }
+        #expect(publishes <= 15, "expected coalesced row publishes, saw \(publishes)")
+        #expect(model.rows.first?.text == "flood-0")
+        #expect(model.rows.last?.text == "flood-49")
+    }
+}
+
 @Suite("LogTailer backscroll anchors")
 struct LogTailerAnchorTests {
 
@@ -584,6 +708,36 @@ struct LogTailerAnchorTests {
         let text = String(decoding: data, as: UTF8.self)
         let firstLine = try #require(tailer.lines.first?.text)
         #expect(text.hasPrefix(firstLine + "\n"), "anchor not at the first retained line")
+    }
+
+    // Regression (caught by the WS-M2 seam test): a 64 KB seed of SHORT lines
+    // exceeds the 2000-line retention cap, publish trimmed the head after
+    // ingest, and earliestSeedOffset pointed below the first retained line —
+    // "Load older" then spliced older history in with a silent gap. The seed
+    // is now bounded to the cap in data space, so the anchor is exact.
+    @MainActor
+    @Test func overlongSeedIsCappedWithExactAnchor() throws {
+        let path = (NSTemporaryDirectory() as NSString)
+            .appendingPathComponent("eldr-anchor-cap-\(UUID().uuidString).log")
+        defer { try? FileManager.default.removeItem(atPath: path) }
+        var blob = ""
+        for index in 0..<20_000 { blob += "line-\(index)\n" }  // ≈230 KB, ~11 B lines
+        try blob.write(toFile: path, atomically: true, encoding: .utf8)
+
+        let tailer = LogTailer(path: path)  // default 64 KB seed ≫ 2000 lines
+        tailer.start()
+        defer { tailer.stop() }
+
+        #expect(tailer.lines.count == 2_000, "seed must cap at retention")
+        #expect(tailer.lines.last?.text == "line-19999")
+        let handle = try #require(FileHandle(forReadingAtPath: path))
+        try handle.seek(toOffset: tailer.earliestSeedOffset)
+        let data = try #require(try handle.read(upToCount: 64))
+        try handle.close()
+        let firstLine = try #require(tailer.lines.first?.text)
+        #expect(
+            String(decoding: data, as: UTF8.self).hasPrefix(firstLine + "\n"),
+            "anchor must point exactly at the first RETAINED line")
     }
 
     @MainActor
