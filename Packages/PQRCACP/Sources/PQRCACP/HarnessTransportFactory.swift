@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 import Foundation
 
 // The seam that keeps PQRCACP dependency-free while still supporting harness kinds that

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 import Foundation
 
 // The CLIENT half of ACP — the counterpart to `ACPAgent`. An ACP client spawns the

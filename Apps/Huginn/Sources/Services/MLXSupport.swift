@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: AGPL-3.0-only
 import Foundation
 
 // Pure, process-free MLX logic: command-line construction for every `mlx_lm`

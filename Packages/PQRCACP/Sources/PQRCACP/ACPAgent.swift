@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 import Foundation
 
 // NODE-SIDE (macOS only): the AGENT half of ACP. It runs the tool-calling loop and

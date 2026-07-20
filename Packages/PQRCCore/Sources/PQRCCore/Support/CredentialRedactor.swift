@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 import Foundation
 
 /// Replaces secrets in agent output with opaque markers before that text is shown to

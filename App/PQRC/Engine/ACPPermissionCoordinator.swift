@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: AGPL-3.0-only
 import Foundation
 
 /// One pending phone-side decision on a paired Mac coding-agent's mutating tool call

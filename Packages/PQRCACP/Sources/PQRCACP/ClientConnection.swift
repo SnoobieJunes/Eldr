@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 import Foundation
 
 /// Where outbound JSON-RPC lines go. Production writes to stdout; tests capture to

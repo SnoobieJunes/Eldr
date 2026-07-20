@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 import Foundation
 
 // Phase 1 item 3 + the "Scaffolds that make Phases 2–4 drop-in" section of

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 import Foundation
 
 /// WS-D: one user-defined quick command for the command-chip strips — the

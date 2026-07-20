@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: AGPL-3.0-only
 import XCTest
 
 /// TEST-PLAN §11: launch + scroll performance. Baseline-relative on CI;

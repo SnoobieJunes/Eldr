@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: AGPL-3.0-only
 import AppKit
 import PQRCACP  // WS-D: the shared CustomCommand chip model.
 import SwiftUI

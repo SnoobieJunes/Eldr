@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: AGPL-3.0-only
 import XCTest
 
 /// TEST-PLAN §10: XCUITest over the Local Universe. The demo script

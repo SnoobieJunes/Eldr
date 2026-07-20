@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: AGPL-3.0-only
 import SwiftUI
 
 /// The full-screen guided tour: a swipeable sequence of `TourStepCard`s with a

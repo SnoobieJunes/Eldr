@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 import Foundation
 
 /// A JSON value (`google.protobuf.Value` / `google.protobuf.Struct` on the A2A wire).

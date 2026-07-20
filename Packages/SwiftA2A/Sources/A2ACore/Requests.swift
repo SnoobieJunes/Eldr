@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 import Foundation
 
 // Request/response messages from lf.a2a.v1 (a2a.proto). Every request carries an

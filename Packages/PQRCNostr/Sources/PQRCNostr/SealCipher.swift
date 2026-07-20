@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 import Crypto
 import Foundation
 import P256K

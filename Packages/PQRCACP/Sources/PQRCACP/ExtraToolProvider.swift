@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 import Foundation
 
 // Phase D3 — MCP passthrough over the relay, the PQRCACP (dependency-free) seam.

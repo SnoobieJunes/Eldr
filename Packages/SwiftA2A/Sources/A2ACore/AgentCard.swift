@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 import Foundation
 
 // `AgentCard` and its component types from lf.a2a.v1 (a2a.proto). The card is the

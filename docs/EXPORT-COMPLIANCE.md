@@ -70,3 +70,17 @@ This declaration covers the **iOS client only**. The `pqrc-relay` server moves
 ciphertext and holds no keys, but if you operate it across borders, assess its
 own export posture separately (THREAT_MODEL §2.7 / the relay operator's
 IP-and-retention policy decision).
+
+## Open-source publication of the source code (§742.15(b))
+
+Publishing this repository's encryption source code publicly (e.g. a public
+GitHub repo) makes it "publicly available" encryption source under EAR
+§734.3(b)(3) — not subject to the EAR — **provided** the one-time notification
+required by **§742.15(b)** is sent: an email to `crypt@bis.doc.gov` and
+`enc@nsa.gov` containing the URL of the public repository (or a copy of the
+source). Send it **when the repo goes public**, keep a copy with your records,
+and re-notify if the URL ever changes. This is separate from — and does not
+replace — the App Store §740.17(b)(1) self-classification path above, which
+continues to cover the distributed binary. As with everything in this file:
+confirm the current addresses and rules against BIS guidance before sending;
+not legal advice.

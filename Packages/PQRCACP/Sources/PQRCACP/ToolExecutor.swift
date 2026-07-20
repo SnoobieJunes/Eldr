@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 import Foundation
 
 /// What the client said it can do (from `initialize` → clientCapabilities). Drives

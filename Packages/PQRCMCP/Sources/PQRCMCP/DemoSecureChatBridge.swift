@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 import Foundation
 
 /// A fixture bridge so the `pqrc-mcp` executable runs (and Goose/Xcode/Claude can

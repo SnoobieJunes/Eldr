@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 import A2ACore
 
 // The business-logic seam a server-side A2A implementation plugs into. `A2AServer`

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: AGPL-3.0-only
 import XCTest
 
 /// Runtime verification of the findings from docs/deprecated/UX-RECOMMENDATIONS.md.

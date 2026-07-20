@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: AGPL-3.0-only
 import SwiftUI
 
 /// A single tour card: a glowing hero badge (mock iconography, never a

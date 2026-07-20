@@ -142,7 +142,10 @@ The bootstrap relay is **relay.lerants.com** — [khatru](https://github.com/fia
 
 ## License
 
-Not finalized yet — the LICENSE files land with the public release. Until then: the source is public to read and build, but no license is granted. If you want to use any of it sooner, open an issue.
+Split licensing, on purpose ([LICENSING.md](LICENSING.md) has the full map):
+
+- **`Packages/`** — all eight SPM packages (crypto core, Nostr transport, agent stack, MCP, A2A, node, CLI): **Apache-2.0**. Embed them in anything, including proprietary products.
+- **The apps** (`App/` EldrChat, `Apps/Huginn/`) and everything else: **AGPL-3.0-only**, with a Signal-style [App Store exception](LICENSE-EXCEPTIONS.md) so builds can ship through Apple's store. Forks stay open.
 
 ---
 

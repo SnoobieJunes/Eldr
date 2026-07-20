@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 import Foundation
 
 /// One conversation, as exposed to an MCP client. Already egress-safe: the app's

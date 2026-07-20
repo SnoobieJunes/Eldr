@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 import Foundation
 
 // `Message`, `Part`, `Artifact` and `Role` from lf.a2a.v1 (a2a.proto), in the proto3

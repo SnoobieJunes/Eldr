@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 import Foundation
 
 /// Bech32 encoding (BIP-173) for npub/nsec display. An encoding, not a

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 import A2ACore
 
 /// Legality gate for `A2ATask` status transitions (`TaskState`). `A2AServer` runs

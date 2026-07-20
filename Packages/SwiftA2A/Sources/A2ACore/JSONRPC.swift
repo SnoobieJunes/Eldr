@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 import Foundation
 
 // The JSON-RPC 2.0 envelope for the A2A v1.0 JSON-RPC binding

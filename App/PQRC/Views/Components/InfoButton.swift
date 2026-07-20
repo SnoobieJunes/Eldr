@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: AGPL-3.0-only
 import SwiftUI
 
 /// A tasteful, cross-platform "help & info" affordance (one source string, one

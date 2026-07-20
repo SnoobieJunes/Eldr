@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: AGPL-3.0-only
 import SwiftUI
 
 /// Per-party color coding for a conversation (APP-SPEC §6.2 readability pass).

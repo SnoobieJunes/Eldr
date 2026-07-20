@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 import Foundation
 
 /// Deterministic, scriptable provider for tests and the Local Universe demo.

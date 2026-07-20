@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 import Foundation
 
 /// Who authored a message. `participant_type` is cryptographically meaningful

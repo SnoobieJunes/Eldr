@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 import Foundation
 
 // Context budgeting, tool selection, and prompt tuning — the knobs that let one

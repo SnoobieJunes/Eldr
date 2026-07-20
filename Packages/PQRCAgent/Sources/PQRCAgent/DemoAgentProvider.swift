@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 import Foundation
 
 /// A no-network "simulated AI" for demos and for any time a real brain isn't

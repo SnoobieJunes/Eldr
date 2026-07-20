@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 import Foundation
 
 /// Remote inference via OpenRouter (APP-SPEC §9, D3) — one API key, many models

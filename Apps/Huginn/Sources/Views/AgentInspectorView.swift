@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: AGPL-3.0-only
 import SwiftUI
 
 /// Live view of what the node is actually doing — every LLM round-trip (with latency

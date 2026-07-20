@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 import Foundation
 
 // Phase 1 (docs/ACPRouterplan.md §5): decouple ACP from stdio. The agent was already

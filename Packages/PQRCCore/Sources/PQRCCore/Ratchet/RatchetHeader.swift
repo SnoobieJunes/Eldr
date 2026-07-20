@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 import Foundation
 
 /// PQ rekey header (SPEC §6.2, NIP-XX §6): present only on the message that

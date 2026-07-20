@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 import Foundation
 
 // Phase-3 substrate: the structured `eldr.md` a project accumulates. Kept here

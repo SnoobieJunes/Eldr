@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 import Foundation
 
 // A2A error model: the JSON-RPC 2.0 error object plus the A2A-specific code range
