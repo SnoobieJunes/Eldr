@@ -6,7 +6,7 @@ Right now you get to pick one. Private messengers (Signal, iMessage) are adding 
 
 > 📱 **Text only, on purpose.** Eldr transports your words; it never stores them. No photos, no videos, no cloud archive of your life ("use iMessage for that"). Messages even expire off the relays within days.
 
-**Status: alpha, pre-release, not yet security-audited.** The eight core packages run their 670-test headless suite green (frozen byte-for-byte crypto vectors and a networked chaos matrix included), and the app targets carry further UI + security-regression suites — but no independent audit has happened yet. Don't stake your safety on it. Details in [docs/THREAT_MODEL.md](docs/THREAT_MODEL.md).
+**Status: alpha, pre-release, not yet security-audited.** The eight core packages run their 676-test headless suite green (frozen byte-for-byte crypto vectors and a networked chaos matrix included), and the app targets carry further UI + security-regression suites — but no independent audit has happened yet. Don't stake your safety on it. Details in [docs/THREAT_MODEL.md](docs/THREAT_MODEL.md).
 
 ---
 
@@ -149,4 +149,4 @@ Split licensing, on purpose ([LICENSING.md](LICENSING.md) has the full map):
 
 ---
 
-*Built in the open, human + AI pair-engineering: ~82k lines of Swift 6 across eight packages and two apps, ~900 tests, frozen crypto vectors, and a public decision ledger — in weeks, not years. User privacy is the number-one priority, without exception.*
+*Built in the open, human + AI pair-engineering: ~82k lines of Swift 6 across eight packages and two apps, ~890 tests (676 headless + 214 in the macOS companion, plus the iOS app suites), frozen crypto vectors, and a public decision ledger — in weeks, not years. User privacy is the number-one priority, without exception.*

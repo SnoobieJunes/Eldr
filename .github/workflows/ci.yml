@@ -20,8 +20,10 @@ jobs:
       - name: Scan
         # Baseline 2026-07-19: 56 raw findings, all false positives, each
         # allowlisted with a reason in .gitleaks.toml. A NEW finding is real.
+        # Image pinned by tag, not :latest — an unpinned scanner is a
+        # supply-chain hole in the thing meant to close supply-chain holes.
         run: |
-          docker run --rm -v "$PWD:/repo" -w /repo zricethezav/gitleaks:latest \
+          docker run --rm -v "$PWD:/repo" -w /repo zricethezav/gitleaks:v8.30.1 \
             detect --no-banner --redact -v -c .gitleaks.toml
 
   packages:

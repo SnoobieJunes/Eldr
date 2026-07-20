@@ -81,5 +81,5 @@ Per-task approval applies unless **Auto-approve inbound tasks** is on
 ungated-tools). The reverse direction — the LOCAL model tasking a cloud agent —
 is `delegate_to_cloud_agent` (harness `claude-code` → `claude-agent-acp`,
 using the `claude` CLI's own login); it requires an LLM server whose tool-call
-output mlx-lm can parse (see LOOP-STATE 2026-07-18: Qwen3-Coder-Next's XML
+output mlx-lm can parse (verified 2026-07-18: Qwen3-Coder-Next's XML
 grammar does not parse; Qwen3.6-27B's classic format does).

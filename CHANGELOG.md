@@ -32,9 +32,10 @@ Initial public release.
 - **SwiftA2A**: A2A v1.0 types, JSON-RPC client/server, and the draft
   "A2A over PQRC" E2EE transport extension
   ([docs/A2A-PQRC-EXTENSION.md](docs/A2A-PQRC-EXTENSION.md)).
-- **Test suite as a deliverable:** ~900 tests across eight packages and two
-  apps — frozen byte-for-byte crypto vectors, a networked chaos matrix,
-  security-regression suites, an accessibility audit — plus CI (package
-  matrix, iOS + Catalyst build gate, app tests, non-blocking perf).
+- **Test suite as a deliverable:** 676 headless package tests plus the two app
+  suites (214 in the macOS companion) — frozen byte-for-byte crypto vectors, a
+  networked chaos matrix, security-regression suites, an accessibility audit —
+  plus CI (secret scan, package matrix, iOS + Catalyst build gate, app tests,
+  non-blocking perf).
 - **Split licensing:** Apache-2.0 for all eight packages, AGPL-3.0-only for the
   apps with an App Store exception ([LICENSING.md](LICENSING.md)).

@@ -142,8 +142,9 @@ rejected regardless of how nice the feature is.
 ## Pull requests
 
 1. Fork → feature branch → PR against `main`.
-2. **CI must pass** — the package matrix (all eight), the iOS + Mac Catalyst
-   build gate, and the app test job. The performance job is non-blocking.
+2. **CI must pass** — the secret scan, the package matrix (all eight), the
+   iOS + Mac Catalyst build gate, and the app test job. The performance job is
+   non-blocking.
 3. **Spec-affecting changes must add a [DEVIATIONS.md](docs/DEVIATIONS.md)
    entry** — every judgment call gets a row, tagged `[upstream-NIP]`,
    `[app-only]`, or `[tech-debt]`.
