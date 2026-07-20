@@ -5,11 +5,18 @@
 **Status note.** The original handoff package referenced this document but did
 not contain it. This file was authored alongside the v1 reference
 implementation to be the normative wire format, derived from
-`SPEC.md` (protocol law) and the field-name contract in `CLAUDE.md`
+`pqrc-SPEC-v1_1.md` (protocol law) and the field-name contract in `CLAUDE.md`
 (`spk`, `pqpk`, `otp`, `otp_pq`, `lrp`, `dh`, `pn`, `n`, `pq`, `ptr`).
 Where this NIP fills a gap the SPEC leaves open, the decision is also recorded
 in `docs/DEVIATIONS.md` tagged `[upstream-NIP]`. The frozen vectors in
 `TestVectors/` are the byte-level contract for a second client.
+
+**Upstream intent.** This document is written for submission to
+[`nostr-protocol/nips`](https://github.com/nostr-protocol/nips) once the
+protocol and the frozen vectors stabilize; the `[upstream-NIP]` tags in
+`docs/DEVIATIONS.md` enumerate exactly what must be reconciled before that
+submission. Until it is merged upstream, the event kinds and `pqrc` tag names
+used here are provisional and may be renumbered on upstream review.
 
 ## 1. Overview
 

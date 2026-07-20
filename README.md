@@ -114,7 +114,7 @@ Apps/Huginn/    # macOS companion — tethered AI + coding agent
 TestVectors/    # frozen byte-for-byte crypto vectors
 ```
 
-Core logic lives in the packages (no UI imports) so `swift test` runs headlessly; the app targets stay thin. Swift 6, strict concurrency, actors own all mutable state, CryptoKit/swift-crypto only — no libsignal, no custom primitives.
+Core logic lives in the packages (no UI imports) so `swift test` runs headlessly; the app targets stay thin. Swift 6, strict concurrency, actors own all mutable state, CryptoKit/swift-crypto only — no libsignal, no custom primitives. The macOS companion has its own deep-dive: [Apps/Huginn/README.md](Apps/Huginn/README.md).
 
 ## Documentation
 

@@ -13,19 +13,14 @@ This repository contains the v1 iOS client and test suite for **PQRC (Post-Quant
 
 **The cardinal rule (SPEC §0): user privacy is the number one priority, without exception.** Every tie resolves in favor of privacy, even at the cost of convenience, features, or performance.
 
-## Communication — no sycophancy, no placating
+## Truthful reporting
 
-The user does **not** want a yes-man. This is a hard rule, not a style preference.
-
-- **Banned:** flattery, validation openers ("You're right", "Great question",
-  "Absolutely"), reflexive apologies, and agreeing just to be agreeable. Lead with the
-  fact or the action, never with reassurance.
-- **Tell the truth even when it's unwelcome.** If something is broken, can't be done,
-  or was claimed done but wasn't, say so plainly and show the evidence.
-- **Never report a build, test, or feature as working without having run it and seen it
-  pass.** Distinguish what is *proven* (ran it, saw the output) from what is *inferred*
-  or *compile-checked only*. Label every unverified claim as unverified.
-- Don't soften bad news with hedges or padding. Disagree when the evidence warrants it.
+- **Never report a build, test, or feature as working without having run it and
+  seen it pass.** Distinguish what is *proven* (ran it, saw the output) from what
+  is *inferred* or *compile-checked only*. Label every unverified claim as
+  unverified.
+- If something is broken, can't be done, or was claimed done but wasn't, say so
+  plainly and show the evidence. Nothing merges red.
 
 ## Stack
 
@@ -121,8 +116,13 @@ xcodebuild test -project App/EldrChat.xcodeproj -scheme EldrChat \
 
 # The macOS companion app (Huginn) has its own project + suite — it is NOT covered by
 # the iOS scheme and NOT in CI. Run it whenever you touch Apps/Huginn or the gateway.
+# Huginn tests need REAL signing (the data-protection keychain group is team-scoped
+# and DEVELOPMENT_TEAM is deliberately blank in the pbxproj): pass a team id on the
+# command line — any free personal team works; this machine keeps one in the
+# gitignored private/dev-team.txt. Building only? CODE_SIGNING_ALLOWED=NO instead.
 xcodebuild test -project Apps/Huginn/Huginn.xcodeproj -scheme Huginn \
-  -destination 'platform=macOS' -skipPackagePluginValidation
+  -destination 'platform=macOS' -skipPackagePluginValidation \
+  DEVELOPMENT_TEAM="$(cat private/dev-team.txt 2>/dev/null || echo YOUR_TEAM_ID)"
 ```
 
 **Three xcodebuild rules that have each cost real hours — do not rediscover them:**
