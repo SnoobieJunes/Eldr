@@ -145,7 +145,7 @@ private func validConfig() -> ConduitProvisioner.Config {
     #expect(!ConduitProvisioner.isSafeSSHDestination("host name"))
     #expect(!ConduitProvisioner.isSafeSSHDestination("host$(id)"))
     // Real destinations pass.
-    #expect(ConduitProvisioner.isSafeSSHDestination("auston@mac.local"))
+    #expect(ConduitProvisioner.isSafeSSHDestination("user@mac.local"))
     #expect(ConduitProvisioner.isSafeSSHDestination("192.168.1.20"))
     #expect(ConduitProvisioner.isSafeSSHDestination("user@host.example.com:2222"))
     #expect(ConduitProvisioner.isSafeSSHDestination("build-box"))

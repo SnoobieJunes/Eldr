@@ -23,8 +23,11 @@ logs/
 *~
 *.swift~*
 
-# Claude Code background-agent worktrees
-.claude/worktrees/
+# Claude Code local config + background-agent worktrees (never published)
+.claude/
+
+# Private, non-published material (business/marketing docs, live task checklists)
+private/
 
 # Xcode distribution / export logs (build artifacts)
 *.xcdistributionlogs/

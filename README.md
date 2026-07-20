@@ -63,12 +63,12 @@ Right now you get to pick one. Private messengers (Signal, iMessage) are adding 
 
 1. **AI is coming to your private chats whether you like it or not.** The mainstream version will be platform-owned models with platform-decided visibility. Eldr is the counter-model: user-owned AI, cryptographically leashed, honestly labeled — built into the protocol, not the terms of service.
 2. **"Harvest now, decrypt later" is a today problem.** Anything encrypted classically can be recorded now and broken when quantum hardware matures. Post-quantum ratcheting is table stakes for conversations meant to stay private for decades.
-3. **The agent economy needs a private wire.** Agents delegating work to other agents over HTTP-through-somebody's-cloud repeats every mistake messaging just spent a decade fixing. A serverless, post-quantum E2EE agent transport is infrastructure that doesn't exist yet — see [docs/BUSINESS-CASE.md](docs/BUSINESS-CASE.md) for the market landscape.
+3. **The agent economy needs a private wire.** Agents delegating work to other agents over HTTP-through-somebody's-cloud repeats every mistake messaging just spent a decade fixing. A serverless, post-quantum E2EE agent transport is infrastructure that doesn't exist yet.
 
 ## How you can help
 
 - **Build it and beat on it.** Quickstart below. File issues for anything that confuses you — UX confusion reports are as valuable as crashes.
-- **Device testing.** The highest-value work right now is proving flows on real hardware (pairing, tethered AI, the coding-agent conduit). The live human checklist is [docs/meatsuittasks.md](docs/meatsuittasks.md).
+- **Device testing.** The highest-value work right now is proving flows on real hardware (pairing, tethered AI, the coding-agent conduit). File what you find as issues.
 - **Security review.** Read [docs/pqrc-SPEC-v1_1.md](docs/pqrc-SPEC-v1_1.md) and [docs/THREAT_MODEL.md](docs/THREAT_MODEL.md), then try to break the implementation. Report privately (below). We treat findings as first-class commits — the repo's audit-fix history is public.
 - **Run a relay.** Deployment runbook: [docs/RELAY-DEPLOY-CROSTINI.md](docs/RELAY-DEPLOY-CROSTINI.md).
 - **Protocol feedback.** The wire format ([docs/NIP-XX-pqrc.md](docs/NIP-XX-pqrc.md)) and the A2A extension ([docs/A2A-PQRC-EXTENSION.md](docs/A2A-PQRC-EXTENSION.md)) both want adversarial readers before they're submitted upstream.
@@ -131,7 +131,6 @@ All docs live in [`docs/`](docs/) — retired material is quarantined in [`docs/
 | [docs/DEVIATIONS.md](docs/DEVIATIONS.md) | Every judgment call, tagged and dated |
 | [docs/SETUP-GUIDE.md](docs/SETUP-GUIDE.md) | Building, running, transports |
 | [docs/DEMO.md](docs/DEMO.md) / [docs/DEMO-SYBILCLAW.md](docs/DEMO-SYBILCLAW.md) | Scripted demos |
-| [docs/BUSINESS-CASE.md](docs/BUSINESS-CASE.md) | Market landscape, value proposition, path to revenue |
 
 ## Relay
 
@@ -143,7 +142,7 @@ The bootstrap relay is **relay.lerants.com** — [khatru](https://github.com/fia
 
 ## License
 
-Not finalized yet — the LICENSE file lands together with the 1.0 licensing/monetization decision (analysis in [docs/BUSINESS-CASE.md](docs/BUSINESS-CASE.md)). Until then: the source is public to read and build, but no license is granted. If you want to use any of it sooner, open an issue.
+Not finalized yet — the LICENSE files land with the public release. Until then: the source is public to read and build, but no license is granted. If you want to use any of it sooner, open an issue.
 
 ---
 

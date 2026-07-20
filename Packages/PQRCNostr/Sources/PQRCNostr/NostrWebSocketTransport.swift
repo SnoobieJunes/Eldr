@@ -2,8 +2,6 @@
 //  NostrWebSocketTransport.swift
 //  PQRCNostr
 //
-//  Created by Auston on 6/12/26.
-//
 
 import Foundation
 import OSLog

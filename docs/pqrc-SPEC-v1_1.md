@@ -1,6 +1,6 @@
 # PQRC Protocol Specification v1
 
-**PQ-Ratchet & Clank** — a post-quantum, decentralized, AI-native end-to-end encrypted messaging protocol for iOS.
+**PQRC (Post-Quantum Ratcheted Conversations)** — a post-quantum, decentralized, AI-native end-to-end encrypted messaging protocol for iOS.
 
 Protocol identifier: `pqrc-v1`
 Status: Draft

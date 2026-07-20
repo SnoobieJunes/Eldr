@@ -5,7 +5,7 @@ A phased checklist. Items marked **YOU** need a human (account access, money, or
 ## A. Accounts & identity
 
 1. **YOU** — Enroll in the Apple Developer Program ($99/yr) with an account that has Certificates/App Manager rights. Two-factor on.
-2. **YOU** — Pick the public **app name** and **bundle ID** (e.g. `chat.eldr.app`). Note: the codename "Ratchet & Clank" is a Sony trademark — fine internally, not for any public listing. Decide the real name now; renaming later churns App Store Connect records.
+2. **YOU** — Pick the public **app name** and **bundle ID** (e.g. `chat.eldr.app`). Note: the protocol's original internal codename was a trademarked name; it has been retired repo-wide and must not appear in any public listing. Decide the real name now; renaming later churns App Store Connect records.
 3. **CLAUDE** — Set bundle ID, team, display name, version `0.1.0`, build `1` in the project once you provide Team ID.
 
 ## B. Project configuration for distribution

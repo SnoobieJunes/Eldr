@@ -18,7 +18,7 @@
 
 ## iOS 27 SDK cross-check
 
-All file references are relative to repo root `/Users/auston/Development Projects/Eldr/`. Fetched 2026-06-12. Apple's `developer.apple.com/tutorials/data/...json` endpoints (the raw data behind the doc pages) rendered correctly and are treated as primary sources; the Xcode 27 / iOS 27 release-notes HTML pages did not render body text via fetch, so toolchain-level items rest on search snippets + the DevelopersIO mirror and are marked accordingly.
+All file references are relative to the repo root. Fetched 2026-06-12. Apple's `developer.apple.com/tutorials/data/...json` endpoints (the raw data behind the doc pages) rendered correctly and are treated as primary sources; the Xcode 27 / iOS 27 release-notes HTML pages did not render body text via fetch, so toolchain-level items rest on search snippets + the DevelopersIO mirror and are marked accordingly.
 
 ### Platform API inventory & iOS 27 status
 
