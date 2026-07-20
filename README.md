@@ -76,7 +76,7 @@ Right now you get to pick one. Private messengers (Signal, iMessage) are adding 
 
 ## Quickstart
 
-**Toolchain:** stable Xcode 26.x builds everything (CI runs 26.5; 26.6 also verified). You need the **iOS 26.5 simulator runtime** installed for the app tests. The Xcode 27 beta is needed **only** if you enable the experimental Private Cloud Compute tier (`ELDR_PCC_SDK`); for that, `export DEVELOPER_DIR=/Applications/Xcode-beta.app/Contents/Developer` first.
+**Toolchain:** stable Xcode 26.x builds everything (CI runs 26.5; 26.6 also verified). You need the **iOS 26.5 simulator runtime** installed for the app tests. The Xcode 27 beta is needed **only** to opt into the experimental Private Cloud Compute tier — off by default; enable with `export DEVELOPER_DIR=/Applications/Xcode-beta.app/Contents/Developer` **and** `export ELDR_PCC_SDK=1`.
 
 ```bash
 # All eight packages, headless — no simulator needed.

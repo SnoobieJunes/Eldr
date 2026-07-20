@@ -100,7 +100,17 @@ iPhoneSimulator SDKs). **Always export the beta's `DEVELOPER_DIR` before buildin
 
 ```bash
 export DEVELOPER_DIR=/Applications/Xcode-beta.app/Contents/Developer   # Xcode 27 — the default for this repo
+export ELDR_PCC_SDK=1   # opt into the PCC path (AC123: no longer an unconditional .define)
 ```
+
+**PCC is opt-in via the environment, not hardcoded (AC123).** `PQRCAgent`'s
+`Package.swift` used to `.define("ELDR_PCC_SDK")` unconditionally, which made the
+package — and therefore the whole iOS app, which imports it — uncompilable on any
+26.x SDK, including every GitHub-hosted CI runner (they ship 26.0.1–26.6, never
+27). It now reads `ELDR_PCC_SDK` from the environment. Export it (above) to get
+the PCC path; leave it unset and everything builds on stable Xcode. Do NOT
+"fix" a `cannot find type 'ContextOptions'` error by re-adding the hardcoded
+define — export the variable and use the beta.
 
 ```bash
 # Fast inner loop (no simulator needed) — ALL EIGHT packages, not just the first three.

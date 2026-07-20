@@ -18,9 +18,19 @@ Vulnerabilities: **never a public issue** — see [SECURITY.md](SECURITY.md).
 - macOS 26 + **stable Xcode 26.x** — this builds everything; CI runs 26.5 and
   26.6 is verified too. Install the **iOS 26.5** simulator runtime
   (Xcode → Settings → Components) — the app test commands pin `OS=26.5`.
-- The **Xcode 27 beta** is needed *only* if you enable the experimental Private
-  Cloud Compute tier (`ELDR_PCC_SDK`, off by default). For that:
-  `export DEVELOPER_DIR=/Applications/Xcode-beta.app/Contents/Developer`.
+- The **Xcode 27 beta** is needed *only* if you opt into the experimental
+  Private Cloud Compute tier, which is **off by default**. To enable it you need
+  both an Xcode 27+ toolchain and the environment flag:
+
+  ```bash
+  export DEVELOPER_DIR=/Applications/Xcode-beta.app/Contents/Developer
+  export ELDR_PCC_SDK=1
+  ```
+
+  Without `ELDR_PCC_SDK`, `PQRCAgent` compiles the non-PCC path and everything
+  builds on a stable toolchain. Don't add an unconditional `.define` for it in
+  `Packages/PQRCAgent/Package.swift` — the PCC symbols are absent from every
+  26.x SDK, so that breaks CI and every contributor not on the beta.
 
 ## Building and testing
 
