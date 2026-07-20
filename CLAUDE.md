@@ -89,9 +89,10 @@ Core logic lives in SPM packages so `swift test` runs headlessly and fast; the a
 ## Commands
 
 **Toolchain rule (hard): build/test against the Xcode 27 beta, NOT the 26.x release —
-unless the user EXPLICITLY asks for 26.5.** The `xcode-select` default is
-`/Applications/Xcode.app` (Xcode 26.5), whose SDK is missing iOS-27 symbols this app
-uses — most notably the Private Cloud Compute FoundationModels API
+unless the user EXPLICITLY asks for the stable one.** The `xcode-select` default is
+`/Applications/Xcode.app` (a 26.x release — 26.6 as of 2026-07-19; don't assume a
+specific point release, run `xcodebuild -version`), whose SDK is missing iOS-27
+symbols this app uses — most notably the Private Cloud Compute FoundationModels API
 (`PrivateCloudComputeLanguageModel`, `ContextOptions`), gated behind `ELDR_PCC_SDK`.
 Building with 26.x fails with "cannot find type … in scope" and misleads you into
 concluding the API doesn't exist (it does — verified present in Xcode 27's iPhoneOS *and*

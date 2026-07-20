@@ -11,9 +11,11 @@ This repository is deliberately split-licensed:
 
 Two riders:
 
-- **App Store exception.** The AGPL alone cannot ship through Apple's store, so
-  the copyright holders grant a Signal-style additional permission under AGPL §7
-  — see [`LICENSE-EXCEPTIONS.md`](LICENSE-EXCEPTIONS.md).
+- **App store exception.** Apple's App Store terms conflict with the AGPL's
+  freedoms, so the copyright holders grant an additional permission under
+  AGPL §7 — see [`LICENSE-EXCEPTIONS.md`](LICENSE-EXCEPTIONS.md). The source
+  obligation is unchanged: complete corresponding source stays available under
+  the AGPL here.
 - **Contribution terms** (details in `CONTRIBUTING.md`):
   - `Packages/` — DCO sign-off (`git commit -s`); inbound = outbound Apache-2.0.
   - `App/` and `Apps/` — contributions additionally require a Contributor

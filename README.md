@@ -76,7 +76,7 @@ Right now you get to pick one. Private messengers (Signal, iMessage) are adding 
 
 ## Quickstart
 
-**Toolchain:** stable Xcode 26.5 builds everything (CI does exactly that). The Xcode 27 beta is needed **only** if you enable the experimental Private Cloud Compute tier (`ELDR_PCC_SDK`); for that, `export DEVELOPER_DIR=/Applications/Xcode-beta.app/Contents/Developer` first.
+**Toolchain:** stable Xcode 26.x builds everything (CI runs 26.5; 26.6 also verified). You need the **iOS 26.5 simulator runtime** installed for the app tests. The Xcode 27 beta is needed **only** if you enable the experimental Private Cloud Compute tier (`ELDR_PCC_SDK`); for that, `export DEVELOPER_DIR=/Applications/Xcode-beta.app/Contents/Developer` first.
 
 ```bash
 # All eight packages, headless — no simulator needed.
@@ -145,7 +145,7 @@ The bootstrap relay is **relay.lerants.com** — [khatru](https://github.com/fia
 Split licensing, on purpose ([LICENSING.md](LICENSING.md) has the full map):
 
 - **`Packages/`** — all eight SPM packages (crypto core, Nostr transport, agent stack, MCP, A2A, node, CLI): **Apache-2.0**. Embed them in anything, including proprietary products.
-- **The apps** (`App/` EldrChat, `Apps/Huginn/`) and everything else: **AGPL-3.0-only**, with a Signal-style [App Store exception](LICENSE-EXCEPTIONS.md) so builds can ship through Apple's store. Forks stay open.
+- **The apps** (`App/` EldrChat, `Apps/Huginn/`) and everything else: **AGPL-3.0-only**, with an [app store exception](LICENSE-EXCEPTIONS.md) so builds can ship through Apple's store. Forks stay open.
 
 ---
 

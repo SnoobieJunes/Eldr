@@ -518,7 +518,7 @@ Blossom — neither survived contact with implementation):
 ### 15.2 Licensing
 
 Decided for the open-source release (2026-07, DEVIATIONS AC122): the app targets
-(EldrChat, Huginn) are **AGPL-3.0-only** with a Signal-style Apple App Store
+(EldrChat, Huginn) are **AGPL-3.0-only** with an Apple App Store
 additional permission (`LICENSE-EXCEPTIONS.md`), so shipped and network-deployed
 forks stay open; the eight SPM packages are **Apache-2.0** so the protocol stack
 can be embedded in any product. Full map: `LICENSING.md`. Note: if `libsignal`

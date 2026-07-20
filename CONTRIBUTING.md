@@ -15,8 +15,9 @@ Vulnerabilities: **never a public issue** — see [SECURITY.md](SECURITY.md).
 
 ## Toolchain
 
-- macOS 26 + **stable Xcode 26.5** — this builds everything; CI uses exactly
-  this. Install the iOS 26.5 simulator runtime (Xcode → Settings → Components).
+- macOS 26 + **stable Xcode 26.x** — this builds everything; CI runs 26.5 and
+  26.6 is verified too. Install the **iOS 26.5** simulator runtime
+  (Xcode → Settings → Components) — the app test commands pin `OS=26.5`.
 - The **Xcode 27 beta** is needed *only* if you enable the experimental Private
   Cloud Compute tier (`ELDR_PCC_SDK`, off by default). For that:
   `export DEVELOPER_DIR=/Applications/Xcode-beta.app/Contents/Developer`.
