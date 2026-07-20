@@ -72,7 +72,7 @@ Right now you get to pick one. Private messengers (Signal, iMessage) are adding 
 - **Security review.** Read [docs/pqrc-SPEC-v1_1.md](docs/pqrc-SPEC-v1_1.md) and [docs/THREAT_MODEL.md](docs/THREAT_MODEL.md), then try to break the implementation. Report privately (below). We treat findings as first-class commits — the repo's audit-fix history is public.
 - **Run a relay.** Deployment runbook: [docs/RELAY-DEPLOY-CROSTINI.md](docs/RELAY-DEPLOY-CROSTINI.md).
 - **Protocol feedback.** The wire format ([docs/NIP-XX-pqrc.md](docs/NIP-XX-pqrc.md)) and the A2A extension ([docs/A2A-PQRC-EXTENSION.md](docs/A2A-PQRC-EXTENSION.md)) both want adversarial readers before they're submitted upstream.
-- **Contribute code.** Ground rules: read `CLAUDE.md` (the hard invariants are non-negotiable — the tests enforce them), every judgment call gets a [docs/DEVIATIONS.md](docs/DEVIATIONS.md) entry, and nothing merges red.
+- **Contribute code.** Start with [CONTRIBUTING.md](CONTRIBUTING.md) — the hard invariants are non-negotiable (the tests enforce them), every judgment call gets a [docs/DEVIATIONS.md](docs/DEVIATIONS.md) entry, and nothing merges red.
 
 ## Quickstart
 
@@ -138,7 +138,7 @@ The bootstrap relay is **relay.lerants.com** — [khatru](https://github.com/fia
 
 ## Security reporting
 
-**Please don't open public issues for vulnerabilities.** Email **security@lerants.com** with a description and reproduction steps; expect a response within 72 hours and coordinated disclosure.
+**Please don't open public issues for vulnerabilities.** Use GitHub's private vulnerability reporting (Security → "Report a vulnerability") or email **security@lerants.com**; acknowledgement within 72 hours, coordinated disclosure within 90 days. Full policy, scope, and honesty notes: [SECURITY.md](SECURITY.md).
 
 ## License
 

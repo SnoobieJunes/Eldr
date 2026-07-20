@@ -1,0 +1,32 @@
+name: Feature request
+description: Propose an improvement
+labels: [enhancement]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Before writing: the hard invariants in [CONTRIBUTING.md](../blob/main/CONTRIBUTING.md) are non-negotiable — media/blob storage, new crypto primitives, and privacy-for-convenience trades will be declined. Text-only is permanent ("use iMessage for that").
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What can't you do today, and who else hits this?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed solution
+    validations:
+      required: false
+  - type: dropdown
+    id: privacy
+    attributes:
+      label: Privacy impact
+      description: Every tie resolves toward privacy (SPEC §0).
+      options:
+        - "None that I can see"
+        - "Some — discussed in the proposal above"
+        - "Not sure"
+    validations:
+      required: true

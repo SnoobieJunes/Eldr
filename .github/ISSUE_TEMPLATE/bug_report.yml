@@ -1,0 +1,51 @@
+name: Bug report
+description: Something is broken or confusing — UX confusion reports are as valuable as crashes
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        **Security vulnerabilities: do NOT file an issue.** Use GitHub → Security → "Report a vulnerability" (see [SECURITY.md](../blob/main/SECURITY.md)).
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened?
+      description: What did you do, what did you expect, and what happened instead?
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: Reproduction steps
+      placeholder: |
+        1. …
+        2. …
+    validations:
+      required: false
+  - type: dropdown
+    id: surface
+    attributes:
+      label: Where
+      options:
+        - EldrChat (iOS app)
+        - Huginn (macOS app)
+        - A package (PQRCCore / PQRCNostr / PQRCAgent / PQRCACP / PQRCMCP / EldrNode / Eldrctl / SwiftA2A)
+        - eldr-acp / coding-agent conduit
+        - Relay
+        - Docs
+    validations:
+      required: true
+  - type: input
+    id: env
+    attributes:
+      label: Environment
+      placeholder: "iOS 26.5 simulator / iPhone hardware / macOS 26; Xcode 26.5; commit or tag"
+    validations:
+      required: false
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs / screenshots
+      description: Strip anything personal. Logs should already be redacted by the app — if they aren't, that's a security bug; report it privately instead.
+    validations:
+      required: false
