@@ -1,0 +1,45 @@
+# gitleaks configuration — secret-scanning gate for the public repo.
+#
+# Baseline established 2026-07-19 over all 245 commits: 56 raw findings, ALL
+# false positives, each allowlisted below with a reason. Any NEW finding is
+# therefore real and must fail the build. Re-run with:
+#
+#   gitleaks detect --no-banner --redact -v
+#
+[extend]
+useDefault = true
+
+# 1. Frozen crypto test vectors. TEST-PLAN §2 requires byte-for-byte stable
+#    vectors; they are high-entropy hex BY DESIGN (deterministic outputs of
+#    published test key material, never live key material). 43 findings.
+[[allowlists]]
+description = "Frozen protocol test vectors (TestVectors/*.json)"
+paths = ['''^TestVectors/.*\.json$''']
+
+# 2. Deliberately fake credentials in the redaction test suites. These exist to
+#    PROVE the log redactor scrubs each shape (hard invariant 12); removing them
+#    would delete the test's purpose. `AKIAIOSFODNN7EXAMPLE` is AWS's own
+#    published example id; the rest are self-labelled canaries. Matched against
+#    the detected secret value (gitleaks' default regexTarget).
+[[allowlists]]
+description = "Synthetic credential canaries in redaction tests"
+regexes = [
+  '''^sk-ABC123def456GHI789jkl012MNO$''',
+  '''^sk-ant-api03-abc123DEF456ghi789$''',
+  '''^AKIAIOSFODNN7EXAMPLE$''',
+  '''^ghp_1234567890abcdefABCDEF1234567890abcd$''',
+  '''^sk-PTYSECRET123abcDEF456ghi789$''',
+  '''^sk-abcdef0123456789ABCDEF$''',
+  '''^sk-abc123DEF456ghi789JKL012$''',
+  '''^cf-secret-canary-9f8e7d6c5b4a$''',
+]
+
+# 3. CryptoKit TYPE NAMES in Swift declarations — e.g.
+#    `public let privateKey: Curve25519.Signing.PrivateKey`. The rule fires on
+#    the identifier name; the "secret" it captures is the type path itself, so
+#    there is no literal value to leak.
+[[allowlists]]
+description = "CryptoKit type paths in Swift declarations (no literal value)"
+regexes = [
+  '''^(Curve25519|MLKEM768|P256|P384|P521)\.[A-Za-z.]*(PrivateKey|PublicKey)$''',
+]
