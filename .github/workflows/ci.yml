@@ -6,9 +6,11 @@ on:
   pull_request:
 
 # TEST-PLAN §12. Project/scheme is EldrChat (renamed from PQRC). The app builds
-# against the iOS 26.5 SDK: the Private Cloud Compute tier is gated OFF by default
-# (ELDR_PCC_SDK opt-in, DEVIATIONS AC36), so no iOS-27 SDK/runner is required —
-# `macos-26` + `/Applications/Xcode.app` is sufficient for the `app`/`perf` jobs.
+# against the iOS 26.5 SDK: the Private Cloud Compute tier self-gates on the SDK's
+# module version (DEVIATIONS AC125 — there is no build flag), so on a 26.x runner it
+# is simply compiled out and no iOS-27 SDK/runner is required — `macos-26` +
+# `/Applications/Xcode.app` is sufficient for the `app`/`perf` jobs. PCC therefore
+# has no CI coverage of its live path; that is a known, accepted gap.
 jobs:
   secrets:
     name: gitleaks (secret scan)

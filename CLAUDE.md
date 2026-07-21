@@ -93,24 +93,52 @@ unless the user EXPLICITLY asks for the stable one.** The `xcode-select` default
 `/Applications/Xcode.app` (a 26.x release — 26.6 as of 2026-07-19; don't assume a
 specific point release, run `xcodebuild -version`), whose SDK is missing iOS-27
 symbols this app uses — most notably the Private Cloud Compute FoundationModels API
-(`PrivateCloudComputeLanguageModel`, `ContextOptions`), gated behind `ELDR_PCC_SDK`.
-Building with 26.x fails with "cannot find type … in scope" and misleads you into
-concluding the API doesn't exist (it does — verified present in Xcode 27's iPhoneOS *and*
-iPhoneSimulator SDKs). **Always export the beta's `DEVELOPER_DIR` before building:**
+(`PrivateCloudComputeLanguageModel`, `ContextOptions`). Building with 26.x does not
+fail — the app compiles and silently drops to the non-PCC path — so a 26.x build is
+how you ship a phone that says "compiled against an SDK without the Private Cloud
+Compute API". **Always export the beta's `DEVELOPER_DIR` before building:**
 
 ```bash
 export DEVELOPER_DIR=/Applications/Xcode-beta.app/Contents/Developer   # Xcode 27 — the default for this repo
-export ELDR_PCC_SDK=1   # opt into the PCC path (AC123: no longer an unconditional .define)
 ```
 
-**PCC is opt-in via the environment, not hardcoded (AC123).** `PQRCAgent`'s
-`Package.swift` used to `.define("ELDR_PCC_SDK")` unconditionally, which made the
-package — and therefore the whole iOS app, which imports it — uncompilable on any
-26.x SDK, including every GitHub-hosted CI runner (they ship 26.0.1–26.6, never
-27). It now reads `ELDR_PCC_SDK` from the environment. Export it (above) to get
-the PCC path; leave it unset and everything builds on stable Xcode. Do NOT
-"fix" a `cannot find type 'ContextOptions'` error by re-adding the hardcoded
-define — export the variable and use the beta.
+### 🚫 THE PCC BUILD GATE — DO NOT TOUCH IT. EVER. (DEVIATIONS AC125)
+
+**There is no PCC build flag, environment variable, `.define`, Xcode build setting,
+or flag file. Do not add one. Do not "restore" one. The only correct action here is
+no action.**
+
+PCC gates itself on the SDK's own module version, in exactly one place —
+`Packages/PQRCAgent/Sources/PQRCAgent/PCCFoundationModelsProvider.swift`:
+
+```swift
+#if canImport(FoundationModels, _version: 2.0) && (os(iOS) || os(macOS))
+```
+
+Xcode 27's FoundationModels declares `user-module-version 2.0.59` and vends the PCC
+symbols; Xcode 26.6 declares `1.5.2` and does not. The compiler reads the installed
+SDK and picks the right branch by itself — identically for the Xcode GUI, `xcodebuild`,
+`swift test`, and CI, with nothing to configure, inherit, or forget. (The
+`os(iOS) || os(macOS)` clause scopes it to the platforms Apple ships PCC on — the 2.0
+module also appears on tvOS/watchOS/visionOS, where the symbols are unusable and the
+version check alone would wrongly open the gate. Mac Catalyst is `os(iOS)`, so it's
+covered.)
+
+**Why this is locked.** Every manual flag has already been tried and each one broke
+the product a different way:
+
+| Attempt | Failure |
+|---|---|
+| `.define("ELDR_PCC_SDK")` unconditional | Broke stable Xcode + 3 of 5 CI jobs; no GitHub runner has Xcode 27 (AC123) |
+| `ELDR_PCC_SDK` env-var opt-in | Dock-launched Xcode doesn't inherit shell env → PCC silently OFF in the app the owner actually runs (AC125) |
+| `.pcc_enabled` flag file | Same silent-OFF failure; also invisible to SwiftPM's manifest cache |
+
+The two failure modes are opposite and a flag can only ever pick one. The version
+gate has neither. **If PCC looks broken, the cause is the toolchain (`xcodebuild
+-version` must say 27) or the device — never the gate.** Diagnose with
+`swift test --package-path Packages/PQRCAgent --filter PCCBuildGateTests`, which
+asserts the correct behavior for whichever SDK it is compiled against and fails
+loudly if the gate is ever broken again.
 
 ```bash
 # Fast inner loop (no simulator needed) — ALL EIGHT packages, not just the first three.

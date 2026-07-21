@@ -10,7 +10,7 @@ first-class contributions — the repo's audit-fix history is public on purpose.
 - Preferred: **GitHub → Security → "Report a vulnerability"**
   (<https://github.com/SnoobieJunes/Eldr/security/advisories/new>) — a private
   advisory only the maintainers can see.
-- Alternative: email **security@lerants.com**.
+- Alternative: email **security@auston.org**.
 
 Include what you can: the affected component (package / app / protocol
 section), reproduction steps or a failing test, and impact as you understand

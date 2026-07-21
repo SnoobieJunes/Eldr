@@ -18,19 +18,25 @@ Vulnerabilities: **never a public issue** — see [SECURITY.md](SECURITY.md).
 - macOS 26 + **stable Xcode 26.x** — this builds everything; CI runs 26.5 and
   26.6 is verified too. Install the **iOS 26.5** simulator runtime
   (Xcode → Settings → Components) — the app test commands pin `OS=26.5`.
-- The **Xcode 27 beta** is needed *only* if you opt into the experimental
-  Private Cloud Compute tier, which is **off by default**. To enable it you need
-  both an Xcode 27+ toolchain and the environment flag:
+- The **Xcode 27 beta** is needed *only* for the experimental Private Cloud
+  Compute tier, and **there is nothing to switch on**:
 
   ```bash
   export DEVELOPER_DIR=/Applications/Xcode-beta.app/Contents/Developer
-  export ELDR_PCC_SDK=1
   ```
 
-  Without `ELDR_PCC_SDK`, `PQRCAgent` compiles the non-PCC path and everything
-  builds on a stable toolchain. Don't add an unconditional `.define` for it in
-  `Packages/PQRCAgent/Package.swift` — the PCC symbols are absent from every
-  26.x SDK, so that breaks CI and every contributor not on the beta.
+  PCC gates itself on the SDK's module version
+  (`#if canImport(FoundationModels, _version: 2.0)` in
+  `PCCFoundationModelsProvider.swift`): Xcode 27 vends the PCC symbols at
+  version `2.0.x`, Xcode 26.x reports `1.5.2` and omits them, so each toolchain
+  compiles the right path automatically.
+
+  **Please do not add a build flag for this** — not a `.define`, not an
+  environment variable, not a flag file. All three have been tried: hardcoding
+  it broke every stable toolchain and most of CI, and both the env-var and
+  flag-file opt-ins silently disabled PCC in Xcode GUI builds (which don't
+  inherit shell environment). `PCCBuildGateTests` enforces the current behavior
+  on whichever SDK you build against.
 
 ## Building and testing
 
@@ -72,7 +78,10 @@ xcodebuild test -project Apps/Huginn/Huginn.xcodeproj -scheme Huginn \
    (-34018) and the keychain/Secure-Enclave tests fail in a way that looks like
    a code bug. Simulator test builds sign ad-hoc and keep entitlements — just
    drop the flag. (Plain `build` with it is fine; CI does that.)
-4. **`DEVELOPMENT_TEAM` is intentionally blank** in the checked-in projects.
+4. **`DEVELOPMENT_TEAM` is intentionally blank** in the checked-in projects —
+   and Xcode's automatic signing will try to write *your* team id back into
+   `project.pbxproj`. Don't commit that: check `git diff -- '*.pbxproj'` before
+   pushing.
    - EldrChat, simulator: works as-is — ad-hoc signing covers build *and* test.
    - EldrChat, physical device: set your own team in Signing & Capabilities;
      don't commit it.

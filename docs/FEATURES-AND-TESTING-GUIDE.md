@@ -174,7 +174,7 @@ When the agent opens a shell, a live PTY streams to the phone with a red **Stop*
 
 # Part 5 — Build, run, test
 
-> **Toolchain (hard rule):** export the Xcode 27 beta before any `xcodebuild` — the 26.x SDK is missing iOS-27 (PCC) symbols and fails to compile.
+> **Toolchain (hard rule):** export the Xcode 27 beta before any `xcodebuild`. A 26.x build does *not* fail — the Private Cloud Compute path self-gates on the SDK version (DEVIATIONS AC125) and is silently compiled out, so you get a working app with PCC missing.
 > ```bash
 > export DEVELOPER_DIR=/Applications/Xcode-beta.app/Contents/Developer
 > ```
@@ -237,7 +237,7 @@ A full PQRC deployment in one process — five seeded personas + an in-process r
 
 - **"Connection refused" / gateway "down" / host errors** → the Mac stack isn't running (Huginn, eldr-node, or LM Studio/sybilclaw not started, or the Mac is at the login window). Check Huginn ▸ Configuration ▸ Connections ▸ **Check** and Local LLM ▸ **Test**. Ports: sybilclaw gateway **18789**, ContextGraph **8302**.
 - **Peer can't be added / "hasn't opened EldrChat on this relay"** → they haven't published keys on your relay; use the **Invite** link, or both switch to the same relay.
-- **`xcodebuild` "cannot find type … in scope"** → you're on Xcode 26.x; export the Xcode-beta `DEVELOPER_DIR` (Part 5).
+- **Settings ▸ AI says the build has no Private Cloud Compute API** → you built with Xcode 26.x. That SDK genuinely cannot compile PCC, so it is correctly compiled out; export the Xcode-beta `DEVELOPER_DIR` (Part 5) and rebuild. Do **not** add a build flag — see the locked PCC section in CLAUDE.md.
 - **No AI reply / it "forgets"** → confirm the AI is Enabled and **Gathers** isn't "Off"; for in-chat replies you need an **open AI window**; the Mac chat AI is **read-only** until you enable "Coding & tools".
 - **Mac AI gives a canned/echo reply** → it's the Demo stub — the node isn't paired+consented yet, or its LLM is unreachable.
 - **Nearby/host list empty in Simulator** → Multipeer needs real radios; use a device.

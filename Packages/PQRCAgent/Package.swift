@@ -1,15 +1,23 @@
 // swift-tools-version:6.2
 import PackageDescription
-import Foundation
 
-/// Private Cloud Compute build gate (DEVIATIONS AC36/AC123). OFF unless you ask
-/// for it, because the PCC symbols (`PrivateCloudComputeLanguageModel`,
-/// `ContextOptions`) exist ONLY in the Xcode 27+ SDK — and no GitHub-hosted
-/// runner ships Xcode 27, so an unconditional `.define` makes CI unbuildable
-/// and breaks every contributor on a stable toolchain.
-///
-///     ELDR_PCC_SDK=1 swift build     # on an Xcode 27+ toolchain
-let pccEnabled = ProcessInfo.processInfo.environment["ELDR_PCC_SDK"] != nil
+// ⚠️ THERE IS NO PRIVATE CLOUD COMPUTE BUILD FLAG. DO NOT ADD ONE. (DEVIATIONS AC125)
+//
+// PCC is gated in the SOURCE, on the SDK's own module version (scoped to the platforms
+// Apple ships PCC on):
+//     #if canImport(FoundationModels, _version: 2.0) && (os(iOS) || os(macOS))
+// in Sources/PQRCAgent/PCCFoundationModelsProvider.swift. Xcode 27's
+// FoundationModels declares user-module-version 2.0.x and vends the PCC symbols;
+// Xcode 26.x declares 1.5.2 and does not. The compiler reads the installed SDK and
+// picks the right path with zero configuration, identically for the Xcode GUI, the
+// command line, and CI.
+//
+// Every manual flag tried here failed: an unconditional `.define("ELDR_PCC_SDK")`
+// broke stable Xcode and 3 of 5 CI jobs (AC123), and the environment-variable /
+// flag-file opt-in that replaced it silently disabled PCC for Dock-launched Xcode
+// builds — which is how the app is actually built — so the owner's device reported
+// "compiled without the Private Cloud Compute SDK" (AC125). Adding a flag back
+// reintroduces one of those two failures. Don't.
 
 let package = Package(
     name: "PQRCAgent",
@@ -29,28 +37,11 @@ let package = Package(
         .target(
             name: "PQRCAgent",
             dependencies: ["PQRCCore", "PQRCNostr", "PQRCACP"],
-            // Real Private Cloud Compute path in PCCFoundationModelsProvider, gated
-            // behind `ELDR_PCC_SDK`. That flag is OFF by default (DEVIATIONS
-            // AC36/AC123): the PCC symbols (`PrivateCloudComputeLanguageModel`,
-            // `ContextOptions`, `ContextOptions.ReasoningLevel`, the generic
-            // `LanguageModelSession(model: some LanguageModel, instructions:)`) are
-            // ABSENT from the 26.x SDKs, so defining it unconditionally breaks the
-            // build ("cannot find type in scope") for everyone not on an Xcode 27+
-            // toolchain — which includes all GitHub-hosted CI runners.
-            // It is therefore OPT-IN VIA THE ENVIRONMENT (`pccEnabled`, top of file):
-            // `ELDR_PCC_SDK=1 swift build`, and only on a toolchain whose SDK
-            // actually vends those symbols (verify in FoundationModels.swiftinterface
-            // first). Do NOT re-add an unconditional `.define` here.
-            //
-            // SCOPE NOTE (DEVIATIONS AC25): if/when re-enabled, the flag is iOS-only.
-            // Apple Private Cloud Compute is an iOS capability, and the only macOS
-            // consumer of PQRCAgent — the Eldr ACP Configurator — uses LOCAL LLMs,
-            // never PCC. The macOS PCC symbols also vary by SDK seed (the Xcode 27.0
-            // macOS seed lacks them, which broke the Configurator build), so scoping
-            // any future opt-in to iOS keeps the macOS build green on any Xcode.
-            swiftSettings: pccEnabled
-                ? [.swiftLanguageMode(.v6), .define("ELDR_PCC_SDK")]
-                : [.swiftLanguageMode(.v6)]
+            // No PCC define here — see the banner at the top of this file. The Private
+            // Cloud Compute path gates itself on the SDK's module version in
+            // PCCFoundationModelsProvider.swift, so this target builds on every
+            // toolchain without configuration.
+            swiftSettings: [.swiftLanguageMode(.v6)]
         ),
         .testTarget(
             name: "PQRCAgentTests",
