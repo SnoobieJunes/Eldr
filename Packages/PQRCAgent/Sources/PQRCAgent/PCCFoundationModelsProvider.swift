@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 import Foundation
 
 #if canImport(FoundationModels)
@@ -23,19 +24,37 @@ import Foundation
 /// specific reason and the caller falls back to the Demo stub — never a silent
 /// confidentiality downgrade.
 ///
-/// BUILD GATE — `ELDR_PCC_SDK`: the PCC symbols
-/// (`PrivateCloudComputeLanguageModel`, `ContextOptions`, `ContextOptions.ReasoningLevel`,
-/// the `respond(to:options:contextOptions:)` overload) ship in the **Xcode 27 / iOS 27**
-/// SDK — VERIFIED present in both the iPhoneOS and iPhoneSimulator
-/// FoundationModels.swiftinterface (2026-06). They are ABSENT from the Xcode 26.x SDK, so
-/// this file MUST be compiled with Xcode 27
-/// (`DEVELOPER_DIR=/Applications/Xcode-beta.app/Contents/Developer`); building it against
-/// 26.x fails with "cannot find type … in scope". The real PCC path is therefore gated on
-/// `ELDR_PCC_SDK`, which is ON in `Package.swift`
-/// (`swiftSettings: [.define("ELDR_PCC_SDK")]`) — set there, NOT in the app target's
-/// `SWIFT_ACTIVE_COMPILATION_CONDITIONS`, which doesn't reach package compilation. With
-/// the flag OFF the file still compiles on any SDK and the provider degrades to a clear
-/// "not built with the PCC SDK" reason → Demo fallback.
+/// BUILD GATE — **self-detecting; there is nothing to configure** (DEVIATIONS AC125).
+/// The PCC symbols (`PrivateCloudComputeLanguageModel`, `ContextOptions`,
+/// `ContextOptions.ReasoningLevel`, the `respond(to:options:contextOptions:)` overload)
+/// ship only in the **Xcode 27 / iOS 27** SDK, whose FoundationModels module declares
+/// `user-module-version 2.0.x`. The Xcode 26.x SDK declares `1.5.2` and has none of them
+/// (verified in the iPhoneOS, iPhoneSimulator *and* MacOSX `.swiftinterface` of both
+/// toolchains). The gate is therefore the SDK's own version, AND'd with the platforms
+/// Apple actually ships PCC on:
+///
+///     #if canImport(FoundationModels, _version: 2.0) && (os(iOS) || os(macOS))
+///
+/// The `os(iOS) || os(macOS)` clause is load-bearing: Xcode 27's FoundationModels declares
+/// version 2.0 on tvOS/watchOS/visionOS too, so the version check ALONE would open the gate
+/// there — but PCC is `@available` only for iOS/macOS/visionOS/watchOS 27 and `unavailable`
+/// on tvOS, and this file's `@available(iOS 27, macOS 27, *)` guards resolve `*` to the
+/// deployment target (26) on other platforms → a compile error. This product ships
+/// iPhone/iPad/Mac only (Mac Catalyst is `os(iOS)`, native Mac `os(macOS)`), so scoping to
+/// those two is correct and verified; a future watchOS/tvOS target degrades to the "no PCC
+/// API" message instead of breaking the build.
+///
+/// The compiler reads the installed SDK and decides. Build with Xcode 27 → the real PCC
+/// path compiles in, automatically. Build with 26.x → this file still compiles and the
+/// provider degrades to a clear reason → Demo fallback. Simulator, device, Xcode GUI,
+/// command line and CI all behave identically because none of them need a flag.
+///
+/// ⚠️ DO NOT reintroduce a manual switch here or in `Package.swift`. This replaced the
+/// `ELDR_PCC_SDK` define precisely because every manual form of it failed the same way:
+/// hardcoded ON broke stable Xcode and all of CI (AC123), and the env-var/flag-file
+/// opt-in silently switched PCC **off** for any build that didn't inherit the variable —
+/// which includes every Dock-launched Xcode build, i.e. how the app is actually built.
+/// The user then sees "compiled without the PCC SDK" on a device that supports it.
 ///
 /// RUNTIME GATE: even once the symbols ship, `PrivateCloudComputeLanguageModel` & friends
 /// require iOS/macOS 27 while the package deploys to iOS/macOS 26 — so every PCC symbol
@@ -67,7 +86,7 @@ public struct PCCFoundationModelsProvider: AgentProvider {
     /// PCC-specific failures (entitlement missing, over the 2M cap, rate-limited)
     /// surface at `respond` time and are mapped in `mapGenerationError`.
     public static var availabilityReason: String? {
-        #if canImport(FoundationModels) && ELDR_PCC_SDK
+        #if canImport(FoundationModels, _version: 2.0) && (os(iOS) || os(macOS))
             guard #available(iOS 27, macOS 27, *) else {
                 return "Private Cloud Compute requires iOS 27 / macOS 27 or later — this device is on an older OS."
             }
@@ -90,7 +109,7 @@ public struct PCCFoundationModelsProvider: AgentProvider {
                 }
             }
         #elseif canImport(FoundationModels)
-            return "This build was compiled without the Private Cloud Compute SDK. Replies use the Demo stub until the app is rebuilt with the Xcode 27 SDK (ELDR_PCC_SDK) + PCC entitlement."
+            return "This build was compiled against an SDK without the Private Cloud Compute API (Xcode 26 or earlier). Rebuild with Xcode 27 or later to enable it — replies use the Demo stub until then."
         #else
             return "This OS build doesn't include the Foundation Models framework."
         #endif
@@ -99,7 +118,7 @@ public struct PCCFoundationModelsProvider: AgentProvider {
     public static var isAvailable: Bool { availabilityReason == nil }
 
     public func draftReply(context: AgentContext) async throws -> Draft {
-        #if canImport(FoundationModels) && ELDR_PCC_SDK
+        #if canImport(FoundationModels, _version: 2.0) && (os(iOS) || os(macOS))
             guard #available(iOS 27, macOS 27, *) else {
                 throw AgentProviderError.unavailable(
                     "Private Cloud Compute requires iOS 27 / macOS 27 or later.")
@@ -135,7 +154,7 @@ public struct PCCFoundationModelsProvider: AgentProvider {
     }
 
     public func threadTurn(context: AgentContext) async throws -> AgentTurn? {
-        #if canImport(FoundationModels) && ELDR_PCC_SDK
+        #if canImport(FoundationModels, _version: 2.0) && (os(iOS) || os(macOS))
             guard #available(iOS 27, macOS 27, *) else {
                 throw AgentProviderError.unavailable(
                     "Private Cloud Compute requires iOS 27 / macOS 27 or later.")
@@ -168,7 +187,7 @@ public struct PCCFoundationModelsProvider: AgentProvider {
 
     // MARK: - PCC session + reasoning (WWDC26 SDK only)
 
-    #if canImport(FoundationModels) && ELDR_PCC_SDK
+    #if canImport(FoundationModels, _version: 2.0) && (os(iOS) || os(macOS))
         /// Build a session bound to the PCC SERVER model (not the on-device default).
         @available(iOS 27, macOS 27, *)
         private static func makeSession(instructions: String) -> LanguageModelSession {

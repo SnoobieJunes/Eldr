@@ -45,14 +45,29 @@ DEVELOPER_ID="${DEVELOPER_ID:-Developer ID Application}"
 : "${APP_PASSWORD:?set APP_PASSWORD (app-specific password from appleid.apple.com)}"
 : "${TEAM_ID:?set TEAM_ID (your 10-char Apple Developer Team ID)}"
 
-# Build with Xcode 27: the PCC symbols ELDR_PCC_SDK compiles
-# (PrivateCloudComputeLanguageModel, ContextOptions) are ABSENT from the Xcode 26.x SDK,
-# so archiving under the default toolchain fails with "cannot find type … in scope".
+# Build with Xcode 27. The PCC symbols (PrivateCloudComputeLanguageModel,
+# ContextOptions) ship only in the Xcode 27+ SDK, and since DEVIATIONS AC125 the code
+# self-gates on the SDK's module version instead of a build flag. That removed a build
+# BREAK and replaced it with a SILENT omission: archiving on Xcode 26.x now SUCCEEDS and
+# produces a signed, notarized DMG with PCC quietly compiled out. A release artifact is
+# exactly where that must not happen, so assert the toolchain here rather than trusting
+# whoever runs this script.
 # Default DEVELOPER_DIR to the beta if it's installed and the caller didn't set one.
 if [ -z "${DEVELOPER_DIR:-}" ] && [ -d "/Applications/Xcode-beta.app" ]; then
   export DEVELOPER_DIR="/Applications/Xcode-beta.app/Contents/Developer"
 fi
 echo "==> Toolchain: $(xcodebuild -version 2>/dev/null | head -1) (DEVELOPER_DIR=${DEVELOPER_DIR:-default})"
+
+# Hard gate: refuse to cut a release on an SDK that cannot compile PCC.
+# Set ELDR_ALLOW_NO_PCC=1 to deliberately ship a PCC-less build.
+XCODE_MAJOR="$(xcodebuild -version 2>/dev/null | head -1 | sed -E 's/^Xcode ([0-9]+).*/\1/')"
+if [ "${ELDR_ALLOW_NO_PCC:-0}" != "1" ] && [ "${XCODE_MAJOR:-0}" -lt 27 ]; then
+  echo "ERROR: this is Xcode ${XCODE_MAJOR:-?}; Private Cloud Compute needs the Xcode 27+ SDK." >&2
+  echo "       Building anyway would ship a release DMG with PCC silently compiled out." >&2
+  echo "       Fix: export DEVELOPER_DIR=/Applications/Xcode-beta.app/Contents/Developer" >&2
+  echo "       Or, to ship without PCC on purpose: ELDR_ALLOW_NO_PCC=1 $0" >&2
+  exit 1
+fi
 
 echo "==> Reading version"
 VERSION="$(xcodebuild -project "$PROJECT" -scheme "$SCHEME" -showBuildSettings 2>/dev/null \

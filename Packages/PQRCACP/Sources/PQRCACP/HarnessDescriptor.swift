@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 import Foundation
 
 // Phase 1 item 3 + the "Scaffolds that make Phases 2–4 drop-in" section of
@@ -128,6 +129,22 @@ public struct HarnessDescriptor: Sendable, Equatable, Identifiable {
             id: id, displayName: displayName, kind: kind, command: command, args: args,
             env: env, isProvisional: isProvisional, vendorKeyEnvVar: vendorKeyEnvVar,
             a2aCardURL: a2aCardURL, a2aBearerToken: token)
+    }
+
+    /// AC94 — a copy of this descriptor with `command` replaced by an operator-chosen
+    /// executable path (typically absolute: GUI-launched apps and launchd daemons get a
+    /// minimal PATH, so an nvm/npm-installed bare name doesn't resolve there). No-op
+    /// (returns self unchanged) for non-`.stdioSpawn` kinds or a nil/empty override,
+    /// mirroring `withVendorKey`'s launch-scoped-copy pattern.
+    public func withCommand(_ override: String?) -> HarnessDescriptor {
+        guard kind == .stdioSpawn, let override,
+            !override.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        else { return self }
+        return HarnessDescriptor(
+            id: id, displayName: displayName, kind: kind,
+            command: override.trimmingCharacters(in: .whitespacesAndNewlines), args: args,
+            env: env, isProvisional: isProvisional, vendorKeyEnvVar: vendorKeyEnvVar,
+            a2aCardURL: a2aCardURL, a2aBearerToken: a2aBearerToken)
     }
 
     /// The built-in EldrChat reference harness (bring-your-own-model). Convenience so the node
@@ -268,5 +285,23 @@ public enum HarnessRegistry {
     /// Look up a descriptor by its stable `id` (router selection / restore).
     public static func descriptor(id: String) -> HarnessDescriptor? {
         all.first { $0.id == id }
+    }
+
+    /// AC94 — the environment variable that overrides a `.stdioSpawn` descriptor's
+    /// executable (`ELDR_HARNESS_CMD_<ID>`, `-` → `_`, uppercased; e.g. `claude-code`
+    /// → `ELDR_HARNESS_CMD_CLAUDE_CODE`). This is the CLI-side half of the operational
+    /// caveat documented above `all`: Huginn's Bridge picker persists an absolute path
+    /// and writes it into the agent env file, so `delegate_to_cloud_agent` inside a
+    /// GUI/launchd-spawned `eldr-acp` resolves the binary without PATH luck.
+    public static func commandOverrideEnvVar(for id: String) -> String {
+        "ELDR_HARNESS_CMD_" + id.uppercased().replacingOccurrences(of: "-", with: "_")
+    }
+
+    /// `descriptor(id:)` with the AC94 env override applied. Pure in `environment` so
+    /// it's unit-testable; production callers default to the process environment.
+    public static func resolvedDescriptor(
+        id: String, environment: [String: String] = ProcessInfo.processInfo.environment
+    ) -> HarnessDescriptor? {
+        descriptor(id: id)?.withCommand(environment[commandOverrideEnvVar(for: id)])
     }
 }

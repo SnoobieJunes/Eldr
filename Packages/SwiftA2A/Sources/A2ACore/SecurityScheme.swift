@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 import Foundation
 
 // Security scheme types from lf.a2a.v1 (a2a.proto), mirroring the OpenAPI 3.2

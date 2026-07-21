@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: AGPL-3.0-only
 import AppKit
 import SwiftUI
 
@@ -24,15 +25,44 @@ struct MLXView: View {
     /// Cross-section state: the Models section's "Try" seeds the Playground model.
     @State private var playModel = ""
     @State private var playModelSeeded = false
+    /// Cross-section state: the fine-tune after-run "Try with adapter" seeds the
+    /// Playground adapter (WS-M4).
+    @State private var playAdapter = ""
+    /// WS-M5: Convert + Playground live behind this persisted disclosure — occasional
+    /// workshop tools, kept fully intact but out of the everyday path (demotion only).
+    /// The "Try" affordances open it explicitly so their target is never invisible.
+    @AppStorage("mlx.advancedExpanded") private var advancedExpanded = false
     /// Cross-section state: rows request deletion; the dialog presents Form-wide.
     @State private var deleteCandidate: MLXCachedModel?
 
+    /// Whether a Huginn-MANAGED server is up (the only server the fine-tune memory
+    /// preflight may offer to stop; a detached/foreign server isn't Huginn's).
+    private var managedServerRunning: Bool {
+        guard service.managesServer else { return false }
+        if service.autostartEnabled { return service.probeStatus.isReachable }
+        switch service.serverState {
+        case .running, .starting: return true
+        default: return false
+        }
+    }
+
     var body: some View {
         Form {
-            MLXEnvironmentSection(
+            MLXBrainCard(
                 service: service,
+                managed: service.managesServer,
                 envState: service.envState,
                 mlxDir: service.mlxDir,
+                config: service.serverConfig,
+                serverState: service.serverState,
+                probeStatus: service.probeStatus,
+                autostart: service.autostartEnabled,
+                startedAt: service.serverStartedAt,
+                memoryBytes: service.serverMemoryBytes,
+                brainSwap: service.brainSwap,
+                portDiagnosis: service.portDiagnosis,
+                wiredAsBackend: store.llmURL == service.serverConfig.baseURL,
+                backendURL: store.llmURL,
                 jobRunning: service.activeJob != nil,
                 pane: service.jobPaneState(for: [.installEnvironment]))
             MLXServerSection(
@@ -46,39 +76,79 @@ struct MLXView: View {
                 launchedConfig: service.launchedServerConfig,
                 autostart: service.autostartEnabled,
                 envReady: service.envState.isReady,
-                cachedModels: service.cachedModels,
-                logWindow: service.serverLogWindow,
-                logPath: service.serverLogPath)
+                cachedModels: service.cachedModels)
             MLXModelsSection(
                 service: service,
+                store: store,
                 cachedModels: service.cachedModels,
                 searchResults: service.searchResults,
                 isSearching: service.isSearching,
                 modelsError: service.modelsError,
                 cacheDir: service.cacheDir,
                 jobRunning: service.activeJob != nil,
+                brainSwapAvailable: service.managesServer && service.envState.isReady
+                    && !service.brainSwap.isWorking,
                 pane: service.jobPaneState(for: [.download]),
+                downloadProgress: service.downloadProgress,
+                downloadPreflight: service.downloadPreflight,
+                openAdvanced: { advancedExpanded = true },
                 playModel: $playModel,
                 deleteCandidate: $deleteCandidate)
-            MLXConvertSection(
-                service: service,
-                envReady: service.envState.isReady,
-                jobRunning: service.activeJob != nil,
-                pane: service.jobPaneState(for: [.convert]))
-            MLXPlaygroundSection(
-                service: service,
-                envReady: service.envState.isReady,
-                jobRunning: service.activeJob != nil,
-                serverModel: service.serverConfig.model,
-                pane: service.jobPaneState(for: [.generate]),
-                playModel: $playModel,
-                playModelValue: playModel)
             MLXFineTuneSection(
                 service: service,
                 envReady: service.envState.isReady,
                 jobRunning: service.activeJob != nil,
                 fineTunePane: service.jobPaneState(for: [.finetune]),
-                fusePane: service.jobPaneState(for: [.fuse]))
+                fusePane: service.jobPaneState(for: [.fuse]),
+                lossHistory: service.lossHistory,
+                cachedModels: service.cachedModels,
+                managedServerRunning: managedServerRunning,
+                serverMemoryBytes: service.serverMemoryBytes,
+                openAdvanced: { advancedExpanded = true },
+                playModel: $playModel,
+                playAdapter: $playAdapter)
+            // WS-M5 demotion: the model workshop (Convert / quantize + Playground) is
+            // code-intact but tucked behind this disclosure — serving, library, and
+            // fine-tune stay first-class above.
+            Section("Advanced") {
+                Button {
+                    withAnimation { advancedExpanded.toggle() }
+                } label: {
+                    HStack(spacing: 6) {
+                        Image(systemName: advancedExpanded ? "chevron.down" : "chevron.right")
+                            .font(.caption)
+                        Text(
+                            advancedExpanded
+                                ? "Hide the model workshop"
+                                : "Show the model workshop — Convert / quantize + Playground")
+                        Spacer()
+                    }
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .accessibilityIdentifier("mlx-advanced-toggle")
+                Text(
+                    "Occasional tools: convert a source model to MLX, or exercise a model one-shot without the server. \"Try\" buttons above open this automatically."
+                )
+                .font(.caption).foregroundStyle(.secondary)
+            }
+            if advancedExpanded {
+                MLXConvertSection(
+                    service: service,
+                    envReady: service.envState.isReady,
+                    jobRunning: service.activeJob != nil,
+                    pane: service.jobPaneState(for: [.convert]))
+                MLXPlaygroundSection(
+                    service: service,
+                    envReady: service.envState.isReady,
+                    jobRunning: service.activeJob != nil,
+                    serverModel: service.serverConfig.model,
+                    pane: service.jobPaneState(for: [.generate]),
+                    playModel: $playModel,
+                    playModelValue: playModel,
+                    playAdapter: $playAdapter,
+                    playAdapterValue: playAdapter)
+            }
         }
         .formStyle(.grouped)
         .frame(maxWidth: 1100, alignment: .leading)
@@ -111,21 +181,135 @@ struct MLXView: View {
     }
 }
 
-// MARK: - Environment
+// MARK: - Brain card (WS-M1)
 
-private struct MLXEnvironmentSection: View, Equatable {
+/// The at-a-glance card at the top of the tab: which model is (or would be) the
+/// AI's brain, whether it's answering, uptime / memory / port, whether Eldr is
+/// wired to it, brain-swap progress, port-conflict diagnosis — and the MLX
+/// environment demoted to a status chip (the full install card only appears
+/// while it's actually needed: not ready, or an install job showing output).
+private struct MLXBrainCard: View, Equatable {
     let service: MLXService
+    let managed: Bool
     let envState: MLXService.EnvironmentState
     let mlxDir: String
+    let config: MLXServerConfig
+    let serverState: MLXService.ServerState
+    let probeStatus: LLMHealthChecker.HealthResult
+    let autostart: Bool
+    let startedAt: Date?
+    let memoryBytes: Int64?
+    let brainSwap: MLXService.BrainSwapState
+    let portDiagnosis: String?
+    let wiredAsBackend: Bool
+    let backendURL: String
     let jobRunning: Bool
     let pane: MLXService.JobPaneState
 
     nonisolated static func == (lhs: Self, rhs: Self) -> Bool {
-        lhs.envState == rhs.envState && lhs.jobRunning == rhs.jobRunning && lhs.pane == rhs.pane
+        lhs.managed == rhs.managed && lhs.envState == rhs.envState
+            && lhs.config == rhs.config && lhs.serverState == rhs.serverState
+            && lhs.probeStatus == rhs.probeStatus && lhs.autostart == rhs.autostart
+            && lhs.startedAt == rhs.startedAt && lhs.memoryBytes == rhs.memoryBytes
+            && lhs.brainSwap == rhs.brainSwap && lhs.portDiagnosis == rhs.portDiagnosis
+            && lhs.wiredAsBackend == rhs.wiredAsBackend && lhs.backendURL == rhs.backendURL
+            && lhs.jobRunning == rhs.jobRunning && lhs.pane == rhs.pane
     }
 
     var body: some View {
-        Section("MLX environment") {
+        Section("Your AI's brain") {
+            HStack(spacing: 10) {
+                Circle().fill(stateColor).frame(width: 10, height: 10)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(modelTitle).font(.headline)
+                    Text(stateText).font(.caption).foregroundStyle(.secondary)
+                }
+                Spacer()
+                if wiredAsBackend {
+                    Label("Eldr backend", systemImage: "checkmark.seal.fill")
+                        .font(.caption).foregroundStyle(.green)
+                        .help(
+                            "Configuration ▸ Local LLM points at this server — your AI runs on it."
+                        )
+                }
+            }
+            if managed, serverUp {
+                HStack(spacing: 16) {
+                    if let startedAt {
+                        Label {
+                            Text("up ") + Text(startedAt, style: .relative)
+                        } icon: {
+                            Image(systemName: "clock")
+                        }
+                    }
+                    if let memoryBytes {
+                        Label(
+                            memoryBytes.formatted(.byteCount(style: .memory)),
+                            systemImage: "memorychip")
+                    }
+                    Label("\(config.probeHost):\(String(config.port))", systemImage: "network")
+                    Spacer()
+                }
+                .font(.caption).foregroundStyle(.secondary)
+            }
+
+            switch brainSwap {
+            case .idle:
+                EmptyView()
+            case .working(_, let phase):
+                HStack(spacing: 8) {
+                    ProgressView().controlSize(.small)
+                    Text(phase).font(.caption)
+                    Spacer()
+                }
+            case .done(let model):
+                dismissableNote(
+                    Label("Your AI now runs on \(model).", systemImage: "checkmark.circle.fill")
+                        .font(.caption).foregroundStyle(.green))
+            case .failed(let why):
+                dismissableNote(
+                    Label(why, systemImage: "exclamationmark.triangle.fill")
+                        .font(.caption).foregroundStyle(.orange))
+            }
+
+            if let portDiagnosis {
+                Label(portDiagnosis, systemImage: "exclamationmark.triangle.fill")
+                    .font(.caption).foregroundStyle(.orange)
+            }
+
+            environmentRow
+        }
+    }
+
+    private func dismissableNote(_ label: some View) -> some View {
+        HStack(spacing: 8) {
+            label
+            Spacer()
+            Button {
+                service.clearBrainSwapNote()
+            } label: {
+                Image(systemName: "xmark.circle.fill")
+            }
+            .buttonStyle(.plain)
+            .foregroundStyle(.tertiary)
+            .accessibilityLabel("Dismiss")
+        }
+    }
+
+    // MARK: Environment chip / card
+
+    /// Full install card only while it's needed: env not ready, an install
+    /// running, or a FAILED install to explain. A successful install collapses
+    /// straight to the chip (the fresh version number is the confirmation).
+    private var environmentExpanded: Bool {
+        !envState.isReady || pane.activeJob != nil
+            || pane.lastResult.map { !$0.success } == true
+    }
+
+    @ViewBuilder
+    private var environmentRow: some View {
+        if environmentExpanded {
+            Divider()
             HStack(spacing: 8) {
                 Circle().fill(envColor).frame(width: 8, height: 8)
                 Text(envText).font(.caption).foregroundStyle(.secondary)
@@ -147,6 +331,26 @@ private struct MLXEnvironmentSection: View, Equatable {
                 }
             }
             MLXJobPane(service: service, state: pane)
+        } else {
+            HStack(spacing: 6) {
+                Circle().fill(envColor).frame(width: 6, height: 6)
+                Text(envText).font(.caption2).foregroundStyle(.secondary)
+                Spacer()
+                Menu {
+                    Button("Check again") { Task { await service.refreshEnvironment() } }
+                    Button("Update mlx-lm") { service.installEnvironment() }
+                        .disabled(jobRunning)
+                    Button("Reveal environment in Finder") {
+                        NSWorkspace.shared.activateFileViewerSelecting(
+                            [URL(fileURLWithPath: mlxDir)])
+                    }
+                } label: {
+                    Image(systemName: "ellipsis.circle")
+                }
+                .menuStyle(.borderlessButton)
+                .fixedSize()
+                .accessibilityLabel("MLX environment actions")
+            }
         }
     }
 
@@ -181,6 +385,53 @@ private struct MLXEnvironmentSection: View, Equatable {
         case .unknown: return "Checking…"
         }
     }
+
+    // MARK: Display state
+
+    private var modelTitle: String {
+        guard managed else { return "MLX serving is off" }
+        return config.model.isEmpty ? "No model picked yet" : config.model
+    }
+
+    private var serverUp: Bool {
+        if autostart { return probeStatus.isReachable }
+        switch serverState {
+        case .starting, .running: return true
+        default: return false
+        }
+    }
+
+    private var stateColor: Color {
+        guard managed else { return .secondary }
+        if autostart { return probeStatus.isReachable ? .green : .orange }
+        switch serverState {
+        case .running(let healthy): return healthy ? .green : .orange
+        case .starting: return .yellow
+        case .failed: return .red
+        case .stopped: return .secondary
+        }
+    }
+
+    private var stateText: String {
+        guard managed else {
+            return "Eldr talks to \(backendURL.isEmpty ? "no backend yet" : backendURL) — manage that in the Server section below."
+        }
+        if autostart {
+            return probeStatus.isReachable
+                ? "Answering (launchd) on \(config.baseURL)"
+                : "launchd-managed — not answering on \(config.baseURL) yet"
+        }
+        switch serverState {
+        case .stopped:
+            return config.model.isEmpty
+                ? "Pick a cached model below and serve it as your AI's brain."
+                : "Not running — press Start below, or \u{201C}Serve as my AI's brain\u{201D} on a cached model."
+        case .starting: return "Starting — waiting for \(config.baseURL) to answer…"
+        case .running(true): return "Answering on \(config.baseURL)"
+        case .running(false): return "Process alive but not answering — see the server log"
+        case .failed(let why): return why
+        }
+    }
 }
 
 // MARK: - Server
@@ -205,8 +456,6 @@ private struct MLXServerSection: View, Equatable {
     let autostart: Bool
     let envReady: Bool
     let cachedModels: [MLXCachedModel]
-    let logWindow: [MLXLogRow]
-    let logPath: String
 
     // Server "Advanced" numeric fields are optionals in the config; SwiftUI's
     // numeric TextFields fight mid-typing round-trips, so these seed once (State
@@ -214,6 +463,8 @@ private struct MLXServerSection: View, Equatable {
     @State private var advMaxTokens: String
     @State private var advTemperature: String
     @State private var advTopP: String
+    @State private var advPromptCacheSize: String
+    @State private var advPromptCacheGB: String
 
     /// Confirmation caption captured at click time (so later config edits can't
     /// make it claim something that wasn't written).
@@ -224,7 +475,7 @@ private struct MLXServerSection: View, Equatable {
         config: Binding<MLXServerConfig>, serverState: MLXService.ServerState,
         probeStatus: LLMHealthChecker.HealthResult, serverWarning: String?,
         launchedConfig: MLXServerConfig?, autostart: Bool, envReady: Bool,
-        cachedModels: [MLXCachedModel], logWindow: [MLXLogRow], logPath: String
+        cachedModels: [MLXCachedModel]
     ) {
         self.service = service
         self.store = store
@@ -238,12 +489,15 @@ private struct MLXServerSection: View, Equatable {
         self.autostart = autostart
         self.envReady = envReady
         self.cachedModels = cachedModels
-        self.logWindow = logWindow
-        self.logPath = logPath
         _advMaxTokens = State(initialValue: config.wrappedValue.maxTokens.map(String.init) ?? "")
         _advTemperature = State(
             initialValue: config.wrappedValue.temperature.map(MLXCommand.formatNumber) ?? "")
         _advTopP = State(initialValue: config.wrappedValue.topP.map(MLXCommand.formatNumber) ?? "")
+        _advPromptCacheSize = State(
+            initialValue: config.wrappedValue.promptCacheSize.map(String.init) ?? "")
+        _advPromptCacheGB = State(
+            initialValue: config.wrappedValue.promptCacheBytes
+                .map { MLXCommand.formatNumber(MLXCommand.gigabytes(fromBytes: $0)) } ?? "")
     }
 
     nonisolated static func == (lhs: Self, rhs: Self) -> Bool {
@@ -251,7 +505,7 @@ private struct MLXServerSection: View, Equatable {
             && lhs.serverState == rhs.serverState && lhs.probeStatus == rhs.probeStatus
             && lhs.serverWarning == rhs.serverWarning && lhs.launchedConfig == rhs.launchedConfig
             && lhs.autostart == rhs.autostart && lhs.envReady == rhs.envReady
-            && lhs.cachedModels == rhs.cachedModels && lhs.logWindow == rhs.logWindow
+            && lhs.cachedModels == rhs.cachedModels
     }
 
     var body: some View {
@@ -332,6 +586,34 @@ private struct MLXServerSection: View, Equatable {
                 "Sampling defaults need a recent mlx-lm. Leave blank to omit the flags — an older server rejects them with an argparse error (visible in the log)."
             )
             .font(.caption).foregroundStyle(.secondary)
+            Picker("Reasoning (thinking mode)", selection: $config.reasoning) {
+                Text("Model default").tag(Bool?.none)
+                Text("On").tag(Bool?.some(true))
+                Text("Off").tag(Bool?.some(false))
+            }
+            .help(
+                "Passes --chat-template-args {\"enable_thinking\":…} so reasoning models (Qwen3-style) think, or answer directly. \u{201C}Model default\u{201D} omits the flag — required for older mlx-lm servers; models without a thinking mode ignore it."
+            )
+            LabeledContent("Prompt-cache entries") {
+                TextField("server default", text: $advPromptCacheSize)
+                    .textFieldStyle(.roundedBorder).frame(maxWidth: 120)
+                    .onChange(of: advPromptCacheSize) { _, new in
+                        config.promptCacheSize = Int(new.trimmingCharacters(in: .whitespaces))
+                    }
+            }
+            .help(
+                "--prompt-cache-size — how many distinct conversation prefixes the server keeps ready (its KV prompt cache). More entries = instant re-prompts for more chats, at the cost of memory."
+            )
+            LabeledContent("Prompt-cache cap (GB)") {
+                TextField("unbounded", text: $advPromptCacheGB)
+                    .textFieldStyle(.roundedBorder).frame(maxWidth: 120)
+                    .onChange(of: advPromptCacheGB) { _, new in
+                        config.promptCacheBytes = parseDouble(new).flatMap(MLXCommand.bytes(fromGB:))
+                    }
+            }
+            .help(
+                "--prompt-cache-bytes — hard cap on the KV prompt cache's memory. Set it if the server's RAM keeps growing across long chats; evicted prefixes simply re-prefill (slower first token, identical answers). Needs a recent mlx-lm."
+            )
             Toggle("Trust remote code (--trust-remote-code)", isOn: $config.trustRemoteCode)
             Toggle("Use the tokenizer's default chat template", isOn: $config.useDefaultChatTemplate)
             VStack(alignment: .leading, spacing: 4) {
@@ -401,9 +683,12 @@ private struct MLXServerSection: View, Equatable {
         .font(.caption).foregroundStyle(.secondary)
 
         VStack(alignment: .leading, spacing: 4) {
-            Text("Server log (\(logPath))")
+            Text("Server log")
                 .font(.caption).foregroundStyle(.secondary)
-            MLXLogPane(rows: logWindow)
+            // WS-M2: the reusable console replaced the read-only MLXLogPane here.
+            // It owns its own tailer (visibility-driven), so this section's ==
+            // stays free of log churn, and Expand/search/remediation come along.
+            LogConsoleView(source: .mlxServer, style: .embedded)
         }
     }
 
@@ -495,13 +780,25 @@ private struct MLXServerSection: View, Equatable {
 
 private struct MLXModelsSection: View, Equatable {
     let service: MLXService
+    /// Unobserved — only passed into `makeBrain` (the swap's backend wiring).
+    let store: ConfigurationStore
     let cachedModels: [MLXCachedModel]
     let searchResults: [MLXHubModel]
     let isSearching: Bool
     let modelsError: String?
     let cacheDir: String
     let jobRunning: Bool
+    /// Managed + env ready + no swap already running (disables the per-row
+    /// "Serve as my AI's brain" buttons).
+    let brainSwapAvailable: Bool
     let pane: MLXService.JobPaneState
+    /// Live download progress (files-based percent), nil when not downloading.
+    let downloadProgress: MLXDownloadProgress?
+    /// Non-nil while the pre-download size/disk check runs (disables Download).
+    let downloadPreflight: String?
+    /// WS-M5: "Try" seeds the demoted Playground — this opens the Advanced
+    /// disclosure so the seeded section is actually visible.
+    let openAdvanced: () -> Void
     @Binding var playModel: String
     @Binding var deleteCandidate: MLXCachedModel?
 
@@ -509,11 +806,16 @@ private struct MLXModelsSection: View, Equatable {
     @State private var searchPublisher = "mlx-community"
     @State private var searchMLXOnly = true
     @State private var searchSort = "downloads"
+    /// Cache-hygiene ordering; `.largest` first surfaces the models to delete.
+    @State private var cacheSort: MLXModelSort = .largest
 
     nonisolated static func == (lhs: Self, rhs: Self) -> Bool {
         lhs.cachedModels == rhs.cachedModels && lhs.searchResults == rhs.searchResults
             && lhs.isSearching == rhs.isSearching && lhs.modelsError == rhs.modelsError
             && lhs.jobRunning == rhs.jobRunning && lhs.pane == rhs.pane
+            && lhs.brainSwapAvailable == rhs.brainSwapAvailable
+            && lhs.downloadProgress == rhs.downloadProgress
+            && lhs.downloadPreflight == rhs.downloadPreflight
     }
 
     var body: some View {
@@ -533,26 +835,25 @@ private struct MLXModelsSection: View, Equatable {
                 .font(.system(.caption2, design: .monospaced)).foregroundStyle(.secondary)
                 .lineLimit(1).truncationMode(.middle)
 
-            ForEach(cachedModels) { model in
-                HStack {
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text(model.repoID).font(.callout)
-                        Text(model.sizeBytes.formatted(.byteCount(style: .file)))
-                            .font(.caption).foregroundStyle(.secondary)
-                    }
-                    Spacer()
-                    Button("Serve") { service.serverConfig.model = model.repoID }
-                        .controlSize(.small)
-                    Button("Try") { playModel = model.repoID }
-                        .controlSize(.small)
-                    Button(role: .destructive) {
-                        deleteCandidate = model
-                    } label: {
-                        Image(systemName: "trash")
-                    }
-                    .controlSize(.small)
-                    .accessibilityLabel("Delete \(model.repoID)")
+            if cachedModels.count > 1 {
+                Picker("Sort", selection: $cacheSort) {
+                    ForEach(MLXModelSort.allCases, id: \.self) { Text($0.label).tag($0) }
                 }
+                .pickerStyle(.menu).fixedSize()
+                .help(
+                    "Largest first is the fastest way to free up space — the biggest models are on top to delete.")
+            }
+
+            ForEach(MLXCommand.sortedModels(cachedModels, by: cacheSort)) { model in
+                MLXCachedModelRow(
+                    model: model,
+                    brainSwapAvailable: brainSwapAvailable,
+                    onServe: { Task { await service.makeBrain(model: model.repoID, store: store) } },
+                    onTry: {
+                        playModel = model.repoID
+                        openAdvanced()
+                    },
+                    onDelete: { deleteCandidate = model })
             }
             if cachedModels.isEmpty {
                 Text("No models cached yet — search below and download one (small 4-bit instruct models from mlx-community are a good start).")
@@ -599,32 +900,67 @@ private struct MLXModelsSection: View, Equatable {
                     .font(.caption).foregroundStyle(.orange)
             }
             ForEach(searchResults) { result in
-                HStack {
-                    VStack(alignment: .leading, spacing: 2) {
-                        HStack(spacing: 6) {
-                            Text(result.id).font(.callout)
-                            if let quant = result.quantLabel {
-                                Text(quant)
-                                    .font(.caption2).padding(.horizontal, 4).padding(.vertical, 1)
-                                    .background(.quaternary, in: Capsule())
+                let format = result.format
+                VStack(alignment: .leading, spacing: 3) {
+                    HStack {
+                        VStack(alignment: .leading, spacing: 2) {
+                            HStack(spacing: 6) {
+                                Text(result.id).font(.callout)
+                                if let quant = result.quantLabel {
+                                    Text(quant)
+                                        .font(.caption2).padding(.horizontal, 4).padding(.vertical, 1)
+                                        .background(.quaternary, in: Capsule())
+                                }
+                                if searchMLXOnly == false, let badge = format.badge {
+                                    Text(badge)
+                                        .font(.caption2).padding(.horizontal, 4).padding(.vertical, 1)
+                                        .background(
+                                            (format.isBlocking ? Color.red : Color.orange)
+                                                .opacity(0.2), in: Capsule())
+                                }
                             }
-                            if !result.isMLX && searchMLXOnly == false {
-                                Text("not MLX")
-                                    .font(.caption2).padding(.horizontal, 4).padding(.vertical, 1)
-                                    .background(.orange.opacity(0.2), in: Capsule())
-                            }
+                            Text(searchResultCaption(result)).font(.caption).foregroundStyle(
+                                .secondary)
                         }
-                        Text(searchResultCaption(result)).font(.caption).foregroundStyle(.secondary)
-                    }
-                    Spacer()
-                    if let page = URL(string: "https://huggingface.co/\(result.id)") {
-                        Link(destination: page) { Image(systemName: "safari") }
+                        Spacer()
+                        if let page = URL(string: "https://huggingface.co/\(result.id)") {
+                            Link(destination: page) { Image(systemName: "safari") }
+                                .controlSize(.small)
+                                .accessibilityLabel("Open \(result.id) on Hugging Face")
+                        }
+                        Button("Download") { service.downloadModel(result.id) }
                             .controlSize(.small)
-                            .accessibilityLabel("Open \(result.id) on Hugging Face")
+                            .disabled(jobRunning || downloadPreflight != nil)
                     }
-                    Button("Download") { service.downloadModel(result.id) }
-                        .controlSize(.small)
-                        .disabled(jobRunning)
+                    // Format honesty (the NVFP4 lesson): when the MLX filter is off,
+                    // spell out what mlx_lm can't load and name the alternative.
+                    if searchMLXOnly == false, let advisory = format.advisory {
+                        Label(
+                            advisory,
+                            systemImage: format.isBlocking
+                                ? "xmark.octagon.fill" : "exclamationmark.triangle.fill"
+                        )
+                        .font(.caption2)
+                        .foregroundStyle(format.isBlocking ? Color.red : Color.orange)
+                        .fixedSize(horizontal: false, vertical: true)
+                    }
+                }
+            }
+
+            if let downloadPreflight {
+                Label(downloadPreflight, systemImage: "externaldrive.badge.questionmark")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+            // Determinate download progress (WS-M3): a real ProgressView driven by
+            // the tqdm frame in the log. Files-based (per-file byte bars are
+            // suppressed off a TTY), captioned in tqdm's own honest wording.
+            if pane.activeJob?.kind == .download, let progress = downloadProgress {
+                VStack(alignment: .leading, spacing: 2) {
+                    ProgressView(value: progress.fraction) {
+                        Text(progress.caption).font(.caption)
+                    }
+                    Text("\(Int((progress.fraction * 100).rounded()))%")
+                        .font(.caption2).foregroundStyle(.secondary).monospacedDigit()
                 }
             }
             MLXJobPane(service: service, state: pane)
@@ -659,6 +995,114 @@ private struct MLXModelsSection: View, Equatable {
     }
 }
 
+/// One cached-model row with an ⓘ detail popover (size / last used / quant / path
+/// + Reveal / Serve / Try). Owns its own popover flag so the popover anchors to
+/// the row's info button (WS-M3). Actions arrive as closures from the section.
+private struct MLXCachedModelRow: View {
+    let model: MLXCachedModel
+    let brainSwapAvailable: Bool
+    let onServe: () -> Void
+    let onTry: () -> Void
+    let onDelete: () -> Void
+
+    @State private var showDetail = false
+
+    var body: some View {
+        HStack {
+            VStack(alignment: .leading, spacing: 2) {
+                Text(model.repoID).font(.callout)
+                HStack(spacing: 6) {
+                    Text(model.sizeBytes.formatted(.byteCount(style: .file)))
+                    if let quant = model.quant {
+                        Text(quant)
+                            .padding(.horizontal, 4).padding(.vertical, 1)
+                            .background(.quaternary, in: Capsule())
+                    }
+                }
+                .font(.caption).foregroundStyle(.secondary)
+            }
+            Spacer()
+            Button { showDetail = true } label: {
+                Image(systemName: "info.circle")
+            }
+            .buttonStyle(.plain).foregroundStyle(.secondary)
+            .accessibilityLabel("Details for \(model.repoID)")
+            .popover(isPresented: $showDetail, arrowEdge: .top) { detail }
+            Button("Serve as my AI's brain") { onServe() }
+                .controlSize(.small)
+                .disabled(!brainSwapAvailable)
+                .help(
+                    "One click: start the server on this model, wait until it answers, and wire it as the Eldr backend. Progress shows in the card at the top."
+                )
+            Button("Try") { onTry() }
+                .controlSize(.small)
+            Button(role: .destructive) { onDelete() } label: {
+                Image(systemName: "trash")
+            }
+            .controlSize(.small)
+            .accessibilityLabel("Delete \(model.repoID)")
+        }
+    }
+
+    @ViewBuilder
+    private var detail: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text(model.repoID).font(.headline).textSelection(.enabled)
+            Grid(alignment: .leadingFirstTextBaseline, horizontalSpacing: 12, verticalSpacing: 4) {
+                detailRow("Size", model.sizeBytes.formatted(.byteCount(style: .file)))
+                GridRow {
+                    Text("Last used").foregroundStyle(.secondary)
+                    if let lastUsed = model.lastUsed {
+                        Text(lastUsed, format: .relative(presentation: .named))
+                    } else {
+                        Text("—").foregroundStyle(.secondary)
+                    }
+                }
+                // nil quant means "no quantization tag in config.json" — which is
+                // usually a full-precision model but also covers an unreadable
+                // config, so show "—" rather than over-claim "full precision".
+                detailRow("Quant", model.quant ?? "—")
+            }
+            .font(.caption)
+            VStack(alignment: .leading, spacing: 2) {
+                Text("Path").font(.caption).foregroundStyle(.secondary)
+                Text(model.path)
+                    .font(.system(.caption2, design: .monospaced))
+                    .textSelection(.enabled)
+                    .lineLimit(2).truncationMode(.middle)
+            }
+            Divider()
+            HStack {
+                Button("Reveal") {
+                    NSWorkspace.shared.activateFileViewerSelecting(
+                        [URL(fileURLWithPath: model.path)])
+                    showDetail = false
+                }
+                Button("Serve") {
+                    onServe()
+                    showDetail = false
+                }
+                .disabled(!brainSwapAvailable)
+                Button("Try") {
+                    onTry()
+                    showDetail = false
+                }
+                Spacer()
+            }
+            .controlSize(.small)
+        }
+        .padding()
+        .frame(minWidth: 320, maxWidth: 460)
+    }
+
+    private func detailRow(_ label: String, _ value: String) -> some View {
+        GridRow {
+            Text(label).foregroundStyle(.secondary)
+            Text(value).textSelection(.enabled)
+        }
+    }
+}
+
 // MARK: - Convert
 
 private struct MLXConvertSection: View, Equatable {
@@ -682,6 +1126,9 @@ private struct MLXConvertSection: View, Equatable {
                     Button("Browse…") { pickFolder { convertConfig.hfPath = $0 } }
                 }
             }
+            .help(
+                "The model to convert: a Hugging Face repo id (downloads first) or a local folder of safetensors weights. GGUF can't be converted — start from the original (non-GGUF) release."
+            )
             LabeledContent("Output folder") {
                 HStack {
                     TextField("new folder for the MLX model", text: $convertConfig.mlxPath)
@@ -693,19 +1140,31 @@ private struct MLXConvertSection: View, Equatable {
                     }
                 }
             }
+            .help(
+                "Where the converted MLX model lands — must be a NEW folder (mlx_lm.convert refuses an existing one)."
+            )
             Toggle("Quantize", isOn: $convertConfig.quantize)
+                .help(
+                    "Shrinks the weights to 4- or 8-bit. Roughly quarters (4-bit) or halves (8-bit) the size and memory at a small quality cost — what the mlx-community builds do."
+                )
             if convertConfig.quantize {
                 Picker("Bits", selection: $convertConfig.qBits) {
                     Text("4-bit").tag(4)
                     Text("8-bit").tag(8)
                 }
                 .pickerStyle(.segmented).frame(maxWidth: 240)
+                .help(
+                    "4-bit = smallest and fastest, slight quality cost. 8-bit = nearly lossless, twice the size."
+                )
                 Picker("Group size", selection: $convertConfig.qGroupSize) {
                     Text("32").tag(32)
                     Text("64").tag(64)
                     Text("128").tag(128)
                 }
                 .pickerStyle(.segmented).frame(maxWidth: 240)
+                .help(
+                    "How many weights share one quantization scale. Smaller tracks the weights closer (better quality, slightly bigger file); 64 is the usual default."
+                )
             }
             Picker("dtype", selection: $convertConfig.dtype) {
                 Text("default").tag("")
@@ -714,10 +1173,16 @@ private struct MLXConvertSection: View, Equatable {
                 Text("float32").tag("float32")
             }
             .frame(maxWidth: 240)
+            .help(
+                "Floating-point type for UN-quantized weights. Default keeps the source's; bfloat16 is the safe modern pick; float32 doubles the size for little gain on Apple silicon."
+            )
             LabeledContent("Upload to HF (optional)") {
                 TextField("your-org/your-model", text: $convertConfig.uploadRepo)
                     .textFieldStyle(.roundedBorder)
             }
+            .help(
+                "Pushes the converted model to this Hugging Face repo when set (needs hf auth login in the venv). Blank = keep it local."
+            )
             HStack {
                 Button("Convert") { service.startConvert(convertConfig) }
                     .disabled(jobRunning || !envReady)
@@ -747,17 +1212,27 @@ private struct MLXPlaygroundSection: View, Equatable {
     /// MLXServerSection.currentConfig) — the field must re-render when the Models
     /// section's "Try" writes the shared state.
     let playModelValue: String
+    /// Shared with the fine-tune after-run "Try with adapter" (WS-M4), same pattern
+    /// as playModel: a binding to write + a value copy for the nonisolated `==`.
+    @Binding var playAdapter: String
+    let playAdapterValue: String
 
     @State private var playPrompt = ""
     @State private var playMaxTokens = 512
     @State private var playTemperature = ""
     @State private var playTopP = ""
-    @State private var playAdapter = ""
+    // KV-cache controls (WS-M1): generate is where mlx_lm's quantized-KV flags
+    // actually exist (the server has none — verified against 0.31.3).
+    @State private var playKVBits: Int?
+    @State private var playKVGroup = ""
+    @State private var playKVStart = ""
+    @State private var playMaxKV = ""
 
     nonisolated static func == (lhs: Self, rhs: Self) -> Bool {
         lhs.envReady == rhs.envReady && lhs.jobRunning == rhs.jobRunning
             && lhs.serverModel == rhs.serverModel && lhs.pane == rhs.pane
             && lhs.playModelValue == rhs.playModelValue
+            && lhs.playAdapterValue == rhs.playAdapterValue
     }
 
     var body: some View {
@@ -770,6 +1245,9 @@ private struct MLXPlaygroundSection: View, Equatable {
                         .disabled(serverModel.isEmpty)
                 }
             }
+            .help(
+                "The model to run one-shot — loaded fresh for this generation (first run on a big model takes a while), independent of the server."
+            )
             VStack(alignment: .leading, spacing: 4) {
                 Text("Prompt").font(.caption).foregroundStyle(.secondary)
                 TextEditor(text: $playPrompt)
@@ -781,14 +1259,21 @@ private struct MLXPlaygroundSection: View, Equatable {
                 LabeledContent("Max tokens") {
                     TextField("512", value: $playMaxTokens, format: .number.grouping(.never))
                         .textFieldStyle(.roundedBorder).frame(width: 80)
+                        .help("Cap on the generated length. The run stops here even mid-sentence.")
                 }
                 LabeledContent("Temp") {
                     TextField("default", text: $playTemperature)
                         .textFieldStyle(.roundedBorder).frame(width: 70)
+                        .help(
+                            "Sampling randomness: 0 = deterministic, ~0.7 = normal chat, higher = wilder. Blank = the model default."
+                        )
                 }
                 LabeledContent("Top-p") {
                     TextField("default", text: $playTopP)
                         .textFieldStyle(.roundedBorder).frame(width: 70)
+                        .help(
+                            "Nucleus sampling: only the most likely tokens summing to this probability are considered. Blank = the model default."
+                        )
                 }
             }
             LabeledContent("Adapter (optional)") {
@@ -797,6 +1282,42 @@ private struct MLXPlaygroundSection: View, Equatable {
                         .textFieldStyle(.roundedBorder)
                     Button("Browse…") { pickFolder { playAdapter = $0 } }
                 }
+            }
+            .help(
+                "A trained LoRA/DoRA adapter folder to apply on top of the model — how you feel a fine-tune before fusing. Clear it to compare against the plain base."
+            )
+            DisclosureGroup("KV cache (advanced)") {
+                Picker("KV quantization", selection: $playKVBits) {
+                    Text("Off (16-bit)").tag(Int?.none)
+                    Text("8-bit").tag(Int?.some(8))
+                    Text("4-bit").tag(Int?.some(4))
+                }
+                .help(
+                    "--kv-bits — quantizes the key/value cache while generating: big memory savings on long outputs, slight quality cost. 8-bit is nearly lossless; 4-bit halves that again for a small further cost."
+                )
+                if playKVBits != nil {
+                    LabeledContent("Group size") {
+                        TextField("64", text: $playKVGroup)
+                            .textFieldStyle(.roundedBorder).frame(width: 80)
+                    }
+                    .help(
+                        "--kv-group-size — how many values share one quantization scale. Smaller groups track the data closer (better quality, slightly more memory). Blank = mlx default (64)."
+                    )
+                    LabeledContent("Quantize after (tokens)") {
+                        TextField("5000", text: $playKVStart)
+                            .textFieldStyle(.roundedBorder).frame(width: 80)
+                    }
+                    .help(
+                        "--quantized-kv-start — keep the first N tokens of cache un-quantized (the prompt matters most). Blank = mlx default (5000)."
+                    )
+                }
+                LabeledContent("Max KV size (tokens)") {
+                    TextField("unlimited", text: $playMaxKV)
+                        .textFieldStyle(.roundedBorder).frame(width: 80)
+                }
+                .help(
+                    "--max-kv-size — rotating cap on the cached context. Bounds memory on very long generations; the model gradually forgets the oldest tokens past the cap."
+                )
             }
             HStack {
                 Button("Generate") {
@@ -807,7 +1328,13 @@ private struct MLXPlaygroundSection: View, Equatable {
                             maxTokens: max(1, playMaxTokens),
                             temperature: parseDouble(playTemperature),
                             topP: parseDouble(playTopP),
-                            adapterPath: playAdapter.trimmingCharacters(in: .whitespacesAndNewlines)))
+                            adapterPath: playAdapter.trimmingCharacters(in: .whitespacesAndNewlines),
+                            kvBits: playKVBits,
+                            kvGroupSize: playKVBits != nil
+                                ? Int(playKVGroup.trimmingCharacters(in: .whitespaces)) : nil,
+                            quantizedKVStart: playKVBits != nil
+                                ? Int(playKVStart.trimmingCharacters(in: .whitespaces)) : nil,
+                            maxKVSize: Int(playMaxKV.trimmingCharacters(in: .whitespaces))))
                 }
                 .disabled(jobRunning || !envReady)
                 Spacer()
@@ -827,143 +1354,37 @@ private struct MLXFineTuneSection: View, Equatable {
     let jobRunning: Bool
     let fineTunePane: MLXService.JobPaneState
     let fusePane: MLXService.JobPaneState
-
-    @State private var fineTuneConfig = MLXFineTuneConfig()
-    @State private var fuseModel = ""
-    @State private var fuseAdapters = ""
-    @State private var fuseSavePath = ""
+    let lossHistory: MLXLossHistory
+    let cachedModels: [MLXCachedModel]
+    let managedServerRunning: Bool
+    let serverMemoryBytes: Int64?
+    /// WS-M5: opens the demoted Advanced disclosure (the after-run "Try with
+    /// adapter" seeds the Playground, which lives there now).
+    let openAdvanced: () -> Void
+    @Binding var playModel: String
+    @Binding var playAdapter: String
 
     nonisolated static func == (lhs: Self, rhs: Self) -> Bool {
         lhs.envReady == rhs.envReady && lhs.jobRunning == rhs.jobRunning
             && lhs.fineTunePane == rhs.fineTunePane && lhs.fusePane == rhs.fusePane
+            && lhs.lossHistory == rhs.lossHistory && lhs.cachedModels == rhs.cachedModels
+            && lhs.managedServerRunning == rhs.managedServerRunning
+            && lhs.serverMemoryBytes == rhs.serverMemoryBytes
     }
 
     var body: some View {
         Section("Fine-tune (mlx_lm.lora) + fuse") {
-            LabeledContent("Base model") {
-                HStack {
-                    TextField("mlx-community/… or /path/to/model", text: $fineTuneConfig.model)
-                        .textFieldStyle(.roundedBorder)
-                    Button("Browse…") { pickFolder { fineTuneConfig.model = $0 } }
-                }
-            }
-            LabeledContent("Data folder") {
-                HStack {
-                    TextField("folder with train.jsonl + valid.jsonl", text: $fineTuneConfig.dataDir)
-                        .textFieldStyle(.roundedBorder)
-                    Button("Browse…") { pickFolder { fineTuneConfig.dataDir = $0 } }
-                }
-            }
-            if let status = dataDirStatus {
-                Label(status.text, systemImage: status.ok ? "checkmark.circle" : "exclamationmark.triangle")
-                    .font(.caption)
-                    .foregroundStyle(status.ok ? Color.green : Color.orange)
-            }
-            LabeledContent("Adapter output") {
-                HStack {
-                    TextField("(auto — under the MLX folder)", text: $fineTuneConfig.adapterPath)
-                        .textFieldStyle(.roundedBorder)
-                    Button("Choose…") {
-                        pickSaveLocation(defaultName: "adapters") { fineTuneConfig.adapterPath = $0 }
-                    }
-                }
-            }
-            Picker("Type", selection: $fineTuneConfig.fineTuneType) {
-                Text("LoRA").tag("lora")
-                Text("DoRA").tag("dora")
-                Text("Full").tag("full")
-            }
-            .pickerStyle(.segmented).frame(maxWidth: 240)
-            HStack(spacing: 16) {
-                Stepper("Layers: \(fineTuneConfig.numLayers)", value: $fineTuneConfig.numLayers, in: 1...128)
-                Stepper("Batch: \(fineTuneConfig.batchSize)", value: $fineTuneConfig.batchSize, in: 1...32)
-            }
-            HStack(spacing: 16) {
-                LabeledContent("Iterations") {
-                    TextField("600", value: $fineTuneConfig.iters, format: .number.grouping(.never))
-                        .textFieldStyle(.roundedBorder).frame(width: 80)
-                }
-                LabeledContent("Learning rate") {
-                    TextField("1e-5", value: $fineTuneConfig.learningRate, format: .number)
-                        .textFieldStyle(.roundedBorder).frame(width: 100)
-                }
-            }
-            if fineTuneConfig.fineTuneType != "full" {
-                HStack(spacing: 16) {
-                    LabeledContent("Rank") {
-                        TextField("8", value: $fineTuneConfig.loraRank, format: .number.grouping(.never))
-                            .textFieldStyle(.roundedBorder).frame(width: 60)
-                    }
-                    LabeledContent("Scale") {
-                        TextField("20", value: $fineTuneConfig.loraScale, format: .number)
-                            .textFieldStyle(.roundedBorder).frame(width: 60)
-                    }
-                    LabeledContent("Dropout") {
-                        TextField("0", value: $fineTuneConfig.loraDropout, format: .number)
-                            .textFieldStyle(.roundedBorder).frame(width: 60)
-                    }
-                }
-            }
-            HStack {
-                Button("Start fine-tune") { service.startFineTune(fineTuneConfig) }
-                    .disabled(jobRunning || !envReady)
-                Spacer()
-                Text("Live train/val loss streams below; Cancel stops the run (adapters checkpoint as they go).")
-                    .font(.caption).foregroundStyle(.secondary)
-            }
-            MLXJobPane(service: service, state: fineTunePane)
-
-            Divider()
-
-            Text("Fuse — bake trained adapters into a standalone model (usable in the sections above).")
-                .font(.caption).foregroundStyle(.secondary)
-            LabeledContent("Model") {
-                HStack {
-                    TextField("base model", text: $fuseModel).textFieldStyle(.roundedBorder)
-                    Button("From fine-tune") {
-                        fuseModel = fineTuneConfig.model
-                        fuseAdapters = fineTuneConfig.adapterPath
-                    }
-                    .disabled(fineTuneConfig.model.isEmpty)
-                }
-            }
-            LabeledContent("Adapters") {
-                HStack {
-                    TextField("adapter folder", text: $fuseAdapters).textFieldStyle(.roundedBorder)
-                    Button("Browse…") { pickFolder { fuseAdapters = $0 } }
-                }
-            }
-            LabeledContent("Save to") {
-                HStack {
-                    TextField("new folder for the fused model", text: $fuseSavePath)
-                        .textFieldStyle(.roundedBorder)
-                    Button("Choose…") {
-                        pickSaveLocation(defaultName: "fused-model") { fuseSavePath = $0 }
-                    }
-                }
-            }
-            HStack {
-                Button("Fuse") {
-                    service.startFuse(model: fuseModel, adapterPath: fuseAdapters, savePath: fuseSavePath)
-                }
-                .disabled(jobRunning || !envReady)
-                Spacer()
-            }
-            MLXJobPane(service: service, state: fusePane)
+            // WS-M4: guided/expert modes, dataset assistant, memory preflight, live
+            // loss chart, after-run try/fuse — all in FineTuneGuideView (its own
+            // file). This section stays a narrow Equatable wrapper.
+            FineTuneGuideView(
+                service: service, envReady: envReady, jobRunning: jobRunning,
+                fineTunePane: fineTunePane, fusePane: fusePane,
+                lossHistory: lossHistory, cachedModels: cachedModels,
+                managedServerRunning: managedServerRunning, serverMemoryBytes: serverMemoryBytes,
+                openAdvanced: openAdvanced,
+                playModel: $playModel, playAdapter: $playAdapter)
         }
-    }
-
-    private var dataDirStatus: (ok: Bool, text: String)? {
-        let dir = fineTuneConfig.dataDir.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !dir.isEmpty else { return nil }
-        let fm = FileManager.default
-        let train = fm.fileExists(atPath: (dir as NSString).appendingPathComponent("train.jsonl"))
-        let valid = fm.fileExists(atPath: (dir as NSString).appendingPathComponent("valid.jsonl"))
-        if train && valid { return (true, "train.jsonl and valid.jsonl found") }
-        var missing: [String] = []
-        if !train { missing.append("train.jsonl") }
-        if !valid { missing.append("valid.jsonl") }
-        return (false, "Missing \(missing.joined(separator: " and ")) in that folder")
     }
 }
 
@@ -973,7 +1394,8 @@ private struct MLXFineTuneSection: View, Equatable {
 /// label afterwards, and the terminal output whenever the (already
 /// section-filtered) window is non-empty. Equatable on the pane state alone so a
 /// job streaming in one section never re-lays-out the others.
-private struct MLXJobPane: View, Equatable {
+/// Internal so FineTuneGuideView (a separate file) reuses it.
+struct MLXJobPane: View, Equatable {
     let service: MLXService
     let state: MLXService.JobPaneState
 
@@ -1037,8 +1459,9 @@ private func parseDouble(_ raw: String) -> Double? {
     Double(raw.replacingOccurrences(of: ",", with: ".").trimmingCharacters(in: .whitespaces))
 }
 
+// Internal (not private) so FineTuneGuideView (a separate file) reuses them.
 @MainActor
-private func pickFolder(_ assign: @escaping (String) -> Void) {
+func pickFolder(_ assign: @escaping (String) -> Void) {
     let panel = NSOpenPanel()
     panel.canChooseDirectories = true
     panel.canChooseFiles = false
@@ -1055,12 +1478,24 @@ private func pickFolder(_ assign: @escaping (String) -> Void) {
 /// Pick a NEW folder location (the mlx tools create it; convert refuses an
 /// existing one).
 @MainActor
-private func pickSaveLocation(defaultName: String, _ assign: @escaping (String) -> Void) {
+func pickSaveLocation(defaultName: String, _ assign: @escaping (String) -> Void) {
     let panel = NSSavePanel()
     panel.canCreateDirectories = true
     panel.showsHiddenFiles = true
     panel.treatsFilePackagesAsDirectories = true
     panel.nameFieldStringValue = defaultName
     panel.prompt = "Choose"
+    if panel.runModal() == .OK, let url = panel.url { assign(url.path) }
+}
+
+/// Pick an existing FILE (dataset validation, CSV/text import for the assistant).
+@MainActor
+func pickFile(_ assign: @escaping (String) -> Void) {
+    let panel = NSOpenPanel()
+    panel.canChooseDirectories = false
+    panel.canChooseFiles = true
+    panel.allowsMultipleSelection = false
+    panel.showsHiddenFiles = true
+    panel.prompt = "Select"
     if panel.runModal() == .OK, let url = panel.url { assign(url.path) }
 }

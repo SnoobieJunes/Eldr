@@ -6,7 +6,7 @@
 
 # PQRC Threat Model v1
 
-**PQRC — Post-Quantum Ratcheted Conversations** (codename **Ratchet & Clank**)
+**PQRC — Post-Quantum Ratcheted Conversations**
 
 Companion to `SPEC.md` (protocol identifier `pqrc-v1`). This document states plainly what PQRC protects, against whom, and — just as importantly — what it does not. A privacy tool that overstates its guarantees endangers the people who rely on it most. Where the spec resolves ties in favor of privacy, this document resolves ties in favor of honesty.
 

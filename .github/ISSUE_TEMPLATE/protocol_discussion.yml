@@ -1,0 +1,28 @@
+name: Protocol discussion
+description: Design questions about the PQRC spec or the Nostr wire format
+labels: [protocol]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        For design questions about the [SPEC](../blob/main/docs/pqrc-SPEC-v1_1.md) or the [NIP](../blob/main/docs/NIP-XX-pqrc.md) — both want adversarial readers before upstream submission. Cite sections; bring the attack.
+  - type: input
+    id: section
+    attributes:
+      label: SPEC/NIP section
+      placeholder: "SPEC §8.3 / NIP kind-1059 wrap"
+    validations:
+      required: true
+  - type: textarea
+    id: question
+    attributes:
+      label: Question or concern
+      description: Include the failure/attack scenario if you see one — concrete inputs and what goes wrong.
+    validations:
+      required: true
+  - type: textarea
+    id: alternative
+    attributes:
+      label: Alternative you'd propose
+    validations:
+      required: false

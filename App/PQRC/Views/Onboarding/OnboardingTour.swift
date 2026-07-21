@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: AGPL-3.0-only
 import SwiftUI
 
 /// The guided "venturing on unknown seas" first-run tour (APP-SPEC §0 product

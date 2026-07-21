@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 import Foundation
 
 /// Typed errors for the PQRC core (CLAUDE.md conventions: no try!, no fatalError).

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 import Foundation
 
 /// Agent-to-agent skills for the shared AI thread (APP-SPEC §8, docs/

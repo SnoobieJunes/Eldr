@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 import Foundation
 
 /// The runbook `eldrctl conduit instructions` prints verbatim — the steps the user's AI on

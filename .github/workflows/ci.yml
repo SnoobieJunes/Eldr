@@ -6,17 +6,35 @@ on:
   pull_request:
 
 # TEST-PLAN §12. Project/scheme is EldrChat (renamed from PQRC). The app builds
-# against the iOS 26.5 SDK: the Private Cloud Compute tier is gated OFF by default
-# (ELDR_PCC_SDK opt-in, DEVIATIONS AC36), so no iOS-27 SDK/runner is required —
-# `macos-26` + `/Applications/Xcode.app` is sufficient for the `app`/`perf` jobs.
+# against the iOS 26.5 SDK: the Private Cloud Compute tier self-gates on the SDK's
+# module version (DEVIATIONS AC125 — there is no build flag), so on a 26.x runner it
+# is simply compiled out and no iOS-27 SDK/runner is required — `macos-26` +
+# `/Applications/Xcode.app` is sufficient for the `app`/`perf` jobs. PCC therefore
+# has no CI coverage of its live path; that is a known, accepted gap.
 jobs:
+  secrets:
+    name: gitleaks (secret scan)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # full history — the gate covers every commit
+      - name: Scan
+        # Baseline 2026-07-19: 56 raw findings, all false positives, each
+        # allowlisted with a reason in .gitleaks.toml. A NEW finding is real.
+        # Image pinned by tag, not :latest — an unpinned scanner is a
+        # supply-chain hole in the thing meant to close supply-chain holes.
+        run: |
+          docker run --rm -v "$PWD:/repo" -w /repo zricethezav/gitleaks:v8.30.1 \
+            detect --no-banner --redact -v -c .gitleaks.toml
+
   packages:
     name: swift test (${{ matrix.package }})
     runs-on: macos-26
     strategy:
       fail-fast: false
       matrix:
-        package: [PQRCCore, PQRCNostr, PQRCAgent, PQRCACP, PQRCMCP, EldrNode, Eldrctl]
+        package: [PQRCCore, PQRCNostr, PQRCAgent, PQRCACP, PQRCMCP, EldrNode, Eldrctl, SwiftA2A]
     steps:
       - uses: actions/checkout@v4
       - name: Select Xcode 26

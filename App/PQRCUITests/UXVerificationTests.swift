@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: AGPL-3.0-only
 import XCTest
 
 /// Runtime verification of the findings from docs/deprecated/UX-RECOMMENDATIONS.md.
@@ -148,7 +149,9 @@ final class UXVerificationTests: XCTestCase {
         chip.tap()
         XCTAssertTrue(app.navigationBars["AI in this chat"].waitForExistence(timeout: 10),
                       "chip should open the per-AI hub")
-        XCTAssertTrue(element(app, "ai-hub-context-mode").exists, "hub has the AI-context picker")
+        // C6: the hub embeds the SAME shared context component Details does, so
+        // the picker carries the one shared identifier now.
+        XCTAssertTrue(element(app, "conversation-ai-mode").exists, "hub has the AI-context picker")
         XCTAssertTrue(element(app, "ai-responds-mode").exists, "hub has the My-AI-responds picker")
         shot(app, "rec1-02-chip-opens-AIHub")
         app.buttons["Done"].firstMatch.tap()

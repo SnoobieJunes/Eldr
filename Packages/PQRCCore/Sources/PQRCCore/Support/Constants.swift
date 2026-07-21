@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 import Foundation
 
 /// Protocol constants (SPEC §14). Values are normative; tests assert them.

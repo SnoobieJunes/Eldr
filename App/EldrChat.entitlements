@@ -16,13 +16,15 @@
 		<string>$(AppIdentifierPrefix)chat.eldr.app</string>
 	</array>
 
-	<!-- Apple Private Cloud Compute (PCCFoundationModelsProvider — DEVIATIONS A40 / AC36).
-	     ENABLED for iOS 27 at the owner's request. Pairs with `.define("ELDR_PCC_SDK")` in
-	     Packages/PQRCAgent/Package.swift; the PCC symbols ship in the Xcode 27 / iOS 27 SDK
-	     (verified 2026-06), so the app MUST be built with Xcode 27. NOTE: this is a MANAGED
-	     entitlement — device / TestFlight signing needs Apple to approve the team's PCC
-	     request (developer.apple.com/private-cloud-compute); a Simulator build ad-hoc signs
-	     and does not surface that. -->
+	<!-- Apple Private Cloud Compute (PCCFoundationModelsProvider — DEVIATIONS A40 / AC36 /
+	     AC125). ENABLED for iOS 27 at the owner's request. There is NO build flag to pair
+	     this with: the code gates itself on the SDK's module version
+	     (`#if canImport(FoundationModels, _version: 2.0) && (os(iOS) || os(macOS))`), so the app MUST simply be built
+	     with Xcode 27 — see the locked section in CLAUDE.md before changing anything.
+	     NOTE: this is a MANAGED entitlement — device / TestFlight signing needs Apple to
+	     approve the team's PCC request (developer.apple.com/private-cloud-compute); a
+	     Simulator build ad-hoc signs and does not surface that, so a device build can fail
+	     to provision here even when the code is correct. -->
 	<key>com.apple.developer.private-cloud-compute</key>
 	<true/>
 </dict>

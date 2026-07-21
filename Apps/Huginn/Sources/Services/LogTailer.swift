@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: AGPL-3.0-only
 import Foundation
 
 /// One classified line from `eldr-acp.log`.
@@ -37,6 +38,17 @@ final class LogTailer: ObservableObject {
     /// True while the dispatch source is watching the file (false after `stop()` —
     /// the observable "tailer is idle" signal the MLX kill-switch tests assert).
     var isTailing: Bool { source != nil }
+
+    /// WS-M2: byte offset of the first line the current seed retained — the
+    /// anchor the log console's "Load older" back-scroll reads BEFORE. Only valid
+    /// for the current `fileGeneration`.
+    private(set) var earliestSeedOffset: UInt64 = 0
+
+    /// WS-M2: bumped whenever a fresh tail seed REPLACES earlier content
+    /// (rotation, or a stop/start gap too large to resume through). The console
+    /// accumulates lines across publishes; a generation change tells it the
+    /// accumulated history no longer matches the file and must be dropped.
+    private(set) var fileGeneration = 0
 
     private let path: String
     /// Cap retained lines so a long-running session doesn't grow unbounded in memory.
@@ -140,10 +152,29 @@ final class LogTailer: ObservableObject {
             let seedStart = size > maxSeedBytes ? size - maxSeedBytes : 0
             try? h.seek(toOffset: seedStart)
             var existing = (try? h.readToEnd()) ?? Data()
+            var firstLineOffset = seedStart
             if seedStart > 0, let firstNewline = existing.firstIndex(of: UInt8(ascii: "\n")) {
                 // Started mid-line: drop the partial first line.
+                let dropped = existing.distance(from: existing.startIndex, to: firstNewline) + 1
                 existing = existing[existing.index(after: firstNewline)...]
+                firstLineOffset = seedStart + UInt64(dropped)
             }
+            // Cap the seed by the retention cap IN DATA SPACE too: a 64 KB seed
+            // of short lines can exceed maxLines, and `publish` would trim the
+            // head AFTER ingest — leaving `earliestSeedOffset` pointing below
+            // the first line actually kept, so WS-M2's "Load older" would
+            // splice older history in with a silent gap at the seam.
+            let boundedStart = Self.tailLineStart(existing, maxLines: maxLines)
+            if boundedStart > existing.startIndex {
+                firstLineOffset += UInt64(
+                    existing.distance(from: existing.startIndex, to: boundedStart))
+                existing = existing[boundedStart...]
+            }
+            // A fresh tail seed that REPLACES earlier content (rotation, or a
+            // stop/start gap too large to resume through) starts a new
+            // generation: back-scroll anchors from the old file/window are void.
+            if nextID > 0 { fileGeneration += 1 }
+            earliestSeedOffset = firstLineOffset
             offset = (try? h.offset()) ?? size
             ingest(existing, seeding: true)
         }
@@ -184,6 +215,29 @@ final class LogTailer: ObservableObject {
             stop()
             offset = 0
             openAndPrime()
+        }
+    }
+
+    /// Start index of the last `maxLines` PHYSICAL lines in `data` (a trailing
+    /// newline terminates the final line; a partial final line counts as one).
+    /// Empty lines count here even though ingest's split omits them from
+    /// display — what matters is that the returned index is a true line start,
+    /// so byte offsets derived from it stay exact.
+    static func tailLineStart(_ data: Data, maxLines: Int) -> Data.Index {
+        guard maxLines > 0, !data.isEmpty else { return data.startIndex }
+        var position = data.index(before: data.endIndex)
+        if data[position] == UInt8(ascii: "\n") {
+            guard position > data.startIndex else { return data.startIndex }
+            position = data.index(before: position)
+        }
+        var linesSeen = 0
+        while true {
+            if data[position] == UInt8(ascii: "\n") {
+                linesSeen += 1
+                if linesSeen == maxLines { return data.index(after: position) }
+            }
+            guard position > data.startIndex else { return data.startIndex }
+            position = data.index(before: position)
         }
     }
 

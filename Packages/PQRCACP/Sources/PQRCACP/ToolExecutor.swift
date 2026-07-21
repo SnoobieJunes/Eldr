@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 import Foundation
 
 /// What the client said it can do (from `initialize` → clientCapabilities). Drives
@@ -447,7 +448,9 @@ public struct ToolExecutor: Sendable {
 
     /// A2: the jail-inside directory (relative to the workdir) oversized tool results
     /// spill into. Kept under a dot-dir so it's out of the way and easy to `.gitignore`.
-    static let spillDirRelative = ".eldr/tool-results"
+    /// Public (AC104) so Huginn's "Clean spilled tool-results" affordance points at the
+    /// SAME path this executor writes — one constant, no drift.
+    public static let spillDirRelative = ".eldr/tool-results"
 
     /// Pick a fresh spill destination under `<workdir>/.eldr/tool-results/`, RELATIVE
     /// to the workdir (what the model passes to `read_file`). nil when the resolved

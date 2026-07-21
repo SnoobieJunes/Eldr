@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: AGPL-3.0-only
 import PQRCACP
 import SwiftUI
 
@@ -90,6 +91,15 @@ struct HuginnApp: App {
         .windowResizability(.contentMinSize)
         .commands { CommandGroup(replacing: .newItem) {} }  // no "New Window"
 
+        // WS-M2: "Open as window" target for the log console — one scene, the
+        // routed LogConsoleSource picks which log it shows (each source gets its
+        // own window; opening an already-open source focuses it).
+        WindowGroup("Log console", id: LogConsoleView.windowID, for: LogConsoleSource.self) {
+            $source in
+            LogConsoleWindow(source: source ?? .agent)
+        }
+        .defaultSize(width: 1000, height: 640)
+
         // Menu-bar presence (the modern, state-sharing replacement for NSStatusItem).
         MenuBarExtra("Eldr node", systemImage: "wrench.and.screwdriver") {
             StatusBarView()
@@ -124,6 +134,11 @@ struct MainWindow: View {
     enum Tab: Hashable { case configuration, testChat, mlx, inspector, logs, bridge, nearby, relay }
     @State private var tab: Tab = .configuration
 
+    /// Cross-scene tab jump (WS-M1): the menu-bar extra and the Configuration
+    /// linkage chip post this with a `Tab` as the object to land on a tab —
+    /// selection is otherwise private @State inside the main window.
+    static let openTab = Notification.Name("chat.eldr.huginn.open-tab")
+
     var body: some View {
         TabView(selection: $tab) {
             ConfigurationView()
@@ -138,7 +153,9 @@ struct MainWindow: View {
             AgentInspectorView()
                 .tabItem { Label("Inspector", systemImage: "scope") }
                 .tag(Tab.inspector)
-            LogView()
+            // WS-M2: the reusable console replaced LogView — same default source
+            // (eldr-acp.log), plus source switching, search, markup, remediation.
+            LogConsoleView(source: .agent, style: .full)
                 .tabItem { Label("Logs", systemImage: "text.alignleft") }
                 .tag(Tab.logs)
             BridgeView()
@@ -155,5 +172,8 @@ struct MainWindow: View {
         }
         .padding(.top, 6)
         .navigationTitle("Eldr — Mac node & AI tether")
+        .onReceive(NotificationCenter.default.publisher(for: Self.openTab)) { note in
+            if let target = note.object as? Tab { tab = target }
+        }
     }
 }

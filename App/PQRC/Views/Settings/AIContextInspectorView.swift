@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: AGPL-3.0-only
 import PQRCCore
 import SwiftUI
 
@@ -19,6 +20,9 @@ struct AIInspectionView: View {
     @Bindable var model: AppModel
     /// The tethered AI this inspection is scoped to (`ConfiguredAI.id`).
     let aiID: String
+    /// C6: when embedded in a CONVERSATION surface (Details / the AI hub), the
+    /// conversation is fixed — the picker is hidden and this id is inspected.
+    var fixedConversationID: String? = nil
 
     @State private var selectedConversation: String?
     @State private var inspection: PersonaRuntime.AIContextInspection?
@@ -26,23 +30,25 @@ struct AIInspectionView: View {
 
     var body: some View {
         Group {
-            Section {
-                if model.conversations.isEmpty {
-                    Text("Start a conversation to inspect what this AI receives.")
-                        .foregroundStyle(.secondary)
-                } else {
-                    Picker("Conversation", selection: $selectedConversation) {
-                        ForEach(model.conversations) { conversation in
-                            Text(conversation.title).tag(Optional(conversation.id))
+            if fixedConversationID == nil {
+                Section {
+                    if model.conversations.isEmpty {
+                        Text("Start a conversation to inspect what this AI receives.")
+                            .foregroundStyle(.secondary)
+                    } else {
+                        Picker("Conversation", selection: $selectedConversation) {
+                            ForEach(model.conversations) { conversation in
+                                Text(conversation.title).tag(Optional(conversation.id))
+                            }
                         }
+                        .pickerStyle(.menu)
+                        .accessibilityIdentifier("inspector-conversation")
+                        .onChange(of: selectedConversation) { _, _ in Task { await reload() } }
                     }
-                    .pickerStyle(.menu)
-                    .accessibilityIdentifier("inspector-conversation")
-                    .onChange(of: selectedConversation) { _, _ in Task { await reload() } }
+                } header: {
+                    Text("What this AI sees")
+                        .helpInfo("Pick a conversation to see precisely what THIS AI would receive for it right now — the exact prompt that goes out and every message in its window. Toggling a message is saved and takes effect on the next turn.")
                 }
-            } header: {
-                Text("What this AI sees")
-                    .helpInfo("Pick a conversation to see precisely what THIS AI would receive for it right now — the exact prompt that goes out and every message in its window. Toggling a message is saved and takes effect on the next turn.")
             }
 
             if loading {
@@ -52,7 +58,11 @@ struct AIInspectionView: View {
             }
         }
         .task {
-            if selectedConversation == nil { selectedConversation = model.conversations.first?.id }
+            if let fixed = fixedConversationID {
+                selectedConversation = fixed
+            } else if selectedConversation == nil {
+                selectedConversation = model.conversations.first?.id
+            }
             await reload()
         }
     }
@@ -202,5 +212,95 @@ struct AIInspectionView: View {
         inspection = await model.contextInspections(conversationID: id)
             .first(where: { $0.id == aiID })
         loading = false
+    }
+}
+
+/// C6: THE per-conversation "what your AI sees here" component — one mode picker
+/// (the ONLY writer of the per-conversation `conversationContextMode` key), the
+/// live effect echo, and a collapsed per-AI inspection (the same `AIInspectionView`
+/// Settings ▸ AI uses, conversation fixed). Embedded by BOTH
+/// `ConversationDetailsView` and `AIHubSheet`, which previously each had their own
+/// picker writing the same key with drifting copy — edit where you inspect, once.
+struct ConversationAIContextSection: View {
+    @Bindable var model: AppModel
+    let conversationID: String
+    /// Called after the mode changes, so the embedder can refresh its own summary
+    /// state (the Details header / the in-chat glance chip).
+    var onChanged: (() -> Void)? = nil
+
+    @State private var mode = "default"
+    @State private var summary: (mode: String, isRemote: Bool, firewallOn: Bool) =
+        ("active", false, true)
+    /// The enabled AI whose view is being inspected (defaults to the first).
+    @State private var inspectedAI: String?
+    @State private var myAIs: [(id: String, name: String)] = []
+    @State private var showInspection = false
+
+    var body: some View {
+        Section {
+            Picker("AI context here", selection: $mode) {
+                Text("Follow each AI's own setting").tag("default")
+                Text("Off in this conversation").tag("off")
+                Text("Marked only — messages I add to context").tag("marked")
+                Text("Live — full conversation while active").tag("full")
+            }
+            .accessibilityIdentifier("conversation-ai-mode")
+            .onAppear(perform: load)
+            .onChange(of: mode) { _, newValue in
+                model.setConversationContextMode(
+                    newValue == "default" ? nil : newValue, conversationID: conversationID)
+                summary = model.primaryAIContextSummary(conversationID)
+                onChanged?()
+            }
+            // Live echo of what the AI actually does here + the firewall indicator
+            // whenever a REMOTE AI is active (privacy cardinal rule: any widening
+            // of what a remote AI sees keeps the firewall state visible).
+            AIContextEcho(summary: summary)
+            if summary.mode != "off", summary.isRemote {
+                RemoteAIFirewallRow(firewallOn: summary.firewallOn)
+            }
+            // The inspection itself: exactly what a chosen AI receives for THIS
+            // conversation — prompt + transcript with real include/exclude
+            // toggles. Collapsed by default (it can be long in a sheet).
+            if !myAIs.isEmpty {
+                DisclosureGroup(isExpanded: $showInspection) {
+                    if myAIs.count > 1 {
+                        Picker("Inspect", selection: $inspectedAI) {
+                            ForEach(myAIs, id: \.id) { ai in
+                                Text(ai.name).tag(Optional(ai.id))
+                            }
+                        }
+                        .pickerStyle(.menu)
+                        .accessibilityIdentifier("conversation-inspect-ai")
+                    } else {
+                        Text("Showing \(myAIs.first?.name ?? "your AI")'s view below.")
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                    }
+                } label: {
+                    Label("What your AI sees here", systemImage: "eye")
+                        .font(.callout)
+                }
+                .accessibilityIdentifier("conversation-ai-inspection")
+            }
+        } header: {
+            Text("AI in this conversation (now: \(AIContextVocab.glance(summary)))")
+        } footer: {
+            Text("Overrides every AI's own setting, just here. \"Off\" silences all AIs in this chat. Each chat is separate — your AI never carries context from one into another.")
+        }
+        // The inspection sections render as siblings (AIInspectionView emits
+        // Form sections; nesting them inside the DisclosureGroup row would
+        // collapse their layout), gated on the disclosure being open.
+        if showInspection, let aiID = inspectedAI ?? myAIs.first?.id {
+            AIInspectionView(model: model, aiID: aiID, fixedConversationID: conversationID)
+                .id("\(aiID)-\(conversationID)")
+        }
+    }
+
+    private func load() {
+        mode = model.conversationContextMode(conversationID) ?? "default"
+        summary = model.primaryAIContextSummary(conversationID)
+        myAIs = model.tetheredAIList().filter(\.isEnabled).map { ($0.id, $0.name) }
+        if inspectedAI == nil { inspectedAI = myAIs.first?.id }
     }
 }

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: AGPL-3.0-only
 import PQRCNostr
 import SwiftUI
 
@@ -23,6 +24,8 @@ struct ConfigurationView: View {
     @State private var newestPQRCACPSourceDate: Date?
     @State private var reinstalling = false
     @State private var reinstallError: String?
+    /// AC106: what the installed binary's `--version` reports (nil = missing/unprobed).
+    @State private var installedVersion: String?
     /// Are-you-sure step for the persistent ungated-tools toggle: the switch flips
     /// only after explicit confirmation; turning it OFF never asks.
     @State private var confirmUngatedTools = false
@@ -107,6 +110,7 @@ struct ConfigurationView: View {
                 )
                 .font(.caption).foregroundStyle(.secondary)
                 healthRow
+                MLXBackendLinkageChip()
             }
         }
     }
@@ -118,6 +122,32 @@ struct ConfigurationView: View {
             Spacer()
             Button("Test") { Task { await health.checkNow() } }
                 .controlSize(.small)
+        }
+    }
+
+    /// WS-M1 "edit where you inspect" linkage: when the Local-LLM URL above IS
+    /// the MLX tab's managed server, say so and offer the jump. A leaf observer
+    /// struct so MLX churn re-renders only this row, never the whole form.
+    private struct MLXBackendLinkageChip: View {
+        @ObservedObject private var mlx = MLXService.shared
+        @EnvironmentObject private var store: ConfigurationStore
+
+        var body: some View {
+            if mlx.managesServer, store.llmURL == mlx.serverConfig.baseURL {
+                HStack(spacing: 8) {
+                    Label("Managed by the MLX tab", systemImage: "memorychip")
+                        .font(.caption).foregroundStyle(.secondary)
+                    Spacer()
+                    Button("Open MLX tab") {
+                        NotificationCenter.default.post(
+                            name: MainWindow.openTab, object: MainWindow.Tab.mlx)
+                    }
+                    .controlSize(.small)
+                }
+                .help(
+                    "The URL above is the MLX tab's server — start/stop it and switch models there. Editing the URL here just points Eldr somewhere else; the MLX server keeps its own config."
+                )
+            }
         }
     }
 
@@ -392,6 +422,7 @@ struct ConfigurationView: View {
         gatewayRegistered = HarnessRegistration.isRegistered(
             path: store.paths.defaultGatewayConfig(for: store.gatewayFlavor))
         installedCLIModDate = installer.installedBinaryModificationDate()
+        installedVersion = await store.installedAgentVersion()
         await connections.probeGateway(port: store.sybilclawGatewayPort)
         await connections.probeContextGraph(urlString: store.contextGraphURL)
         // File-system scan off the main actor — cheap, but no reason to block it.
@@ -510,6 +541,24 @@ struct ConfigurationView: View {
                     .font(.caption).foregroundStyle(.orange)
             }
 
+            // AC106 (the WS-B3-descoped staleness warning): what the binary REPORTS
+            // vs what this app was built against. Compared for EQUALITY, not order —
+            // the summaries aren't semver, and drift in either direction means the
+            // installed CLI isn't the one this app's seams were tested with.
+            if let installedVersion {
+                Text(
+                    "Reports \(installedVersion) · this app expects \(ConfigurationStore.expectedAgentVersion)"
+                )
+                .font(.caption).foregroundStyle(.secondary)
+                if installedVersion != ConfigurationStore.expectedAgentVersion {
+                    Label(
+                        "Installed CLI version doesn't match this app — Reinstall to update it.",
+                        systemImage: "exclamationmark.triangle.fill"
+                    )
+                    .font(.caption).foregroundStyle(.orange)
+                }
+            }
+
             if cliIsStale {
                 Label(
                     "Older than the newest Packages/PQRCACP source changes — reinstall to pick them up.",
@@ -554,6 +603,7 @@ struct ConfigurationView: View {
         do {
             try await installer.install()
             installedCLIModDate = installer.installedBinaryModificationDate()
+            installedVersion = await store.installedAgentVersion()
         } catch {
             reinstallError = "Reinstall failed: \(error.localizedDescription)"
         }

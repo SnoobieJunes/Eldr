@@ -3,9 +3,11 @@ import PackageDescription
 
 // SwiftA2A — a clean-room Swift SDK for the Agent2Agent (A2A) protocol v1.0
 // (https://a2a-protocol.org, Linux Foundation). Zero non-Apple dependencies by
-// design: this package is built to be extracted to a standalone public repo and
-// proposed to the a2aproject as the official Swift SDK, so nothing in here may
-// depend on the rest of the Eldr workspace.
+// design: nothing in here may depend on the rest of the Eldr workspace, so the
+// package stays extractable as a standalone repo if that's ever wanted. It is an
+// INTERNAL SDK: the original ambition to propose it upstream as the official Swift
+// SDK was dropped (DEVIATIONS AC112 — the a2aproject already lists a community
+// Swift SDK); ours exists for Eldr's own A2A surfaces and evolves with them.
 //
 // Wire-format source of truth: specification/a2a.proto (package lf.a2a.v1) with
 // the proto3 canonical JSON mapping, cross-checked against the JSON examples in

@@ -1,8 +1,7 @@
+// SPDX-License-Identifier: Apache-2.0
 //
 //  NostrWebSocketTransport.swift
 //  PQRCNostr
-//
-//  Created by Auston on 6/12/26.
 //
 
 import Foundation

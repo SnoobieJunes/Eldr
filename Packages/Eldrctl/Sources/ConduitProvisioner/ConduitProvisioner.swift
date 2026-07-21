@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 import Foundation
 
 /// Generates the idempotent bootstrap that provisions a Mac for Eldr "conduit" mode and

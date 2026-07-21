@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 import Foundation
 
 // Phase D3 — the NODE-SIDE MCP client that exposes the PHONE's MCP chat tools to the

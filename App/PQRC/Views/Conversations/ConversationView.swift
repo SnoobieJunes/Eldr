@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: AGPL-3.0-only
 import PQRCCore
 import SwiftUI
 import UIKit
@@ -15,6 +16,19 @@ struct ConversationView: View {
     @State private var fullScreenContent: FullScreenContent?
     /// Set while the AI is drafting a response into the composer.
     @State private var aiDrafting = false
+    /// C1 composer-refill guard, part 1: bumped on every send. Async fillers (the
+    /// AI-draft insertion) capture it when they start and drop their result if a
+    /// send happened meanwhile — a late insert into the field the send just
+    /// cleared reads as "my message is back, ready to re-send".
+    @State private var composerEpoch = 0
+    /// C1 composer-refill guard, part 2: the text most recently sent + when. The
+    /// multiline field (`axis: .vertical` is UITextView-backed) can commit pending
+    /// autocorrect/marked text AFTER the programmatic clear, pushing the just-sent
+    /// draft back through the binding — the user-confirmed "message sends but the
+    /// draft stays in the field" bug. `onChange` recognizes that exact write-back
+    /// (a wholesale restore of the sent text, or a whitespace-only Return remnant,
+    /// within 2 s of the send) and re-clears; any real keystroke disarms it.
+    @State private var justSent: (text: String, at: Date)?
     @State private var showThreadSheet = false
     /// When starting a thread from a specific message (long-press), the source
     /// message id to anchor it to; nil for a thread started from the top menu.
@@ -632,6 +646,8 @@ struct ConversationView: View {
         largePaste = nil
         draftText = ""
         mentionSuggestions = []
+        composerEpoch += 1
+        justSent = (outgoing, Date())
         Task { await model.send(outgoing, conversationID: conversationID) }
     }
 
@@ -747,6 +763,21 @@ struct ConversationView: View {
                         in: RoundedRectangle(cornerRadius: 20, style: .continuous))
                     .accessibilityIdentifier("composer-field")
                     .onChange(of: draftText) { oldValue, newValue in
+                        // C1: a send just cleared this field. If the next change
+                        // restores the sent text wholesale (the UITextView-backed
+                        // field committing stale content back through the binding)
+                        // or leaves only whitespace (a hardware-Return remnant),
+                        // it is not the user typing — clear it again. Any real
+                        // keystroke produces different text and disarms the guard.
+                        if let sent = justSent {
+                            if Date().timeIntervalSince(sent.at) < 2,
+                                newValue == sent.text
+                                    || (!newValue.isEmpty && newValue.allSatisfy(\.isWhitespace)) {
+                                draftText = ""
+                                return
+                            }
+                            if !newValue.isEmpty { justSent = nil }
+                        }
                         // Collapse big PASTES into the chip — detected as a large
                         // jump in a single change — so the keyboard's QuickType
                         // engine doesn't thrash on a big block left live in the
@@ -811,6 +842,7 @@ struct ConversationView: View {
     private func draftWithAI() {
         guard !aiDrafting else { return }
         aiDrafting = true
+        let epoch = composerEpoch
         Task {
             // Race the draft against a timeout so the button can't spin forever
             // (a wedged provider / network would otherwise leave it stuck).
@@ -831,7 +863,10 @@ struct ConversationView: View {
             }
             aiDrafting = false
             switch outcome {
-            case .text(let drafted): insertIntoComposer(drafted)
+            case .text(let drafted):
+                // C1: if a send raced the draft, drop it — don't re-fill the field
+                // the send just cleared.
+                if epoch == composerEpoch { insertIntoComposer(drafted) }
             case .failed: break  // the agentError alert already explains why
             case .timedOut:
                 model.agentError =

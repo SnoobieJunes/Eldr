@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: AGPL-3.0-only
 import Foundation
 
 /// Generates paste-able shell scripts that stand up a **khatru** Nostr relay (NIP-42

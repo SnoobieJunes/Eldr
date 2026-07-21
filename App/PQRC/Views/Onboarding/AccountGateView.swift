@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: AGPL-3.0-only
 import SwiftUI
 
 /// The always-first screen: a lock gate for the device's accounts.

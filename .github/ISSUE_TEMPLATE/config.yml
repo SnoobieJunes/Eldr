@@ -1,0 +1,5 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Report a security vulnerability (private)
+    url: https://github.com/SnoobieJunes/Eldr/security/advisories/new
+    about: Never file vulnerabilities as public issues — see SECURITY.md for scope and response times.

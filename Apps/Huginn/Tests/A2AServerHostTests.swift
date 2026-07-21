@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: AGPL-3.0-only
 import A2ACore
 import A2AServer
 import Foundation

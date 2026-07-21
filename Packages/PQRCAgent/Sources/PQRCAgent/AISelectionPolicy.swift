@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 import Foundation
 
 /// The one property the default routing policy needs from a tethered AI to decide

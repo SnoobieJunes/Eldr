@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: AGPL-3.0-only
 import SwiftUI
 
 /// Renders message text as richly-formatted content: block-level **markdown**

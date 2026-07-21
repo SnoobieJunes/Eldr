@@ -1,9 +1,12 @@
+// SPDX-License-Identifier: AGPL-3.0-only
 import Foundation
 import Observation
 import PQRCACP
 import PQRCAgent
 import PQRCCore
 import PQRCNostr
+import UIKit  // C4: haptic + application state for the approval-prompt hooks.
+import UserNotifications
 
 /// UI-facing conversation summary.
 struct ConversationVM: Identifiable, Hashable {
@@ -165,6 +168,21 @@ final class AppModel {
         // Wire the interactive permission asker BEFORE bootstrap, so the first relay-ACP
         // rebind (inside bootstrap) builds a handler that can prompt the human.
         await runtime.setPermissionAsker(acpPermissions)
+        // C4: approval-prompt hooks — a haptic on arrival (felt over any screen),
+        // an OPT-IN local notification when the app isn't frontmost, and an
+        // explicit in-chat "expired" row when the C-1 timeout denies, so a
+        // request can never be eaten invisibly again.
+        acpPermissions.onNewRequest = { [weak self] nodeHex, _, kind in
+            self?.approvalPromptArrived(nodeHex: nodeHex, kind: kind)
+        }
+        acpPermissions.onExpired = { [weak self] nodeHex, title in
+            guard let self else { return }
+            Task {
+                await self.runtime.recordLocalSystemRow(
+                    conversationID: nodeHex,
+                    text: "Approval request expired — “\(title)” was denied automatically (no answer within 2 minutes).")
+            }
+        }
         let events = try await runtime.bootstrap(
             inMemoryStore: inMemoryStore, storeURL: storeURL, relayURLs: relayURLs)
         myNpub = await runtime.npub
@@ -432,6 +450,26 @@ final class AppModel {
         try? await runtime.sendAsMyAI(text, conversationID: conversationID)
     }
 
+    /// C4: a new approval prompt arrived — haptic so it's felt whatever screen is
+    /// up, and (opt-in) a local notification when the app isn't frontmost, so the
+    /// node's 120 s auto-deny stops eating requests invisibly. The notification
+    /// carries the contact name + tool kind only — never the command/path
+    /// (invariant 12 treats the lock screen as a log).
+    private func approvalPromptArrived(nodeHex: String, kind: String) {
+        UINotificationFeedbackGenerator().notificationOccurred(.warning)
+        guard AppSession.approvalNotificationsEnabled(siloID: siloID),
+            UIApplication.shared.applicationState != .active
+        else { return }
+        let content = UNMutableNotificationContent()
+        content.title = "Approval needed"
+        content.body =
+            "\(contactNames[nodeHex] ?? "Your Mac agent") wants to make a change (\(kind)). Open EldrChat to review — it auto-denies in 2 minutes."
+        content.sound = .default
+        UNUserNotificationCenter.current().add(
+            UNNotificationRequest(
+                identifier: "acp-approval-\(nodeHex)", content: content, trigger: nil))
+    }
+
     /// Surfaced when an AI action fails (e.g. a bad Anthropic key or network),
     /// so the user sees *why* instead of silently getting nothing.
     var agentError: String?
@@ -586,6 +624,9 @@ final class AppModel {
     /// The configured tethered AIs (id/name/kind/enabled) — the per-AI hub's roster
     /// rows. Includes the Mac-Tethered-AI (`acp`) like any other (feature 8).
     func tetheredAIList() -> [ConfiguredAI] { AppSession.loadConfiguredAIs(siloID: siloID) }
+
+    /// C7: live count of identity-proven co-present peers (Settings ▸ Nearby).
+    func nearbyPeerCount() async -> Int { await runtime.nearbyPeerCount() }
 
     /// Per-conversation "AIs reply in order (critique panel)" role toggle.
     func isOrderedCritique(_ conversationID: String) -> Bool {

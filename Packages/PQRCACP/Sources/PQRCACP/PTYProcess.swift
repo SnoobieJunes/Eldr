@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 import Foundation
 
 // NODE-SIDE (macOS only): a pseudo-terminal-backed interactive process — the Phase-D4

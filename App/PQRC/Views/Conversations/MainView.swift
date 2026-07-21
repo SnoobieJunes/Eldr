@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: AGPL-3.0-only
 import PQRCCore
 import PQRCNostr
 import SwiftUI
@@ -49,6 +50,9 @@ struct MainView: View {
     /// and select the conversation in the real split view. Injected ONLY into the
     /// Settings subtree (below), so it stays scoped.
     @State private var settingsNav = SettingsNavigation()
+    /// C4: the alert-level passthrough window hosting the ACP approval card above
+    /// every sheet. Presented on appear, torn down on disappear (silo lock).
+    @State private var approvalWindow = ApprovalWindowPresenter()
 
     /// Conversations after applying the search filter (Mac ⌘F).
     private var visibleConversations: [ConversationVM] {
@@ -140,14 +144,16 @@ struct MainView: View {
         }
         // Phase 3 item 3 / feature 9 — interactive per-tool approval. When a paired Mac
         // coding agent wants a mutating action (write/edit/run) and autonomous-changes
-        // consent is OFF, it surfaces as an INLINE, non-blocking card (replacing the old
-        // modal alert) so the rest of the app stays usable and a queue is visible. Global
-        // so it appears over any screen; the node's own 120s C-1 timeout denies if this is
-        // ignored (fail-closed — the card is the affordance, not the brake).
-        .overlay(alignment: .bottom) {
-            ACPApprovalCard(model: model)
-                .animation(.spring(duration: 0.3), value: model.acpPermissions.pending.count)
-        }
+        // consent is OFF, it surfaces as an INLINE, non-blocking card so the rest of the
+        // app stays usable and a queue is visible. C4: the card lives in its OWN
+        // alert-level passthrough window (ApprovalWindowPresenter) instead of an overlay
+        // here — an overlay rendered UNDER any presented sheet (Settings, AI hub …), so
+        // requests arriving while a sheet was up expired invisibly. The node's own 120 s
+        // C-1 timeout still denies if ignored (fail-closed — the card is the affordance,
+        // not the brake); the phone now mirrors that timeout with a visible in-chat
+        // "expired" row.
+        .onAppear { approvalWindow.present(model: model) }
+        .onDisappear { approvalWindow.dismiss() }
     }
 
     /// Conversation list — the sidebar on wide screens, the root on iPhone.
@@ -621,6 +627,8 @@ struct NewChatView: View {
     /// with the new chat stranded in the list — the coding-agent "it doesn't do
     /// anything / opens nothing" bug.
     @Environment(SettingsNavigation.self) private var settingsNav: SettingsNavigation?
+    /// C5: pairing ingest configures the Mac-Tethered-AI immediately (see below).
+    @Environment(AppSession.self) private var appSession: AppSession?
     @State private var npub = ""
     @State private var firstMessage = ""
     @State private var error: String?
@@ -666,6 +674,15 @@ struct NewChatView: View {
                             // so its watch-along drafts are recognized + voiced (§13.5).
                             if let type = prefilledContactType, !type.isEmpty {
                                 await model.runtime.setContactType(identityHex, type: type)
+                                // C5: surface the Mac-Tethered-AI under Settings ▸ AI at
+                                // PAIRING time (status + consents + link) — not on the
+                                // first Details visit, where nobody found it.
+                                if type == "coding_agent",
+                                    model.ensureMacTetheredAIConfigured(
+                                        nodeName: model.contactNames[identityHex])
+                                {
+                                    await appSession?.applyAIProvider()
+                                }
                             }
                             // Open the new conversation in the split view — closes this
                             // sheet AND Settings if it was hosting us. Without this the

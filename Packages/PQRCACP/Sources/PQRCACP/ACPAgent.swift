@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 import Foundation
 
 // NODE-SIDE (macOS only): the AGENT half of ACP. It runs the tool-calling loop and
@@ -899,7 +900,10 @@ public actor ACPAgent {
         guard let task = args["task"]?.stringValue, !task.isEmpty else {
             return ToolResult(text: "delegate_to_cloud_agent: missing 'task'.", isError: true)
         }
-        guard let descriptor = HarnessRegistry.descriptor(id: harnessID),
+        // AC94: `resolvedDescriptor` applies the `ELDR_HARNESS_CMD_<ID>` executable
+        // override — a GUI/launchd-spawned node has a minimal PATH, so nvm/npm bare
+        // names only resolve when the operator has pinned an absolute path.
+        guard let descriptor = HarnessRegistry.resolvedDescriptor(id: harnessID),
             descriptor.kind == .stdioSpawn || descriptor.kind == .a2aRemote
         else {
             return ToolResult(

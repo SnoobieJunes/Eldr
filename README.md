@@ -6,7 +6,7 @@ Right now you get to pick one. Private messengers (Signal, iMessage) are adding 
 
 > 📱 **Text only, on purpose.** Eldr transports your words; it never stores them. No photos, no videos, no cloud archive of your life ("use iMessage for that"). Messages even expire off the relays within days.
 
-**Status: alpha, pre-release, not yet security-audited.** The eight core packages run their 670-test headless suite green (frozen byte-for-byte crypto vectors and a networked chaos matrix included), and the app targets carry further UI + security-regression suites — but no independent audit has happened yet. Don't stake your safety on it. Details in [docs/THREAT_MODEL.md](docs/THREAT_MODEL.md).
+**Status: alpha, pre-release, not yet security-audited.** The eight core packages run their 676-test headless suite green (frozen byte-for-byte crypto vectors and a networked chaos matrix included), and the app targets carry further UI + security-regression suites — but no independent audit has happened yet. Don't stake your safety on it. Details in [docs/THREAT_MODEL.md](docs/THREAT_MODEL.md).
 
 ---
 
@@ -63,20 +63,20 @@ Right now you get to pick one. Private messengers (Signal, iMessage) are adding 
 
 1. **AI is coming to your private chats whether you like it or not.** The mainstream version will be platform-owned models with platform-decided visibility. Eldr is the counter-model: user-owned AI, cryptographically leashed, honestly labeled — built into the protocol, not the terms of service.
 2. **"Harvest now, decrypt later" is a today problem.** Anything encrypted classically can be recorded now and broken when quantum hardware matures. Post-quantum ratcheting is table stakes for conversations meant to stay private for decades.
-3. **The agent economy needs a private wire.** Agents delegating work to other agents over HTTP-through-somebody's-cloud repeats every mistake messaging just spent a decade fixing. A serverless, post-quantum E2EE agent transport is infrastructure that doesn't exist yet — see [docs/BUSINESS-CASE.md](docs/BUSINESS-CASE.md) for the market landscape.
+3. **The agent economy needs a private wire.** Agents delegating work to other agents over HTTP-through-somebody's-cloud repeats every mistake messaging just spent a decade fixing. A serverless, post-quantum E2EE agent transport is infrastructure that doesn't exist yet.
 
 ## How you can help
 
 - **Build it and beat on it.** Quickstart below. File issues for anything that confuses you — UX confusion reports are as valuable as crashes.
-- **Device testing.** The highest-value work right now is proving flows on real hardware (pairing, tethered AI, the coding-agent conduit). The live human checklist is [docs/meatsuittasks.md](docs/meatsuittasks.md).
+- **Device testing.** The highest-value work right now is proving flows on real hardware (pairing, tethered AI, the coding-agent conduit). File what you find as issues.
 - **Security review.** Read [docs/pqrc-SPEC-v1_1.md](docs/pqrc-SPEC-v1_1.md) and [docs/THREAT_MODEL.md](docs/THREAT_MODEL.md), then try to break the implementation. Report privately (below). We treat findings as first-class commits — the repo's audit-fix history is public.
 - **Run a relay.** Deployment runbook: [docs/RELAY-DEPLOY-CROSTINI.md](docs/RELAY-DEPLOY-CROSTINI.md).
 - **Protocol feedback.** The wire format ([docs/NIP-XX-pqrc.md](docs/NIP-XX-pqrc.md)) and the A2A extension ([docs/A2A-PQRC-EXTENSION.md](docs/A2A-PQRC-EXTENSION.md)) both want adversarial readers before they're submitted upstream.
-- **Contribute code.** Ground rules: read `CLAUDE.md` (the hard invariants are non-negotiable — the tests enforce them), every judgment call gets a [docs/DEVIATIONS.md](docs/DEVIATIONS.md) entry, and nothing merges red.
+- **Contribute code.** Start with [CONTRIBUTING.md](CONTRIBUTING.md) — the hard invariants are non-negotiable (the tests enforce them), every judgment call gets a [docs/DEVIATIONS.md](docs/DEVIATIONS.md) entry, and nothing merges red.
 
 ## Quickstart
 
-**Toolchain:** stable Xcode 26.5 builds everything (CI does exactly that). The Xcode 27 beta is needed **only** if you enable the experimental Private Cloud Compute tier (`ELDR_PCC_SDK`); for that, `export DEVELOPER_DIR=/Applications/Xcode-beta.app/Contents/Developer` first.
+**Toolchain:** stable Xcode 26.x builds everything (CI runs 26.5; 26.6 also verified). You need the **iOS 26.5 simulator runtime** installed for the app tests. The Xcode 27 beta is needed **only** for the experimental Private Cloud Compute tier, and there is **nothing to configure** — PCC detects the SDK itself (`canImport(FoundationModels, _version: 2.0)`), so building with Xcode 27 includes it and building with 26.x cleanly omits it.
 
 ```bash
 # All eight packages, headless — no simulator needed.
@@ -114,7 +114,7 @@ Apps/Huginn/    # macOS companion — tethered AI + coding agent
 TestVectors/    # frozen byte-for-byte crypto vectors
 ```
 
-Core logic lives in the packages (no UI imports) so `swift test` runs headlessly; the app targets stay thin. Swift 6, strict concurrency, actors own all mutable state, CryptoKit/swift-crypto only — no libsignal, no custom primitives.
+Core logic lives in the packages (no UI imports) so `swift test` runs headlessly; the app targets stay thin. Swift 6, strict concurrency, actors own all mutable state, CryptoKit/swift-crypto only — no libsignal, no custom primitives. The macOS companion has its own deep-dive: [Apps/Huginn/README.md](Apps/Huginn/README.md).
 
 ## Documentation
 
@@ -131,7 +131,6 @@ All docs live in [`docs/`](docs/) — retired material is quarantined in [`docs/
 | [docs/DEVIATIONS.md](docs/DEVIATIONS.md) | Every judgment call, tagged and dated |
 | [docs/SETUP-GUIDE.md](docs/SETUP-GUIDE.md) | Building, running, transports |
 | [docs/DEMO.md](docs/DEMO.md) / [docs/DEMO-SYBILCLAW.md](docs/DEMO-SYBILCLAW.md) | Scripted demos |
-| [docs/BUSINESS-CASE.md](docs/BUSINESS-CASE.md) | Market landscape, value proposition, path to revenue |
 
 ## Relay
 
@@ -139,12 +138,15 @@ The bootstrap relay is **relay.lerants.com** — [khatru](https://github.com/fia
 
 ## Security reporting
 
-**Please don't open public issues for vulnerabilities.** Email **security@lerants.com** with a description and reproduction steps; expect a response within 72 hours and coordinated disclosure.
+**Please don't open public issues for vulnerabilities.** Use GitHub's private vulnerability reporting (Security → "Report a vulnerability") or email **security@lerants.com**; acknowledgement within 72 hours, coordinated disclosure within 90 days. Full policy, scope, and honesty notes: [SECURITY.md](SECURITY.md).
 
 ## License
 
-Not finalized yet — the LICENSE file lands together with the 1.0 licensing/monetization decision (analysis in [docs/BUSINESS-CASE.md](docs/BUSINESS-CASE.md)). Until then: the source is public to read and build, but no license is granted. If you want to use any of it sooner, open an issue.
+Split licensing, on purpose ([LICENSING.md](LICENSING.md) has the full map):
+
+- **`Packages/`** — all eight SPM packages (crypto core, Nostr transport, agent stack, MCP, A2A, node, CLI): **Apache-2.0**. Embed them in anything, including proprietary products.
+- **The apps** (`App/` EldrChat, `Apps/Huginn/`) and everything else: **AGPL-3.0-only**, with an [app store exception](LICENSE-EXCEPTIONS.md) so builds can ship through Apple's store. Forks stay open.
 
 ---
 
-*Built in the open, human + AI pair-engineering: ~82k lines of Swift 6 across eight packages and two apps, ~900 tests, frozen crypto vectors, and a public decision ledger — in weeks, not years. User privacy is the number-one priority, without exception.*
+*Built in the open, human + AI pair-engineering: ~82k lines of Swift 6 across eight packages and two apps, ~890 tests (676 headless + 214 in the macOS companion, plus the iOS app suites), frozen crypto vectors, and a public decision ledger — in weeks, not years. User privacy is the number-one priority, without exception.*

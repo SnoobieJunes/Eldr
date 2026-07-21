@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 import Foundation
 
 /// Builders for the ACP wire shapes the agent emits, kept in one place so the

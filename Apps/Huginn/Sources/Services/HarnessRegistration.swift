@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: AGPL-3.0-only
 import Foundation
 
 /// Registers the `eldr-acp` agent into an ACP harness's config **crash-safely**.

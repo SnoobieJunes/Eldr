@@ -29,8 +29,11 @@ coding agent.
 
 ## Build / test
 
-**Toolchain rule (hard): export the Xcode 27 beta first, or app builds fail with
-missing iOS-27 symbols:**
+**Toolchain rule (hard): export the Xcode 27 beta first.** Builds on 26.x do NOT
+fail — the Private Cloud Compute path self-gates on the SDK version and is silently
+compiled out, so a 26.x build produces a working app with PCC missing. Never
+"diagnose" absent PCC as a code or configuration bug; check `xcodebuild -version`
+first, and see the locked PCC section in CLAUDE.md before touching anything:
 
 ```bash
 export DEVELOPER_DIR=/Applications/Xcode-beta.app/Contents/Developer

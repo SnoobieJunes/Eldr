@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: AGPL-3.0-only
 import SwiftUI
 
 /// Inline, NON-blocking permission approval (feature 9 — "fix the permission

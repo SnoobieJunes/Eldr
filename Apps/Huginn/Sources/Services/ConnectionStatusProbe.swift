@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: AGPL-3.0-only
 import Foundation
 
 /// Probes the local services Huginn coordinates so the Config UI can answer the two

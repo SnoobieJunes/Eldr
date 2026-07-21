@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: AGPL-3.0-only
 import PQRCCore
 import SwiftUI
 
@@ -19,7 +20,6 @@ struct ConversationDetailsView: View {
     @State private var nickname = ""
     /// Per-conversation AI context override: "default" (use each AI's own
     /// setting) | "off" | "marked" | "full".
-    @State private var aiContextMode = "default"
     /// Per-conversation egress-firewall override: "default" (inherit the account
     /// setting) | "on" (redact) | "off" (raw — a private chat with your own agents).
     @State private var firewallOverride = "default"
@@ -133,32 +133,13 @@ struct ConversationDetailsView: View {
                         .helpInfo("Confirm you're really talking to this person, not an impostor. Read the 60 digits aloud in person or over a trusted call — if they match on both phones, you're verified and get a green shield. If the code ever changes, a red banner warns you before you trust new messages.")
                 }
                 }  // end 1:1-only (Name + Verify) sections — a group has no peer key
+                // C6: THE shared "what your AI sees here" component — mode picker
+                // (single writer of the per-conversation key), live echo, and the
+                // collapsed per-AI inspection. The same component the AI hub embeds.
+                ConversationAIContextSection(model: model, conversationID: conversationID) {
+                    summary = model.primaryAIContextSummary(conversationID)
+                }
                 Section {
-                    // Unified vocabulary (matches the per-AI "Gathers" picker and
-                    // the in-chat "AI here" chip): Follow each AI's own setting · Off ·
-                    // Marked only · Live. Tags stay the engine's "default"/"off"/
-                    // "marked"/"full" — only the labels are unified.
-                    Picker("AI context here", selection: $aiContextMode) {
-                        Text("Follow each AI's own setting").tag("default")
-                        Text("Off in this conversation").tag("off")
-                        Text("Marked only — messages I add to context").tag("marked")
-                        Text("Live — full conversation while active").tag("full")
-                    }
-                    .accessibilityIdentifier("conversation-ai-mode")
-                    .onChange(of: aiContextMode) { _, newValue in
-                        AppSession.setConversationContextMode(
-                            newValue == "default" ? nil : newValue, conversationID: conversationID,
-                            siloID: model.siloID)
-                        summary = model.primaryAIContextSummary(conversationID)
-                    }
-                    // Live echo of what the AI actually does here + the firewall/
-                    // consent indicator whenever a REMOTE AI is active (privacy
-                    // cardinal rule: any widening of what a remote AI sees keeps
-                    // the firewall state visible).
-                    AIContextEcho(summary: summary)
-                    if summary.mode != "off" && summary.isRemote {
-                        RemoteAIFirewallRow(firewallOn: summary.firewallOn)
-                    }
                     Picker("Egress firewall here", selection: $firewallOverride) {
                         // A consented coding-agent node defaults the firewall OFF
                         // (it's your own trusted device); every other chat follows
@@ -189,9 +170,7 @@ struct ConversationDetailsView: View {
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 } header: {
-                    Text("AI in this conversation — overrides your AI's default (now: \(AIContextVocab.glance(summary)))")
-                } footer: {
-                    Text("Overrides your AIs' own context setting, just here. \"Off\" keeps every AI from gathering anything from this conversation.")
+                    Text("Egress firewall & reply style here")
                 }
                 if isCodingAgent {
                     Section {
@@ -364,10 +343,9 @@ struct ConversationDetailsView: View {
             }
             .navigationTitle("Details")
             .task {
-                // The per-conversation AI-context + egress-firewall overrides apply to
-                // BOTH 1:1 and group chats, so load them regardless.
-                aiContextMode =
-                    AppSession.conversationContextMode(conversationID, siloID: model.siloID) ?? "default"
+                // The per-conversation egress-firewall override applies to BOTH 1:1
+                // and group chats, so load it regardless. (The AI-context mode
+                // picker lives in the shared ConversationAIContextSection — C6.)
                 firewallOverride =
                     AppSession.conversationFirewall(conversationID, siloID: model.siloID)
                     .map { $0 ? "on" : "off" } ?? "default"

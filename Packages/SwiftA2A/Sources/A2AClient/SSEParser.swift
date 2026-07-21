@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 import Foundation
 
 // An incremental `text/event-stream` (SSE) parser, per the WHATWG HTML spec §9.2

@@ -310,9 +310,9 @@ each independently configured.
 *any* OpenAI-compatible server (Ollama / LM Studio / vLLM or another vendor; API key
 OPTIONAL, base URL required; the URL builder accepts a bare `host:port`, a `…/v1`, or a
 full path, A30/A31) · **Apple Private Cloud Compute** (`pcc`, A40 — `isRemote` + consent,
-but **exempt from the egress firewall** because it is attested + no-retention; gated
-behind `ELDR_PCC_SDK`, currently OFF because the SDK symbols are absent — see `docs/deprecated/statusreport.md`
-§1.3) · **`acp`** (Mac coding harness, §24a — `isRemote` + firewalled + `routingCapabilities==["code"]`;
+but **exempt from the egress firewall** because it is attested + no-retention; compiled
+in automatically when built against an Xcode 27+ SDK and cleanly omitted on 26.x — no
+build flag, see DEVIATIONS AC125) · **`acp`** (Mac coding harness, §24a — `isRemote` + firewalled + `routingCapabilities==["code"]`;
 falls back to a Demo stub until a node is paired+consented, then swaps in `ACPAgentProvider`) ·
 **hub** (the nearby host's shared AI, §22) · **Demo** (stub replies). A new classifier
 **`appliesEgressFirewall`** decouples "firewalled" from "isRemote" (so PCC can be remote

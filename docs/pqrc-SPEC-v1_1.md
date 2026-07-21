@@ -1,12 +1,12 @@
 # PQRC Protocol Specification v1
 
-**PQ-Ratchet & Clank** — a post-quantum, decentralized, AI-native end-to-end encrypted messaging protocol for iOS.
+**PQRC (Post-Quantum Ratcheted Conversations)** — a post-quantum, decentralized, AI-native end-to-end encrypted messaging protocol for iOS.
 
 Protocol identifier: `pqrc-v1`
 Status: Draft
 Target platform: iOS 26+ / iPadOS 26+ / macOS 26+
 Reference implementation language: Swift (CryptoKit + swift-crypto)
-License: AGPL-3.0 (recommended; see §15)
+License: split — AGPL-3.0-only (apps) / Apache-2.0 (packages); see §15.2 and `LICENSING.md`
 
 ---
 
@@ -387,6 +387,14 @@ iOS terminates background WebSocket connections, so live relay delivery while ba
 
 ## 11. Unlimited Message Size
 
+> **v1 implementation status (binding for this repo):** the >64 KB **Blossom blob
+> path in §11.1 is not implemented and is permanently rejected** for this product —
+> Eldr is text-only and transports messages rather than storing them (DEVIATIONS
+> T5 / AC111(b); CLAUDE.md hard invariant #4). Large text uses the §11.2 chunking
+> path exclusively, sized from each relay's NIP-11 `max_content_length`. The
+> `content_pointer`/`ptr` wire field remains defined for forward compatibility,
+> but a conforming Eldr build never produces it.
+
 PQRC supports arbitrarily large messages via a pointer pattern, keeping on-relay envelopes small and constant-size.
 
 ### 11.1 Size tiers
@@ -491,14 +499,31 @@ Agent signing keys are **device-bound** (derived from the device-bound identity 
 
 ### 15.1 Libraries
 
-- **Crypto:** Apple CryptoKit (iOS 26+) for all primitives; swift-crypto ≥ 4.3.1 for any server-side (relay/proxy) shared code.
-- **Nostr plumbing:** `rust-nostr/nostr-sdk-swift` (UniFFI bindings) for event construction, signing, relay I/O, and NIP-17/44/59 gift-wrap handling. Write the PQRC ratchet in Swift; use the SDK only for transport.
-- **Relay:** strfry (C++) or khatru (Go) for the anchor relay, AUTH-gated, kind-1059-restricted.
-- **Media:** any Blossom server implementation; mirror across ≥2 for durability.
+What the shipped implementation actually uses (reconciled 2026-07-19 for the
+open-source release; the original draft listed `rust-nostr/nostr-sdk-swift` and
+Blossom — neither survived contact with implementation):
+
+- **Crypto:** Apple CryptoKit on-device; `swift-crypto` ≥ 4.3.1 (CVE pin) for the
+  platform-agnostic core packages. No other crypto dependencies; no libsignal; no
+  custom primitives (§2).
+- **Nostr plumbing:** implemented natively in Swift in `PQRCNostr` (event model,
+  NIP-01 codec, relay I/O, gift-wrap); BIP-340 Schnorr signing via
+  `21-DOT-DEV/swift-secp256k1`. No Rust/UniFFI dependency.
+- **Relay:** khatru (Go) is the deployed anchor relay (strfry also fits),
+  AUTH-gated per §9; the repo also ships its own `pqrc-relay` executable for
+  local/dev use.
+- **Media/blobs:** none — text-only, permanently (DEVIATIONS T5). Large text uses
+  §11.2 relay chunking.
 
 ### 15.2 Licensing
 
-AGPL-3.0 is recommended: it matches the privacy-first, FOSS ethos and ensures network-deployed forks stay open. If distributing via the App Store, include a GPL App Store linking exception (as Signal does). Note: if `libsignal` is ever used directly it is AGPL-3.0 already; PQRC's from-spec Double Ratchet avoids that dependency and keeps licensing flexible.
+Decided for the open-source release (2026-07, DEVIATIONS AC122): the app targets
+(EldrChat, Huginn) are **AGPL-3.0-only** with an Apple App Store
+additional permission (`LICENSE-EXCEPTIONS.md`), so shipped and network-deployed
+forks stay open; the eight SPM packages are **Apache-2.0** so the protocol stack
+can be embedded in any product. Full map: `LICENSING.md`. Note: if `libsignal`
+were ever used directly it is AGPL-3.0 already; PQRC's from-spec Double Ratchet
+avoids that dependency and keeps the packages permissively licensable.
 
 ### 15.3 What to publish
 

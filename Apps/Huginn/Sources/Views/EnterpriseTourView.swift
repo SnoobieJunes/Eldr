@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: AGPL-3.0-only
 import SwiftUI
 
 /// The enterprise / funder "Why Eldr for teams" tour, hosted in Huginn (the agent

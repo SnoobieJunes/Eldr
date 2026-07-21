@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: AGPL-3.0-only
 import CoreImage.CIFilterBuiltins
 import PQRCCore
 import PQRCNostr
@@ -28,6 +29,8 @@ struct SettingsView: View {
     /// stored record always keeps every raw byte (§23) — this is display-only.
     @State private var showAgentEnvelope = false
     @AppStorage("localLinkEnabled") private var localLinkEnabled = AppSession.localLinkEnabled
+    /// C7: live count of identity-proven co-present peers (polled while visible).
+    @State private var nearbyPeerCount = 0
     @State private var relayURLs: [String] = []
     @State private var newRelayURL = ""
     @State private var relayError: String?
@@ -342,12 +345,36 @@ struct SettingsView: View {
             }
             .accessibilityIdentifier("nearby-toggle")
             .onChange(of: localLinkEnabled) {
-                needsReconnect = true
+                // C7: auto-apply — flipping Nearby rewires the transports NOW,
+                // instead of arming a hidden "Apply & reconnect" in another
+                // section. The reboot swaps the runtime this sheet is bound to,
+                // so close first (same order the old Apply button used).
+                dismiss()
+                Task { await session.rebootSingle() }
+            }
+            if localLinkEnabled {
+                // Live co-present peer count (identity-proven links only).
+                HStack {
+                    Label("Nearby now", systemImage: "person.2.wave.2")
+                    Spacer()
+                    Text("\(nearbyPeerCount) peer\(nearbyPeerCount == 1 ? "" : "s")")
+                        .foregroundStyle(nearbyPeerCount > 0 ? .green : .secondary)
+                        .monospacedDigit()
+                }
+                .accessibilityIdentifier("nearby-peer-count")
+                .task {
+                    // Poll while this section is on screen (cheap actor read);
+                    // cancelled automatically when the view goes away.
+                    while !Task.isCancelled {
+                        nearbyPeerCount = await model.nearbyPeerCount()
+                        try? await Task.sleep(for: .seconds(3))
+                    }
+                }
             }
         } header: {
             Text("Nearby")
         } footer: {
-            Text("Delivers messages directly to contacts in the same room over Wi-Fi/Bluetooth — no server involved, works offline. Pairing stays automatic for verified contacts; strangers nearby can never read or join anything.")
+            Text("Delivers messages directly to contacts in the same room over Wi-Fi/Bluetooth — no server involved, works offline. Needs: Nearby ON on BOTH devices, the app open on both, the contact verified, and real devices (simulators have no radios). Pairing stays automatic for verified contacts; strangers nearby can never read or join anything.")
         }
     }
 

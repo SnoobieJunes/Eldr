@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: AGPL-3.0-only
 import SwiftUI
 
 /// Per-backend visual identity — the single source of truth for "which kind of AI

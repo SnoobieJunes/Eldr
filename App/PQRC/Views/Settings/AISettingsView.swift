@@ -1,6 +1,8 @@
+// SPDX-License-Identifier: AGPL-3.0-only
 import PQRCAgent
 import PQRCCore
 import SwiftUI
+import UserNotifications  // C4: authorization for the approval-request notification.
 
 /// Multi-AI configuration (APP-SPEC §9, extended): a person can tether one or
 /// more AIs at once — on-device Core AI, a token API, or the Demo stub — name
@@ -34,6 +36,16 @@ struct AISettingsView: View {
     /// can't claim "connected" while replies are still simulated. Refreshed in `.task`
     /// and after every `persist()` (which re-binds providers via `applyAIProvider`).
     @State private var acpNode: (identityHex: String, name: String)?
+    /// C5: the paired coding-agent node REGARDLESS of consent, so the acp AI's
+    /// detail can show its consent switches + a link to its chat even before
+    /// "Drive this agent" is on.
+    @State private var pairedNode: (identityHex: String, name: String)?
+    /// C4: mirror of the per-silo approval-notification opt-in (state so the
+    /// toggle re-renders; the source of truth is AppSession).
+    @State private var approvalNotifs = false
+    /// C5: the Settings→split-view bridge, so "Open this agent's chat" lands in
+    /// the real conversation pane instead of pushing inside the sheet.
+    @Environment(SettingsNavigation.self) private var settingsNav: SettingsNavigation?
 
     /// AI config + API keys are scoped to the unlocked silo, so accounts never
     /// share AI setup or credentials.
@@ -121,6 +133,8 @@ struct AISettingsView: View {
             ais = AppSession.loadConfiguredAIs(siloID: siloID)
             contextDomain = AppSession.aiContextDomain(siloID: siloID)
             firewallEnabled = AppSession.egressFirewallEnabled(siloID: siloID)
+            approvalNotifs = AppSession.approvalNotificationsEnabled(siloID: siloID)
+            pairedNode = await model.pairedCodingAgentNode()
             await refreshACPNode()
         }
         .onDisappear {
@@ -281,6 +295,54 @@ struct AISettingsView: View {
                     .accessibilityIdentifier("api-key-field")
                 Text("Stored in the device Keychain, never synced or exported.")
                     .font(.caption2).foregroundStyle(.secondary)
+            }
+
+            // C5: the Mac-Tethered-AI's node controls, right where the AI lives —
+            // status is the row's status line; here are its consents + a link to
+            // its chat, so nothing requires hunting through Conversation Details.
+            if currentKind == "acp" {
+                if let node = pairedNode {
+                    let nodeHex = node.identityHex
+                    Toggle("Drive this agent from my phone", isOn: Binding(
+                        get: { model.codingToolsEnabled(nodeHex: nodeHex) },
+                        set: { on in
+                            // Same consent key + rebind path as Details' toggle.
+                            if model.setCodingToolsEnabled(on, nodeHex: nodeHex) {
+                                Task { await session.applyAIProvider() }
+                            }
+                            Task { await refreshACPNode() }
+                        }))
+                        .accessibilityIdentifier("ai-acp-drive-toggle")
+                    Label(
+                        model.codingAutonomy(nodeHex: nodeHex)
+                            ? "Runs file/shell changes WITHOUT asking (change in the chat's details)"
+                            : "Asks you before every file/shell change",
+                        systemImage: model.codingAutonomy(nodeHex: nodeHex)
+                            ? "lock.open" : "checkmark.shield")
+                        .font(.caption2).foregroundStyle(.secondary)
+                    Toggle("Notify me about approval requests", isOn: Binding(
+                        get: { approvalNotifs },
+                        set: { on in
+                            approvalNotifs = on
+                            AppSession.setApprovalNotificationsEnabled(on, siloID: siloID)
+                            if on {
+                                UNUserNotificationCenter.current().requestAuthorization(
+                                    options: [.alert, .sound]) { _, _ in }
+                            }
+                        }))
+                        .accessibilityIdentifier("ai-acp-approval-notifications")
+                    Text("Optional local notification when this agent asks permission while EldrChat is in the background — requests auto-deny after 2 minutes. The notification never includes the command, only who's asking.")
+                        .font(.caption2).foregroundStyle(.secondary)
+                    Button {
+                        settingsNav?.openConversationID = nodeHex
+                    } label: {
+                        Label("Open \(node.name)'s chat", systemImage: "bubble.left.and.text.bubble.right")
+                    }
+                    .accessibilityIdentifier("ai-acp-open-chat")
+                } else {
+                    Text("No Mac paired yet — provision one with `eldrctl install`, then scan its pairing link.")
+                        .font(.caption2).foregroundStyle(.secondary)
+                }
             }
 
             // Context & behavior — shown EXPANDED by default (was a collapsed

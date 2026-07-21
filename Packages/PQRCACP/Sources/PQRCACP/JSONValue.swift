@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 import Foundation
 
 /// A `Sendable`, `Codable` JSON value. ACP messages cross actor boundaries

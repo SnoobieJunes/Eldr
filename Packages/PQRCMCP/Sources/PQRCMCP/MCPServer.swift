@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 import Foundation
 
 /// A spec-compliant Model Context Protocol server, transport-agnostic: it turns a

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 import Crypto
 import EldrNodeCore
 import Foundation

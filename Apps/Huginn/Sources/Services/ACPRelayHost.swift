@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: AGPL-3.0-only
 import A2AHarness
 import Foundation
 import PQRCACP

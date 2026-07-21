@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 import Foundation
 
 // ACP "available commands" (a.k.a. slash-commands / skills) the agent advertises to

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 import Foundation
 
 /// Remote inference via the OpenAI Chat Completions API (APP-SPEC §9, D3).

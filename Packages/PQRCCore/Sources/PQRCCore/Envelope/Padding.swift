@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 import Foundation
 
 /// Fixed-size bucket padding (SPEC §7): defeats size-based traffic analysis.
