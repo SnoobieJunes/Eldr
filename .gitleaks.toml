@@ -43,3 +43,24 @@ description = "CryptoKit type paths in Swift declarations (no literal value)"
 regexes = [
   '''^(Curve25519|MLKEM768|P256|P384|P521)\.[A-Za-z.]*(PrivateKey|PublicKey)$''',
 ]
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Custom RULES (added to the default set via [extend].useDefault above).
+#
+# 4. Nostr private keys. The bech32 `nsec1` (NIP-19) and encrypted `ncryptsec1`
+#    (NIP-49) formats match NO default gitleaks rule, yet a leaked nsec is TOTAL,
+#    permanent identity compromise for this product (SPEC §3.1, hard invariant
+#    10) — the one secret shape that must never escape. Verified: the default
+#    ruleset returns "no leaks" on a real nsec1 in a .swift file, so this closes
+#    it. Bech32 charset excludes 1/b/i/o.
+[[rules]]
+id = "nostr-nsec"
+description = "Nostr private key (bech32 nsec1)"
+regex = '''\bnsec1[02-9ac-hj-np-z]{58}\b'''
+keywords = ["nsec1"]
+
+[[rules]]
+id = "nostr-ncryptsec"
+description = "Nostr encrypted private key (NIP-49 ncryptsec1)"
+regex = '''\bncryptsec1[02-9ac-hj-np-z]{100,}\b'''
+keywords = ["ncryptsec1"]
