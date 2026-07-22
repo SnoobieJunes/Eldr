@@ -142,10 +142,15 @@ The bootstrap relay is **relay.lerants.com** — [khatru](https://github.com/fia
 
 ## License
 
-Split licensing, on purpose ([LICENSING.md](LICENSING.md) has the full map):
+Split licensing, on purpose ([LICENSING.md](LICENSING.md) has the full map).
+The rule: **anything you need in order to interoperate is public domain; the
+reference code is permissive; the shipped apps are copyleft.**
 
+- **The protocol** — the [SPEC](docs/pqrc-SPEC-v1_1.md), the [NIP](docs/NIP-XX-pqrc.md), the [A2A binding](docs/A2A-PQRC-EXTENSION.md), and the [interop test vectors](TestVectors/): **CC0-1.0, public domain**. Implement PQRC in any language under any license, and check yourself against our vectors. Please do.
 - **`Packages/`** — all eight SPM packages (crypto core, Nostr transport, agent stack, MCP, A2A, node, CLI): **Apache-2.0**. Embed them in anything, including proprietary products.
-- **The apps** (`App/` EldrChat, `Apps/Huginn/`) and everything else: **AGPL-3.0-only**, with an [app store exception](LICENSE-EXCEPTIONS.md) so builds can ship through Apple's store. Forks stay open.
+- **The apps** (`App/` EldrChat, `Apps/Huginn/`) and the remaining docs: **AGPL-3.0-only**, with an [app store exception](LICENSE-EXCEPTIONS.md) so builds can ship through Apple's store. Forks stay open.
+
+The name is not part of the grant — fork it, but [rename it](TRADEMARKS.md).
 
 ---
 
