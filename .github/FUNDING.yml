@@ -1,0 +1,7 @@
+# .github/FUNDING.yml — powers the "Sponsor" button on this repository.
+# GitHub reads this from the default branch.
+custom: ["https://paypal.me/austonleroy"]
+
+# Enable later if you want more options (remove the leading # to activate):
+# github: [SnoobieJunes]   # after GitHub Sponsors approval — recurring, native button, GitHub covers fees
+# ko_fi: your-handle        # one-time + monthly; a page name keeps your legal name private
