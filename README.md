@@ -138,7 +138,7 @@ The bootstrap relay is **relay.lerants.com** — [khatru](https://github.com/fia
 
 ## Security reporting
 
-**Please don't open public issues for vulnerabilities.** Use GitHub's private vulnerability reporting (Security → "Report a vulnerability") or email **security@lerants.com**; acknowledgement within 72 hours, coordinated disclosure within 90 days. Full policy, scope, and honesty notes: [SECURITY.md](SECURITY.md).
+**Please don't open public issues for vulnerabilities.** Use GitHub's private vulnerability reporting (Security → "Report a vulnerability") or email **security@auston.org**; acknowledgement within 72 hours, coordinated disclosure within 90 days. Full policy, scope, and honesty notes: [SECURITY.md](SECURITY.md).
 
 ## License
 
