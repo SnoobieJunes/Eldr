@@ -1,3 +1,5 @@
+<!-- SPDX-License-Identifier: CC0-1.0 -->
+
 # PQRC Protocol Specification v1
 
 **PQRC (Post-Quantum Ratcheted Conversations)** — a post-quantum, decentralized, AI-native end-to-end encrypted messaging protocol for iOS.
@@ -6,7 +8,7 @@ Protocol identifier: `pqrc-v1`
 Status: Draft
 Target platform: iOS 26+ / iPadOS 26+ / macOS 26+
 Reference implementation language: Swift (CryptoKit + swift-crypto)
-License: split — AGPL-3.0-only (apps) / Apache-2.0 (packages); see §15.2 and `LICENSING.md`
+License: **this document is CC0-1.0 (public domain)** — implement it freely, under any license. The implementation is split-licensed (Apache-2.0 packages / AGPL-3.0-only apps); see §15.2 and `LICENSING.md`
 
 ---
 
@@ -517,13 +519,22 @@ Blossom — neither survived contact with implementation):
 
 ### 15.2 Licensing
 
-Decided for the open-source release (2026-07, DEVIATIONS AC122): the app targets
-(EldrChat, Huginn) are **AGPL-3.0-only** with an Apple App Store
-additional permission (`LICENSE-EXCEPTIONS.md`), so shipped and network-deployed
-forks stay open; the eight SPM packages are **Apache-2.0** so the protocol stack
-can be embedded in any product. Full map: `LICENSING.md`. Note: if `libsignal`
-were ever used directly it is AGPL-3.0 already; PQRC's from-spec Double Ratchet
-avoids that dependency and keeps the packages permissively licensable.
+Decided for the open-source release (2026-07, DEVIATIONS AC122, amended by AC137):
+
+- **The protocol itself is public domain — CC0-1.0.** This document, the NIP
+  (`NIP-XX-pqrc.md`), the extension profiles (`A2A-PQRC-EXTENSION.md` and any
+  future one), and the interop test vectors (`TestVectors/`) carry no copyleft.
+  A specification that rivals cannot implement is not a specification, and the
+  NIPs repository requires public domain.
+- The eight SPM packages are **Apache-2.0** so the reference stack can be
+  embedded in any product, including proprietary ones (express patent grant).
+- The app targets (EldrChat, Huginn) are **AGPL-3.0-only** with an Apple App
+  Store additional permission (`LICENSE-EXCEPTIONS.md`), so shipped and
+  network-deployed forks stay open.
+
+Full map: `LICENSING.md`. Note: if `libsignal` were ever used directly it is
+AGPL-3.0 already; PQRC's from-spec Double Ratchet avoids that dependency and
+keeps the packages permissively licensable.
 
 ### 15.3 What to publish
 

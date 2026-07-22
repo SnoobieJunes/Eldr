@@ -1,6 +1,13 @@
+<!-- SPDX-License-Identifier: CC0-1.0 -->
+
 # NIP-XX — PQRC: Post-Quantum Ratcheted Conversations over Nostr
 
 `draft` `optional`
+
+> **This document is public domain (CC0-1.0)** — deliberately, so it can be
+> submitted to [nostr-protocol/nips](https://github.com/nostr-protocol/nips)
+> ("all NIPs are public domain") and implemented by anyone under any license.
+> It is **not** covered by the repository's AGPL. See [`LICENSING.md`](../LICENSING.md).
 
 **Status note.** The original handoff package referenced this document but did
 not contain it. This file was authored alongside the v1 reference

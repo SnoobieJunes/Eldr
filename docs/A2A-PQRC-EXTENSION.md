@@ -1,3 +1,5 @@
+<!-- SPDX-License-Identifier: CC0-1.0 -->
+
 # A2A over PQRC: an end-to-end-encrypted, serverless transport binding for the A2A protocol
 
 - **Extension URI:** `https://eldr.app/ext/a2a-pqrc-e2ee/v1`
