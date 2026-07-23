@@ -522,10 +522,10 @@ Blossom — neither survived contact with implementation):
 Decided for the open-source release (2026-07, DEVIATIONS AC122, amended by AC137):
 
 - **The protocol itself is public domain — CC0-1.0.** This document, the NIP
-  (`NIP-XX-pqrc.md`), the extension profiles (`A2A-PQRC-EXTENSION.md` and any
-  future one), and the interop test vectors (`TestVectors/`) carry no copyleft.
-  A specification that rivals cannot implement is not a specification, and the
-  NIPs repository requires public domain.
+  (`NIP-XX-pqrc.md`), the extension profiles (`pqrc-ext-standing-grants.md`,
+  `A2A-PQRC-EXTENSION.md`), and the interop test vectors (`TestVectors/`) carry
+  no copyleft. A specification that rivals cannot implement is not a
+  specification, and the NIPs repository requires public domain.
 - The eight SPM packages are **Apache-2.0** so the reference stack can be
   embedded in any product, including proprietary ones (express patent grant).
 - The app targets (EldrChat, Huginn) are **AGPL-3.0-only** with an Apple App

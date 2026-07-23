@@ -23,6 +23,15 @@ public enum RumorType: String, Codable, Sendable {
     case threadCreate = "thread_create"
     case aiInvite = "ai_invite"
     case aiContextGrant = "ai_context_grant"
+    /// Standing town grant / its withdrawal (GOOSEWORLD §5, DEVIATIONS AC126).
+    /// Like `ai_context_grant`, the object itself rides INSIDE the ciphertext on a
+    /// `.message` body (`MessageBody.standingGrant`), so these labels exist for
+    /// completeness and future dedicated rumors — nothing on the wire emits them
+    /// today. That matters for SPEC §12: a client older than this build would fail
+    /// to decode a rumor whose `type` it does not know, so new control objects are
+    /// carried as OPTIONAL body fields, never as a new outer type.
+    case standingGrant = "standing_grant"
+    case standingGrantRevocation = "standing_grant_revocation"
 }
 
 /// Blossom content pointer for >64 KB payloads (SPEC §11). Wire name: `ptr`.
@@ -475,6 +484,15 @@ public struct MessageBody: Codable, Equatable, Sendable {
     public var aiContextMark: AIContextMark?
     /// Human-signed context-sharing grant (DEVIATIONS N24).
     public var aiContextGrant: AIContextGrant?
+    /// Human-signed STANDING TOWN GRANT (GOOSEWORLD §5, DEVIATIONS AC126) — the
+    /// day-scale, peer- and plane-scoped, budgeted authorization for cross-town
+    /// autonomy. Optional and omitted from the encoding when nil, so frozen
+    /// vectors stay byte-identical and older clients ignore it (SPEC §12); a
+    /// client that ignores it simply never opens the town gate, which is the
+    /// fail-closed direction.
+    public var standingGrant: StandingGrant?
+    /// Signed withdrawal of a standing grant, effective on receipt (AC126).
+    public var standingGrantRevocation: StandingGrantRevocation?
     /// Sender-chosen display alias, shared only inside the encrypted channel —
     /// so only already-established contacts ever see it (no public profile,
     /// D11 preserved). Optional and ignored by older clients (SPEC §12).
@@ -531,6 +549,8 @@ public struct MessageBody: Codable, Equatable, Sendable {
         case aiContext = "ai_context"
         case aiContextMark = "ai_context_mark"
         case aiContextGrant = "ai_context_grant"
+        case standingGrant = "standing_grant"
+        case standingGrantRevocation = "standing_grant_revocation"
         case alias
         case chunk
         case agentDraft = "agent_draft"
@@ -546,7 +566,9 @@ public struct MessageBody: Codable, Equatable, Sendable {
         aiContext: Bool? = nil, aiContextMark: AIContextMark? = nil,
         aiContextGrant: AIContextGrant? = nil, alias: String? = nil,
         chunk: MessageChunk? = nil, agentDraft: AgentDraft? = nil,
-        coauthored: Bool? = nil, mentions: [Mention]? = nil
+        coauthored: Bool? = nil, mentions: [Mention]? = nil,
+        standingGrant: StandingGrant? = nil,
+        standingGrantRevocation: StandingGrantRevocation? = nil
     ) {
         self.text = text
         self.sentAt = sentAt
@@ -565,6 +587,8 @@ public struct MessageBody: Codable, Equatable, Sendable {
         self.agentDraft = agentDraft
         self.coauthored = coauthored
         self.mentions = mentions
+        self.standingGrant = standingGrant
+        self.standingGrantRevocation = standingGrantRevocation
     }
 }
 

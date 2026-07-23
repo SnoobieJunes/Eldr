@@ -19,6 +19,40 @@ public enum AgentEngineError: Error, Equatable, Sendable {
     case windowNotFromHumanIdentity
     case windowDurationUnbounded
     case loopGuardPaused
+
+    // MARK: Standing town grants (GOOSEWORLD §5, DEVIATIONS AC126)
+    //
+    // Deliberately a SEPARATE set of cases rather than a reuse of
+    // `autonomousSendNotAuthorized`. The town gate and the §13 gate are different
+    // gates with different scopes; if one error meant both, a caller could catch
+    // the wrong one and conclude it had permission it never had. Distinct cases
+    // make that mistake a compile-time-visible one.
+
+    /// Town send attempted with no live, unrevoked grant covering that exact
+    /// (peer, plane) — fail closed.
+    case townSendNotAuthorized
+    /// A live grant covers it, but this send would cross the day's message or
+    /// byte budget. Distinct from `townSendNotAuthorized` so a client can say
+    /// "budget spent, back tomorrow" instead of "you were never allowed".
+    case townBudgetExhausted
+    /// A live `delegate` grant covers it, but `max_concurrent_tasks` are already
+    /// in flight.
+    case townTaskLimitReached
+    /// The requested duration is not one of `allowedStandingGrantDurations`, or an
+    /// incoming grant claims more life than `maxStandingGrantDuration`. Bounded is
+    /// mandatory; there is no unbounded standing grant.
+    case standingGrantDurationUnbounded
+    case standingGrantSignatureInvalid
+    case standingGrantNotFromHumanIdentity
+    /// Structurally invalid (bad peer hex, empty/duplicate planes, out-of-range
+    /// budget, oversized tool ceiling…). Carries the wire layer's reason.
+    case standingGrantMalformed(StandingGrantError)
+    /// A verified peer already holds `maxStandingGrantsPerGranter` distinct live
+    /// grants and this is a NEW grant id — refused so a paired-but-hostile peer
+    /// cannot grow the grant store without bound (a re-issue of an existing id is
+    /// always accepted and never reaches this). Fail-closed: the new grant simply
+    /// is not honored, which can only ever withhold authorization, never widen it.
+    case standingGrantLimitReached
 }
 
 /// Where engine-approved agent messages go: the conversation send path
@@ -116,8 +150,22 @@ public actor AgentEngine {
     /// Context-sharing grants: scope tag -> (granter identity hex -> active_until).
     /// Orthogonal to windows/invites: this is the *consume* axis, never *send*.
     private var contextGrants: [String: [String: Int64]] = [:]
+    /// Standing town grants (AC126): `grantKey(granter:peer:plane:)` -> record.
+    ///
+    /// A THIRD, independent axis. Windows/invites gate `authorizeAutonomousSend`;
+    /// context grants gate the consume axis; these gate `authorizeTownSend` and
+    /// nothing else. No lookup here is ever consulted by the §13 gate, and no §13
+    /// state is ever consulted here — that separation is the whole point of the
+    /// workstream (GOOSEWORLD §5: "widening gates ad hoc per surface is how
+    /// invariant 9 erodes").
+    private var standingGrants: [String: StandingGrantRecord] = [:]
     /// Loop guard (D14): consecutive agent messages per thread.
     private var consecutiveAgentMessages: [String: Int] = [:]
+
+    /// Test-only observability of the grant store's size — the quantity the
+    /// per-granter cap + expiry-prune bound (visible only through `@testable`).
+    /// Not part of the public API; production never reads it.
+    var standingGrantRecordCountForTesting: Int { standingGrants.count }
     /// Loop-guard threshold: pause a thread's agents once this many consecutive
     /// agent messages accumulate with no human in between. Configurable per
     /// account (the app reads a per-silo setting and passes it in); defaults to
@@ -303,6 +351,417 @@ public actor AgentEngine {
         let live = contextGrants[scope.tag]?.filter { $0.value > now } ?? [:]
         guard live[myIdentityHex] != nil else { return false }
         return live.keys.contains { $0 != myIdentityHex }
+    }
+
+    // MARK: - standing_grant (town scope, GOOSEWORLD §5 / DEVIATIONS AC126)
+
+    /// One live grant, plus the day-accounting the gate spends against it.
+    ///
+    /// The budget counters live HERE, not on the wire object, because they are
+    /// purely local bookkeeping: nothing about how much of today's allowance my
+    /// agent has spent should ever be inferable by a peer or a relay (SPEC §0).
+    struct StandingGrantRecord: Sendable {
+        let grantID: String
+        let granter: String
+        let peer: String
+        let plane: StandingGrant.Plane
+        let activeUntil: Int64
+        let budget: StandingGrant.Budget
+        /// UTC day the counters below belong to. Compared, never scheduled on.
+        var dayIndex: Int64
+        var messagesUsed: Int
+        var bytesUsed: Int
+        /// In-flight delegated task ids (a Set, so a duplicate `begin` for the same
+        /// task can't inflate the concurrency count and a lost `end` can't
+        /// double-decrement).
+        var tasksInFlight: Set<String>
+    }
+
+    /// A live grant as a client should render it: expiry AND what is left of the
+    /// budget, so the indicator can say "3 days left, 41 of 200 messages" rather
+    /// than a bare "active" badge.
+    ///
+    /// Visibility is not a nicety here — it is the property that makes a day-scale
+    /// grant acceptable at all. `ai_window` is safe partly because it is short;
+    /// a standing grant is safe partly because it is *conspicuous* for its whole
+    /// life (GOOSEWORLD §5, invariant 9's visible-indicator clause).
+    public struct StandingGrantStatus: Equatable, Sendable {
+        public let grantID: String
+        public let granterIdentityHex: String
+        public let peerIdentityHex: String
+        public let plane: StandingGrant.Plane
+        public let activeUntil: Int64
+        public let messagesRemaining: Int
+        public let bytesRemaining: Int
+        public let tasksInFlight: Int
+        public let maxConcurrentTasks: Int
+        public let toolCeiling: [String]?
+    }
+
+    /// The UTC day a timestamp falls in. Floor division (not truncation), so the
+    /// pre-1970 case a hostile clock could produce still yields a monotone index
+    /// rather than folding two days together.
+    static func utcDayIndex(_ time: Int64) -> Int64 {
+        let day = PQRCConstants.secondsPerDay
+        let quotient = time / day
+        return (time % day < 0) ? quotient - 1 : quotient
+    }
+
+    /// Storage key. All three components are fixed-vocabulary or hex-validated
+    /// (`StandingGrant.validateStructure` pins `peer` to 64 lowercase hex, and the
+    /// granter key is a hex-encoded pubkey), so `|` cannot appear inside a
+    /// component and the key is unambiguous.
+    static func grantKey(granter: String, peer: String, plane: StandingGrant.Plane) -> String {
+        "\(granter)|\(peer)|\(plane.rawValue)"
+    }
+
+    /// Human-only action: sign and activate MY standing grant toward one peer town.
+    ///
+    /// `grantID` is supplied by the caller rather than minted here on purpose — the
+    /// engine stays free of system randomness so every test is deterministic
+    /// (TEST-PLAN §1). The id is not security material; the signature binds it.
+    ///
+    /// Returns the signed grant, which the caller MUST publish: like
+    /// `startMyWindow`, activating it locally without telling the peer produces a
+    /// grant only one side can see, which defeats the visibility property.
+    public func startMyStandingGrant(
+        grantID: String, peerIdentityHex: String, planes: [StandingGrant.Plane],
+        budget: StandingGrant.Budget, durationSeconds: Int64
+    ) throws -> StandingGrant {
+        guard PQRCConstants.allowedStandingGrantDurations.contains(durationSeconds) else {
+            throw AgentEngineError.standingGrantDurationUnbounded
+        }
+        let grant: StandingGrant
+        do {
+            grant = try StandingGrant.make(
+                grantID: grantID, peer: peerIdentityHex, planes: planes, budget: budget,
+                activeUntil: clock.now() + durationSeconds, identity: myIdentity)
+        } catch let error as StandingGrantError {
+            throw AgentEngineError.standingGrantMalformed(error)
+        }
+        store(grant, granter: myIdentityHex)
+        return grant
+    }
+
+    /// Validates an incoming grant: signed by the CLAIMED SENDER's own human
+    /// identity key, structurally sound, and bounded. Agents cannot self-grant —
+    /// only an identity-key signature is accepted, exactly as `receiveWindow` does
+    /// (SPEC §13.3, invariant 9). An agent-key signature over the same bytes fails
+    /// the verify; a grant whose `enabled_by` disagrees with the sender is rejected
+    /// before any crypto runs.
+    public func receiveStandingGrant(
+        _ grant: StandingGrant, fromSenderIdentityHex sender: String
+    ) throws {
+        guard grant.enabledBy.hexString == sender else {
+            throw AgentEngineError.standingGrantNotFromHumanIdentity
+        }
+        do {
+            try grant.validateStructure()
+        } catch let error as StandingGrantError {
+            throw AgentEngineError.standingGrantMalformed(error)
+        }
+        guard grant.hasValidSignature() else {
+            throw AgentEngineError.standingGrantSignatureInvalid
+        }
+        guard grant.hasBoundedDuration(now: clock.now()) else {
+            throw AgentEngineError.standingGrantDurationUnbounded
+        }
+        // Bound a single granter's footprint (see `maxStandingGrantsPerGranter`).
+        // Prune first so an expired grant never counts against a peer's live quota,
+        // then refuse only a NEW grant id past the cap — a re-issue (top-up) of an
+        // id already on file is always honored. A caller cannot use this to probe
+        // state: the decision is about the grant in hand, and the count is of the
+        // SENDER's own grants, which the sender already knows it issued.
+        let now = clock.now()
+        pruneExpiredGrants(now: now)
+        let liveGrantIDsFromSender = Set(
+            standingGrants.values
+                .filter { $0.granter == sender && now < $0.activeUntil }
+                .map(\.grantID))
+        if !liveGrantIDsFromSender.contains(grant.grantID),
+            liveGrantIDsFromSender.count >= PQRCConstants.maxStandingGrantsPerGranter
+        {
+            throw AgentEngineError.standingGrantLimitReached
+        }
+        store(grant, granter: sender)
+        agentLog.debug(
+            "Standing grant accepted from \(sender, privacy: .private) for planes \(grant.planes.joined(separator: "+"), privacy: .private)"
+        )
+    }
+
+    /// Materializes one record per KNOWN plane. Unknown plane strings stay bound in
+    /// the signature (so the grant still verifies on a newer peer) but produce no
+    /// record here, and therefore authorize nothing — forward-compatible and
+    /// fail-closed at once (SPEC §12).
+    ///
+    /// Re-storing the SAME `grantID` preserves the day counters. That is a
+    /// security property, not an optimization: if a replayed grant reset the
+    /// budget, replaying it would BE the budget bypass. A genuinely new grant id
+    /// (a deliberate human act) starts fresh.
+    private func store(_ grant: StandingGrant, granter: String) {
+        let now = clock.now()
+        // Opportunistic prune: an expired grant authorizes nothing already (every
+        // gate/query checks `now < activeUntil`), so dropping it here changes no
+        // decision — it only keeps the store from accumulating dead records in a
+        // long-lived daemon. Cheap: runs once per grant issued/received.
+        pruneExpiredGrants(now: now)
+        let today = Self.utcDayIndex(now)
+        for plane in grant.knownPlanes {
+            let key = Self.grantKey(granter: granter, peer: grant.peer, plane: plane)
+            let previous = standingGrants[key]
+            let carryOver = previous?.grantID == grant.grantID ? previous : nil
+            standingGrants[key] = StandingGrantRecord(
+                grantID: grant.grantID, granter: granter, peer: grant.peer, plane: plane,
+                activeUntil: grant.activeUntil, budget: grant.budget,
+                dayIndex: carryOver?.dayIndex ?? today,
+                messagesUsed: carryOver?.messagesUsed ?? 0,
+                bytesUsed: carryOver?.bytesUsed ?? 0,
+                tasksInFlight: carryOver?.tasksInFlight ?? [])
+        }
+    }
+
+    /// Human-only action: withdraw MY standing grant, returning a SIGNED
+    /// revocation the caller MUST publish.
+    ///
+    /// Mirrors `endMyWindowEarly`: the local state is cleared in a `defer`, so
+    /// even if signing throws, THIS device has already stopped honoring the grant.
+    /// The failure mode we refuse to allow is "revocation failed, so we kept
+    /// going" — on doubt, closed.
+    public func revokeMyStandingGrant(grantID: String) throws -> StandingGrantRevocation {
+        defer { forgetGrants(grantID: grantID, granter: myIdentityHex) }
+        do {
+            return try StandingGrantRevocation.make(
+                grantID: grantID, revokedAt: clock.now(), identity: myIdentity)
+        } catch let error as StandingGrantError {
+            throw AgentEngineError.standingGrantMalformed(error)
+        }
+    }
+
+    /// Applies an incoming revocation. Effective on receipt.
+    ///
+    /// Two fail-closed subtleties:
+    ///
+    /// 1. It only ever removes grants whose GRANTER is the revocation's signer.
+    ///    A third party who signs a revocation naming someone else's grant id
+    ///    revokes nothing — otherwise any peer could switch off any other peer's
+    ///    grant, which is a denial-of-service dressed as a safety feature.
+    /// 2. A revocation for a grant id this device has never seen is a SILENT
+    ///    no-op, not an error. Reporting "unknown grant" would answer the question
+    ///    "do you hold grant X?" for anyone willing to guess ids. Replaying a
+    ///    revocation is likewise idempotent.
+    ///
+    /// A bad signature or a mismatched `enabled_by` DOES throw: that is a judgment
+    /// about the message in hand, not a disclosure about stored state.
+    public func receiveStandingGrantRevocation(
+        _ revocation: StandingGrantRevocation, fromSenderIdentityHex sender: String
+    ) throws {
+        guard revocation.enabledBy.hexString == sender else {
+            throw AgentEngineError.standingGrantNotFromHumanIdentity
+        }
+        guard revocation.hasValidSignature() else {
+            throw AgentEngineError.standingGrantSignatureInvalid
+        }
+        forgetGrants(grantID: revocation.grantID, granter: sender)
+    }
+
+    /// Removes every plane-record belonging to one grant id AND one granter.
+    /// Both halves of that predicate matter: the granter clause is what stops a
+    /// third party from revoking someone else's grant by guessing its id.
+    /// Keys are collected before removal so the dictionary is never mutated
+    /// through a live iteration.
+    private func forgetGrants(grantID: String, granter: String) {
+        let doomed = standingGrants.filter {
+            $0.value.grantID == grantID && $0.value.granter == granter
+        }.keys
+        for key in doomed { standingGrants[key] = nil }
+    }
+
+    /// Drops every record whose life has run out (`activeUntil <= now`). Purely a
+    /// memory bound: an expired record is already invisible to every gate and query
+    /// (all of them require `now < activeUntil`), so removing it is behavior-
+    /// preserving. Called opportunistically on `store`, so the store's size tracks
+    /// LIVE grants rather than every grant ever seen. Keys are collected before
+    /// removal so the dictionary is not mutated through a live iteration.
+    private func pruneExpiredGrants(now: Int64) {
+        let doomed = standingGrants.filter { now >= $0.value.activeUntil }.keys
+        for key in doomed { standingGrants[key] = nil }
+    }
+
+    // MARK: The town gate (separate from §13's, fail closed)
+
+    /// Throws unless a live, unrevoked, in-budget grant of MINE covers this exact
+    /// (peer, plane) and this many bytes.
+    ///
+    /// **This is not `authorizeAutonomousSend` and must never become it.** Holding
+    /// a standing grant authorizes cross-town traffic on a named plane and nothing
+    /// else: it does not let my agent speak in an ordinary conversation, and it
+    /// does not let it post in a thread. Those still require a live `ai_window` or
+    /// `ai_invite`, unchanged, byte for byte (SPEC §13.3).
+    ///
+    /// Pure check, no side effects — spending is an explicit `recordTownSend`, the
+    /// same shape as `recordThreadMessage`. Two reasons: an authorization that
+    /// silently consumed budget would double-charge every caller that re-checks
+    /// mid-turn (`runThreadTurn` does exactly that), and a check with no side
+    /// effects is one a UI can call freely to decide whether to grey out a button.
+    public func authorizeTownSend(
+        peerIdentityHex: String, plane: StandingGrant.Plane, bytes: Int
+    ) throws {
+        guard bytes >= 0 else {
+            throw AgentEngineError.standingGrantMalformed(.malformedBudget)
+        }
+        let now = clock.now()
+        let key = Self.grantKey(granter: myIdentityHex, peer: peerIdentityHex, plane: plane)
+        guard let record = standingGrants[key], now < record.activeUntil else {
+            throw AgentEngineError.townSendNotAuthorized
+        }
+        // Day rollover is evaluated HERE, on access, from the injected clock —
+        // never by a scheduled reset (invariant 1).
+        let (messagesUsed, bytesUsed) = Self.usage(of: record, at: now)
+        // Written as `<` and as a SUBTRACTION rather than `used + bytes <= cap`
+        // on purpose: `bytes` is caller-supplied and `used + bytes` traps on
+        // overflow for a large enough `bytes`, which would turn a bad argument
+        // into a crashed actor. Both operands of the subtraction are validated
+        // into `0...maxBytesPerDay`, so it cannot overflow for any `bytes`.
+        guard messagesUsed < record.budget.messagesPerDay,
+            bytes <= record.budget.bytesPerDay - bytesUsed
+        else {
+            throw AgentEngineError.townBudgetExhausted
+        }
+    }
+
+    /// Today's spend against a record, rolling the day forward but never back.
+    ///
+    /// The comparison is `today > record.dayIndex`, not `!=`: a clock moved
+    /// BACKWARDS must not hand the budget back. Time is an untrusted input here
+    /// (SPEC §5.2 keeps it out of the key schedule for the same reason), so the
+    /// rollover is monotone — the only direction it can be wrong in is stingy.
+    private static func usage(
+        of record: StandingGrantRecord, at now: Int64
+    ) -> (messages: Int, bytes: Int) {
+        Self.utcDayIndex(now) > record.dayIndex ? (0, 0) : (record.messagesUsed, record.bytesUsed)
+    }
+
+    /// Spends one message and `bytes` against MY grant for (peer, plane). Call it
+    /// once per send actually made, after `authorizeTownSend` allowed it.
+    ///
+    /// Deliberately non-throwing and forgiving of an unknown/expired grant: this is
+    /// accounting, and an accounting call that can throw invites a caller to skip
+    /// it. Counters saturate at the budget ceiling, so a caller that records
+    /// without authorizing first can only ever make the gate *more* closed.
+    public func recordTownSend(
+        peerIdentityHex: String, plane: StandingGrant.Plane, bytes: Int
+    ) {
+        let key = Self.grantKey(granter: myIdentityHex, peer: peerIdentityHex, plane: plane)
+        guard var record = standingGrants[key] else { return }
+        let today = Self.utcDayIndex(clock.now())
+        if today > record.dayIndex {
+            record.dayIndex = today
+            record.messagesUsed = 0
+            record.bytesUsed = 0
+        }
+        // Clamp the addend to the daily cap BEFORE adding, so a caller passing a
+        // wild byte count saturates instead of trapping (same overflow hazard as
+        // `authorizeTownSend`; both operands stay inside `0...maxBytesPerDay`).
+        let spend = min(max(0, bytes), record.budget.bytesPerDay)
+        record.messagesUsed = min(record.messagesUsed + 1, record.budget.messagesPerDay)
+        record.bytesUsed = min(record.bytesUsed + spend, record.budget.bytesPerDay)
+        standingGrants[key] = record
+    }
+
+    /// Registers a delegated task against MY `delegate` grant for `peer`, subject
+    /// to `max_concurrent_tasks`. Throws rather than queueing — a town that is at
+    /// its ceiling should be told "no" now, not silently backlogged (GOOSEWORLD §4
+    /// adversary class 4: runaway loops/cost).
+    ///
+    /// Concurrency is NOT budget: it does not roll over daily, because it counts
+    /// things currently running rather than things spent.
+    public func beginTownTask(peerIdentityHex: String, taskID: String) throws {
+        let now = clock.now()
+        let key = Self.grantKey(granter: myIdentityHex, peer: peerIdentityHex, plane: .delegate)
+        guard var record = standingGrants[key], now < record.activeUntil else {
+            throw AgentEngineError.townSendNotAuthorized
+        }
+        // Re-registering an id already in flight is idempotent, so a retried
+        // begin can't consume two slots.
+        if !record.tasksInFlight.contains(taskID) {
+            guard record.tasksInFlight.count < record.budget.maxConcurrentTasks else {
+                throw AgentEngineError.townTaskLimitReached
+            }
+            record.tasksInFlight.insert(taskID)
+            standingGrants[key] = record
+        }
+    }
+
+    /// Releases a delegated task slot. Unknown ids are a no-op (same
+    /// no-state-probe rule as revocation).
+    public func endTownTask(peerIdentityHex: String, taskID: String) {
+        let key = Self.grantKey(granter: myIdentityHex, peer: peerIdentityHex, plane: .delegate)
+        guard var record = standingGrants[key] else { return }
+        record.tasksInFlight.remove(taskID)
+        standingGrants[key] = record
+    }
+
+    /// Whether MY `delegate` grant for `peer` permits `tool`.
+    ///
+    /// `nil` ceiling ⇒ `true`: the grant adds no narrowing. That is NOT a
+    /// widening — every tool call still passes the ACP permission gate and the
+    /// path jail, which are unchanged and fail closed on their own. No live
+    /// delegate grant at all ⇒ `false`.
+    public func toolAuthorizedForTown(peerIdentityHex: String, tool: String) -> Bool {
+        let key = Self.grantKey(granter: myIdentityHex, peer: peerIdentityHex, plane: .delegate)
+        guard let record = standingGrants[key], clock.now() < record.activeUntil else {
+            return false
+        }
+        guard let ceiling = record.budget.toolCeiling else { return true }
+        return ceiling.contains(tool)
+    }
+
+    // MARK: Visibility (the indicator every client MUST render)
+
+    /// Live status for one (peer, plane), or nil if there is no unexpired grant.
+    /// `granterIdentityHex` defaults to ME; pass a peer's hex to inspect the grant
+    /// THEY issued (what their town is allowed to do toward us).
+    public func activeStandingGrant(
+        peerIdentityHex: String, plane: StandingGrant.Plane,
+        granterIdentityHex: String? = nil
+    ) -> StandingGrantStatus? {
+        let granter = granterIdentityHex ?? myIdentityHex
+        let key = Self.grantKey(granter: granter, peer: peerIdentityHex, plane: plane)
+        guard let record = standingGrants[key], clock.now() < record.activeUntil else {
+            return nil
+        }
+        return status(for: record)
+    }
+
+    /// Every live grant, for the "what is standing right now" panel. Sorted by
+    /// (peer, plane) so the UI order is stable across calls — a list that
+    /// reshuffles is a list nobody reads, and an unread indicator is not an
+    /// indicator.
+    public func activeStandingGrants() -> [StandingGrantStatus] {
+        let now = clock.now()
+        return
+            standingGrants.values
+            .filter { now < $0.activeUntil }
+            .map(status(for:))
+            .sorted {
+                ($0.peerIdentityHex, $0.plane.rawValue, $0.granterIdentityHex)
+                    < ($1.peerIdentityHex, $1.plane.rawValue, $1.granterIdentityHex)
+            }
+    }
+
+    private func status(for record: StandingGrantRecord) -> StandingGrantStatus {
+        let (messagesUsed, bytesUsed) = Self.usage(of: record, at: clock.now())
+        return StandingGrantStatus(
+            grantID: record.grantID,
+            granterIdentityHex: record.granter,
+            peerIdentityHex: record.peer,
+            plane: record.plane,
+            activeUntil: record.activeUntil,
+            messagesRemaining: max(0, record.budget.messagesPerDay - messagesUsed),
+            bytesRemaining: max(0, record.budget.bytesPerDay - bytesUsed),
+            tasksInFlight: record.tasksInFlight.count,
+            maxConcurrentTasks: record.budget.maxConcurrentTasks,
+            toolCeiling: record.budget.toolCeiling)
     }
 
     // MARK: - The autonomous-send gate (fail closed)

@@ -1675,3 +1675,45 @@ struct MLXReviewFixTests {
         #expect(MLXCommand.boundedSample(fileAt: path + ".missing") == nil)
     }
 }
+
+// The relocatable models folder (user can point the HF hub cache anywhere). Pure
+// resolution logic; no UserDefaults suite persists past the test.
+@Suite("MLX relocatable models directory")
+struct MLXModelsDirectoryTests {
+
+    private func scratchDefaults() -> UserDefaults {
+        let suite = "mlx.models.test.\(UUID().uuidString)"
+        let d = UserDefaults(suiteName: suite)!
+        d.removePersistentDomain(forName: suite)
+        return d
+    }
+
+    @Test func noCustomDir_fallsBackToTheStandardHFResolution() {
+        let d = scratchDefaults()
+        // No custom key, empty env → the documented default location.
+        let resolved = MLXService.resolvedCacheDir(defaults: d, env: [:])
+        #expect(resolved == (NSHomeDirectory() as NSString).appendingPathComponent(".cache/huggingface/hub"))
+    }
+
+    @Test func aCustomDirWinsOverEverythingAndIsTildeExpanded() {
+        let d = scratchDefaults()
+        d.set("~/Development Projects/models", forKey: MLXService.customModelsDirKey)
+        // Even with HF_HOME set, the explicit user relocation wins.
+        let resolved = MLXService.resolvedCacheDir(
+            defaults: d, env: ["HF_HOME": "/somewhere/else"])
+        #expect(resolved == (NSHomeDirectory() as NSString).appendingPathComponent("Development Projects/models"))
+    }
+
+    @Test func aBlankCustomDirIsIgnored_soEnvStillApplies() {
+        let d = scratchDefaults()
+        d.set("   ", forKey: MLXService.customModelsDirKey)  // whitespace only = not set
+        let resolved = MLXService.resolvedCacheDir(
+            defaults: d, env: ["HF_HOME": "/opt/models"])
+        #expect(resolved == "/opt/models/hub")  // HF_HOME + /hub, per HFCache
+    }
+
+    @Test func customDirKeyIsStable() {
+        // A rename would orphan a user's relocation silently — pin the key.
+        #expect(MLXService.customModelsDirKey == "mlx.customModelsDir")
+    }
+}

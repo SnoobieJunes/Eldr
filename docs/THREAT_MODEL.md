@@ -403,6 +403,40 @@ Honest accounting of what is and isn't encrypted at rest (DEVIATIONS AC69–AC72
 | Off-device AI exfiltrating identities / bulk context | egress firewall (default ON): codename redaction + 64 KB outbound cap; default context = marked-only unless actively engaged; explicit consent before the first remote/hub call (§2.12) |
 | Reasoning model leaking its scratchpad into chat | `<think>`/Harmony chain-of-thought stripped from every reply before it renders (A34) |
 
+## 4a. Agent towns (gooseworld) — cross-town agent traffic
+
+When Eldr becomes the channel *between* goosetowns (`private/GOOSEWORLD.md`), a new
+adversary sits across the relay: another human's autonomous, shell-spawning node. The
+message-security properties do not change — a peer town's frames are the same PQ-E2EE,
+gift-wrapped, ratcheted ciphertext any chat carries, so a hostile relay learns nothing new.
+The new risk is entirely at the **application boundary**, where a remote town's text flows
+toward an orchestrator that runs code. These classes are addressed in priority order; the
+honest status of each is marked.
+
+| Threat | Mitigation | Status |
+|---|---|---|
+| **Cross-town prompt injection → code execution** (the dominant risk: a remote wall post or task result is untrusted input flowing into an agent that spawns shells) | `world_wall_read` delivers all remote content as quarantined, quoted DATA inside a four-layer envelope — per-read 128-bit nonce markers (generated after fetch, never posted back), every content line `> `-quoted after splitting on all Unicode line breaks, ANSI/C0/C1/bidi controls escaped to visible `<U+XXXX>`, headers rebuilt from struct fields — so no post body can forge a marker, a header, or a "priority" flag. The C-1 fail-closed permission gate and C-2 path jail on everything a task triggers are unchanged; "never push without approval" stays enforced LOCALLY, not trusted remotely. A dedicated adversarial audit (AC134) found and fixed one real breakout — a town **label** rendered outside the quoted envelope let a raw U+2028 forge a roster row — and tombstoned the rest (full `Bidi_Control` coverage, FS/GS/RS, nonce-never-persisted, oversize-refused). | **Shipped + audited** (PQRCMCP injection suite, DEVIATIONS AC129 + AC134) |
+| **Delegation exfiltration** (the task text IS the leak to the remote town) | `standing_grant` scopes each cross-town authorization to one peer, named planes, and per-day byte/message budgets + a tool ceiling — so exposure is a deliberate, bounded, revocable choice, not an open pipe. The per-chat egress firewall still governs what leaves toward cloud LLM backends. | **Shipped + tested** (grant object; wiring the firewall to the town send is follow-up) |
+| **Sybil towns / impersonation** | kind-10420 human↔agent binding verified in BOTH directions (invariant 7) + invite-only pairing; no open federation, no public town directory in v1. The A2A town plane admits a peer only behind an explicit authorizer (`StandingGrantTownAuthorizer`, owner-granter-pinned) — a peer cannot self-authorize. | **Shipped + tested** (AC128/AC130) |
+| **Runaway loops / cost** | `AgentEngine` loop guards for threads (6 consecutive agent messages, §4 above) + standing-grant budgets (messages/day, bytes/day, concurrent-task ceiling), all message-driven, never timer-driven. | **Shipped + tested** (AC126) |
+| **Hub abuse** | NIP-42 AUTH + invite-gated hub onboarding. | Relay-side; unchanged from §2.9a |
+
+**What is deliberately NOT yet proven, stated plainly:** the town A2A plane and the
+grant-backed authorizer are wired and proven **end-to-end in one process** — an in-process
+TWO-TOWN E2E (AC131) drives two full towns over one `LocalRelaySimulator` through the real
+`serve` loop: a grant admits Town A, an agent-labeled reply returns byte-exact, every
+negative fails closed, and a granted town still cannot reach the coding plane (the
+confused-deputy crown jewel). What that does NOT cover is the **live two-machine delegation
+over the real relay** (GOOSEWORLD Phase 0): no live network (partition/latency/NIP-42
+AUTH/khatru chunk limits), no second OS/Keychain, and Town B's service is a minimal A2A
+responder rather than a live goose flock. That is the one gap a second machine would close.
+The
+`PinnedTownAllowlist` config path is a transport admission check, **not** a §13-compliant
+human-signed grant, and is documented as such; the §13-shaped authorization is the standing
+grant. No public gooseworld artifact should ship before the Phase-2 hardening in this section
+is exercised on-device — connecting shells across a network without it is the one unforgivable
+version of this product (GOOSEWORLD §7, Phase 2).
+
 ## 5. Cryptographic assumptions
 
 X25519, Ed25519, ML-KEM-768 (FIPS 203), AES-256-GCM, ChaCha20-Poly1305,

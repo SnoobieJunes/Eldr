@@ -18,6 +18,7 @@ struct EldrctlMain {
             switch sub {
             case "install": try runInstall(parseArgs(rest))
             case "conduit": try runConduit(rest)
+            case "found-town": try runFoundTown(rest)
             case "-h", "--help", "help": printUsage()
             case "--version": print("eldrctl/0.1.0")
             default:
@@ -131,6 +132,129 @@ struct EldrctlMain {
         default:
             throw CLIError("unknown conduit subcommand: \(sub)")
         }
+    }
+
+    // MARK: - found-town  (GOOSEWORLD §6 WS-G6: town-in-a-box)
+
+    /// `eldrctl found-town` — SSH-provision a gooseworld TOWN: the conduit node PLUS goose
+    /// and the `eldr-gooseworld` extension, joined to the hub, and emit a town invite.
+    ///
+    /// Built ON TOP of `ConduitProvisioner` (reuse, not copy-paste): the node install is the
+    /// exact `install-huginn.sh` the `install` command runs; found-town stages an extra
+    /// binary (`eldr-gooseworld`), runs that script, then runs `FoundTownProvisioner.townScript`
+    /// for the gooseworld layer, and finally derives the town invite from the npub the node
+    /// prints. Subcommands `instructions` / `invite` mirror `conduit instructions` / `pairing-link`.
+    static func runFoundTown(_ rest: [String]) throws {
+        if let first = rest.first {
+            switch first {
+            case "instructions": print(FoundTownRunbook.text); return
+            case "invite": try runFoundTownInvite(parseArgs(Array(rest.dropFirst()))); return
+            default: break  // fall through to provision (flags start with `--`)
+            }
+        }
+
+        let a = parseArgs(rest)
+        guard let rawTarget = a["target"]?.nonEmpty else {
+            throw CLIError("found-town needs --target <user@host>")
+        }
+        let target = try validatedTarget(rawTarget)
+        let installApp = a["no-app"] == nil
+        let dryRun = a["dry-run"] != nil
+
+        var townConfig = FoundTownProvisioner.Config(
+            // `--hub` is the town's canonical flag; `--relay` is accepted as an alias since
+            // the hub IS the relay (GOOSEWORLD §3).
+            ownerHex: a["owner"] ?? "",
+            hubURL: a["hub"] ?? a["relay"] ?? "wss://relay.lerants.com",
+            gooseProvider: a["goose"] ?? "ollama",
+            workdir: a["workdir"] ?? "",
+            installApp: installApp)
+        try FoundTownProvisioner(config: townConfig).validate()
+
+        // Resolve the payload on THIS (controller) machine: node + gooseworld extension.
+        let fm = FileManager.default
+        let appPath = a["app"] ?? "/Applications/Huginn.app"
+        let nodePath = a["node"] ?? "\(appPath)/Contents/Resources/eldr-node"
+        let goosePath = a["gooseworld"] ?? "\(appPath)/Contents/Resources/eldr-gooseworld"
+        if installApp && !fm.fileExists(atPath: appPath) {
+            throw CLIError("Huginn.app not found at \(appPath). Pass --app <path> or --no-app.")
+        }
+        guard fm.fileExists(atPath: nodePath) else {
+            throw CLIError(
+                "eldr-node binary not found at \(nodePath). Pass --node <path>, or build the "
+                    + "DMG (Apps/Huginn/build-dmg.sh) so Huginn.app bundles it.")
+        }
+        guard fm.fileExists(atPath: goosePath) else {
+            throw CLIError(
+                "eldr-gooseworld binary not found at \(goosePath). Pass --gooseworld <path>, or "
+                    + "build the DMG so Huginn.app bundles it.")
+        }
+
+        // Stage the payload into a fresh remote temp dir.
+        note("Staging town payload on \(target) …")
+        let stage = try sshCapture(target, "mktemp -d -t eldr-town")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !stage.isEmpty else { throw CLIError("could not create a staging dir on \(target).") }
+        try scp(nodePath, "\(target):\(stage)/eldr-node", recursive: false)
+        try scp(goosePath, "\(target):\(stage)/eldr-gooseworld", recursive: false)
+        if installApp { try scp(appPath, "\(target):\(stage)/Huginn.app", recursive: true) }
+
+        townConfig.payloadDir = stage
+        let town = FoundTownProvisioner(config: townConfig)
+
+        // Step 1 — the conduit provision (REUSED verbatim: same install-huginn.sh).
+        var conduitArgs = ConduitProvisioner(config: town.conduitConfig()).scriptArguments()
+        if dryRun { conduitArgs.append("--dry-run") }
+        note("Provisioning eldr-node (install-huginn.sh) on \(target) …")
+        try sshRun(
+            target, "bash -s -- " + conduitArgs.map(shellQuote).joined(separator: " "),
+            stdin: Data(ConduitProvisioner.installScript.utf8))
+
+        // Step 2 — the gooseworld layer (install eldr-gooseworld + register with goose).
+        var townArgs = town.townScriptArguments()
+        if dryRun { townArgs.append("--dry-run") }
+        note("Installing goose extension (found-town.sh) on \(target) …")
+        try sshRun(
+            target, "bash -s -- " + townArgs.map(shellQuote).joined(separator: " "),
+            stdin: Data(FoundTownProvisioner.townScript.utf8))
+
+        // Clean up the staging dir (best effort).
+        _ = try? sshCapture(target, "rm -rf " + shellQuote(stage))
+
+        guard !dryRun else { note("Dry run complete (no system changes applied)."); return }
+
+        // Step 3 — emit the town invite, derived from the node's pairing-link npub.
+        note("Town invite (share with a PEER town — they scan/paste to pair):")
+        try emitTownInvite(target: target, hub: townConfig.hubURL)
+        note("Register the goose extension per the printed stanza, then start goose.")
+        note("Seed the model token if needed →  eldrctl conduit import-token --target \(target)")
+    }
+
+    /// `eldrctl found-town invite --target … [--hub …]` — re-emit the town invite for an
+    /// already-provisioned host (mirrors `conduit pairing-link`).
+    static func runFoundTownInvite(_ a: [String: String]) throws {
+        let target = try requireTarget(a)
+        let hub = a["hub"] ?? a["relay"] ?? "wss://relay.lerants.com"
+        try emitTownInvite(target: target, hub: hub)
+    }
+
+    /// Ask the node for its pairing link, parse the npub, and print the `pqrc:town?…` invite.
+    /// The node has no `--print-town-invite` mode (a documented EldrNode follow-up), so the
+    /// invite is derived controller-side from the npub the node already prints.
+    static func emitTownInvite(target: String, hub: String) throws {
+        guard FoundTownProvisioner.isSafeHubURL(hub) else {
+            throw CLIError(
+                "--hub must be a ws:// or wss:// URL with no shell metacharacters (got \(hub)).")
+        }
+        let link = try sshCapture(
+            target, "~/.local/bin/eldr-node --print-pairing-link --relay " + shellQuote(hub))
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let npub = FoundTownProvisioner.npub(fromPairingLink: link) else {
+            throw CLIError(
+                "could not parse an npub from the node's pairing link (got: \(link)). Is the "
+                    + "node installed and unlocked?")
+        }
+        print(FoundTownProvisioner.townInvite(npub: npub, hub: hub))
     }
 
     static func requireTarget(_ a: [String: String]) throws -> String {
@@ -261,6 +385,9 @@ struct EldrctlMain {
           eldrctl conduit pairing-link  --target <user@host> [--relay <wss>]
           eldrctl conduit import-token  --target <user@host>
           eldrctl conduit status        --target <user@host>
+          eldrctl found-town --target <user@host> --owner <64-hex> [--hub <wss>] [--goose <p>]
+          eldrctl found-town instructions
+          eldrctl found-town invite     --target <user@host> [--hub <wss>]
 
         install options
           --relay <wss://…>      relay both ends share (default wss://relay.lerants.com)
@@ -274,6 +401,12 @@ struct EldrctlMain {
           --no-app               headless node only (skip copying the GUI bundle)
           --dry-run              stage + run the script in --dry-run (no system changes)
 
+        found-town options  (all install options, plus)
+          --hub <wss://…>        the gooseworld hub the town joins (default wss://relay.lerants.com)
+          --goose <provider>     goose provider hint (ollama | openai | anthropic | …; default ollama)
+          --gooseworld <path>    eldr-gooseworld binary (default <app>/Contents/Resources/eldr-gooseworld)
+
+        found-town does NOT auto-install goose — install it first (https://block.github.io/goose/).
         The LLM token is NEVER passed here; seed it with `conduit import-token`.
         """)
     }

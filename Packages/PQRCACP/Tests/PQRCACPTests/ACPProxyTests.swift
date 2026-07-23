@@ -215,7 +215,10 @@ struct ACPProxyTests {
         #expect(HarnessRegistry.all.filter { $0.kind == .builtIn }.count == 1)
 
         // Installed launchers (not provisional) + the five Phase-2 placeholders.
-        for required in ["xcode-acp", "openclaw", "claude-code", "codex", "gemini-cli", "opencode", "cursor"] {
+        for required in [
+            "xcode-acp", "openclaw", "claude-code", "codex", "gemini-cli", "opencode", "cursor",
+            "goose-acp",  // WS-G2
+        ] {
             #expect(ids.contains(required), "registry missing \(required)")
         }
 
@@ -244,6 +247,9 @@ struct ACPProxyTests {
         #expect(HarnessRegistry.descriptor(id: "eldr-acp")?.isProvisional == false)
         #expect(HarnessRegistry.descriptor(id: "claude-code")?.isProvisional == false)
         #expect(HarnessRegistry.descriptor(id: "gemini-cli")?.isProvisional == false)
+        // WS-G2 — goose's `acp` subcommand was driven through a real initialize handshake
+        // (see `GooseHarnessTests`), so it is verified, not scaffolding.
+        #expect(HarnessRegistry.descriptor(id: "goose-acp")?.isProvisional == false)
     }
 }
 

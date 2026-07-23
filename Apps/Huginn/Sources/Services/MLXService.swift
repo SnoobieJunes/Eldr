@@ -192,7 +192,14 @@ final class MLXService: ObservableObject {
     nonisolated let venvDir: String
     nonisolated let venvPython: String
     nonisolated let serverLogPath: String
-    nonisolated let cacheDir: String
+    /// The Hugging Face hub cache directory — the folder that directly holds the
+    /// `models--owner--name` entries. Defaults to `~/.cache/huggingface/hub` (or
+    /// wherever `HF_HOME`/`HUGGINGFACE_HUB_CACHE` point), and can be RELOCATED by the
+    /// user to any folder via `setModelsDirectory` (persisted). `@MainActor
+    /// private(set) var` rather than `nonisolated let` so a relocation takes effect
+    /// live: the one detached scan (`refreshCachedModels`) already snapshots it into a
+    /// local before hopping off the actor, so there is no cross-actor read.
+    private(set) var cacheDir: String
     private nonisolated let launchAgentPlistPath: String
 
     private let defaults: UserDefaults
@@ -249,8 +256,10 @@ final class MLXService: ObservableObject {
             .appendingPathComponent("bin/python3")
         serverLogPath = Self.serverLogPath(paths: paths)
         // Injectable so a unit test never scans the user's real multi-GB HF cache
-        // (production defaults to it); production callers pass nothing.
-        self.cacheDir = cacheDir ?? HFCache.defaultCacheDir()
+        // (production defaults to it); production callers pass nothing. The
+        // production default honors a user relocation (`setModelsDirectory`) first,
+        // then the standard HF env/default resolution.
+        self.cacheDir = cacheDir ?? Self.resolvedCacheDir(defaults: defaults)
         let agentsDir =
             launchAgentsDir
             ?? (NSHomeDirectory() as NSString).appendingPathComponent("Library/LaunchAgents")
@@ -425,6 +434,71 @@ final class MLXService: ObservableObject {
         terminateServerProcess(process)
     }
 
+    // MARK: - Models directory (relocatable HF hub cache)
+
+    /// UserDefaults key for a user-relocated models directory. Absent/empty means
+    /// "use the default HF cache location". Not a secret, so UserDefaults.
+    /// `nonisolated`: a plain constant, referenced from `init` and tests alike.
+    nonisolated static let customModelsDirKey = "mlx.customModelsDir"
+
+    /// The effective hub cache dir: an explicit user relocation wins, else the
+    /// standard `HF_HOME`/`HUGGINGFACE_HUB_CACHE`/default resolution
+    /// (`HFCache.defaultCacheDir`). `nonisolated` + pure in its inputs (reads only
+    /// the passed `defaults`/`env`, no actor state), so it is callable from `init`
+    /// and directly testable without hopping onto the main actor.
+    nonisolated static func resolvedCacheDir(
+        defaults: UserDefaults, env: [String: String] = ProcessInfo.processInfo.environment
+    ) -> String {
+        if let custom = defaults.string(forKey: customModelsDirKey),
+            !custom.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        {
+            return (custom as NSString).expandingTildeInPath
+        }
+        return HFCache.defaultCacheDir(env: env)
+    }
+
+    /// Whether the user has relocated the models folder off the default.
+    var isUsingCustomModelsDir: Bool {
+        let custom = defaults.string(forKey: Self.customModelsDirKey) ?? ""
+        return !custom.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    /// Relocate the models folder (or reset to default with `nil`/empty). Persists
+    /// the choice, re-resolves `cacheDir`, ensures the folder exists, and rescans so
+    /// the cached-models list follows immediately. The running server keeps serving
+    /// from the OLD folder until it is restarted (it reads the HF cache env only at
+    /// launch — `mlxSubprocessEnvironment`); the UI surfaces that. No auto-restart,
+    /// to avoid racing the port teardown.
+    func setModelsDirectory(_ path: String?) {
+        let trimmed = path?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        if trimmed.isEmpty {
+            defaults.removeObject(forKey: Self.customModelsDirKey)
+        } else {
+            defaults.set(
+                (trimmed as NSString).expandingTildeInPath, forKey: Self.customModelsDirKey)
+        }
+        cacheDir = Self.resolvedCacheDir(defaults: defaults)
+        try? FileManager.default.createDirectory(
+            atPath: cacheDir, withIntermediateDirectories: true)
+        refreshCachedModels()
+    }
+
+    /// Environment for every `mlx_lm` / `huggingface_hub` subprocess: inherits the
+    /// app env, silences tqdm (unreadable in a log file), and PINS the HF hub cache
+    /// to `cacheDir` so BOTH model loads and downloads use the (possibly relocated)
+    /// models folder. Load-bearing: a GUI/launchd-spawned app never exports
+    /// `HF_HOME`, so without this the subprocess silently falls back to
+    /// `~/.cache/huggingface` even when the scanner points elsewhere — the read/serve
+    /// split that made a relocated folder look empty. Read on the MainActor; callers
+    /// pass the resulting value (a Sendable dictionary) into detached jobs.
+    var mlxSubprocessEnvironment: [String: String] {
+        var env = ProcessInfo.processInfo.environment
+        env["HF_HUB_DISABLE_PROGRESS_BARS"] = "1"
+        env["HF_HUB_CACHE"] = cacheDir
+        env["HUGGINGFACE_HUB_CACHE"] = cacheDir
+        return env
+    }
+
     private func launchServerProcess() {
         var config = serverConfig
         // A "~/…" model is legal in the UI but not to Python: expand it here (the
@@ -447,10 +521,10 @@ final class MLXService: ObservableObject {
         process.executableURL = URL(fileURLWithPath: venvPython)
         process.arguments = arguments
         // tqdm redraws are unreadable in a log file; models should be pre-pulled
-        // via the Models section (which shows live progress) anyway.
-        var environment = ProcessInfo.processInfo.environment
-        environment["HF_HUB_DISABLE_PROGRESS_BARS"] = "1"
-        process.environment = environment
+        // via the Models section (which shows live progress) anyway. The env also
+        // pins the HF hub cache to `cacheDir`, so the server loads from — and
+        // downloads any missing model into — the (possibly relocated) models folder.
+        process.environment = mlxSubprocessEnvironment
         process.standardInput = FileHandle.nullDevice
         process.standardOutput = logHandle
         process.standardError = logHandle
@@ -1185,6 +1259,9 @@ final class MLXService: ObservableObject {
             return
         }
         let python = venvPython
+        // Snapshot the HF-cache-pinned env on the MainActor; the detached job step
+        // captures it by value so the download lands in the relocated models folder.
+        let jobEnv = mlxSubprocessEnvironment
         startJob(
             .download, "Download \(repoID)",
             onFinish: { [weak self] success in
@@ -1197,7 +1274,8 @@ final class MLXService: ObservableObject {
                 self?.refreshCachedModels()
             }
         ) { [self] in
-            try await runJobStep(python, MLXCommand.downloadArguments(repoID: repoID))
+            try await runJobStep(
+                python, MLXCommand.downloadArguments(repoID: repoID), environment: jobEnv)
         }
     }
 

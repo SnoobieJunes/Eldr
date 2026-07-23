@@ -26,6 +26,11 @@ let package = Package(
         // actually spawn to read REAL secure chat. NO MCP logic — it just bridges
         // the editor's stdio to the loopback socket the unlocked app is hosting.
         .executable(name: "pqrc-mcp-bridge", targets: ["pqrc-mcp-bridge"]),
+        // The GOOSE EXTENSION (GOOSEWORLD WS-G3): the binary a goosetown loads to
+        // reach other towns' walls. Same shim posture as pqrc-mcp-bridge — it pipes
+        // the goosetown's stdio to the loopback socket the unlocked node hosts, so
+        // the agent identity key never leaves the node (SPEC §13.5).
+        .executable(name: "eldr-gooseworld", targets: ["eldr-gooseworld"]),
     ],
     targets: [
         .target(name: "PQRCMCP"),
@@ -33,6 +38,8 @@ let package = Package(
         // Deliberately depends on NOTHING (not even PQRCMCP): it carries no
         // protocol knowledge, only raw byte plumbing.
         .executableTarget(name: "pqrc-mcp-bridge"),
+        // Same rule, same reason: no protocol knowledge, no keys, only byte plumbing.
+        .executableTarget(name: "eldr-gooseworld"),
         .testTarget(name: "PQRCMCPTests", dependencies: ["PQRCMCP"]),
     ]
 )
