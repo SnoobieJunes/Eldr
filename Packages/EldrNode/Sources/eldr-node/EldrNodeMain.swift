@@ -5,7 +5,9 @@ import Foundation
 import PQRCACP
 import PQRCCore
 import PQRCNostr
+#if canImport(os)
 import os
+#endif
 
 /// `eldr-node` — the STANDALONE HEADLESS node (ACPRouterplan Phase 4: "run the host on
 /// another machine"). It loads/creates the node's PQRC identity from the macOS Keychain,
@@ -95,7 +97,7 @@ struct EldrNodeMain {
             // Load/create the node identity from the Keychain (inv. 10 access rules; key
             // bytes never logged). Each secret is independent so a partial prior run still
             // resolves the rest.
-            let keychain = NodeKeychain()
+            let keychain = try makeIdentityStore()
             let nostrKeypair = try loadOrCreateNostrKeypair(keychain)
             let identity = try loadOrCreatePQRCIdentity(keychain)
             let identityDH = try loadOrCreateIdentityDH(keychain)
@@ -112,7 +114,7 @@ struct EldrNodeMain {
             // seeded by `--import-token` — never the env file.
             var llmEnv = env
             if llmEnv["ELDR_LLM_TOKEN"]?.nonEmpty == nil,
-                let stored = NodeKeychain().load(account: tokenAccount),
+                let stored = keychain.load(account: tokenAccount),
                 let token = String(data: stored, encoding: .utf8)?.nonEmpty
             {
                 llmEnv["ELDR_LLM_TOKEN"] = token
@@ -153,11 +155,11 @@ struct EldrNodeMain {
                 : OpenAICompatibleLLMClient(config: llmConfig)
             let harnessDescriptor: HarnessDescriptor
             if let cloudHarness, cloudHarness.kind == .a2aRemote {
-                let bearerToken = NodeKeychain().load(account: a2aBearerAccount(for: cloudHarness.id))
+                let bearerToken = keychain.load(account: a2aBearerAccount(for: cloudHarness.id))
                     .flatMap { String(data: $0, encoding: .utf8) }
                 harnessDescriptor = cloudHarness.withBearerToken(bearerToken)
             } else if let cloudHarness {
-                let vendorKey = NodeKeychain().load(account: vendorKeyAccount(for: cloudHarness.id))
+                let vendorKey = keychain.load(account: vendorKeyAccount(for: cloudHarness.id))
                     .flatMap { String(data: $0, encoding: .utf8) }
                 harnessDescriptor = cloudHarness.withVendorKey(vendorKey)
             } else {
@@ -278,7 +280,7 @@ struct EldrNodeMain {
             exit(2)
         }
         do {
-            try NodeKeychain().save(Data(token.utf8), account: tokenAccount)
+            try makeIdentityStore().save(Data(token.utf8), account: tokenAccount)
             FileHandle.standardError.write(Data(
                 "eldr-node: LLM token imported to the Keychain (account \(tokenAccount)).\n".utf8))
         } catch {
@@ -309,7 +311,7 @@ struct EldrNodeMain {
             HarnessRegistry.descriptor(id: harnessID)?.kind == .a2aRemote
             ? a2aBearerAccount(for: harnessID) : vendorKeyAccount(for: harnessID)
         do {
-            try NodeKeychain().save(Data(key.utf8), account: account)
+            try makeIdentityStore().save(Data(key.utf8), account: account)
             FileHandle.standardError.write(Data(
                 "eldr-node: vendor key for \(harnessID) imported to the Keychain.\n".utf8))
         } catch {
@@ -328,7 +330,7 @@ struct EldrNodeMain {
         let relayURL =
             arguments["relay"]?.nonEmpty ?? env["PQRC_RELAY_URL"]?.nonEmpty
         do {
-            let keypair = try loadOrCreateNostrKeypair(NodeKeychain())
+            let keypair = try loadOrCreateNostrKeypair(makeIdentityStore())
             print(pairingLink(npub: keypair.npub, relay: relayURL))
         } catch {
             FileHandle.standardError.write(Data(
@@ -352,7 +354,7 @@ struct EldrNodeMain {
 
     // MARK: - Identity load-or-create (macOS Keychain; key bytes never logged)
 
-    private static func loadOrCreateNostrKeypair(_ keychain: NodeKeychain) throws -> NostrKeypair {
+    private static func loadOrCreateNostrKeypair(_ keychain: any IdentityStore) throws -> NostrKeypair {
         if let data = keychain.load(account: "node-nostr-key") {
             return try NostrKeypair(privateKey: data)
         }
@@ -361,7 +363,7 @@ struct EldrNodeMain {
         return keypair
     }
 
-    private static func loadOrCreatePQRCIdentity(_ keychain: NodeKeychain) throws -> PQRCIdentity {
+    private static func loadOrCreatePQRCIdentity(_ keychain: any IdentityStore) throws -> PQRCIdentity {
         if let seed = keychain.load(account: "node-pqrc-identity-seed") {
             return try PQRCIdentity(seed: seed)
         }
@@ -371,7 +373,7 @@ struct EldrNodeMain {
     }
 
     private static func loadOrCreateIdentityDH(
-        _ keychain: NodeKeychain
+        _ keychain: any IdentityStore
     ) throws -> Curve25519.KeyAgreement.PrivateKey {
         if let seed = keychain.load(account: "node-identity-dh") {
             return try Curve25519.KeyAgreement.PrivateKey(rawRepresentation: seed)
@@ -383,7 +385,7 @@ struct EldrNodeMain {
     }
 
     private static func loadOrCreatePrekeyManager(
-        _ keychain: NodeKeychain, identity: PQRCIdentity
+        _ keychain: any IdentityStore, identity: PQRCIdentity
     ) async throws -> PrekeyManager {
         let manager: PrekeyManager
         if let blob = keychain.load(account: "node-prekey-state"),

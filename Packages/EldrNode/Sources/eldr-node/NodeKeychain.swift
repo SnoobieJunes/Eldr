@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
+#if canImport(Security)
 import Foundation
 import Security
 
@@ -17,7 +18,7 @@ import Security
 /// A tiny generic-password Keychain box, scoped to one service. Used by `eldr-node` to
 /// load-or-create its Nostr identity, PQRC identity seed, identity-DH seed, and prekey
 /// state across restarts.
-struct NodeKeychain {
+struct NodeKeychain: IdentityStore {
     let service: String
 
     init(service: String = "org.eldr.node") {
@@ -72,3 +73,4 @@ struct NodeKeychain {
 enum NodeKeychainError: Error {
     case unhandled(OSStatus)
 }
+#endif  // canImport(Security)
