@@ -14,12 +14,19 @@ import NIOWebSocket
 // the URLSession path does on Apple. Client frames are masked per RFC 6455; ping is answered
 // with a masked pong; a server close finishes the inbound stream.
 
-public enum NIOWebSocketError: Error, Sendable { case badURL, notConnected }
+public enum NIOWebSocketError: Error, Sendable { case badURL, notConnected, upgradeTimedOut }
 
+// @unchecked Sendable JUSTIFICATION (CLAUDE.md requires a written one): the only mutable fields
+// (`channel`, `pingTask`) are assigned exactly once inside `connect()` — which the owning
+// `NIONostrTransport` actor calls before any `send`/`close` uses the instance — and are read-only
+// thereafter (write-once). The inbound `AsyncStream.Continuation` is itself thread-safe (yield /
+// finish are safe from any thread). No field is mutated concurrently, so the class presents a
+// data-race-free interface across tasks.
 public final class NIOWebSocketChannel: @unchecked Sendable {
     private let group: EventLoopGroup
     private let ownsGroup: Bool
     private var channel: Channel?
+    private var pingTask: Task<Void, Never>?
     private let inbound: AsyncStream<String>
     private let inboundCont: AsyncStream<String>.Continuation
 
@@ -56,8 +63,19 @@ public final class NIOWebSocketChannel: @unchecked Sendable {
             .channelInitializer { channel in
                 let upgrader = NIOWebSocketClientUpgrader(
                     requestKey: requestKey,
+                    // Relay events are padded to buckets up to 64 KiB and gift-wrapped, so they
+                    // exceed the 16 KiB default frame size — a small default silently tears the
+                    // socket down on the first real event. Cap at 1 MiB and aggregate fragments.
+                    maxFrameSize: 1 << 20,
                     upgradePipelineHandler: { channel, _ in
-                        channel.pipeline.addHandler(WSInboundHandler(continuation: cont))
+                        channel.pipeline.addHandler(
+                            NIOWebSocketFrameAggregator(
+                                minNonFinalFragmentSize: 0,
+                                maxAccumulatedFrameCount: 1 << 12,
+                                maxAccumulatedFrameSize: 4 << 20)
+                        ).flatMap {
+                            channel.pipeline.addHandler(WSInboundHandler(continuation: cont))
+                        }
                     })
                 let upgradeConfig: NIOHTTPClientUpgradeConfiguration = (
                     upgraders: [upgrader],
@@ -97,7 +115,40 @@ public final class NIOWebSocketChannel: @unchecked Sendable {
             version: .http1_1, method: .GET, uri: uri, headers: headers)
         opened.write(HTTPClientRequestPart.head(requestHead), promise: nil)
         opened.writeAndFlush(HTTPClientRequestPart.end(nil)).cascadeFailure(to: upgradePromise)
-        try await upgradePromise.futureResult.get()
+
+        // Bound the upgrade wait: a well-formed non-101 response (a Cloudflare 4xx/5xx / challenge
+        // page / redirect) takes swift-nio's "not upgrading" path, which resolves nothing — so
+        // without this the daemon hangs forever at startup. Race the upgrade against a deadline;
+        // on timeout, close the channel and throw a clean error.
+        try await withThrowingTaskGroup(of: Void.self) { taskGroup in
+            taskGroup.addTask { try await upgradePromise.futureResult.get() }
+            taskGroup.addTask {
+                try await Task.sleep(for: .seconds(15))
+                throw NIOWebSocketError.upgradeTimedOut
+            }
+            do {
+                try await taskGroup.next()
+                taskGroup.cancelAll()
+            } catch {
+                taskGroup.cancelAll()
+                try? await opened.close().get()
+                throw error
+            }
+        }
+
+        // Keep-alive: a masked ping every 30 s so an idle connection isn't dropped by an
+        // intermediary (this relay sits behind Cloudflare, which closes idle WebSockets ~100 s).
+        let pingChannel = opened
+        pingTask = Task {
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .seconds(30))
+                guard pingChannel.isActive else { break }
+                let ping = WebSocketFrame(
+                    fin: true, opcode: .ping, maskKey: Self.randomMask(),
+                    data: pingChannel.allocator.buffer(capacity: 0))
+                _ = try? await pingChannel.writeAndFlush(ping).get()
+            }
+        }
     }
 
     public func send(text: String) async throws {
@@ -110,6 +161,7 @@ public final class NIOWebSocketChannel: @unchecked Sendable {
     }
 
     public func close() async {
+        pingTask?.cancel()
         try? await channel?.close().get()
         inboundCont.finish()
         if ownsGroup { try? await group.shutdownGracefully() }

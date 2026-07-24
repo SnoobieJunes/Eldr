@@ -43,6 +43,7 @@ struct NIOWebSocketChannelTests {
             .serverChannelOption(ChannelOptions.socketOption(.so_reuseaddr), value: 1)
             .childChannelInitializer { channel in
                 let upgrader = NIOWebSocketServerUpgrader(
+                    maxFrameSize: 1 << 20,
                     shouldUpgrade: { channel, _ in
                         channel.eventLoop.makeSucceededFuture(HTTPHeaders())
                     },
@@ -63,6 +64,13 @@ struct NIOWebSocketChannelTests {
         try await client.send(text: "hello nostr over nio")
         let received = await iterator.next()
         #expect(received == "hello nostr over nio")
+        // Regression (audit finding 1): a frame larger than the 16 KiB default must survive —
+        // relay events (padded to buckets up to 64 KiB, gift-wrapped) routinely exceed it, and a
+        // too-small maxFrameSize silently tore the socket down on the first real event.
+        let big = String(repeating: "x", count: 20_000)
+        try await client.send(text: big)
+        let receivedBig = await iterator.next()
+        #expect(receivedBig == big)
         await client.close()
         try? await group.shutdownGracefully()
     }

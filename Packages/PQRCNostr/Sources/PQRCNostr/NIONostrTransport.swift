@@ -13,7 +13,7 @@ import PQRCCore
 // leaves currentStatus/checkConnection/maxContentLength/transportEvents to protocol defaults.
 public actor NIONostrTransport: RelayTransport {
     public nonisolated let url: URL
-    private let channel: NIOWebSocketChannel
+    private var channel: NIOWebSocketChannel
     private let responseTimeout: Duration
     private var receiveTask: Task<Void, Never>?
     private var connected = false
@@ -38,11 +38,24 @@ public actor NIONostrTransport: RelayTransport {
     /// URLSession transport's `transports: [await transport.connect()]` shape.
     @discardableResult
     public func connect() async throws -> NIONostrTransport {
-        guard !connected else { return self }
-        try await channel.connect(url: url)
+        try await ensureConnected()
+        return self
+    }
+
+    /// Dial the relay if not currently connected, (re)creating a FRESH channel each time — the
+    /// NIO channel's inbound stream is single-use, so a redial can't reuse it. The messenger's
+    /// recovery loop drives publish/subscribe after a drop and each call lands here, honoring the
+    /// Apple transport's lazy-`ensureConnected` redial contract (so one blip is not fatal).
+    private func ensureConnected() async throws {
+        if connected { return }
+        receiveTask?.cancel()
+        await channel.close()  // tear down the stale channel (idempotent) before redialing
+        let fresh = NIOWebSocketChannel()
+        try await fresh.connect(url: url)
+        channel = fresh
         connected = true
         statusState = .connected
-        let inbound = channel.inboundText()
+        let inbound = fresh.inboundText()
         receiveTask = Task { [weak self] in
             for await line in inbound {
                 guard let self else { return }
@@ -52,18 +65,18 @@ public actor NIONostrTransport: RelayTransport {
             }
             await self?.handleDisconnect()
         }
-        return self
     }
 
     public func currentStatus() async -> RelayStatus { statusState }
 
     public func publish(_ event: NostrEvent) async throws -> PublishAck {
-        guard connected else { throw NostrError.publishDropped }
+        try await ensureConnected()
         try await channel.send(text: NostrWire.encode(.event(event)))
         return try await awaitOK(eventID: event.id, error: .publishDropped)
     }
 
     public func subscribe(_ filters: [NostrFilter]) async -> AsyncThrowingStream<NostrEvent, Error> {
+        try? await ensureConnected()  // best-effort redial; a still-dead channel fails the send below
         nextSubscriptionNumber += 1
         let subscriptionID = "pqrc-sub-\(nextSubscriptionNumber)"
         let (stream, continuation) = AsyncThrowingStream<NostrEvent, Error>.makeStream()
@@ -84,6 +97,7 @@ public actor NIONostrTransport: RelayTransport {
     }
 
     public func authenticate(keypair: NostrKeypair, randomSource: any RandomSource) async throws {
+        try await ensureConnected()
         // The challenge may already be here (relays send it on connect) or still in flight.
         let challenge: String
         if let authChallenge {
@@ -110,7 +124,11 @@ public actor NIONostrTransport: RelayTransport {
                 content: ""),
             randomSource: randomSource)
         try await channel.send(text: NostrWire.encode(.auth(authEvent)))
-        _ = try await awaitOK(eventID: authEvent.id, error: .notAuthenticated)
+        // The relay's OK verdict is authoritative: a rejected AUTH must THROW (fail-closed),
+        // never report success — otherwise the messenger's auth-recovery loop never backs off
+        // and spins forever against an AUTH-gated relay. Mirrors NostrWebSocketTransport.
+        let ack = try await awaitOK(eventID: authEvent.id, error: .notAuthenticated)
+        guard ack.accepted else { throw NostrError.notAuthenticated }
     }
 
     // MARK: - Inbound dispatch
