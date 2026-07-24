@@ -227,8 +227,8 @@ struct ACPProxyTests {
     }
 
     // 3b ─ Kind/provisional discipline: every non-built-in is a `.stdioSpawn` with a non-empty
-    // command; the three remaining Phase-2 placeholders are flagged provisional (commands to
-    // confirm), while the built-in, the two installed launchers, AND claude-code/gemini-cli
+    // command; the Phase-2 placeholders and the not-yet-installed `hermes-acp` (AC140) are flagged
+    // provisional (commands to confirm), while the built-in, the two installed launchers, AND claude-code/gemini-cli
     // (WS3d — confirmed against the real installed binaries, see HarnessDescriptor.swift) are
     // NOT.
     @Test func descriptorKindsAndProvisionalFlagsAreConsistent() {
@@ -240,7 +240,9 @@ struct ACPProxyTests {
 
         let provisional = Set(
             HarnessRegistry.all.filter { $0.isProvisional }.map { $0.id })
-        #expect(provisional == ["codex", "opencode", "cursor", "a2a-local-sample"])
+        // `hermes-acp` is provisional too (AC140): Hermes is not installed on the dev machine,
+        // so its command/args are the documented launch invocation, not a verified handshake.
+        #expect(provisional == ["codex", "opencode", "cursor", "hermes-acp", "a2a-local-sample"])
         // Installed/built-in/WS3d-verified are confirmed, not provisional.
         #expect(HarnessRegistry.descriptor(id: "xcode-acp")?.isProvisional == false)
         #expect(HarnessRegistry.descriptor(id: "openclaw")?.isProvisional == false)
