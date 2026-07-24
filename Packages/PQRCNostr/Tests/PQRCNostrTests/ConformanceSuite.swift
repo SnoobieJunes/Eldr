@@ -117,6 +117,9 @@ struct ConformanceSuiteTests {
     /// socket, so it is opt-in per the CLAUDE.md "no unit test touches the
     /// network" rule:
     ///   PQRC_LOOPBACK_TESTS=1 swift test --package-path Packages/PQRCNostr
+    // These two loopback conformance tests drive NostrRelayServer (Network.framework) and the
+    // URLSession transport — both Apple-only — so they compile on Apple platforms only.
+    #if canImport(Network)
     @Test(.enabled(if: ProcessInfo.processInfo.environment["PQRC_LOOPBACK_TESTS"] == "1"))
     func swapPoint_webSocketLoopbackConformance() async throws {
         let relay = LocalRelaySimulator(url: "ws://127.0.0.1:0")
@@ -158,6 +161,7 @@ struct ConformanceSuiteTests {
         #expect(events.contains(.authChallenge))
         #expect(events.contains { if case .eose = $0 { return true } else { return false } })
     }
+    #endif  // canImport(Network)
 
     /// Acceptance gate against a deployed relay (e.g. wss://relay.lerants.com).
     /// Requires the relay to implement NIP-42 AUTH with anchor-relay kind-1059

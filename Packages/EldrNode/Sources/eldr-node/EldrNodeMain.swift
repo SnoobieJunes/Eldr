@@ -103,7 +103,14 @@ struct EldrNodeMain {
             let identityDH = try loadOrCreateIdentityDH(keychain)
             let prekeyManager = try await loadOrCreatePrekeyManager(keychain, identity: identity)
 
-            let transport = await NostrWebSocketTransport(url: relayWSURL).connect()
+            let transport: any RelayTransport
+            #if canImport(Network)
+            transport = await NostrWebSocketTransport(url: relayWSURL).connect()
+            #else
+            // Linux: URLSessionWebSocketTask can't connect ("WebSockets not supported by
+            // libcurl"), so dial the relay over SwiftNIO instead (WS-L5).
+            transport = try await NIONostrTransport(url: relayWSURL).connect()
+            #endif
             let messenger = try PQRCMessenger(
                 identity: identity, nostrKeypair: nostrKeypair, prekeyManager: prekeyManager,
                 identityDH: identityDH, transports: [transport], clock: SystemClock(),
