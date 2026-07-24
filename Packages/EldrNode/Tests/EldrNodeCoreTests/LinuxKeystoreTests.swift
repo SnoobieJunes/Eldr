@@ -125,4 +125,33 @@ struct LinuxKeystoreTests {
                 tpmPresent: { false })
         }
     }
+
+    /// A half-present keystore (only master.wrap OR only master.salt) must fail closed, never
+    /// silently mint a fresh master key and orphan the existing identity (audit finding 6).
+    @Test func partialKeystoreRefusesRatherThanRemint() throws {
+        let dir = tempDir(); defer { try? FileManager.default.removeItem(at: dir) }
+        let env = ["ELDR_NODE_DATA_DIR": dir.path, "ELDR_KEYSTORE_PASSPHRASE": "pw"]
+        _ = try makeLinuxIdentityStore(environment: env, tpmPresent: { false })  // writes wrap + salt
+        try FileManager.default.removeItem(at: dir.appendingPathComponent("master.salt"))
+        #expect(throws: LinuxKeystoreError.self) {
+            _ = try makeLinuxIdentityStore(environment: env, tpmPresent: { false })
+        }
+    }
+
+    /// A systemd credential is only labelled `.tpmSealed` when a TPM is actually present —
+    /// otherwise the posture must not overclaim hardware backing (audit finding 7 / invariant 10).
+    @Test func systemdCredentialWithoutTpmIsNotClaimedHardwareBacked() throws {
+        let credDir = tempDir(); defer { try? FileManager.default.removeItem(at: credDir) }
+        try FileIdentityStore.writeFile(
+            credDir.appendingPathComponent("eldr-node-master"),
+            SymmetricKey(size: .bits256).withUnsafeBytes { Data($0) })
+        let dir = tempDir(); defer { try? FileManager.default.removeItem(at: dir) }
+        let env = ["ELDR_NODE_DATA_DIR": dir.path, "CREDENTIALS_DIRECTORY": credDir.path]
+        let (_, noTpm) = try makeLinuxIdentityStore(environment: env, tpmPresent: { false })
+        #expect(noTpm == .systemdCredential)
+        #expect(!noTpm.isHardwareBacked)
+        let (_, withTpm) = try makeLinuxIdentityStore(environment: env, tpmPresent: { true })
+        #expect(withTpm == .tpmSealed)
+        #expect(withTpm.isHardwareBacked)
+    }
 }

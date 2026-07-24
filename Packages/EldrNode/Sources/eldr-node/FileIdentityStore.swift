@@ -38,6 +38,10 @@ import Darwin
 enum KeystorePosture: String, Sendable {
     /// Master key delivered by systemd-creds, sealed to the TPM outside the process.
     case tpmSealed
+    /// A systemd credential supplied the master key, but a TPM is NOT present on this host, so
+    /// hardware sealing cannot be claimed — the credential may be an unencrypted `LoadCredential`
+    /// / `SetCredential`. Honest middle rung: no silent "TPM-backed" overclaim (invariant 10).
+    case systemdCredential
     /// scrypt KEK, passphrase typed interactively — no passphrase trace on disk.
     case passphraseTyped
     /// scrypt KEK, passphrase from env/file so the daemon can restart unattended — WEAK:
@@ -52,6 +56,9 @@ enum KeystorePosture: String, Sendable {
         switch self {
         case .tpmSealed:
             return "keystore: TPM-sealed master key (systemd-creds) — hardware-backed, unattended-safe."
+        case .systemdCredential:
+            return "keystore: master key from a systemd credential, but NO TPM is present — ⚠️ sealing "
+                + "is not verifiable in-process; hardware backing is unconfirmed (invariant 10)."
         case .passphraseTyped:
             return "keystore: scrypt-passphrase master key, typed interactively — no on-disk passphrase."
         case .passphraseOnDisk:
@@ -231,7 +238,9 @@ private func resolveMasterKey(
     if let credDir = env["CREDENTIALS_DIRECTORY"], !credDir.isEmpty {
         let credURL = URL(fileURLWithPath: credDir).appendingPathComponent("eldr-node-master")
         if let raw = try? Data(contentsOf: credURL), raw.count == 32 {
-            return (SymmetricKey(data: raw), .tpmSealed)
+            // Only claim hardware sealing when a TPM is actually present — a systemd credential
+            // alone does not prove it was TPM-sealed (it could be a plain LoadCredential=).
+            return (SymmetricKey(data: raw), tpmPresent() ? .tpmSealed : .systemdCredential)
         }
     }
 
@@ -278,7 +287,14 @@ private func unwrapOrInitMaster(directory: URL, passphrase: String) throws -> Sy
     let saltURL = directory.appendingPathComponent("master.salt")
     let fm = FileManager.default
 
-    if fm.fileExists(atPath: wrapURL.path), fm.fileExists(atPath: saltURL.path),
+    // Exactly ONE of the pair present ⇒ a corrupt / half-written keystore. Refuse rather than
+    // fall through to first-run, which would silently mint a fresh master key and orphan every
+    // existing *.enc identity blob (fail-closed, the file's own contract).
+    let wrapExists = fm.fileExists(atPath: wrapURL.path)
+    let saltExists = fm.fileExists(atPath: saltURL.path)
+    if wrapExists != saltExists { throw LinuxKeystoreError.corruptMasterWrap }
+
+    if wrapExists, saltExists,
         let salt = try? Data(contentsOf: saltURL), let wrapped = try? Data(contentsOf: wrapURL)
     {
         let kek = try LinuxKeystoreScrypt.kek(passphrase: passphrase, salt: salt)
