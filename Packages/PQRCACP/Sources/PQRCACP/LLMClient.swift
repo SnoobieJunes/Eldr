@@ -107,6 +107,25 @@ public enum LLMError: Error, Sendable, Equatable {
     case badResponse(String)
 }
 
+/// Token usage as reported by an OpenAI-compatible endpoint's `usage` object
+/// (the MLX/LM Studio/vLLM servers all include it). All fields optional — a
+/// server that omits `usage` yields all-nil, which callers MUST NOT record as
+/// zero (NIP-AM §Numeric validity). Surfaced via `usageObserver` so callers
+/// like the Buzz gateway can emit honest NIP-AM turn metrics with REAL counts.
+public struct LLMUsage: Sendable, Equatable {
+    public var promptTokens: Int?
+    public var completionTokens: Int?
+    public var totalTokens: Int?
+    public init(promptTokens: Int? = nil, completionTokens: Int? = nil, totalTokens: Int? = nil) {
+        self.promptTokens = promptTokens
+        self.completionTokens = completionTokens
+        self.totalTokens = totalTokens
+    }
+    public var hasAnyCount: Bool {
+        promptTokens != nil || completionTokens != nil || totalTokens != nil
+    }
+}
+
 /// The seam the agent talks to. Production: `OpenAICompatibleLLMClient`. Tests:
 /// `MockLLMClient`. Executable smoke test: `EchoLLMClient`.
 public protocol LLMClient: Sendable {
@@ -216,14 +235,20 @@ public struct OpenAICompatibleLLMClient: LLMClient {
     /// host, the node, the CLI): the stripped `LLMResponse`/`onDelta` path is identical.
     /// Must be `@Sendable` (the SSE read runs off the caller's actor).
     private let rawObserver: (@Sendable (String) -> Void)?
+    /// Optional tap on the response `usage` object (token counts). Called once
+    /// per non-streamed `complete` when the endpoint reports usage. Default nil
+    /// ⇒ no observation and zero behavior change for every existing caller.
+    private let usageObserver: (@Sendable (LLMUsage) -> Void)?
 
     public init(
         config: LLMConfig, session: URLSession? = nil,
-        rawObserver: (@Sendable (String) -> Void)? = nil
+        rawObserver: (@Sendable (String) -> Void)? = nil,
+        usageObserver: (@Sendable (LLMUsage) -> Void)? = nil
     ) {
         self.config = config
         self.session = session ?? Self.makeSession(timeout: config.requestTimeoutSeconds)
         self.rawObserver = rawObserver
+        self.usageObserver = usageObserver
     }
 
     /// An ephemeral session whose request/resource timeouts match the configured
@@ -298,6 +323,15 @@ public struct OpenAICompatibleLLMClient: LLMClient {
             !raw.isEmpty
         {
             rawObserver(raw)
+        }
+        // Usage tap: surface the endpoint's token counts (NIP-AM honesty). Only
+        // fires when a `usage` object is present with at least one count.
+        if let usageObserver, let usage = json["usage"] {
+            let parsed = LLMUsage(
+                promptTokens: usage["prompt_tokens"]?.intValue,
+                completionTokens: usage["completion_tokens"]?.intValue,
+                totalTokens: usage["total_tokens"]?.intValue)
+            if parsed.hasAnyCount { usageObserver(parsed) }
         }
         return try Self.decode(json)
     }

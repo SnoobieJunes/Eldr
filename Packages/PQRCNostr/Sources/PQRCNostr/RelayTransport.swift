@@ -8,22 +8,28 @@ public struct NostrFilter: Sendable, Equatable, Codable {
     public var kinds: [Int]?
     public var authors: [String]?
     public var pTags: [String]?
+    /// `#h` tag filter — the NIP-29 group/channel tag Buzz uses to scope a
+    /// subscription to one workspace channel. Additive: nil means "no `#h`
+    /// constraint" so every existing PQRC filter is unchanged.
+    public var hTags: [String]?
     public var ids: [String]?
     public var since: Int64?
 
     enum CodingKeys: String, CodingKey {
         case kinds, authors
         case pTags = "p_tags"
+        case hTags = "h_tags"
         case ids, since
     }
 
     public init(
         kinds: [Int]? = nil, authors: [String]? = nil, pTags: [String]? = nil,
-        ids: [String]? = nil, since: Int64? = nil
+        hTags: [String]? = nil, ids: [String]? = nil, since: Int64? = nil
     ) {
         self.kinds = kinds
         self.authors = authors
         self.pTags = pTags
+        self.hTags = hTags
         self.ids = ids
         self.since = since
     }
@@ -36,6 +42,10 @@ public struct NostrFilter: Sendable, Equatable, Codable {
         if let pTags {
             let eventPTags = event.tags.filter { $0.count >= 2 && $0[0] == "p" }.map { $0[1] }
             if !pTags.contains(where: eventPTags.contains) { return false }
+        }
+        if let hTags {
+            let eventHTags = event.tags.filter { $0.count >= 2 && $0[0] == "h" }.map { $0[1] }
+            if !hTags.contains(where: eventHTags.contains) { return false }
         }
         return true
     }

@@ -305,7 +305,19 @@ public actor NostrWebSocketTransport: RelayTransport {
         return stream
     }
 
+    /// `RelayTransport` conformance: standard NIP-42 AUTH with no extra tags.
     public func authenticate(keypair: NostrKeypair, randomSource: any RandomSource) async throws {
+        try await authenticate(keypair: keypair, randomSource: randomSource, extraTags: [])
+    }
+
+    /// Perform NIP-42 AUTH. `extraTags` are appended to the standard
+    /// `relay`/`challenge` tags — Buzz's owner-attested agent path requires the
+    /// NIP-OA `["auth", owner, conditions, sig]` tag here so the relay's
+    /// membership gate resolves the owner (see `NIPOA` and countdown-bot's
+    /// `build_auth_event`). Empty for ordinary strfry/khatru relays.
+    public func authenticate(
+        keypair: NostrKeypair, randomSource: any RandomSource, extraTags: [[String]]
+    ) async throws {
         ensureConnected()
         // The challenge may already be here (relays send it on connect) or
         // still in flight — wait for it either way.
@@ -332,7 +344,7 @@ public actor NostrWebSocketTransport: RelayTransport {
                 pubkey: keypair.publicKeyHex,
                 createdAt: Int64(Date().timeIntervalSince1970),
                 kind: 22242,
-                tags: [["relay", url.absoluteString], ["challenge", challenge]],
+                tags: [["relay", url.absoluteString], ["challenge", challenge]] + extraTags,
                 content: ""
             ), randomSource: randomSource)
         guard let socket else {
