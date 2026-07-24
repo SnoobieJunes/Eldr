@@ -15,6 +15,7 @@
 		AA0000000000000000000106 /* PQRCAgent in Frameworks */ = {isa = PBXBuildFile; productRef = AA0000000000000000000206 /* PQRCAgent */; };
 		AA0000000000000000000107 /* PQRCMCP in Frameworks */ = {isa = PBXBuildFile; productRef = AA0000000000000000000207 /* PQRCMCP */; };
 		AA0000000000000000000108 /* PQRCACP in Frameworks */ = {isa = PBXBuildFile; productRef = AA0000000000000000000208 /* PQRCACP */; };
+		AA0000000000000000000109 /* PQRCACP in Frameworks */ = {isa = PBXBuildFile; productRef = AA0000000000000000000209 /* PQRCACP */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -79,6 +80,7 @@
 				AA0000000000000000000104 /* PQRCCore in Frameworks */,
 				AA0000000000000000000105 /* PQRCNostr in Frameworks */,
 				AA0000000000000000000106 /* PQRCAgent in Frameworks */,
+				AA0000000000000000000109 /* PQRCACP in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -163,6 +165,7 @@
 				AA0000000000000000000204 /* PQRCCore */,
 				AA0000000000000000000205 /* PQRCNostr */,
 				AA0000000000000000000206 /* PQRCAgent */,
+				AA0000000000000000000209 /* PQRCACP */,
 			);
 			productName = PQRCTests;
 			productReference = AA0000000000000000000702 /* EldrChatTests.xctest */;
@@ -605,6 +608,10 @@
 			productName = PQRCMCP;
 		};
 		AA0000000000000000000208 /* PQRCACP */ = {
+			isa = XCSwiftPackageProductDependency;
+			productName = PQRCACP;
+		};
+		AA0000000000000000000209 /* PQRCACP */ = {
 			isa = XCSwiftPackageProductDependency;
 			productName = PQRCACP;
 		};
