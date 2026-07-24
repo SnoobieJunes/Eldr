@@ -51,7 +51,16 @@ public actor NIONostrTransport: RelayTransport {
         receiveTask?.cancel()
         await channel.close()  // tear down the stale channel (idempotent) before redialing
         let fresh = NIOWebSocketChannel()
-        try await fresh.connect(url: url)
+        do {
+            try await fresh.connect(url: url)
+        } catch {
+            // A failed dial must release `fresh`'s owned EventLoopGroup (one thread) — otherwise a
+            // daemon redialing against a down relay leaks a thread per attempt. `close()` shuts the
+            // owned group and finishes the inbound stream; `channel`/`connected` stay as they were,
+            // so the next operation retries cleanly.
+            await fresh.close()
+            throw error
+        }
         channel = fresh
         connected = true
         statusState = .connected

@@ -117,23 +117,24 @@ public final class NIOWebSocketChannel: @unchecked Sendable {
         opened.writeAndFlush(HTTPClientRequestPart.end(nil)).cascadeFailure(to: upgradePromise)
 
         // Bound the upgrade wait: a well-formed non-101 response (a Cloudflare 4xx/5xx / challenge
-        // page / redirect) takes swift-nio's "not upgrading" path, which resolves nothing — so
-        // without this the daemon hangs forever at startup. Race the upgrade against a deadline;
-        // on timeout, close the channel and throw a clean error.
-        try await withThrowingTaskGroup(of: Void.self) { taskGroup in
-            taskGroup.addTask { try await upgradePromise.futureResult.get() }
-            taskGroup.addTask {
-                try await Task.sleep(for: .seconds(15))
-                throw NIOWebSocketError.upgradeTimedOut
-            }
-            do {
-                try await taskGroup.next()
-                taskGroup.cancelAll()
-            } catch {
-                taskGroup.cancelAll()
-                try? await opened.close().get()
-                throw error
-            }
+        // page / redirect) takes swift-nio's "not upgrading" path, which resolves NOTHING — so
+        // without a deadline the daemon hangs forever at startup. The deadline is scheduled ON THE
+        // EVENT LOOP to FAIL the promise, NOT raced in a task group: `EventLoopFuture.get()` does
+        // not observe Swift task cancellation (it is documented not to), so a task-group race can
+        // never unblock the `get()` awaiting an unresolved promise — the group would hang at scope
+        // exit and the timeout would be inert. Failing the promise instead makes `get()` throw
+        // cleanly AND fulfills it, so it can't hit NIO's debug promise-leak precondition. `fail`
+        // after a `succeed` is an idempotent no-op (whichever the upgrade/timeout race wins stands),
+        // and completing the promise cancels the timer so it never lingers.
+        let upgradeTimeout = opened.eventLoop.scheduleTask(in: .seconds(15)) {
+            upgradePromise.fail(NIOWebSocketError.upgradeTimedOut)
+        }
+        upgradePromise.futureResult.whenComplete { _ in upgradeTimeout.cancel() }
+        do {
+            try await upgradePromise.futureResult.get()
+        } catch {
+            try? await opened.close().get()
+            throw error
         }
 
         // Keep-alive: a masked ping every 30 s so an idle connection isn't dropped by an
