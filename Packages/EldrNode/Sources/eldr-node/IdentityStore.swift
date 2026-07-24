@@ -17,31 +17,18 @@ protocol IdentityStore: Sendable {
     func delete(account: String)
 }
 
-enum IdentityStoreError: Error, CustomStringConvertible {
-    /// No hardened keystore conformance exists for this platform yet — fail closed rather
-    /// than write long-term secrets unwrapped (SPEC §0, invariant 10).
-    case noHardenedKeystore(String)
-    var description: String {
-        switch self {
-        case .noHardenedKeystore(let why): return why
-        }
-    }
-}
-
 /// Select the node's identity store for the current platform.
 /// - Apple: the Secure-Enclave-backed `NodeKeychain`.
-/// - Elsewhere (Linux): the hardware-wrapped file store is WS-L3 and not built yet, so this
-///   FAILS CLOSED — the `eldr-node` executable compiles and the port is unblocked, but the
-///   node refuses to run until invariant 10 is actually satisfied on this host. This is the
-///   exact seam WS-L3 fills (TPM-sealed via systemd-creds; scrypt-passphrase KEK fallback).
+/// - Linux: the `FileIdentityStore` ladder (WS-L3) — TPM-sealed via systemd-creds where a
+///   secure element exists, else a scrypt-passphrase KEK; fail-closed at every doubt. The
+///   RESOLVED posture is reported LOUDLY so an operator never gets a silent downgrade
+///   (invariant 10). The Linux fail-closed cases live in `LinuxKeystoreError`.
 func makeIdentityStore() throws -> any IdentityStore {
     #if canImport(Security)
     return NodeKeychain()
     #else
-    throw IdentityStoreError.noHardenedKeystore(
-        "eldr-node: no hardened keystore on this platform yet. The Linux keystore ladder "
-        + "(TPM-sealed via systemd-creds, or a scrypt-passphrase KEK where no secure element "
-        + "exists — invariant 10) is WS-L3 and not built. Refusing to store long-term secrets "
-        + "unwrapped (SPEC §0, fail-closed).")
+    let (store, posture) = try makeLinuxIdentityStore()
+    FileHandle.standardError.write(Data(("eldr-node: " + posture.report + "\n").utf8))
+    return store
     #endif
 }

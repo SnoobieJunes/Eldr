@@ -33,6 +33,13 @@ let package = Package(
         // (the same redacting/window-gating server the phone hosts). EldrNodeCore itself
         // does NOT depend on PQRCMCP — only the test target below does.
         .package(path: "../PQRCMCP"),
+        // WS-L3: scrypt (RFC 7914) for the Linux keystore's passphrase KEK, from swift-crypto's
+        // `_CryptoExtras` — a product of the ALREADY-pinned swift-crypto, so NO new crypto
+        // dependency (honors CLAUDE.md §2 + DEVIATIONS AC31; the port doc's "swift-crypto has no
+        // memory-hard KDF" was wrong — scrypt IS memory-hard and ships here). Compiled on all
+        // platforms so `FileIdentityStore` is unit-tested in the macOS suite; only SELECTED on
+        // Linux (see `makeIdentityStore`).
+        .package(url: "https://github.com/apple/swift-crypto.git", from: "4.3.1"),
     ],
     targets: [
         .target(
@@ -54,6 +61,10 @@ let package = Package(
                 "PQRCCore",
                 "PQRCNostr",
                 .product(name: "PQRCACP", package: "PQRCACP"),
+                // scrypt for the Linux keystore KEK (WS-L3), from swift-crypto's CryptoExtras
+                // module. Harmless on Apple (the macOS node uses NodeKeychain); linked so the
+                // store compiles + tests everywhere.
+                .product(name: "CryptoExtras", package: "swift-crypto"),
             ],
             swiftSettings: [.swiftLanguageMode(.v6)]
         ),
