@@ -448,6 +448,32 @@ grant. No public gooseworld artifact should ship before the Phase-2 hardening in
 is exercised on-device — connecting shells across a network without it is the one unforgivable
 version of this product (GOOSEWORLD §7, Phase 2).
 
+## 4b. Eldr↔Buzz gateway — E2EE termination at the bridge
+
+When Eldr hosts the local model as a member of a Block/Buzz workspace
+(`eldr-buzz-agent`, DEVIATIONS AC144, `docs/ELDR-BUZZ-INTEROP.md`), a deliberate
+crypto-boundary change occurs and MUST be understood, not discovered.
+
+A Buzz channel is **signed-not-E2EE plaintext**: every kind:9 message is a
+signed Nostr event whose content the Buzz relay operator can read. Eldr's own
+value proposition is the opposite — the relay is hostile and sees only
+ciphertext (§2.1–2.2). Bridging the two regimes necessarily terminates E2EE at
+the gateway: to post a reply into a Buzz channel the gateway MUST emit plaintext
+to the Buzz relay.
+
+| Threat | Mitigation | Status |
+|---|---|---|
+| **Silent E2EE downgrade** (a user assumes Buzz traffic has Eldr's confidentiality) | The gateway prints an explicit disclosure at startup (`BuzzGatewayConfig.disclosureBanner`): "messages this gateway posts are readable by that relay's operator." The boundary is a documented, deliberate decision, mirroring the transparency of the `ai_window` banner. | **Shipped** (AC144) |
+| **Third-party bridge operator** (someone other than the owner running the gateway sees the plaintext) | The gateway MUST be run by the workspace owner only; it holds the owner-attested agent key and the local-model endpoint. Documented as a hard operating rule. | **Policy** (AC144) |
+| **Uncontrolled egress of chat context toward the bridge** | The per-chat egress firewall is the natural enforcement point for what Eldr content may cross into a Buzz channel; wiring it to the gateway send is follow-up. | **Partial** (firewall exists; gateway wiring is follow-up) |
+| **NIP-AM / NIP-AO telemetry leakage** | Turn metrics (44200) and observer frames (24200) are NIP-44-encrypted to the OWNER; only `p`/`agent`/`created_at` are cleartext. Turn rate is already observable from channel messages, so no new metadata class is exposed. Matches Buzz's own NIP-AM/AO security analysis. | **Shipped + tested** (AC144) |
+
+**Eldr↔Eldr traffic is unaffected** — it stays PQ-ratcheted gift-wrapped E2EE.
+Only the Buzz-channel boundary is plaintext, and only by Buzz's design. The
+honest one-line summary the product must surface: *messages crossing into a Buzz
+channel are readable by that channel's relay operator; everything on the Eldr
+side of the bridge is not.*
+
 ## 5. Cryptographic assumptions
 
 X25519, Ed25519, ML-KEM-768 (FIPS 203), AES-256-GCM, ChaCha20-Poly1305,

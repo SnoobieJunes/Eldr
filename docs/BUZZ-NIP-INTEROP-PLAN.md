@@ -1,6 +1,14 @@
 # Buzz NIP Interop & Contribution Plan
 
-Status: **plan / not started** · Last updated: 2026-07-24
+Status: **IMPLEMENTED (2026-07-24)** — the adopt/align/contribute work below
+shipped. Codecs (NIP-OA, NIP-44 v2, NIP-AM, NIP-AO) are proven byte-exact
+against Buzz's own vectors; the `eldr-buzz-agent` gateway runs the local model
+as a Buzz member (proven E2E with the real MLX model); the three contribution
+NIPs are drafted PR-ready. See **`ELDR-BUZZ-INTEROP.md`** (runbook + status) and
+**`nips-contrib/`** (the three NIPs). DEVIATIONS AC144. Original plan preserved
+below for provenance.
+
+Status (original): **plan / not started** · Last updated: 2026-07-24
 
 This is the implementation plan for interoperating with Block's **Buzz** NIP suite
 (`/Users/auston/Development Projects/buzz/docs/nips/`, 14 letter-code drafts) and for
@@ -120,7 +128,7 @@ privacy-first personal client on the same protocol.
 - **Eldr has it:** provenance proven to the recipient only, inside NIP-59 gift wrap. NIP-PL already treats
   gift wrap as opaque, so the ecosystem understands the primitive; nobody has specced provenance *within* it.
 - **Scope:** carry an OA-equivalent attestation inside the NIP-59 seal; verify post-unwrap.
-
+B
 ### C3. Consent Windows — *revocable, wall-clock-honest authorization*
 - **Cites:** NIP-AA §Revocation — owner cannot unilaterally revoke an issued `auth` tag; all 3 paths are
   relay-side. Under an untrusted relay, NIP-OA has no revocation.
