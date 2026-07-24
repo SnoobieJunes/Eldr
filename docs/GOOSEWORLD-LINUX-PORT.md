@@ -209,6 +209,10 @@ mode CLAUDE.md keeps warning about).
    first (works on any Linux box, no hardware), TPM rung second. Surface the posture loudly.
 4. **Widen Blocker B** — `runHarness`/`runACPAgent`/`ToolExecutor` to `os(macOS) || os(Linux)`;
    re-seam `PTYProcess` on `<pty.h>`. Prove a shell tool round-trip on Linux.
+   **(DONE 2026-07-24 — WS-L4, DEVIATIONS AC141: gates widened, PTY re-seamed via the
+   `CEldrPTYShim` header shim + a /proc session sweep, and the FULL 270-test PQRCACP
+   suite — PTY kill-the-orphan proofs, bash `run_shell` round-trips, the RunnerE2E
+   real-binary handshake — is green in the swift:6.2 container VM.)**
 5. **Add a Linux `swift test` CI job** (the fast inner-loop matrix in CLAUDE.md, run on Linux).
    Until this exists, every "ports free" claim here stays `[unverified]`.
 
