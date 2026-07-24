@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 import Foundation
+#if os(macOS)
 import PQRCACP
 
 // EldrChat ACP agent over stdio. An ACP client (Xcode 27) spawns this binary and
@@ -162,3 +163,15 @@ struct EldrACPMain {
         log("stdin closed; exiting")
     }
 }
+#else
+// The ACP agent host drives Process/PTY tools (macOS-only — WS-L4). Linux gets a stub so the
+// package builds; the agent host itself is not yet available on a Linux node.
+@main
+struct EldrACPMain {
+    static func main() {
+        FileHandle.standardError.write(Data(
+            "eldr-acp: the ACP agent host is macOS-only; not available on Linux.\n".utf8))
+        exit(1)
+    }
+}
+#endif

@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 import Foundation
+#if os(macOS)
 import PQRCACP
 
 // `eldr-acp-run` — a terminal ACP CLIENT that drives the real `eldr-acp` agent so you
@@ -224,3 +225,15 @@ actor TurnFlag {
     func start() { isRunning = true }
     func finish() { isRunning = false }
 }
+#else
+// The terminal ACP client drives the macOS agent over URLSession/Process — macOS-only. Linux
+// gets a stub so the package builds.
+@main
+struct EldrACPRun {
+    static func main() {
+        FileHandle.standardError.write(Data(
+            "eldr-acp-run: the terminal ACP client is macOS-only; not available on Linux.\n".utf8))
+        exit(1)
+    }
+}
+#endif
