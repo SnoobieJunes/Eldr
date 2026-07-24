@@ -746,6 +746,37 @@ struct ConfigPaths: Sendable {
     /// script body as the Xcode launcher — client-agnostic.
     var openClawLauncher: String { join(binDir, "eldr-acp-openclaw") }
 
+    // MARK: - MCP-client wrappers (env-injecting launchers)
+    //
+    // Some MCP clients (Hermes' `hermes mcp add --command`, others) can't pass env
+    // vars to a stdio server, but our `pqrc-mcp-bridge` / `eldr-gooseworld` shims
+    // REQUIRE a socket + pairing token in the env or they fail closed. The wrappers
+    // below bridge that gap exactly like the ACP launchers above do for the coding
+    // agent: the client is pointed at a stable wrapper path that sources a 0600 env
+    // file (holding the secret) and execs the shim. The WRAPPER carries no secret —
+    // `hermes mcp list` and any config dump would otherwise print a live token
+    // (mirrors the AC132 `found-town` secret-free-generated-script rule).
+
+    /// Wrapper an env-less MCP client is pointed at to reach the SECURE-CHAT MCP
+    /// bridge. Sources `mcpBridgeEnvFile`, then execs `mcpBridgeShim`.
+    var mcpBridgeLauncher: String { join(binDir, "eldr-mcp-chat") }
+    /// The 0600 env file the chat wrapper sources — this, not the wrapper, holds
+    /// `PQRC_MCP_SOCKET` + `PQRC_MCP_TOKEN`. Kept in configDir (not the PATH-listed
+    /// binDir) so the secret is not in a directory clients enumerate for executables.
+    var mcpBridgeEnvFile: String { join(configDir, "mcp-chat.env") }
+    /// The `pqrc-mcp-bridge` shim the chat wrapper execs (installed alongside the
+    /// other binaries in binDir).
+    var mcpBridgeShim: String { join(binDir, "pqrc-mcp-bridge") }
+
+    /// Wrapper an env-less MCP client is pointed at to reach the GOOSEWORLD town
+    /// wall. Sources `gooseworldEnvFile`, then execs `gooseworldShim`.
+    var gooseworldLauncher: String { join(binDir, "eldr-mcp-town") }
+    /// The 0600 env file the town wrapper sources — holds `ELDR_GOOSEWORLD_SOCKET`
+    /// + `ELDR_GOOSEWORLD_TOKEN`. In configDir for the same reason as above.
+    var gooseworldEnvFile: String { join(configDir, "mcp-town.env") }
+    /// The `eldr-gooseworld` shim the town wrapper execs.
+    var gooseworldShim: String { join(binDir, "eldr-gooseworld") }
+
     /// WS-B5: the two gateway-vendor config paths below used to each hand-roll this
     /// same "home dir + subdir + filename" computation; collapsed to one helper so
     /// there's exactly one place that builds a path under the user's home dir.

@@ -464,6 +464,59 @@ Compatibility was validated by driving the binary through a mock ACP client
 exercising the full handshake plus the three skills, against both the built-in echo
 LLM and a real local model.
 
+#### Hermes (Nous Research) — both directions
+
+Hermes ships the two surfaces we care about, so it connects **both ways**. **None of
+the below has been run against a real Hermes install** — Hermes is not installed on
+the dev machine; the commands are the documented invocations, and the harness row
+ships `isProvisional: true` until someone completes a live `initialize` handshake
+(the gated `HermesHarnessLiveHandshakeTests` lights up automatically once `hermes` is
+on `PATH`).
+
+**1. Hermes as the node's brain (`hermes acp` — Hermes is the ACP *agent*).**
+`HarnessRegistry` already carries a `hermes-acp` row (`command: hermes`,
+`args: ["acp"]`), so it appears in Huginn's Bridge picker and the phone's router with
+no further wiring. Two caveats a real setup must handle:
+- `hermes acp` needs Hermes' optional **`[acp]` extra** installed
+  (`cd ~/.hermes/hermes-agent && uv pip install -e '.[acp]'`); a base install has no
+  ACP adapter. Alternate entrypoints: `hermes-acp`, `python -m acp_adapter`.
+- **PATH:** a `uv`/`pipx` install lands outside a GUI-launched Huginn.app's PATH.
+  Point the row at the absolute path with
+  `ELDR_HARNESS_CMD_HERMES_ACP=/full/path/to/hermes` (Huginn's Bridge picker writes
+  this into the agent env file; the `acp` argument survives the override). Same
+  hazard, same fix as Goose.
+
+Note the DIRECTION is the opposite of the Goose warning above: here **we** are the
+ACP client and Hermes is the agent, exactly like the `goose acp` row.
+
+**2. Hermes reading your walls (`hermes mcp` — Hermes is the MCP *client*).** Hermes'
+built-in MCP client discovers tools from stdio servers at startup, but its
+`hermes mcp add <name> --command <cmd> [--args …]` flow has **no documented way to
+pass environment variables**, and our shims (`pqrc-mcp-bridge` for secure chat,
+`eldr-gooseworld` for the town wall) **require** a loopback socket + pairing token in
+the env or they fail closed. Bridge that gap with the env-injecting wrapper Huginn
+writes to `~/.local/bin/eldr-mcp-chat` (chat) / `eldr-mcp-town` (town):
+
+```bash
+# One-time: paste the Socket + Pairing token from Settings ▸ "Local agent access
+# (MCP)" into the 0600 env file the wrapper sources:
+#   ~/.config/eldr-acp/mcp-chat.env   →  PQRC_MCP_SOCKET=…  PQRC_MCP_TOKEN=…
+# Then point Hermes at the wrapper (NOT the shim directly):
+hermes mcp add eldr-chat --command ~/.local/bin/eldr-mcp-chat
+hermes mcp test eldr-chat        # confirms the handshake + redacted reads
+```
+
+The wrapper carries **no secret** — the token lives only in the 0600 env file — so
+`hermes mcp list` and any config dump are safe to share. Everything the tools return
+is already firewall-redacted (codenames, byte-bounded) and, for the write tools,
+`ai_window`-gated exactly as any local MCP client's would be.
+
+**MCP protocol revision (unverified):** our server advertises up to `2025-11-25` and
+otherwise echoes its `2024-11-05` default. If a newer Hermes pins a revision past
+that and refuses the fallback, add it to `MCPServer.knownVersions` — safe, since we
+implement no version-specific behaviour (the set is a pure echo list). Confirm with
+`hermes mcp test`.
+
 #### contextgraph (smart context assembly) — A43
 
 [`rdevaul/contextgraph`](https://github.com/rdevaul/contextgraph) is an optional

@@ -283,6 +283,30 @@ public enum HarnessRegistry {
             args: ["acp"],
             isProvisional: false),
 
+        // Hermes (Nous Research) in ACP-agent mode: `hermes acp`. Same DIRECTION as the
+        // goose row — we are the ACP *client*, Hermes is the *agent*. PROVISIONAL: Hermes
+        // is not installed on this machine, so the command/args are the documented launch
+        // invocation, NOT a verified `initialize` handshake (unlike the goose/Claude/Gemini
+        // rows above). Two caveats a real integration must confirm: (1) `hermes acp` needs
+        // Hermes' optional `[acp]` extra installed (`uv pip install -e '.[acp]'` in the
+        // hermes-agent checkout); a base install has no ACP adapter and will fail to launch.
+        // Alt entrypoints are `hermes-acp` / `python -m acp_adapter`. (2) PATH bites here
+        // like it does goose — a uv/pipx install lands outside a GUI-launched Huginn.app's
+        // default PATH, so set `ELDR_HARNESS_CMD_HERMES_ACP` to the absolute path
+        // (`commandOverrideEnvVar(for:)`; the `acp` argument survives the override).
+        // `vendorKeyEnvVar` is `nil` for the same reason as goose: Hermes sources provider
+        // credentials from its own `~/.hermes/config.yaml`, so there is no single env var
+        // the node could inject, and declaring one would make the Keychain lookup act on a
+        // lie. UNVERIFIED: whether the adapter answers `protocolVersion: 1` in the
+        // `session/new`/`session/prompt`/`session/request_permission` shape our client drives.
+        HarnessDescriptor(
+            id: "hermes-acp",
+            displayName: "Hermes",
+            kind: .stdioSpawn,
+            command: "hermes",
+            args: ["acp"],
+            isProvisional: true),
+
         // ── Phase-2 placeholders (still PROVISIONAL — commands are defaults to confirm). ──
         // Codex: OpenAI's `codex` CLI, ACP/stdio subcommand.
         HarnessDescriptor(
