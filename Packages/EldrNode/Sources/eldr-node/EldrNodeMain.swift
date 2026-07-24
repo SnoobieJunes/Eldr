@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 import Crypto
 import EldrNodeCore
+import EldrNodeGooseworld
 import Foundation
 import PQRCACP
 import PQRCCore
@@ -210,26 +211,48 @@ struct EldrNodeMain {
                     "eldr-node: key publish failed (will still serve if peers already have our keys)\n".utf8))
             }
 
+            // WS-G5 NIP-11 chunk sizing: the frame budget comes from the RELAY (the most
+            // restrictive advertised `max_content_length`, folded through the padding-
+            // bucket math by `chunkTextBudget()`), not a constant — so a hub that raises
+            // its limit is used automatically, and an unknown limit falls back to the
+            // same strict-65535-safe 16 KiB budget the proven e2e used.
+            let frameBudget = await messenger.chunkTextBudget()
+            let nodeMessenger = PQRCNodeMessenger(messenger: messenger)
+
+            // WS-G5: the town plane (wall host + eldr-gooseworld socket + grant-backed
+            // admission), enabled iff ELDR_TOWN_ID is set. nil keeps the exact pre-WS-G5
+            // posture: deny-all authorizer, no service, no socket.
+            let townPlane = await GooseworldWiring.fromEnvironment(
+                env, ownerHex: ownerIdentityHex, workdir: workdir,
+                chunkTextBudget: frameBudget,
+                sendFramed: { [nodeMessenger] framed, peerHex in
+                    try await nodeMessenger.sendFramed(framed, to: peerHex)
+                })
+            for line in townPlane?.statusLines ?? [] { print("  \(line)") }
+
             // Clean SIGINT shutdown: cancel the serve task so the transport closes and the
             // agent loop unwinds, then exit. `signal(SIGINT, SIG_IGN)` + a DispatchSource
             // is the cooperative pattern (a bare handler can't touch Swift concurrency).
             let serveTask = Task {
                 let node = EldrNodeCore()
                 await node.serve(
-                    messenger: PQRCNodeMessenger(messenger: messenger),
+                    messenger: nodeMessenger,
                     ownerIdentityHex: ownerIdentityHex,
-                    maxFrameBytes: relayACPMaxFrameBytes,
+                    maxFrameBytes: frameBudget,
                     llm: llm,
                     toolEnvironment: toolEnvironment,
                     config: .default,
                     streamingEnabled: false,
-                    descriptor: harnessDescriptor)
+                    descriptor: harnessDescriptor,
+                    townAuthorizer: townPlane?.authorizer ?? DenyAllTownAuthorizer(),
+                    townService: townPlane?.service)
             }
 
             signal(SIGINT, SIG_IGN)
             let sigint = DispatchSource.makeSignalSource(signal: SIGINT, queue: .main)
             sigint.setEventHandler {
                 print("\neldr-node: shutting down…")
+                townPlane?.socketHost?.stop()  // close the goose socket before the exit
                 serveTask.cancel()
                 Task {
                     await messenger.stop()
@@ -247,12 +270,6 @@ struct EldrNodeMain {
             exit(1)
         }
     }
-
-    /// The relay's per-message byte budget for framing/chunking ACP lines: the relay's
-    /// event-size cap minus gift-wrap overhead. 16 KiB matches the proven e2e budget and
-    /// the Configurator's `relayACPMaxFrameBytes`, staying well under a strict 65 535-byte
-    /// relay even after wrapping.
-    static let relayACPMaxFrameBytes = 16 * 1024
 
     /// The Keychain account the LLM token is seeded into by `--import-token` and read back
     /// at serve time (C-8: the token lives in the Keychain, never the env file).

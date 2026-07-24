@@ -89,18 +89,38 @@ public struct StandingGrantTownAuthorizer: TownAuthorizer {
     }
 
     public func authorizes(peerIdentityHex: String) async -> Bool {
+        StandingGrantAdmission.admits(
+            peer: peerIdentityHex, plane: plane, requiredGranterHex: requiredGranterHex,
+            cutoff: now(), grants: await liveGrants())
+    }
+}
+
+/// The single grant-admission predicate, extracted (WS-G5) so the transport-level
+/// authorizer above and the per-LINE plane router (`PlaneRoutedTownService`) can never
+/// drift apart: both answer "does a live, owner-signed, unexpired grant cover this peer
+/// on this plane?" with the same checks in the same order. Pure — no clock, no I/O.
+public enum StandingGrantAdmission {
+    /// `requiredGranterHex`, when non-nil, must already be canonical lowercase (both
+    /// callers normalize once at init) — the comparison is a plain `==` against
+    /// `enabledBy.hexString`, which is lowercase by construction.
+    public static func admits(
+        peer peerIdentityHex: String,
+        plane: StandingGrant.Plane,
+        requiredGranterHex: String?,
+        cutoff: Int64,
+        grants: [StandingGrant]
+    ) -> Bool {
         // An empty/whitespace peer is never a real verified identity — refuse before any
         // scan, same first line as `PinnedTownAllowlist`.
         let peer = peerIdentityHex.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !peer.isEmpty else { return false }
 
-        let cutoff = now()
-        for grant in await liveGrants() {
+        for grant in grants {
             // Peer scope: the grant must name THIS peer. Case-sensitive exact match, matching
             // the C-3 gate's `==` and `PinnedTownAllowlist` — one notion of "same peer".
             guard grant.peer == peer else { continue }
             // Plane scope: `.covers` returns false for a grant that only lists other planes,
-            // so a wall-only grant never opens the delegation channel.
+            // so a wall-only grant never opens the delegation channel (and vice versa).
             guard grant.covers(plane) else { continue }
             // Expiry: strictly in the future. `activeUntil == cutoff` is already expired
             // (mirrors the engine's `activeWindow`/`authorizeTownSend` "> now" convention).

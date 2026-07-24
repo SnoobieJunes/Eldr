@@ -138,6 +138,34 @@ public struct PinnedTownAllowlist: TownAuthorizer {
     }
 }
 
+/// WS-G5 — admits a peer iff ANY inner authorizer does. The transport-level gate for a
+/// node serving MORE THAN ONE town plane (a `.wall` wall host and a `.delegate` flock):
+/// admission here answers only "may this peer's A2A frames be delivered at all", and the
+/// per-LINE plane check (`PlaneRoutedTownService`) then decides which plane each admitted
+/// line may actually reach — a wall-only grant admits the peer's frames but still cannot
+/// touch the delegation service.
+///
+/// Fail-closed by construction: an empty inner list admits nobody (it IS
+/// `DenyAllTownAuthorizer`), and each inner authorizer is already required to fail closed
+/// on any doubt, so the OR of them adds no new accept path beyond what some inner
+/// authorizer explicitly grants. Inner authorizers are consulted in order and the scan
+/// short-circuits on the first admit; like every `TownAuthorizer`, this is re-consulted
+/// per frame, so a revocation that flips one inner answer bites on the very next chunk.
+public struct AnyOfTownAuthorizer: TownAuthorizer {
+    private let inner: [any TownAuthorizer]
+
+    public init(_ inner: [any TownAuthorizer]) {
+        self.inner = inner
+    }
+
+    public func authorizes(peerIdentityHex: String) async -> Bool {
+        for authorizer in inner {
+            if await authorizer.authorizes(peerIdentityHex: peerIdentityHex) { return true }
+        }
+        return false
+    }
+}
+
 /// Services one inbound A2A JSON-RPC line from an **authorized** peer town, and may write
 /// zero or more lines back to that same peer.
 ///

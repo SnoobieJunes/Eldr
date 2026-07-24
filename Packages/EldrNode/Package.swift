@@ -21,6 +21,11 @@ let package = Package(
     products: [
         // The reusable, testable headless serve loop (the C-3 gate lives here).
         .library(name: "EldrNodeCore", targets: ["EldrNodeCore"]),
+        // WS-G5: the gooseworld integration layer — the production wall host/bridge,
+        // grant + cursor stores, and the loopback socket host for `eldr-gooseworld`.
+        // A SEPARATE library so `EldrNodeCore` keeps its deliberate PQRCMCP-free
+        // boundary (see the dependency note below) while this layer composes both.
+        .library(name: "EldrNodeGooseworld", targets: ["EldrNodeGooseworld"]),
         // The daemon: load/create identity, dial the relay, park, and serve the owner.
         .executable(name: "eldr-node", targets: ["eldr-node"]),
     ],
@@ -28,10 +33,10 @@ let package = Package(
         .package(path: "../PQRCCore"),
         .package(path: "../PQRCNostr"),
         .package(path: "../PQRCACP"),
-        // Test-only: the phone's MCP SERVER, so the node-side MCP-over-relay client can
-        // be exercised end-to-end over a LocalRelaySimulator against a real `MCPServer`
-        // (the same redacting/window-gating server the phone hosts). EldrNodeCore itself
-        // does NOT depend on PQRCMCP — only the test target below does.
+        // The phone's MCP server package ALSO carries the gooseworld wall model
+        // (TownWall/GooseworldBridge/GooseworldMCPServer, all dependency-free).
+        // EldrNodeCore itself does NOT depend on PQRCMCP — that boundary stands; the
+        // WS-G5 `EldrNodeGooseworld` layer and the test target are what link it.
         .package(path: "../PQRCMCP"),
         // WS-L3: scrypt (RFC 7914) for the Linux keystore's passphrase KEK, from swift-crypto's
         // `_CryptoExtras` — a product of the ALREADY-pinned swift-crypto, so NO new crypto
@@ -54,10 +59,23 @@ let package = Package(
             ],
             swiftSettings: [.swiftLanguageMode(.v6)]
         ),
+        // WS-G5: composes EldrNodeCore's town plane with PQRCMCP's wall model into the
+        // production wall host + bridge + `eldr-gooseworld` socket host.
+        .target(
+            name: "EldrNodeGooseworld",
+            dependencies: [
+                "EldrNodeCore",
+                "PQRCCore",
+                "PQRCNostr",
+                .product(name: "PQRCMCP", package: "PQRCMCP"),
+            ],
+            swiftSettings: [.swiftLanguageMode(.v6)]
+        ),
         .executableTarget(
             name: "eldr-node",
             dependencies: [
                 "EldrNodeCore",
+                "EldrNodeGooseworld",
                 "PQRCCore",
                 "PQRCNostr",
                 .product(name: "PQRCACP", package: "PQRCACP"),
@@ -72,6 +90,7 @@ let package = Package(
             name: "EldrNodeCoreTests",
             dependencies: [
                 "EldrNodeCore",
+                "EldrNodeGooseworld",
                 // The daemon target, so `SybilclawGatewayFramingTests` can `@testable import` it
                 // and pin the node's gateway connect handshake against silent protocol re-drift.
                 "eldr-node",
