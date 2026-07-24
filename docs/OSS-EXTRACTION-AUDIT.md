@@ -77,10 +77,14 @@ people's repos on a given day. I did not check either — no network verificatio
 was performed for this audit, and the catalog's own instruction ("**Re-verify
 before acting**") stands.
 
-Practically: for `eldr-acp` it doesn't matter, because the catalog's own framing
-is right — the lane is the *hardened agent*, not the SDK, and that framing holds
-whether or not a Swift SDK exists. For `a2a-swift` it matters a lot, and the
-README says so in a visible callout rather than asserting the gap as fact.
+Practically: for `eldr-acp` it barely matters, because the catalog's own framing
+is right — the lane is the *hardened agent*, not the SDK, and that holds whether
+or not a Swift SDK exists. For `a2a-swift` it matters a lot.
+
+**Both READMEs now hedge rather than assert.** `a2a-swift` carries a visible
+callout telling the reader to verify the gap before relying on it; `eldr-acp` says
+a community Swift SDK "may exist (unverified at the time of writing)". Neither
+states an unchecked fact about someone else's repo.
 
 ---
 
@@ -162,21 +166,67 @@ derivation should replay pending chain refreshes.
 
 ## 5. What shipped
 
-Eight repos, all building and testing green on macOS with Xcode 27 / Swift 6.4.
-**477 tests total.**
+Eight repos. **Green on macOS (Xcode 27 / Swift 6.4) AND on Linux (aarch64,
+Swift 6.2.4, `swift:6.2` container).** 477 tests on macOS, 460 on Linux — the
+difference is entirely platform-gated suites, itemised below.
 
-| Repo | Deps | Tests | Notes |
-|---|---|---|---|
-| `swift-message-padding` | none | 10 | catalog priority 3. Generalised: caller-supplied bucket ladders |
-| `swift-credential-redactor` | none | 11 | catalog priority 2 ("easiest win" — correct) |
-| `swift-reasoning-trace` | none | 17 | had **no upstream tests**; written from scratch |
-| `untrusted-data-envelope` | none | 28 | catalog priority 4, the flagship. Ships NIP-AD (CC0) |
-| `swift-pqxdh` | swift-crypto | 18 | catalog priority 6 |
-| `swift-double-ratchet` | swift-crypto | 26 | catalog priority 6; decoupled per §2.1 |
-| `a2a-swift` | none | 89 | catalog priority 8 |
-| `eldr-acp` | a2a-swift¹ | 278 | catalog priority 7, biggest asset |
+| Repo | Deps | macOS | Linux | Notes |
+|---|---|---|---|---|
+| `swift-message-padding` | none | 10 | 10 | catalog priority 3. Generalised: caller-supplied bucket ladders |
+| `swift-credential-redactor` | none | 11 | 11 | catalog priority 2 ("easiest win" — correct) |
+| `swift-reasoning-trace` | none | 17 | 17 | had **no upstream tests**; written from scratch |
+| `untrusted-data-envelope` | none | 28 | 28 | catalog priority 4, the flagship. Ships NIP-AD (CC0) |
+| `swift-pqxdh` | swift-crypto | 18 | 18 | catalog priority 6 |
+| `swift-double-ratchet` | swift-crypto | 26 | 26 | catalog priority 6; decoupled per §2.1 |
+| `a2a-swift` | none | 89 | 80 | catalog priority 8; 9 gated, see §5.1 |
+| `eldr-acp` | a2a-swift¹ | 278 | 270 | catalog priority 7, biggest asset; 8 gated (`A2AHarness` is `#if os(macOS)`) |
 
 ¹ `A2AHarness` target only; the core library links nothing on Apple platforms.
+
+### 5.1 Linux verification — done, and it found a real bug
+
+The catalog called a Linux CI job "the cheapest high-value action in this whole
+doc." It was right, and it did not merely confirm a hope — **`a2a-swift` did not
+compile on Linux at all.**
+
+`A2AClient`'s HTTP transport is built on `URLSession`, and swift-corelibs-foundation's
+URLSession (a) lives in a separate `FoundationNetworking` module, (b) is not
+`Sendable`, and (c) **has no `AsyncBytes`**, which the SSE streaming path requires.
+The first two are import-and-annotation problems; the third is not fixable without
+a different HTTP stack.
+
+**Fix applied:** the three URLSession-backed pieces — `HTTPJSONRPCTransport`,
+`AgentCardResolver`, and the `A2AClient.connecting(cardURL:)` convenience — are now
+gated behind `#if canImport(Darwin)`, matching the per-file gating `A2AHTTPServer`
+already used. Everything transport-agnostic still builds on Linux: a Linux user
+implements `A2AClientTransport` over AsyncHTTPClient/NIO and injects it, reusing the
+pure-Foundation `SSEParser`. The README no longer claims "three of four build clean
+on Linux" — that claim was false and is now replaced with the measured result.
+
+Two non-findings worth recording so nobody re-chases them:
+
+- **ML-KEM-768 works fine on Linux.** swift-crypto supplies it directly, so the
+  macOS-26 platform floor is an Apple-availability artefact only. Both crypto
+  repos pass unchanged.
+- **`eldr-acp`'s one Linux "failure" was my test harness.** `versionFlagPrintsNameAndVersion`
+  spawns a hardcoded `.build/debug/eldr-acp`, so running with `--scratch-path` left it
+  executing the *macOS* binary ("Exec format error"). With a default build directory
+  it is 270/270. Worth noting upstream that the test hardcodes `.build/debug/`, which
+  also breaks under `-c release`.
+
+Reproduce with:
+
+```bash
+colima start --cpu 4 --memory 8
+cd ~/Development\ Projects/eldr-oss
+docker run --rm -v "$PWD":/src swift:6.2 bash -lc '
+  mkdir -p /tmp/w/REPO
+  tar -C /src/REPO --exclude=.build --exclude=.swiftpm -cf - . | tar -C /tmp/w/REPO -xf -
+  cd /tmp/w/REPO && swift test'
+```
+
+The `--exclude=.build` copy matters: mounting the host tree directly lets a macOS
+`.build` leak into the container.
 
 ### Things worth knowing about what shipped
 
@@ -192,11 +242,9 @@ Eight repos, all building and testing green on macOS with Xcode 27 / Swift 6.4.
 - **Platform floor is macOS 26 / iOS 26 for the two crypto repos**, because
   ML-KEM-768 arrives in CryptoKit there. Not caution — without it there is no PQ
   leg. Linux is unaffected (swift-crypto supplies ML-KEM itself).
-- **Every repo has a Linux CI job.** This is the catalog's "cheapest high-value
-  action" (priority 1), applied to the extractions. **It has not been run** —
-  there is no Docker on this machine, so Linux compilation remains *unverified*
-  and will be proven or disproven the first time CI runs after push. Do not claim
-  Linux support until that job is green.
+- **Every repo has a Linux CI job (`swift:6.2` container), and Linux is now
+  verified locally** — see §5.1. This was the catalog's priority-1 item and it
+  paid for itself immediately by catching a genuine `a2a-swift` build failure.
 
 ---
 
@@ -223,10 +271,11 @@ Ordered by value.
 
 ## 7. Standing caveats, updated
 
-- **Verified:** macOS build + test, all 8 repos, 477 tests.
-- **Unverified:** Linux compilation (no Docker here); the a2aproject and
-  `wiedymi/swift-acp` claims in §2.4; any interop against another A2A
-  implementation.
+- **Verified:** macOS build + test (477 tests) **and Linux build + test (460
+  tests)**, all 8 repos. Linux via colima + `swift:6.2` on aarch64.
+- **Unverified:** the a2aproject and `wiedymi/swift-acp` claims in §2.4 (both
+  README files now hedge rather than assert); any interop against another A2A
+  implementation; x86-64 Linux (only aarch64 was tested).
 - **The Eldr repo is still private.** "Go public" remains a prerequisite decision
   separate from "split" — but note these eight repos are *already* separable and
   could go public independently of Eldr, since each carries its own Apache-2.0

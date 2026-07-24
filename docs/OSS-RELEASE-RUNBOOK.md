@@ -70,7 +70,34 @@ Re-run the suites if you want the assurance fresh:
 for r in */; do (cd "$r" && echo "--- $r" && swift test 2>&1 | grep "Test run with"); done
 ```
 
-Expected: 10, 11, 17, 28, 18, 26, 89 (4 targets), 278 (2 targets) — **477 total**.
+Expected on macOS: 10, 11, 17, 28, 18, 26, 89 (4 targets), 278 (2 targets) —
+**477 total**.
+
+To re-run the Linux verification (needs `colima start` first):
+
+```bash
+docker run --rm -v "$PWD":/src swift:6.2 bash -lc '
+  REPOS="swift-message-padding swift-credential-redactor swift-reasoning-trace
+         untrusted-data-envelope swift-pqxdh swift-double-ratchet a2a-swift eldr-acp"
+  for r in $REPOS; do
+    mkdir -p /tmp/w/$r
+    tar -C /src/$r --exclude=.build --exclude=.swiftpm -cf - . | tar -C /tmp/w/$r -xf -
+  done
+  echo "### $(swift --version 2>&1 | head -1)"
+  for r in $REPOS; do
+    cd /tmp/w/$r
+    out=$(swift test 2>&1) || true
+    n=$(echo "$out" | grep -oE "Test run with [0-9]+ tests?" | grep -oE "[0-9]+" \
+        | awk "{s+=\$1} END {print s+0}")
+    echo "$out" | grep -qE "error:|✘" && st=FAIL || st=GREEN
+    printf "%-28s %4s tests  %s\n" "$r" "$n" "$st"
+  done'
+```
+
+Expected on Linux: 10, 11, 17, 28, 18, 26, 80, 270 — **460 total**. The
+`--exclude=.build` matters: mounting the host tree directly lets a macOS `.build`
+leak into the container and the eldr-acp end-to-end test then execs an arm64-macOS
+binary ("Exec format error").
 
 ---
 
@@ -116,10 +143,12 @@ for r in swift-message-padding swift-credential-redactor swift-reasoning-trace \
 done
 ```
 
-> **Expect the Linux job to be the interesting one.** It has never been run —
-> there is no Docker on this machine. The macOS job should pass exactly as it did
-> locally. If Linux fails, that is new information, not a regression: fix it or
-> drop the Linux job, but **do not claim Linux support until it is green.**
+> **Both jobs have been verified locally.** Linux was run under colima with the
+> `swift:6.2` container on aarch64 — all eight repos build and test green (460
+> tests; the 17-test gap versus macOS is platform-gated suites, itemised in the
+> audit §5.1). CI runs the same image, so a red Linux job means an environment
+> difference — most likely **x86-64**, which was not tested locally, since GitHub's
+> standard runners are x86-64 and this Mac is arm64.
 
 ---
 
