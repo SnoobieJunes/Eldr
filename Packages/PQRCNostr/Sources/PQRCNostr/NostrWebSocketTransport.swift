@@ -5,7 +5,12 @@
 //
 
 import Foundation
+#if canImport(FoundationNetworking)
+import FoundationNetworking  // URLSession/URLSessionWebSocketTask live here on Linux
+#endif
+#if canImport(OSLog)
 import OSLog
+#endif
 import PQRCCore
 
 /// The real-network `RelayTransport`: NIP-01 over `URLSessionWebSocketTask`.
@@ -361,7 +366,9 @@ public actor NostrWebSocketTransport: RelayTransport {
         // waitsForConnectivity: on a phone the network comes and goes; let the
         // session hold the dial until a route exists instead of failing fast.
         let configuration = URLSessionConfiguration.default
-        configuration.waitsForConnectivity = true
+        #if canImport(Darwin)
+        configuration.waitsForConnectivity = true  // get-only on swift-corelibs (Linux)
+        #endif
         let task = URLSession(configuration: configuration).webSocketTask(with: url)
         socket = task
         statusState = .connecting
@@ -396,19 +403,25 @@ public actor NostrWebSocketTransport: RelayTransport {
     /// only App Nap of THIS app while it's on screen. Idempotent: holds one
     /// token at a time for the life of the socket.
     private func beginVisibilityActivity() {
+        // App Nap is an Apple-platform concept (ProcessInfo.beginActivity/isMacCatalystApp);
+        // a headless Linux node has no window to keep awake, so this is inert there.
+        #if canImport(Darwin)
         let onMac =
             ProcessInfo.processInfo.isMacCatalystApp
             || ProcessInfo.processInfo.isiOSAppOnMac
         guard onMac, visibilityActivity == nil else { return }
         visibilityActivity = ProcessInfo.processInfo.beginActivity(
             options: .userInitiated, reason: "Relay sync while window is open")
+        #endif
     }
 
     /// Releases the App Nap assertion (Mac/Catalyst). No-op when none is held.
     private func endVisibilityActivity() {
+        #if canImport(Darwin)
         guard let token = visibilityActivity else { return }
         ProcessInfo.processInfo.endActivity(token)
         visibilityActivity = nil
+        #endif
     }
 
     /// Sends a keepalive ping on the live socket; false if there's no socket to

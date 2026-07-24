@@ -1,5 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 import Foundation
+#if canImport(FoundationNetworking)
+import FoundationNetworking  // URLSession lives here on Linux
+#endif
 
 // The BRAIN. An OpenAI-compatible Chat Completions client WITH tool/function
 // calling, behind a protocol so tests inject a mock (no network in tests) and the
@@ -308,6 +311,7 @@ public struct OpenAICompatibleLLMClient: LLMClient {
     public func stream(
         messages: [LLMMessage], tools: [LLMTool], onDelta: @Sendable (String) async -> Void
     ) async throws -> LLMResponse {
+        #if canImport(Darwin)
         let request = try makeRequest(messages: messages, tools: tools, stream: true)
         let (bytes, response) = try await session.bytes(for: request)
         if let http = response as? HTTPURLResponse, !(200..<300).contains(http.statusCode) {
@@ -336,6 +340,15 @@ public struct OpenAICompatibleLLMClient: LLMClient {
             if let emit = assembler.consume(json), !emit.isEmpty { await onDelta(emit) }
         }
         return assembler.finish()
+        #else
+        // Linux (swift-corelibs-foundation): URLSession has no async `bytes(for:)`/AsyncBytes,
+        // so SSE token streaming isn't available. Fall back to a single non-streamed
+        // completion and emit the whole visible text as one delta — a headless Linux node
+        // loses token-by-token display, not correctness (real Linux streaming is a follow-up).
+        let response = try await complete(messages: messages, tools: tools)
+        if !response.content.isEmpty { await onDelta(response.content) }
+        return response
+        #endif
     }
 
     /// Build the POST request for one completion. `stream` flips SSE on.

@@ -222,6 +222,7 @@ public actor EldrNodeCore {
         // Serve the AGENT half over the transport, in a child task — a long
         // `session/prompt` turn must not block the inbound read loop below (the owner's
         // permission answer arrives as a LATER inbound frame the in-flight turn awaits).
+        #if os(macOS)
         let agentTask = Task {
             await runHarness(
                 descriptor: descriptor, client: transport, llm: llm,
@@ -229,6 +230,19 @@ public actor EldrNodeCore {
                 streamingEnabled: streamingEnabled, extraTools: mcpClient,
                 factory: A2AHarnessFactory())
         }
+        #else
+        // Linux node (WS-L1 compile-unblock; the full ACP agent host is WS-L4): the
+        // macOS-only harness (`runHarness`/`A2AHarnessFactory`, ultimately PTY/ToolExecutor)
+        // is absent, so the ACP coding-agent half is inert here — the wall/A2A town planes
+        // below still serve. DRAIN the owner ACP transport's inbound stream so admitted
+        // `ACP1|` frames can't buffer without bound (the same hazard the peer-transport note
+        // at the top of this type guards against). `mcpClient` has no consumer without the
+        // harness; retain it so its transport still tears down cleanly.
+        _ = mcpClient
+        let agentTask = Task {
+            for await _ in transport.inboundLines() {}  // no agent to drive on Linux yet
+        }
+        #endif
 
         // Begin the messenger's single event stream and consume it as the SOLE consumer.
         // A start() failure means there is nothing to serve — tear the agent down and

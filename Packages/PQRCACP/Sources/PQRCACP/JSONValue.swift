@@ -67,6 +67,7 @@ public enum JSONValue: Sendable, Equatable {
             self = .null
         case let n as NSNumber:
             // Distinguish Bool from numeric (NSNumber bridges both).
+            #if canImport(Darwin)
             if CFGetTypeID(n) == CFBooleanGetTypeID() {
                 self = .bool(n.boolValue)
             } else if CFNumberIsFloatType(n) {
@@ -74,6 +75,19 @@ public enum JSONValue: Sendable, Equatable {
             } else {
                 self = .int(n.intValue)
             }
+            #else
+            // swift-corelibs-foundation doesn't expose the CF type IDs. JSONSerialization
+            // there encodes JSON booleans as the char type ("c"/"B") and reals as "d"/"f";
+            // everything else is an integer. Same bool/double/int split as the Apple branch.
+            let enc = String(cString: n.objCType)
+            if enc == "c" || enc == "B" {
+                self = .bool(n.boolValue)
+            } else if enc == "d" || enc == "f" {
+                self = .double(n.doubleValue)
+            } else {
+                self = .int(n.intValue)
+            }
+            #endif
         case let s as String:
             self = .string(s)
         case let a as [Any]:

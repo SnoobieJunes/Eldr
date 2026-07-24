@@ -36,7 +36,13 @@ let package = Package(
     ],
     dependencies: [
         // Only `A2AHarness` depends on this — see the note on that target.
-        .package(path: "../SwiftA2A")
+        .package(path: "../SwiftA2A"),
+        // Linux-ONLY: swift-crypto backs AES-GCM/SHA-256 where CryptoKit is absent
+        // (ACPMetadataCrypto/ACPEvents). Linked only on Linux (see the PQRCACP target),
+        // so the "ZERO external packages" promise above still holds on Apple platforms.
+        // Deliberate, Linux-scoped exception to the zero-dep stance — recorded in
+        // DEVIATIONS AC139 (the eldr-node Linux port).
+        .package(url: "https://github.com/apple/swift-crypto.git", from: "4.3.1"),
     ],
     targets: [
         // NO dependencies, ever — this is PQRCACP's zero-dep promise (CLAUDE.md: "The
@@ -46,6 +52,13 @@ let package = Package(
         // possible (see that file).
         .target(
             name: "PQRCACP",
+            dependencies: [
+                // Linux only: CryptoKit's stand-in for AES-GCM/SHA-256. On Apple this
+                // list is EMPTY and PQRCACP links no external package (AC139).
+                .product(
+                    name: "Crypto", package: "swift-crypto",
+                    condition: .when(platforms: [.linux])),
+            ],
             swiftSettings: [.swiftLanguageMode(.v6)]
         ),
         .executableTarget(
@@ -66,8 +79,16 @@ let package = Package(
             name: "A2AHarness",
             dependencies: [
                 "PQRCACP",
-                .product(name: "A2AClient", package: "SwiftA2A"),
-                .product(name: "A2ACore", package: "SwiftA2A"),
+                // A2AHarness sources are all `#if os(macOS)`, so these A2A products are
+                // only needed on Apple platforms. Excluding them on Linux keeps
+                // A2AClient's URLSession code off the Linux EldrNodeCore compile path
+                // (the relay town plane uses RelayA2ATransport, not A2AClient HTTP). AC139.
+                .product(
+                    name: "A2AClient", package: "SwiftA2A",
+                    condition: .when(platforms: [.macOS, .iOS, .macCatalyst, .tvOS, .watchOS, .visionOS])),
+                .product(
+                    name: "A2ACore", package: "SwiftA2A",
+                    condition: .when(platforms: [.macOS, .iOS, .macCatalyst, .tvOS, .watchOS, .visionOS])),
             ],
             swiftSettings: [.swiftLanguageMode(.v6)]
         ),
