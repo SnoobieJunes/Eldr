@@ -420,16 +420,27 @@ honest status of each is marked.
 | **Sybil towns / impersonation** | kind-10420 human↔agent binding verified in BOTH directions (invariant 7) + invite-only pairing; no open federation, no public town directory in v1. The A2A town plane admits a peer only behind an explicit authorizer (`StandingGrantTownAuthorizer`, owner-granter-pinned) — a peer cannot self-authorize. | **Shipped + tested** (AC128/AC130) |
 | **Runaway loops / cost** | `AgentEngine` loop guards for threads (6 consecutive agent messages, §4 above) + standing-grant budgets (messages/day, bytes/day, concurrent-task ceiling), all message-driven, never timer-driven. | **Shipped + tested** (AC126) |
 | **Hub abuse** | NIP-42 AUTH + invite-gated hub onboarding. | Relay-side; unchanged from §2.9a |
+| **Plane confusion** (a peer granted only the WALL using its admission to reach the code-execution-adjacent DELEGATE plane, or vice versa — the wall-era sibling of the AC131 confused-deputy) | Admission and per-line service are two separate gates sharing ONE predicate (`StandingGrantAdmission`): transport admission ORs the plane authorizers, then `PlaneRoutedTownService` re-verifies the plane EACH LINE actually needs — `world/wall.*` requires a live `.wall` grant, everything else `.delegate` — by parsed JSON-RPC method, never substring match. Adversarially tested in both directions plus the method-name-in-a-string probe. | **Shipped + tested** (AC143) |
+| **Wall transport forgery / splice** (a peer claiming another town's authorship, splicing chunk sets, or flooding partial sets) | The author's TOWN is stamped from the messenger-VERIFIED sender identity, never read from the wire (the wire's `agent` field is the peer node's own namespace, sanitized to the identifier charset); chunk sets are keyed per-sender and `WallChunking.reassemble` refuses any incomplete/mixed/duplicated set WHOLE; pending sets are bounded with oldest-first eviction (counted), so endless partials displace the flooder's own state, never grow the node; an oversize reassembled post is refused by the wall's own byte cap, never truncated. | **Shipped + tested** (AC143) |
+| **Local-socket wall access** (any local process reaching the `eldr-gooseworld` socket) | The loopback host services NOTHING before the pairing token arrives as the first line (wrong token = closed unserviced); the Unix-socket path is 0600; the TCP fallback binds 127.0.0.1 only, and the extension binary refuses non-loopback by construction. | **Shipped + tested** (AC143) |
 
 **What is deliberately NOT yet proven, stated plainly:** the town A2A plane and the
 grant-backed authorizer are wired and proven **end-to-end in one process** — an in-process
 TWO-TOWN E2E (AC131) drives two full towns over one `LocalRelaySimulator` through the real
 `serve` loop: a grant admits Town A, an agent-labeled reply returns byte-exact, every
 negative fails closed, and a granted town still cannot reach the coding plane (the
-confused-deputy crown jewel). What that does NOT cover is the **live two-machine delegation
-over the real relay** (GOOSEWORLD Phase 0): no live network (partition/latency/NIP-42
-AUTH/khatru chunk limits), no second OS/Keychain, and Town B's service is a minimal A2A
-responder rather than a live goose flock. That is the one gap a second machine would close.
+confused-deputy crown jewel). The WALL plane now has the same one-process proof (AC143): a
+chunked post travels the real serve loop, is grant-admitted, plane-routed, reassembled
+byte-exact, and reads back quarantined as REMOTE, with cursors surviving a node restart.
+What neither covers is the **live two-machine run over the real relay** (GOOSEWORLD Phase
+0): no live network (partition/latency/NIP-42 AUTH/khatru chunk limits), no second
+OS/Keychain, and the peer service is a minimal A2A responder rather than a live goose
+flock. That is the one gap a second machine would close. Two further wall-plane limits,
+stated: the node-side wall enforces grant EXISTENCE per line but per-day byte/message
+budgets remain the engine-side send gate (`AgentEngine.authorizeTownSend` — a headless
+node does not yet meter them), and the headless grant source is an owner-curated FILE
+where removal is revocation (`FileStandingGrantStore`) — the signed
+`standing_grant_revocation` flow remains the phone/engine surface.
 The
 `PinnedTownAllowlist` config path is a transport admission check, **not** a §13-compliant
 human-signed grant, and is documented as such; the §13-shaped authorization is the standing
