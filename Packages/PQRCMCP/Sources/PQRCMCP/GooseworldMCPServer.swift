@@ -258,7 +258,14 @@ public struct GooseworldMCPServer: Sendable {
     /// id tells them apart, so both coercions below key off it.
     private func isJSONBoolean(_ value: Any) -> Bool {
         guard let number = value as? NSNumber else { return false }
+        #if canImport(Darwin)
         return CFGetTypeID(number) == CFBooleanGetTypeID()
+        #else
+        // swift-corelibs-foundation doesn't expose the CF type IDs; JSONSerialization there
+        // encodes a JSON boolean with the char objCType ("c"/"B"), a number otherwise.
+        let enc = String(cString: number.objCType)
+        return enc == "c" || enc == "B"
+        #endif
     }
 
     private func optionalBool(_ value: Any?, name: String) throws -> Bool? {

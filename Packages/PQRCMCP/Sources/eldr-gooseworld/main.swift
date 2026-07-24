@@ -6,6 +6,14 @@
 #endif
 import Foundation
 
+// `SOCK_STREAM` imports as `Int32` on Darwin but as the `__socket_type` enum on Glibc,
+// so normalize it once for the `socket()` calls below (Linux town port).
+#if canImport(Glibc)
+private let sockStreamType = Int32(SOCK_STREAM.rawValue)
+#else
+private let sockStreamType = SOCK_STREAM
+#endif
+
 // eldr-gooseworld — the goose extension binary (GOOSEWORLD §6 WS-G3).
 //
 // A goose extension IS an MCP server, so this is what you register in a goosetown to
@@ -50,7 +58,7 @@ guard let token = env["ELDR_GOOSEWORLD_TOKEN"], !token.isEmpty else {
 // unencrypted cross-network agent channel.
 let sockFD: Int32
 if let path = env["ELDR_GOOSEWORLD_SOCKET"], !path.isEmpty {
-    let fd = socket(AF_UNIX, SOCK_STREAM, 0)
+    let fd = socket(AF_UNIX, sockStreamType, 0)
     guard fd >= 0 else { die("socket() failed (errno \(errno))") }
     var addr = sockaddr_un()
     addr.sun_family = sa_family_t(AF_UNIX)
@@ -71,7 +79,7 @@ if let path = env["ELDR_GOOSEWORLD_SOCKET"], !path.isEmpty {
     }
     sockFD = fd
 } else if let portStr = env["ELDR_GOOSEWORLD_PORT"], let port = UInt16(portStr) {
-    let fd = socket(AF_INET, SOCK_STREAM, 0)
+    let fd = socket(AF_INET, sockStreamType, 0)
     guard fd >= 0 else { die("socket() failed (errno \(errno))") }
     var addr = sockaddr_in()
     addr.sin_family = sa_family_t(AF_INET)
@@ -128,7 +136,7 @@ outThread.stackSize = 1 << 20
 outThread.start()
 
 pump(from: FileHandle.standardInput.fileDescriptor, to: sockFD)
-shutdown(sockFD, SHUT_WR)
+shutdown(sockFD, Int32(SHUT_WR))
 // Give the reverse direction a moment to flush any final response, then exit.
 while !outThread.isFinished { usleep(2000) }
 exit(0)

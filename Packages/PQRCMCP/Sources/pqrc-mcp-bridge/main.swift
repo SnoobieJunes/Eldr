@@ -6,6 +6,14 @@
 #endif
 import Foundation
 
+// `SOCK_STREAM` imports as `Int32` on Darwin but as the `__socket_type` enum on Glibc,
+// so normalize it once for the `socket()` calls below (Linux town port).
+#if canImport(Glibc)
+private let sockStreamType = Int32(SOCK_STREAM.rawValue)
+#else
+private let sockStreamType = SOCK_STREAM
+#endif
+
 // pqrc-mcp-bridge — the stdio SHIM (A35 Phase 2). EldrChat's real secure chat is
 // in an encrypted store whose key lives only in the unlocked app's RAM, so a
 // standalone MCP process can't read it. The app HOSTS the MCP server in-process
@@ -32,7 +40,7 @@ guard let token = env["PQRC_MCP_TOKEN"], !token.isEmpty else {
 // Connect: Unix-domain socket if PQRC_MCP_SOCKET is set, else 127.0.0.1:PORT.
 let sockFD: Int32
 if let path = env["PQRC_MCP_SOCKET"], !path.isEmpty {
-    let fd = socket(AF_UNIX, SOCK_STREAM, 0)
+    let fd = socket(AF_UNIX, sockStreamType, 0)
     guard fd >= 0 else { die("socket() failed (errno \(errno))") }
     var addr = sockaddr_un()
     addr.sun_family = sa_family_t(AF_UNIX)
@@ -51,7 +59,7 @@ if let path = env["PQRC_MCP_SOCKET"], !path.isEmpty {
     guard ok == 0 else { die("connect(unix) failed (errno \(errno)) — is the app unlocked with local agent access ON?") }
     sockFD = fd
 } else if let portStr = env["PQRC_MCP_PORT"], let port = UInt16(portStr) {
-    let fd = socket(AF_INET, SOCK_STREAM, 0)
+    let fd = socket(AF_INET, sockStreamType, 0)
     guard fd >= 0 else { die("socket() failed (errno \(errno))") }
     var addr = sockaddr_in()
     addr.sin_family = sa_family_t(AF_INET)
@@ -107,7 +115,7 @@ outThread.stackSize = 1 << 20
 outThread.start()
 
 pump(from: FileHandle.standardInput.fileDescriptor, to: sockFD)
-shutdown(sockFD, SHUT_WR)
+shutdown(sockFD, Int32(SHUT_WR))
 // Give the reverse direction a moment to flush any final response, then exit.
 while !outThread.isFinished { usleep(2000) }
 exit(0)
