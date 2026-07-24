@@ -1,14 +1,15 @@
 // SPDX-License-Identifier: Apache-2.0
 import Foundation
 
-// NODE-SIDE (macOS only): the AGENT half of ACP. It runs the tool-calling loop and
+// NODE-SIDE (macOS + Linux): the AGENT half of ACP. It runs the tool-calling loop and
 // executes file/shell tools via `ToolExecutor` (which spawns `Process`), so it only
-// runs on the Mac node. The iOS app drives a remote agent over an `ACPTransport` via
-// `ACPClient`/`ACPClientDriver` and never instantiates the agent itself, so this whole
-// type is guarded off the iOS-compiled `PQRCACP` library. The one wire constant the
-// client path needs (`protocolVersion`) lives on `ACPClientDriver` (iOS-available) and
-// is mirrored here so macOS keeps a single source of truth.
-#if os(macOS)
+// runs on the node (a Mac or, since WS-L4, a Linux server/Pi). The iOS app drives a
+// remote agent over an `ACPTransport` via `ACPClient`/`ACPClientDriver` and never
+// instantiates the agent itself, so this whole type is guarded off the iOS-compiled
+// `PQRCACP` library. The one wire constant the client path needs (`protocolVersion`)
+// lives on `ACPClientDriver` (iOS-available) and is mirrored here so the node keeps a
+// single source of truth.
+#if os(macOS) || os(Linux)
 /// EldrChat's ACP agent. An ACP CLIENT (Xcode 27) spawns it over stdio and drives
 /// it with JSON-RPC: `initialize` → `session/new` → `session/prompt`. On a prompt
 /// the agent runs a tool-calling loop against a local LLM, streaming `session/update`
@@ -764,8 +765,8 @@ public actor ACPAgent {
 
     // MARK: - Phase D4: interactive PTY terminal
 
-    /// Spawn a persistent interactive `/bin/zsh` on a PTY and stream its output to the
-    /// phone as `terminal_output` session/updates. Returns a tool result naming the
+    /// Spawn a persistent interactive shell (`NodeShell.defaultPath`) on a PTY and stream
+    /// its output to the phone as `terminal_output` session/updates. Returns a tool result naming the
     /// `terminalId` (the model can't read the live stream — it goes to the user's device
     /// — so the result just tells the model the terminal is open). The PTY is registered
     /// in `terminals` and lives until the child exits, the phone kills it (Stop), the
@@ -787,7 +788,7 @@ public actor ACPAgent {
         var env = toolEnvironment.shellEnvironment
         let process: PTYProcess
         do {
-            process = try PTYProcess(executable: "/bin/zsh", cwd: cwd, environment: env)
+            process = try PTYProcess(cwd: cwd, environment: env)
         } catch {
             return ToolResult(
                 text: "open_terminal: failed to spawn a PTY: \(Self.describe(error))",
@@ -1392,4 +1393,4 @@ private struct TurnPlan {
         entries[index].status = status
     }
 }
-#endif  // os(macOS) — ACPAgent (node-side: tool-calling loop + ToolExecutor/Process)
+#endif  // os(macOS) || os(Linux) — ACPAgent (node-side: tool-calling loop + ToolExecutor/Process)

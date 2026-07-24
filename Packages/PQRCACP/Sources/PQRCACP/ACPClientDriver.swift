@@ -1,6 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
 import Foundation
 
+#if canImport(Glibc)
+import Glibc  // signal/SIGPIPE on the spawn path
+#endif
+
 // The CLIENT half of ACP — the counterpart to `ACPAgent`. An ACP client spawns the
 // `eldr-acp` agent over stdio and drives it: `initialize → session/new →
 // session/prompt`, while servicing the agent's OUTBOUND requests
@@ -126,9 +130,10 @@ public actor ACPClientDriver {
 
     /// How the agent process is provided.
     private enum Transport {
-        /// Spawn `eldr-acp` ourselves. macOS-only — `Process` is unavailable on iOS, and
-        /// the phone never spawns a local agent (it drives a remote one over `.preset`).
-        #if os(macOS)
+        /// Spawn `eldr-acp` ourselves. Node-only (macOS + Linux) — `Process` is unavailable
+        /// on iOS, and the phone never spawns a local agent (it drives a remote one over
+        /// `.preset`).
+        #if os(macOS) || os(Linux)
         case spawn(executableURL: URL, arguments: [String], environment: [String: String])
         #endif
         /// Attach to an already-running pair (input = where WE write, output = where
@@ -153,7 +158,7 @@ public actor ACPClientDriver {
     /// unchanged.
     private var advertiseChatTools = false
 
-    #if os(macOS)
+    #if os(macOS) || os(Linux)
     private var process: Process?  // node-side: only the spawn path holds a Process
     #endif
     private var inputHandle: FileHandle?
@@ -163,10 +168,10 @@ public actor ACPClientDriver {
     private var readerTask: Task<Void, Never>?
     private var started = false
 
-    #if os(macOS)
+    #if os(macOS) || os(Linux)
     /// Spawn a fresh `eldr-acp` at `executableURL`. `environmentOverrides` are merged
     /// over the inherited process environment (which already carries `ELDR_LLM_*`,
-    /// `ELDR_WORKDIR`, `DEVELOPER_DIR` when exported by the launcher). macOS-only: spawning
+    /// `ELDR_WORKDIR`, `DEVELOPER_DIR` when exported by the launcher). Node-only: spawning
     /// uses `Process`, and the phone drives a remote agent (`.preset`) instead.
     public init(
         executableURL: URL, arguments: [String] = [],
@@ -223,7 +228,7 @@ public actor ACPClientDriver {
         signal(SIGPIPE, SIG_IGN)
 
         switch transport {
-        #if os(macOS)
+        #if os(macOS) || os(Linux)
         case .spawn(let executableURL, let arguments, let environment):
             let process = Process()
             process.executableURL = executableURL
@@ -364,7 +369,7 @@ public actor ACPClientDriver {
         if case .preset(let acpTransport) = transport { acpTransport.close() }
         try? inputHandle?.close()
         inputHandle = nil
-        #if os(macOS)
+        #if os(macOS) || os(Linux)
         if let process, process.isRunning { process.terminate() }
         process = nil
         #endif

@@ -1,7 +1,13 @@
 // SPDX-License-Identifier: Apache-2.0
 import Foundation
-#if os(macOS)
+#if os(macOS) || os(Linux)
 import PQRCACP
+#if canImport(FoundationNetworking)
+import FoundationNetworking  // URLSession lives here on Linux (pingLLM)
+#endif
+#if canImport(Glibc)
+import Glibc  // signal/SIGINT
+#endif
 
 // `eldr-acp-run` — a terminal ACP CLIENT that drives the real `eldr-acp` agent so you
 // can run and test it by hand against real LM Studio and real files. It's a thin UX
@@ -226,13 +232,13 @@ actor TurnFlag {
     func finish() { isRunning = false }
 }
 #else
-// The terminal ACP client drives the macOS agent over URLSession/Process — macOS-only. Linux
-// gets a stub so the package builds.
+// WS-L4 made the terminal ACP client run on macOS AND Linux; this stub now covers only
+// platforms with neither (nothing real builds this target there).
 @main
 struct EldrACPRun {
     static func main() {
         FileHandle.standardError.write(Data(
-            "eldr-acp-run: the terminal ACP client is macOS-only; not available on Linux.\n".utf8))
+            "eldr-acp-run: the terminal ACP client requires macOS or Linux.\n".utf8))
         exit(1)
     }
 }

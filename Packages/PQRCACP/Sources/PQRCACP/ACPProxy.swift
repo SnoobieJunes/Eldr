@@ -67,11 +67,11 @@ public func runACPProxy(client: any ACPTransport, harness: any ACPTransport) asy
 /// failure the client transport is closed so the phone sees a clean disconnect rather than
 /// a hang.
 ///
-/// macOS-only because the default factory's `.stdioSpawn` branch spawns a `Process`. The
-/// node (Mac/server/Pi) hosts harnesses; the phone is the ACP client and calls
-/// `runACPAgent`/drives a remote one, never `runHarness`. Same gating as `runACPAgent` and
-/// `StdioHarnessTransport`.
-#if os(macOS)
+/// Node-only (macOS + Linux) because the default factory's `.stdioSpawn` branch spawns a
+/// `Process`. The node (Mac/server/Pi) hosts harnesses; the phone is the ACP client and
+/// calls `runACPAgent`/drives a remote one, never `runHarness`. Same gating as
+/// `runACPAgent` and `StdioHarnessTransport`.
+#if os(macOS) || os(Linux)
 public func runHarness(
     descriptor: HarnessDescriptor,
     client: any ACPTransport,
@@ -109,4 +109,4 @@ public func runHarness(
         await runACPProxy(client: client, harness: harness)
     }
 }
-#endif  // os(macOS) — runHarness spawns a Process for .stdioSpawn (node-side only)
+#endif  // os(macOS) || os(Linux) — runHarness spawns a Process for .stdioSpawn (node-side only)

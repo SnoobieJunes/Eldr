@@ -35,9 +35,9 @@ public protocol HarnessTransportFactory: Sendable {
     func makeTransport(for descriptor: HarnessDescriptor) throws -> any ACPTransport
 }
 
-#if os(macOS)
+#if os(macOS) || os(Linux)
 /// The production default: `.stdioSpawn` spawns the descriptor as a subprocess via
-/// `StdioHarnessTransport` (macOS-only — `Process` is unavailable on iOS, same gating as
+/// `StdioHarnessTransport` (node-only — `Process` is unavailable on iOS, same gating as
 /// that type). Every other kind — `.builtIn` (never reaches a factory) and `.a2aRemote`
 /// (needs `A2AHarness`'s factory) — throws `HarnessTransportError.unsupportedKind` rather
 /// than silently doing nothing, so a caller that forgets to inject the richer factory
@@ -56,4 +56,4 @@ public struct DefaultHarnessTransportFactory: HarnessTransportFactory {
         }
     }
 }
-#endif  // os(macOS) — DefaultHarnessTransportFactory spawns a Process for .stdioSpawn
+#endif  // os(macOS) || os(Linux) — DefaultHarnessTransportFactory spawns a Process for .stdioSpawn

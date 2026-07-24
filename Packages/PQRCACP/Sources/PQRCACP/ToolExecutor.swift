@@ -113,13 +113,31 @@ public struct ToolResult: Sendable {
     }
 }
 
-// NODE-SIDE (macOS only): the tool executor spawns shells (`Process`) and touches the
+/// The node's default shell, per platform. zsh ships standard on macOS; Linux boxes
+/// (Ubuntu/Debian servers, the swift:6.2 container, a Pi) ship bash but commonly no
+/// zsh — and both accept the exact invocation shapes the node uses (`-lc` for one-shot
+/// `run_shell`, `-l -i +m` for the interactive PTY, where `+m` turns job control OFF —
+/// the always-killable guarantee `PTYProcess` documents). One constant so `run_shell`,
+/// `open_terminal`, and the tool description advertised to the model can never drift.
+/// iOS-available (it's just a string) so phone-side UI could surface it if ever needed.
+public enum NodeShell {
+    /// Absolute path of the node's default shell: `/bin/zsh` on macOS, `/bin/bash` on Linux.
+    public static var defaultPath: String {
+        #if os(Linux)
+        return "/bin/bash"
+        #else
+        return "/bin/zsh"
+        #endif
+    }
+}
+
+// NODE-SIDE (macOS + Linux): the tool executor spawns shells (`Process`) and touches the
 // filesystem to do real file/shell work. The iOS app never runs the AGENT half — the
-// phone is the remote control that drives a Mac node over an `ACPTransport` — so this
+// phone is the remote control that drives a node over an `ACPTransport` — so this
 // whole type is guarded off the iOS-compiled `PQRCACP` library. The phone-side value
 // types above (`ClientCapabilities`/`ToolEnvironment`/`ToolResult`) stay available
 // because `ACPClient`/`ACPClientDriver` reference them.
-#if os(macOS)
+#if os(macOS) || os(Linux)
 /// Executes the agent's four tools, preferring client-routed I/O over Foundation
 /// fallbacks. Constructed once per prompt turn (it carries that turn's sessionId,
 /// which the fs/* and terminal/* methods require); stateless otherwise, so it's a
@@ -280,7 +298,7 @@ public struct ToolExecutor: Sendable {
             LLMTool(
                 name: "run_shell",
                 description:
-                    "Run one shell command with /bin/zsh -lc in the working directory; returns combined stdout+stderr and the exit code. Use for builds and tests, e.g. run_shell(command: \"xcodebuild -scheme App test\") or xcrun simctl / swift build. DEVELOPER_DIR is preset to the configured Xcode. Long output is truncated.",
+                    "Run one shell command with \(NodeShell.defaultPath) -lc in the working directory; returns combined stdout+stderr and the exit code. Use for builds and tests, e.g. run_shell(command: \"xcodebuild -scheme App test\") or xcrun simctl / swift build. DEVELOPER_DIR is preset to the configured Xcode. Long output is truncated.",
                 parameters: stringArgSchema(
                     name: "command", desc: "the single shell command line to run", required: true)),
             LLMTool(
@@ -952,8 +970,8 @@ public struct ToolExecutor: Sendable {
         }
     }
 
-    /// Foundation fallback: spawn /bin/zsh -lc with the (DEVELOPER_DIR-augmented)
-    /// environment and capture combined stdout+stderr.
+    /// Foundation fallback: spawn the node shell (`NodeShell.defaultPath`) with `-lc`
+    /// and the (DEVELOPER_DIR-augmented) environment, capturing combined stdout+stderr.
     ///
     /// `async` + a continuation: a background reader drains the pipe to EOF (so a
     /// child that fills the OS pipe buffer before exiting can't deadlock), owning
@@ -961,7 +979,7 @@ public struct ToolExecutor: Sendable {
     /// `Data` value. No shared mutable state, no lock — Sendable-clean.
     private func runShellViaProcess(_ command: String) async -> ToolResult {
         let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/bin/zsh")
+        process.executableURL = URL(fileURLWithPath: NodeShell.defaultPath)
         process.arguments = ["-lc", command]
         process.environment = environment.shellEnvironment
         process.currentDirectoryURL = URL(fileURLWithPath: environment.effectiveWorkdir)
@@ -974,7 +992,7 @@ public struct ToolExecutor: Sendable {
             try process.run()
         } catch {
             return ToolResult(
-                text: "run_shell: failed to launch /bin/zsh: \(error.localizedDescription)",
+                text: "run_shell: failed to launch \(NodeShell.defaultPath): \(error.localizedDescription)",
                 isError: true)
         }
 
@@ -1034,4 +1052,4 @@ public struct ToolExecutor: Sendable {
         return text
     }
 }
-#endif  // os(macOS) — ToolExecutor (node-side, spawns Process)
+#endif  // os(macOS) || os(Linux) — ToolExecutor (node-side, spawns Process)

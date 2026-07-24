@@ -8,12 +8,15 @@ import Foundation
 // locally-spawned process's stdin/stdout. With both sides modeled as `ACPTransport`,
 // `runACPProxy` pipes between them without knowing either is a process or a radio.
 //
-// macOS-only: spawning uses `Process`, which is unavailable on iOS — and per the plan the
-// node (Mac/server/Pi) hosts harnesses; the phone is always the ACP *client* and never
-// spawns one. Same `#if os(macOS)` gating as `runACPAgent` and the `.spawn` path in
+// Node-only (macOS + Linux): spawning uses `Process`, which is unavailable on iOS — and
+// per the plan the node (Mac/server/Pi) hosts harnesses; the phone is always the ACP
+// *client* and never spawns one. Same gating as `runACPAgent` and the `.spawn` path in
 // `ACPClientDriver`.
 
-#if os(macOS)
+#if os(macOS) || os(Linux)
+#if canImport(Glibc)
+import Glibc  // signal/SIGPIPE
+#endif
 /// An `ACPTransport` backed by a spawned external ACP harness: the child's **stdout →
 /// `inboundLines()`** (newline-framed JSON-RPC, identical framing to the agent) and
 /// **`send(_:)` → child stdin**; `close()` terminates it. Reuses the
@@ -213,4 +216,4 @@ private final class HarnessLineSplitter: @unchecked Sendable {
         return lines
     }
 }
-#endif  // os(macOS) — StdioHarnessTransport spawns a Process (node-side only)
+#endif  // os(macOS) || os(Linux) — StdioHarnessTransport spawns a Process (node-side only)
