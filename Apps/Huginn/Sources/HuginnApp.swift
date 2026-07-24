@@ -131,7 +131,9 @@ struct RootView: View {
 /// harness (Configuration, Test Chat, Logs), the phone pairing/tether (Bridge (phone
 /// tether)), and the infrastructure setup (Relay).
 struct MainWindow: View {
-    enum Tab: Hashable { case configuration, testChat, mlx, inspector, logs, bridge, nearby, relay }
+    enum Tab: Hashable {
+        case configuration, testChat, mlx, inspector, logs, bridge, nearby, relay, townGrants
+    }
     @State private var tab: Tab = .configuration
 
     /// Cross-scene tab jump (WS-M1): the menu-bar extra and the Configuration
@@ -169,6 +171,12 @@ struct MainWindow: View {
             RelayWizardView()
                 .tabItem { Label("Relay", systemImage: "server.rack") }
                 .tag(Tab.relay)
+            // WS-G5 Phase-2 gate: the node's standing TOWN grants (view/verify/import/
+            // revoke-by-removal) — the human-visible authorization surface invariant 9
+            // requires for the cross-town planes.
+            TownGrantsView()
+                .tabItem { Label("Town Grants", systemImage: "signpost.right.and.left") }
+                .tag(Tab.townGrants)
         }
         .padding(.top, 6)
         .navigationTitle("Eldr — Mac node & AI tether")

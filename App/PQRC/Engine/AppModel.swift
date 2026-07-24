@@ -520,6 +520,67 @@ final class AppModel {
             conversationID: conversationID, durationSeconds: Int64(minutes * 60))
     }
 
+    // MARK: - Standing town grants (WS-G4 UI — the invariant-9 visibility surface)
+
+    /// Live standing grants (mine + received), refreshed on demand: the section's
+    /// onAppear and every mutation below. No 1 Hz churn — expiry display uses the
+    /// header's existing ticker against `activeUntil`.
+    var myTownGrants: [AgentEngine.StandingGrantStatus] = []
+    /// The most recently minted grant's exportable JSON (what Huginn/the node's
+    /// town-grants.json consumes), kept for the copy affordance.
+    var lastMintedGrantJSON: String?
+
+    func refreshTownGrants() async {
+        myTownGrants = await runtime.townGrantStatuses()
+    }
+
+    /// Default day-scale budget for a UI-minted grant: bounded everywhere (the Budget
+    /// type refuses unbounded), roomy enough for a day of wall coordination.
+    /// `nonisolated`: an immutable Sendable constant tests reach off-main.
+    nonisolated static let defaultTownGrantBudget = StandingGrant.Budget(
+        messagesPerDay: 200, bytesPerDay: 512 * 1024, maxConcurrentTasks: 4)
+
+    /// Mint a grant for `peerIdentityHex`; returns the export JSON (nil = refused).
+    @discardableResult
+    func startTownGrant(
+        peerIdentityHex: String, planes: [StandingGrant.Plane], days: Int
+    ) async -> String? {
+        do {
+            let (statuses, json) = try await runtime.startTownGrant(
+                peerIdentityHex: peerIdentityHex, planes: planes,
+                budget: Self.defaultTownGrantBudget,
+                durationSeconds: Int64(max(1, days)) * 86_400)
+            myTownGrants = statuses
+            lastMintedGrantJSON = json
+            return json
+        } catch {
+            return nil
+        }
+    }
+
+    func revokeTownGrant(grantID: String) async {
+        if let statuses = try? await runtime.revokeTownGrant(grantID: grantID) {
+            myTownGrants = statuses
+        }
+    }
+
+    /// The grants banner for a conversation: 1:1 conversation ids ARE the peer's
+    /// identity hex, so a live grant naming that peer surfaces exactly where the
+    /// relationship lives. Pure + `nonisolated` static so the matching is
+    /// unit-testable without an AppModel instance (or the main actor).
+    nonisolated static func townGrantBanner(
+        grants: [AgentEngine.StandingGrantStatus], conversationID: String, now: Int64
+    ) -> (planes: String, until: Int64)? {
+        let live = grants.filter { $0.peerIdentityHex == conversationID && $0.activeUntil > now }
+        guard let soonest = live.min(by: { $0.activeUntil < $1.activeUntil }) else { return nil }
+        let planes = Set(live.map(\.plane.rawValue)).sorted().joined(separator: " + ")
+        return (planes, soonest.activeUntil)
+    }
+
+    func activeTownGrantBanner(conversationID: String, now: Int64) -> (planes: String, until: Int64)? {
+        Self.townGrantBanner(grants: myTownGrants, conversationID: conversationID, now: now)
+    }
+
     func createThread(
         conversationID: String, title: String, anchorMessageID: String? = nil
     ) async -> String? {

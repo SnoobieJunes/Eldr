@@ -739,6 +739,12 @@ struct ConfigPaths: Sendable {
     /// WS-MLX: the managed MLX area (private Python venv, server log, fine-tune
     /// configs) — kept beside the agent config so it's one visible, debuggable place.
     var mlxDir: String { join(configDir, "mlx") }
+    /// WS-G5/Phase-2 gate: the standing-grant file an `eldr-node` town plane consumes
+    /// (`FileStandingGrantStore` format — removal of an entry IS revocation there), and
+    /// the peer roster beside it. Edited by Huginn's Town Grants panel; the node
+    /// re-reads on change.
+    var townGrantsFile: String { join(configDir, "town-grants.json") }
+    var townPeersFile: String { join(configDir, "town-peers.json") }
 
     var installedBinary: String { join(binDir, "eldr-acp") }
     var launcher: String { join(binDir, "eldr-acp-xcode") }

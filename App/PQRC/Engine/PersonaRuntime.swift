@@ -2631,6 +2631,42 @@ actor PersonaRuntime {
                 activeUntil: announcement.activeUntil))
     }
 
+    // MARK: - Standing town grants (GOOSEWORLD WS-G4 engine → the Phase-2 UI gate)
+
+    /// Mint + sign a standing town grant for `peerIdentityHex` (the §13-shaped, human-
+    /// signed, day-bounded authorization for the cross-town wall/delegate planes) and
+    /// return the refreshed status list PLUS the grant's exportable JSON — the exact
+    /// element the node's `town-grants.json` (`FileStandingGrantStore`) consumes. The
+    /// export is how the authorization reaches a headless node in v1: the OWNER carries
+    /// it (paste into Huginn ▸ Town Grants), the engine never auto-ships it anywhere.
+    func startTownGrant(
+        peerIdentityHex: String, planes: [StandingGrant.Plane],
+        budget: StandingGrant.Budget, durationSeconds: Int64
+    ) async throws -> (statuses: [AgentEngine.StandingGrantStatus], exportJSON: String) {
+        let grant = try await engine.startMyStandingGrant(
+            grantID: "grant-\(UUID().uuidString.prefix(8).lowercased())",
+            peerIdentityHex: peerIdentityHex, planes: planes, budget: budget,
+            durationSeconds: durationSeconds)
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        let json = String(decoding: (try? encoder.encode(grant)) ?? Data(), as: UTF8.self)
+        return (await engine.activeStandingGrants(), json)
+    }
+
+    /// Revoke one of MY standing grants (signed revocation recorded by the engine; the
+    /// authorization dies engine-side immediately). A node consuming the FILE store
+    /// additionally needs the entry removed there — the UI says so (removal-from-file
+    /// is that store's revocation, DEVIATIONS AC143).
+    func revokeTownGrant(grantID: String) async throws -> [AgentEngine.StandingGrantStatus] {
+        _ = try await engine.revokeMyStandingGrant(grantID: grantID)
+        return await engine.activeStandingGrants()
+    }
+
+    /// Current live standing grants (mine + received), for the invariant-9 indicator.
+    func townGrantStatuses() async -> [AgentEngine.StandingGrantStatus] {
+        await engine.activeStandingGrants()
+    }
+
     func inviteMyAI(threadID: String, durationSeconds: Int64) async throws {
         guard let conversationID = threadConversations[threadID] else { return }
         let invite = try await engine.startMyInvite(
