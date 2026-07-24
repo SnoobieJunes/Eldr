@@ -24,8 +24,10 @@ Durable and streamed agent-memory specs on Nostr — notably
 [NIP-AE](NIP-AE.md) (agent engrams) — explicitly leave admission control to the
 implementer. NIP-AE §Security considerations states that "Encryption protects
 confidentiality, not the truthfulness of what the agent decides to remember.
-Admission control is the implementer's problem," and that owner write authority
-is "out of band." An agent that reads an engram, a channel message, or a
+Admission control is the implementer's problem." It also states that there is
+**no owner write authority** — only the agent's own key can author records — and
+that any out-of-band mechanism by which an owner directs that memory is left
+undefined. An agent that reads an engram, a channel message, or a
 cross-workspace payload and folds it verbatim into its context is vulnerable to
 **prompt injection**: hostile text that reads as an instruction ("ignore your
 previous instructions and…"), or terminal-escape forgery that rewrites what a
