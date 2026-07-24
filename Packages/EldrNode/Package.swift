@@ -8,13 +8,13 @@ import PackageDescription
 // `ACPBridgeService` (no SwiftUI, no @MainActor): the same proven wiring, parked as a
 // daemon.
 //
-// macOS-only: `runACPAgent` (PQRCACP) drives `ACPAgent`, whose `ToolExecutor` spawns
-// `Foundation.Process` to do real file/shell work — guarded `#if os(macOS)` upstream.
-// So the node hosts the agent only where that exists (a Mac), exactly like the
-// Configurator. Servers/Pis without a macOS Keychain are a documented follow-up (the
-// `eldr-node` executable's identity store is macOS Keychain-backed for tonight); the
-// reusable `EldrNodeCore` serve loop is platform-agnostic and dependency-injected, so
-// it is exercised headlessly over a `LocalRelaySimulator` with no network/Keychain.
+// Platforms: `runACPAgent` (PQRCACP) drives `ACPAgent`, whose `ToolExecutor` spawns
+// `Foundation.Process` to do real file/shell work — node-only (`#if os(macOS) ||
+// os(Linux)` upstream since WS-L4), so both a Mac and a Linux server/Pi host the full
+// agent. Linux identity lives in the WS-L2/L3 `FileIdentityStore` keystore ladder
+// (macOS keeps the Keychain); the reusable `EldrNodeCore` serve loop is
+// platform-agnostic and dependency-injected, so it is exercised headlessly over a
+// `LocalRelaySimulator` with no network/Keychain.
 let package = Package(
     name: "EldrNode",
     platforms: [.macOS(.v26)],
