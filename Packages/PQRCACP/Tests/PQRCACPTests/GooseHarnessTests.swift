@@ -20,8 +20,8 @@ import Testing
 //     on goose actually being resolvable, so a machine (or CI runner) without goose SKIPS it
 //     rather than failing — and, critically, rather than passing vacuously.
 //
-// macOS-only: `StdioHarnessTransport` is `#if os(macOS)` (spawning needs `Foundation.Process`,
-// which iOS lacks), exactly like the rest of the harness-spawn surface.
+// Node-only (macOS + Linux): `StdioHarnessTransport` needs `Foundation.Process`,
+// which iOS lacks — exactly like the rest of the harness-spawn surface.
 
 // MARK: - (1) registry shape — always runs
 
@@ -74,7 +74,7 @@ struct GooseHarnessRegistryTests {
 
 // MARK: - (2) the live handshake — the actual verification
 
-#if os(macOS)
+#if os(macOS) || os(Linux)
 @Suite("WS-G2 goose ACP initialize handshake (live, macOS)")
 struct GooseHarnessLiveHandshakeTests {
 
@@ -164,4 +164,4 @@ struct GooseHarnessLiveHandshakeTests {
         }
     }
 }
-#endif  // os(macOS)
+#endif  // os(macOS) || os(Linux)

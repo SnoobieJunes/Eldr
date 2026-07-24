@@ -4,12 +4,17 @@ import Testing
 
 @testable import PQRCACP
 
-// PTY lifecycle proofs (Phase D4). macOS-only — PTYProcess spawns a real /bin/zsh on a
+// PTY lifecycle proofs (Phase D4). Node-only (macOS + Linux since WS-L4) — PTYProcess
+// spawns the real node shell (`NodeShell.defaultPath`: zsh on macOS, bash on Linux) on a
 // pseudo-terminal, so these run on the node, never the iOS app target. Hermetic: no
 // network, no relay; a real child process whose death we VERIFY (the whole point — an
 // interactive shell that can't be reliably killed is the project's highest risk).
-#if os(macOS)
+#if os(macOS) || os(Linux)
+#if canImport(Darwin)
 import Darwin
+#else
+import Glibc
+#endif
 
 @Suite("PTYProcess — interactive PTY lifecycle (Phase D4)")
 struct PTYProcessTests {
@@ -29,11 +34,10 @@ struct PTYProcessTests {
         return await condition()
     }
 
-    /// Is `pid` still a live process? `kill(pid, 0)` returns 0 while it exists (and the
-    /// caller can signal it) and -1/ESRCH once it's reaped/gone. A SIGKILLed-and-reaped
-    /// child returns ESRCH.
+    /// Is `pid` still a live process? Zombie-aware on Linux (a container's pid-1 test
+    /// runner never reaps reparented children) — see `testProcessIsAlive`.
     private func processAlive(_ pid: pid_t) -> Bool {
-        kill(pid, 0) == 0
+        testProcessIsAlive(pid)
     }
 
     /// Accumulates the PTY's output stream off the single consumer, so a test can await
@@ -57,7 +61,7 @@ struct PTYProcessTests {
         }
     }
 
-    /// Spawn zsh, drain its output into a sink, return both. The caller drives stdin.
+    /// Spawn the node shell, drain its output into a sink, return both. The caller drives stdin.
     private func spawnWithSink() throws -> (pty: PTYProcess, sink: OutputSink, reader: Task<Void, Never>) {
         let pty = try PTYProcess(
             cwd: NSTemporaryDirectory(),
@@ -71,7 +75,7 @@ struct PTYProcessTests {
 
     // MARK: - (1) spawn → write → read → terminate (the child actually dies)
 
-    @Test func spawnZsh_echoesStdin_thenTerminateKillsTheChild() async throws {
+    @Test func spawnShell_echoesStdin_thenTerminateKillsTheChild() async throws {
         let (pty, sink, reader) = try spawnWithSink()
         defer { reader.cancel() }
 
@@ -79,8 +83,8 @@ struct PTYProcessTests {
         // through the public surface (isTerminated) AND independently below using a
         // marker that can only appear if the shell ran our command.
         let marker = "PTY_OK_\(UUID().uuidString.prefix(8))"
-        // Write a command + newline. An interactive zsh on a tty echoes input and runs it,
-        // so the marker shows up in the output stream.
+        // Write a command + newline. An interactive shell on a tty echoes input and runs
+        // it, so the marker shows up in the output stream.
         #expect(pty.write("echo \(marker)\n"))
 
         let sawMarker = await waitUntil { await sink.contains(marker) }
@@ -165,4 +169,4 @@ struct PTYProcessTests {
         func set() { value = true }
     }
 }
-#endif  // os(macOS)
+#endif  // os(macOS) || os(Linux)

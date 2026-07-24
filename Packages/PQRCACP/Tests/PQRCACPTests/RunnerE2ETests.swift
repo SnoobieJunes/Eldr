@@ -22,8 +22,17 @@ private var agentBinaryURL: URL {
     if let override = ProcessInfo.processInfo.environment["ELDR_ACP_BIN"], !override.isEmpty {
         return URL(fileURLWithPath: override)
     }
-    let dir = Bundle(for: BundleToken.self).bundleURL.deletingLastPathComponent()
-    return dir.appendingPathComponent("eldr-acp")
+    let bundleDir = Bundle(for: BundleToken.self).bundleURL
+    // macOS: the .xctest BUNDLE sits inside the products dir, so its PARENT holds the
+    // freshly built `eldr-acp`. Linux (WS-L4): there is no bundle directory — corelibs
+    // resolves bundleURL to the products dir itself. Probe both so the same test runs
+    // on either layout; prefer whichever actually holds an executable.
+    let candidates = [
+        bundleDir.deletingLastPathComponent().appendingPathComponent("eldr-acp"),
+        bundleDir.appendingPathComponent("eldr-acp"),
+    ]
+    return candidates.first { FileManager.default.isExecutableFile(atPath: $0.path) }
+        ?? candidates[0]
 }
 
 /// Records the driver's render callbacks for assertions.

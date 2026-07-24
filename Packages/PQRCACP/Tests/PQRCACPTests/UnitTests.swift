@@ -361,8 +361,15 @@ struct ClientConnectionTests {
                 method: "fs/read_text_file",
                 params: .object(["path": .string("/x")]))
         }
-        // Let the request hit the sink, then read the id it used.
-        try await Task.sleep(nanoseconds: 50_000_000)
+        // Let the request hit the sink, then read the id it used. Bounded POLL, not a
+        // fixed sleep: under a loaded/virtualized host (the Linux container VM) 50 ms
+        // was not always enough for the detached Task to even start — same
+        // deterministic-readiness rule the PTY tests follow.
+        var waited = 0
+        while await sink.last() == nil, waited < 5_000 {
+            try await Task.sleep(nanoseconds: 20_000_000)
+            waited += 20
+        }
         let sent = try #require(await sink.last())
         let id = try #require(JSONValue.parse(sent)?["id"]?.intValue)
         #expect(id < 0)  // outbound ids are negative
@@ -384,7 +391,12 @@ struct ClientConnectionTests {
         let task = Task {
             try await connection.request(method: "terminal/create", params: .object([:]))
         }
-        try await Task.sleep(nanoseconds: 50_000_000)
+        // Bounded poll, not a fixed sleep — see outboundRequest_correlatesResponseById.
+        var waited = 0
+        while await sink.last() == nil, waited < 5_000 {
+            try await Task.sleep(nanoseconds: 20_000_000)
+            waited += 20
+        }
         let id = try #require(JSONValue.parse(await sink.last() ?? "")?["id"]?.intValue)
         let errorResponse = JSONValue.object([
             "jsonrpc": .string("2.0"), "id": .int(id),

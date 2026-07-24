@@ -17,7 +17,7 @@ import Testing
 //     it SKIPS rather than passing vacuously. Hermes is NOT installed here, so this is the
 //     row's honest status: shipped `isProvisional: true`, awaiting a live run to promote it.
 //
-// macOS-only for the live half: `StdioHarnessTransport` is `#if os(macOS)`.
+// Node-only (macOS + Linux) for the live half: `StdioHarnessTransport` spawns `Process`.
 
 // MARK: - (1) registry shape — always runs
 
@@ -71,7 +71,7 @@ struct HermesHarnessRegistryTests {
 
 // MARK: - (2) the live handshake — the actual verification (skips without Hermes)
 
-#if os(macOS)
+#if os(macOS) || os(Linux)
 @Suite("Hermes ACP initialize handshake (live, macOS)")
 struct HermesHarnessLiveHandshakeTests {
 
@@ -148,4 +148,4 @@ struct HermesHarnessLiveHandshakeTests {
         }
     }
 }
-#endif  // os(macOS)
+#endif  // os(macOS) || os(Linux)
