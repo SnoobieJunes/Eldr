@@ -167,6 +167,20 @@ The complement to Path A: **Buzz Desktop** owns the agent (spawns it, manages it
 shows it in the Agents tab), and it uses Huginn's local model as its brain. Two
 ways to wire the brain — try B1 first:
 
+**B0 — generate a Buzz agent snapshot and import it (the chosen mechanism).**
+Buzz has a portable **`buzz-agent-snapshot` v1** manifest (`.agent.json` or
+`.agent.png`) it imports to create a managed agent — the clean, programmatic way
+to register one. Eldr now generates it: `BuzzAgentSnapshot.forLocalModel(…)`
+(PQRCNostr) emits JSON matching Buzz's schema EXACTLY (verified in
+`BuzzAgentSnapshotTests`), pre-wired with `runtime: goose`, `provider:
+http://127.0.0.1:1337/v1`, the local model id, persona, and `respondTo`. Import
+opens Buzz's Edit-agent draft pre-filled (the owner's screenshot) → Save → a
+managed agent in the Agents tab, brained by Huginn. Secrets/keys/relay are
+absent by design — Buzz fills those on import. **Huginn wiring:** an "Add to
+Buzz" button that calls the generator with the running model's provider/model
+and writes the `.agent.json` for the user to import (or drops it where Buzz
+watches). This supersedes B1/B2 below as the primary path.
+
 **B1 — point a Buzz agent's provider at the local model (possibly zero Eldr code).**
 Buzz managed agents carry a `backend` (`local` or `Provider{…}`), a runtime
 (`goose`/`claude`/`codex` via `agent_command`/`agent_command_override`), and
