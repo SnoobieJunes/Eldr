@@ -70,6 +70,52 @@ Buzz Desktop's `buzz-acp` harness spawns an ACP agent per turn. Point it at
   wire-able but was **not run against a live Buzz relay** (no member key); verify
   on-device in the morning. **Prefer Path A for the demo.**
 
+### The GUI over both paths — Huginn ▸ **Connections** (WS-I7 / AC146)
+
+Neither path needs a terminal any more. Huginn's **Connections** tab is the
+product surface over everything above; the full design is
+`docs/ELDR-BUZZ-GUI-PLAN.md`.
+
+**Path A, in five clicks** — *Connect an AI to a workspace…*
+
+1. **Which workspace?** Paste the relay URL and press **Test connection**: Eldr's
+   own transport opens the socket and reports whether the relay answers and
+   whether it asks members to authenticate (NIP-42), with the relay's NIP-11 name.
+   Then choose *I own/admin this workspace* (paste the owner key once — it signs
+   the NIP-OA attestation in memory and is never stored) or *I was invited* (paste
+   an auth tag an admin gave you).
+2. **Which model?** Leave it empty and the agent follows whatever model Huginn is
+   serving (swap the brain in the MLX tab and the workspace agent follows), or pin
+   one model/endpoint to this workspace.
+3. **Identity & behavior.** Display name (the `@mention` trigger), about, channel
+   ids, mentions-only, the egress filter, and the persona prompt.
+4. **The disclosure.** The E2EE-termination banner with a required checkbox — the
+   gateway refuses to start without it.
+5. **Connect.** Huginn mints a fresh agent key into the Keychain
+   (`buzzagent.<id>`), attests it, writes the connection record, and starts the
+   supervised `eldr-buzz-agent` child.
+
+The running row shows `● Eldr · <relay> — 4 replies · 1.2k tokens`, with
+**Pause/Resume**, **View logs** (the existing console, one log per connection),
+**Rotate key** (new identity + re-attestation), and **Remove** — which publishes
+an agent-signed retirement (kind:0 tombstone + NIP-09 kind:5) and then destroys
+the key.
+
+**Path B, in one click** — *Add this model to Buzz's own Agents tab*. Huginn
+writes a `buzz-agent-snapshot` v1 `.agent.json` wired to `runtime: goose`,
+`provider: lmstudio`, and the loaded model id; import it in Buzz Desktop and
+Save. Because Buzz deliberately strips env vars out of snapshots, the panel also
+shows the one line you paste into the agent's Advanced ▸ env vars (or already
+have in goose's config):
+
+```
+LMSTUDIO_HOST=http://127.0.0.1:1337
+```
+
+> Note the correction here: `provider` is a goose **provider ID**, not a base URL.
+> Buzz projects it into `GOOSE_PROVIDER` at spawn, so a URL in that field imports
+> cleanly and then never answers (AC146).
+
 ---
 
 ## The crypto that makes it interoperable (proven byte-exact)

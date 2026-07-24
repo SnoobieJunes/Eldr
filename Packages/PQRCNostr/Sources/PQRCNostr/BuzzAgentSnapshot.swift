@@ -118,27 +118,100 @@ public struct BuzzAgentSnapshot: Codable, Equatable, Sendable {
         self.memory = memory
     }
 
+    // MARK: - Local-model providers
+
+    /// How a Buzz-managed **goose** agent is pointed at a LOCAL OpenAI-compatible
+    /// endpoint (Huginn's `:1337`).
+    ///
+    /// Buzz's `definition.provider` is a **provider ID**, not a URL: at spawn time
+    /// Buzz projects it into the runtime's `provider_env_var` (`GOOSE_PROVIDER` for
+    /// the goose runtime — `desktop/src-tauri/src/managed_agents/discovery.rs`), and
+    /// goose then resolves the base URL from that provider's OWN host variable
+    /// (`LMSTUDIO_HOST`, `OPENAI_HOST`, `OLLAMA_HOST`). Writing the base URL into
+    /// `provider` therefore yields `GOOSE_PROVIDER=http://127.0.0.1:1337/v1`, which
+    /// goose rejects as an unknown provider — the agent imports and then never
+    /// answers. `environmentHints` carries the host variable the user pastes into
+    /// Buzz's Advanced ▸ env-vars box, because a snapshot deliberately CANNOT carry
+    /// env vars (Buzz excludes them as potential credentials — `agent_snapshot.rs`
+    /// §Secret exclusion).
+    public enum LocalProvider: String, Codable, Sendable, CaseIterable {
+        /// goose `lmstudio`: `base_url = ${LMSTUDIO_HOST}/v1/chat/completions`.
+        /// Any OpenAI-compatible server (MLX's `mlx_lm.server`, LM Studio) fits.
+        case lmstudio
+        /// goose `openai` against a custom host (`OPENAI_HOST` + `OPENAI_BASE_PATH`).
+        case openai
+        /// goose `ollama` (`OLLAMA_HOST`).
+        case ollama
+
+        /// The `GOOSE_PROVIDER` value — what goes in `definition.provider`.
+        public var providerID: String { rawValue }
+
+        /// The env var carrying the endpoint's host for this provider.
+        public var hostEnvVar: String {
+            switch self {
+            case .lmstudio: return "LMSTUDIO_HOST"
+            case .openai: return "OPENAI_HOST"
+            case .ollama: return "OLLAMA_HOST"
+            }
+        }
+
+        /// The env vars a user must have set (in goose's own config, or pasted into
+        /// Buzz's Advanced ▸ env vars) for this provider to reach `baseURL`.
+        /// `baseURL` is the OpenAI-compatible base (`http://127.0.0.1:1337/v1`);
+        /// goose appends its own path, so the `/v1…` suffix is stripped here.
+        public func environmentHints(baseURL: String) -> [(key: String, value: String)] {
+            let host = Self.originOf(baseURL)
+            switch self {
+            case .lmstudio, .ollama:
+                return [(hostEnvVar, host)]
+            case .openai:
+                return [
+                    (hostEnvVar, host),
+                    ("OPENAI_BASE_PATH", "v1/chat/completions"),
+                    // goose requires a key even for a local server; any value works.
+                    ("OPENAI_API_KEY", "local"),
+                ]
+            }
+        }
+
+        /// `http://127.0.0.1:1337/v1/` → `http://127.0.0.1:1337`. Tolerates a bare
+        /// host, a trailing slash, and a missing scheme.
+        public static func originOf(_ baseURL: String) -> String {
+            var s = baseURL.trimmingCharacters(in: .whitespacesAndNewlines)
+            while s.hasSuffix("/") { s.removeLast() }
+            for suffix in ["/v1/chat/completions", "/v1"] where s.hasSuffix(suffix) {
+                s.removeLast(suffix.count)
+                break
+            }
+            return s
+        }
+    }
+
     // MARK: - Generator
 
     /// Build a snapshot that registers a LOCAL model (Huginn's `:1337`) as a
-    /// Buzz-managed agent. `providerURL` is the OpenAI-compatible base URL and
-    /// `model` is the loaded model id (both as shown in Buzz's Edit-agent
-    /// screen). Runtime defaults to `goose` (it speaks local OpenAI endpoints).
+    /// Buzz-managed agent. `provider` selects the goose provider ID written into
+    /// `definition.provider`; `providerBaseURL` is the OpenAI-compatible base URL
+    /// the matching env var must point at (see `LocalProvider`). `model` is the
+    /// loaded model id, exactly as the endpoint reports it. Runtime defaults to
+    /// `goose` — the runtime that speaks local OpenAI-compatible endpoints.
     public static func forLocalModel(
         displayName: String,
         systemPrompt: String,
-        providerURL: String,
+        providerBaseURL: String,
         model: String,
+        provider: LocalProvider = .lmstudio,
         about: String? = nil,
         runtime: String = "goose",
         respondTo: String = "owner-only",
         parallelism: Int = 1,
         avatarDataUrl: String? = nil
     ) -> BuzzAgentSnapshot {
-        BuzzAgentSnapshot(
+        _ = providerBaseURL  // carried by `environmentHints`, never by the manifest
+        return BuzzAgentSnapshot(
             definition: Definition(
                 name: displayName, systemPrompt: systemPrompt, runtime: runtime, model: model,
-                provider: providerURL, parallelism: parallelism, respondTo: respondTo,
+                provider: provider.providerID, parallelism: parallelism, respondTo: respondTo,
                 namePool: [displayName]),
             profile: Profile(
                 displayName: displayName, about: about, avatarDataUrl: avatarDataUrl),

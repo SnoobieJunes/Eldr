@@ -184,6 +184,40 @@ to it — DEVIATIONS AC9), and *Unpair* deletes the identity and forgets everyth
 > type `eldr-acp` while EldrChat's nearby link defaults to `pqrc-local`; reconciling
 > those is part of that runtime wiring (DEVIATIONS AC10).
 
+### Connections — put your local model in a Buzz workspace (WS-I7)
+
+The outbound counterpart to the Bridge: instead of pulling a workspace into
+EldrChat, this pushes **your** model into someone else's chat workspace as an
+agent that answers when it is `@mentioned`, running entirely on this Mac.
+
+**Connect an AI to a workspace…** is a five-step sheet — workspace relay (with a
+live *Test connection* probe), which model (empty = follow whatever Huginn is
+serving), the agent's name/persona/channels, the encryption disclosure, then
+Connect. Connecting mints a **fresh agent key per workspace** into the Keychain
+(`buzzagent.<id>`, `WhenUnlockedThisDeviceOnly`, never synced), signs a NIP-OA
+owner attestation with a key you paste **once** (used in memory, never stored),
+and starts a supervised `eldr-buzz-agent` child — one process, one log file, per
+connection, stopped when Huginn quits.
+
+Each running connection shows `● name · relay — N replies · N tokens`, folded
+from the gateway's own status lines, with **Pause**, **View logs** (the standard
+log console), **Edit** (persona/channels/behavior), **Rotate key** (new attested
+identity), and **Remove** — which publishes an agent-signed retirement to the
+workspace and then destroys the key.
+
+> **Privacy — the one honest cost.** A Buzz channel is *signed, not
+> end-to-end-encrypted*: whatever your agent posts there is readable by whoever
+> runs that workspace's relay. The wizard says so and requires you to acknowledge
+> it; the gateway refuses to start otherwise. Your Eldr↔Eldr chats are unaffected.
+> Outbound replies are also run through the credential redactor by default, so a
+> key the model read off your disk doesn't cross the boundary
+> (`docs/THREAT_MODEL.md` §4b).
+
+The same tab's **Add this model to Buzz's own Agents tab** goes the other way: it
+writes a `buzz-agent-snapshot` `.agent.json` (runtime `goose`, provider
+`lmstudio`, your loaded model) that Buzz Desktop imports and manages itself, plus
+the one `LMSTUDIO_HOST=…` env line Buzz cannot carry inside a snapshot.
+
 ### Menu-bar item
 
 A `MenuBarExtra` (DEVIATIONS AC7) gives an always-available status dot (LLM

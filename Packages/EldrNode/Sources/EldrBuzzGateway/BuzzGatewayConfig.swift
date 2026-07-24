@@ -22,6 +22,11 @@ public struct BuzzGatewayConfig: Sendable {
     public var displayName: String
     /// kind:0 about text.
     public var about: String
+    /// kind:0 `picture` — the agent's avatar, as an https URL. A URL, never an
+    /// inlined data: blob: an avatar can be megabytes and this config crosses a
+    /// process boundary as an environment variable (ARG_MAX), so a blob here
+    /// would fail at spawn time for large images instead of at edit time.
+    public var pictureURL: String?
     /// System prompt / persona for the local model.
     public var systemPrompt: String
     /// Owner pubkey (hex, x-only). Required to emit NIP-AM / NIP-AO (they are
@@ -47,19 +52,30 @@ public struct BuzzGatewayConfig: Sendable {
     public var model: String
     /// Harness identifier recorded in NIP-AM payloads.
     public var harnessName: String
+    /// **Egress firewall** (WS-I7 Phase 4). Run every outbound reply through
+    /// `CredentialRedactor` before it is posted into the Buzz channel, so a key
+    /// the local model read off the owner's own disk cannot cross into a
+    /// signed-not-E2EE workspace the relay operator can read. ON by default —
+    /// this is the privacy-maximizing side of SPEC §0, and the crossing is
+    /// exactly the boundary the redactor exists for. Off only for a workspace the
+    /// owner treats as private (`ELDR_BUZZ_REDACT=0`).
+    public var redactOutbound: Bool
 
     public init(
         relayURL: URL, channelIds: [String], displayName: String, about: String,
-        systemPrompt: String, ownerPubkeyHex: String? = nil, authTagJSON: String? = nil,
+        systemPrompt: String, pictureURL: String? = nil, ownerPubkeyHex: String? = nil,
+        authTagJSON: String? = nil,
         respondToMentionsOnly: Bool = true, emitTurnMetrics: Bool = true,
         emitObserverFrames: Bool = true, announceMembership: Bool = true, historyWindow: Int = 12,
-        model: String = "local-model", harnessName: String = "eldr-buzz-agent"
+        model: String = "local-model", harnessName: String = "eldr-buzz-agent",
+        redactOutbound: Bool = true
     ) {
         self.relayURL = relayURL
         self.channelIds = channelIds
         self.displayName = displayName
         self.about = about
         self.systemPrompt = systemPrompt
+        self.pictureURL = pictureURL
         self.ownerPubkeyHex = ownerPubkeyHex
         self.authTagJSON = authTagJSON
         self.respondToMentionsOnly = respondToMentionsOnly
@@ -69,6 +85,7 @@ public struct BuzzGatewayConfig: Sendable {
         self.historyWindow = historyWindow
         self.model = model
         self.harnessName = harnessName
+        self.redactOutbound = redactOutbound
     }
 
     /// One-line startup disclosure surfaced to the operator (INTEROP §8.1).
@@ -141,6 +158,7 @@ public struct BuzzGatewayConfig: Sendable {
                 ?? "You are a helpful AI participating in a Buzz workspace channel. "
                     + "You are hosted locally on the owner's own machine via Eldr/Huginn. "
                     + "Keep replies concise and useful.",
+            pictureURL: env["ELDR_BUZZ_PICTURE"].flatMap { $0.isEmpty ? nil : $0 },
             ownerPubkeyHex: ownerHex,
             authTagJSON: authTag,
             respondToMentionsOnly: env["ELDR_BUZZ_MENTIONS_ONLY"] != "0",
@@ -149,7 +167,8 @@ public struct BuzzGatewayConfig: Sendable {
             announceMembership: env["ELDR_BUZZ_ANNOUNCE_MEMBERSHIP"] != "0",
             historyWindow: env["ELDR_BUZZ_HISTORY"].flatMap { Int($0) } ?? 12,
             model: env["ELDR_LLM_MODEL"].flatMap { $0.isEmpty ? nil : $0 } ?? "local-model",
-            harnessName: "eldr-buzz-agent")
+            harnessName: "eldr-buzz-agent",
+            redactOutbound: env["ELDR_BUZZ_REDACT"] != "0")
         return (config, keypair)
     }
 

@@ -557,7 +557,7 @@ final class ConfigurationStore: ObservableObject {
     /// `ws://` is allowed ONLY when the host is loopback (127.0.0.0/8, `::1`, or
     /// `localhost` — where a local `pqrc-relay` dev/demo instance runs plaintext);
     /// every other host MUST be `wss://`.
-    static func validateRelayOverride(_ raw: String) -> Result<String?, RelayURLValidationError> {
+    nonisolated static func validateRelayOverride(_ raw: String) -> Result<String?, RelayURLValidationError> {
         let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
         if trimmed.isEmpty { return .success(nil) }
         guard let url = URL(string: trimmed), let scheme = url.scheme?.lowercased(),
@@ -576,7 +576,7 @@ final class ConfigurationStore: ObservableObject {
     /// The validated override, or nil to fall back to the default relay — for a
     /// caller that only cares "what do I actually dial", not why an invalid value was
     /// refused (mirrors `validateRelayOverride`'s success case, dropping the error).
-    static func effectiveRelayURL(_ raw: String) -> String? {
+    nonisolated static func effectiveRelayURL(_ raw: String) -> String? {
         if case .success(let value) = validateRelayOverride(raw) { return value }
         return nil
     }
@@ -584,7 +584,7 @@ final class ConfigurationStore: ObservableObject {
     /// Loopback = `localhost`, `::1`, or an IPv4 LITERAL in 127.0.0.0/8. Parsed as
     /// four numeric octets — a string-prefix check would also match DNS names like
     /// `127.evil.com`, which can resolve anywhere and must never get plaintext `ws://`.
-    private static func isLoopbackHost(_ host: String) -> Bool {
+    nonisolated private static func isLoopbackHost(_ host: String) -> Bool {
         let h = host.lowercased()
         if h == "localhost" || h == "::1" { return true }
         let octets = h.split(separator: ".", omittingEmptySubsequences: false)
@@ -746,7 +746,20 @@ struct ConfigPaths: Sendable {
     var townGrantsFile: String { join(configDir, "town-grants.json") }
     var townPeersFile: String { join(configDir, "town-peers.json") }
 
+    // MARK: - WS-I7: Buzz workspace connections
+    /// The connection records the Connections tab edits and `BuzzGatewayService`
+    /// supervises (agent KEYS live in the Keychain, never here).
+    var buzzConnectionsFile: String { join(configDir, "buzz-connections.json") }
+    /// One log file per running gateway child, so the console can show exactly one
+    /// connection's traffic (`LogConsoleSource.buzzGateway`).
+    var buzzDir: String { join(configDir, "buzz") }
+    func buzzLogFile(connectionID: String) -> String {
+        join(buzzDir, "gateway-\(connectionID).log")
+    }
+
     var installedBinary: String { join(binDir, "eldr-acp") }
+    /// The Buzz gateway daemon Huginn supervises (installed beside `eldr-acp`).
+    var installedBuzzAgent: String { join(binDir, "eldr-buzz-agent") }
     var launcher: String { join(binDir, "eldr-acp-xcode") }
     /// Dedicated launcher OpenClaw (and other ACP clients) are pointed at. Same
     /// script body as the Xcode launcher — client-agnostic.

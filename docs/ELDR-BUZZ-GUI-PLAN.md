@@ -1,8 +1,36 @@
 # WS-I7 — "Connect my AI to a Buzz workspace" (Huginn GUI flow + plan)
 
-Status: **design / not started** · 2026-07-24 · prerequisite: the engine
-(`EldrBuzzGateway` + `eldr-buzz-agent`, AC144) is built and proven; this is the
-GUI that makes it usable without a terminal.
+Status: **BUILT — 2026-07-24 (AC146)** · both paths, Phases 1–4 · engine
+prerequisite (`EldrBuzzGateway` + `eldr-buzz-agent`, AC144) was already proven.
+
+> **What shipped vs. this plan.** Everything below is implemented, in Huginn's
+> new **Connections** tab, plus three things the plan didn't foresee:
+>
+> 1. **The status row is a contract, not log-scraping.** `BuzzGatewayStatus` /
+>    `BuzzGatewayCounters` (in **PQRCNostr**, the one module both the gateway and
+>    Huginn link) define the `ELDR-BUZZ-STATUS {json}` lines the gateway emits and
+>    the supervisor folds. Both directions are unit-tested, and the loopback E2E
+>    asserts the GUI's counters against the real emitter.
+> 2. **Path B's snapshot was wrong and is fixed.** Buzz's `definition.provider` is
+>    a provider **ID** projected into `GOOSE_PROVIDER`, not a base URL — AC144's
+>    generator emitted `http://127.0.0.1:1337/v1`, which would import cleanly and
+>    then never answer. It now emits `lmstudio` (a real goose provider) and the UI
+>    surfaces the `LMSTUDIO_HOST=…` line to paste, because Buzz deliberately
+>    excludes env vars from snapshots.
+> 3. **§8 build-order item 1 (verify B1) is answered from source** (Buzz's
+>    `discovery.rs` + goose's provider metadata), not from a GUI click — see §8.
+>
+> **Verified:** all 8 package suites, EldrChat 104/104, and the Huginn suite —
+> including the 11 new tests, which caught two real bugs on their first run (an
+> asymmetric date strategy that would have emptied the connections file on every
+> relaunch, and a missing-binary check that reported a raw spawn error instead of
+> the actionable one). The Huginn suite must be run with the Mac **unlocked**:
+> these tests write real `WhenUnlockedThisDeviceOnly` Keychain items, so a locked
+> screen fails them — and six pre-existing Keychain tests — with
+> `errSecInteractionNotAllowed`.
+>
+> **Not done:** a live run against a hosted Buzz workspace (needs the owner's nsec
+> and a real workspace).
 
 > **Why this exists.** Everything shipped so far is the *engine and the proof*.
 > A real user must never type a command. This doc specifies the Huginn screens,
@@ -145,19 +173,26 @@ owner controls what context may cross into a Buzz channel. *Est: 2–3 days.*
 
 ---
 
-## 5. Open decisions (for the owner)
+## 5. Open decisions — resolved when this was built (AC146)
 
-1. **Entry point placement** — a dedicated top-level "Connections" section in
-   Huginn (recommended; this is a distinct outbound capability), vs. folding into
-   the existing Bridge/Relay area.
-2. **Where it runs** — this is a **Mac/Huginn** capability: Huginn hosts the local
-   model (`:1337`) and supervises the gateway, so the connect flow lives in
-   Huginn. The iPhone app shows the connection's status read-only, if anything.
-3. **Owner-key handling in the GUI** — the owner key signs the attestation once.
-   Options: (a) read it from Huginn's existing identity Keychain if the same key,
-   (b) a one-time paste that's used and discarded. (Recommend (a) when the Huginn
-   identity *is* the Buzz owner; else (b).)
-4. **Default persona** — ship a good default so most users skip Step 3's text box.
+1. **Entry point placement** → a dedicated top-level **Connections** tab, as
+   recommended. It is a distinct outbound capability (this Mac joining someone
+   else's workspace), not part of the phone tether.
+2. **Where it runs** → Mac/Huginn only, as written. The phone shows nothing yet;
+   a read-only status mirror there is future work, not a gap in this flow.
+3. **Owner-key handling** → **(b), a one-time paste**, unconditionally. Option (a)
+   was rejected on inspection rather than preference: Huginn's stored identity is
+   the *node's* PQRC/Nostr identity, which is not the Buzz *workspace owner's*
+   account key, so "read it from the Keychain if it's the same key" would be true
+   approximately never and would invite the user to attest with the wrong key. The
+   pasted key signs the NIP-OA attestation in memory and is then dropped —
+   verified by a test that asserts it never appears in the connections file.
+   What persists is the auth tag (a signature) and the owner's public key.
+4. **Default persona** → shipped as `BuzzConnection.defaultSystemPrompt`, which
+   states where the agent runs, tells it to answer concisely and admit
+   uncertainty, and tells it never to repeat credentials into the channel (the
+   prompt-level companion to the egress firewall). Step 3's text box is
+   pre-filled with it, so most users can skip past.
 
 ---
 
@@ -212,28 +247,49 @@ adds the agent to channels in Buzz, or the agent creates its own channel.
 
 ---
 
-## 8. Build order (both paths)
+## 8. Build order (both paths) — done, with B1 answered
 
-1. **Verify B1 (minutes, no code):** check Buzz Desktop's create-agent screen for
-   a custom base-URL/provider field → if present, the Agents-tab goal is met by
-   config today; document the exact steps.
-2. **Path A Phase 1 (the Eldr product):** the Huginn gateway MVP (§4 Phase 1).
-3. **Path B2 helper:** the "Register in Buzz" one-screen writer + the eldr-acp
-   protocol-version/context-file fix — so Eldr's own code can live in the Agents
-   tab even where B1 isn't available.
-4. Path A Phases 2–4.
+1. **B1 verified from source, not a screenshot (2026-07-24).** Buzz's agent
+   dialog does expose a **Custom provider…** field
+   (`desktop/src/features/agents/ui/AgentConfigFields.tsx`,
+   `CUSTOM_PROVIDER_DROPDOWN_VALUE`), and the value is a provider **ID** that Buzz
+   projects into `GOOSE_PROVIDER` at spawn
+   (`desktop/src-tauri/src/managed_agents/discovery.rs`: the `goose` runtime's
+   `provider_env_var`). goose's own `lmstudio` provider resolves
+   `base_url = ${LMSTUDIO_HOST}/v1/chat/completions`. So the exact recipe is:
+   **runtime `goose`, provider `lmstudio`, model = the loaded model id, and
+   `LMSTUDIO_HOST=http://127.0.0.1:1337`** (already present in this machine's
+   `~/.config/goose/config.yaml`, so nothing else is needed here). No Eldr code is
+   required for B1 — and Huginn's "Add to Buzz" panel now writes exactly this
+   snapshot and shows that env line with a Copy button.
+2. **Path A Phase 1–4 (the Eldr product):** built — see §4 and the status note at
+   the top.
+3. **B2 (`eldr-acp` as the Buzz runtime) not built, deliberately.** B0/B1 reach
+   the Agents tab with no Eldr code and no ACP-version wrinkle; B2's only added
+   value is running Eldr's own harness there, which the ACP `protocolVersion ≥ 2`
+   gap makes strictly more fragile. Left as a documented option, not a shipped
+   path.
 
 ---
 
 ## 6. Definition of done for WS-I7
 
-- [ ] A user with zero terminal use connects a local model to a Buzz workspace,
-  sees it appear as an agent, `@mention`s it, and gets a reply from their own
-  machine — all from Huginn.
-- [ ] Pause/Disconnect/Remove work; Remove emits a signed revocation and deletes
-  the key.
-- [ ] The E2EE-termination disclosure is shown and acknowledged before first send.
-- [ ] Gateway logs stream to the existing console; status row shows live
-  reply/token counts.
-- [ ] Huginn test suite covers `BuzzGatewayService` lifecycle (mirroring the
-  `MLXServerLifecycle` tests) with no real network (fake transport/relay sim).
+- [x] A user with zero terminal use connects a local model to a Buzz workspace —
+  wizard → minted+attested agent key → supervised gateway — all from Huginn.
+  *(The end-to-end `@mention`→reply path is the one AC144 proved live against a
+  real relay and the real local model; the GUI drives that same binary. A live run
+  of the GUI flow against a hosted workspace still needs the owner's nsec.)*
+- [x] Pause/Disconnect/Remove work; Remove publishes an agent-signed retirement
+  (kind:0 tombstone + NIP-09 kind:5 deletion request) and destroys the key.
+- [x] The E2EE-termination disclosure is shown and acknowledged before first
+  send — and the gateway refuses to start without it (fail closed).
+- [x] Gateway logs stream to the existing console (`LogConsoleSource.buzzGateway`,
+  one file per connection); the status row shows live reply/token counts folded
+  from the gateway's own status lines.
+- [x] Huginn tests cover `BuzzGatewayService` lifecycle with no network — a fake
+  `eldr-buzz-agent` script drives start → connected → counters → stop, plus the
+  fail-closed gates, the child environment, key mint/rotate/destroy, and the
+  attestation. **Green** — and they caught two real bugs doing it (see the status
+  note at the top).
+- [x] Phase 4: per-connection agent keys + a Rotate action, and the egress
+  firewall (`CredentialRedactor`) on every outbound reply.

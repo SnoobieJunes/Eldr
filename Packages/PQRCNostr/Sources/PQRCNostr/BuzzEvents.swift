@@ -95,6 +95,36 @@ public enum BuzzEvents {
             tags: [["p", ownerPubkeyHex]], content: jsonObject(map))
     }
 
+    // MARK: - Retirement / revocation (WS-I7 "Remove")
+
+    /// The kind:5 NIP-09 deletion-request kind.
+    public static let deletionRequest = 5
+
+    /// A final, agent-signed kind:0 that marks this agent RETIRED. Published
+    /// before the agent's key is destroyed, so the workspace's own record says the
+    /// agent is gone rather than merely going quiet. `reason` is shown verbatim in
+    /// the profile's `about`.
+    public static func retirementProfile(
+        pubkey: String, displayName: String, reason: String
+    ) -> NostrEvent {
+        profile(
+            pubkey: pubkey, displayName: "\(displayName) (retired)", name: displayName,
+            about: reason)
+    }
+
+    /// A NIP-09 kind:5 deletion request, signed by the agent, asking the relay to
+    /// drop the agent's own replaceable profile events (`a` tags of the form
+    /// `<kind>:<pubkey>:`). A relay MAY refuse — the retirement profile above is
+    /// the part that always lands — so callers treat rejection as non-fatal.
+    public static func profileDeletionRequest(
+        pubkey: String, kinds: [Int] = [Kind.profile, Kind.agentProfile],
+        reason: String
+    ) -> NostrEvent {
+        let tags = kinds.map { ["a", "\($0):\(pubkey):"] } + [["k", String(Kind.profile)]]
+        return NostrEvent(
+            pubkey: pubkey, createdAt: now(), kind: deletionRequest, tags: tags, content: reason)
+    }
+
     // MARK: - NIP-AM kind:44200 agent turn metric (encrypted to owner)
 
     /// Build a kind:44200 turn metric: NIP-44 encrypt the payload with

@@ -54,6 +54,36 @@ struct BuzzGatewayTests {
                 event: unrelated, agentPubkey: "aa", displayName: "Eldr", mentionsOnly: false))
     }
 
+    // MARK: - Egress firewall (WS-I7 Phase 4)
+
+    @Test("outbound replies are scrubbed of secret-shaped content by default")
+    func egressFirewallScrubsCredentials() {
+        let leak = """
+            Sure — the key from your .env is sk-ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789abcd and the \
+            DB is postgres://admin:hunter2@db.internal:5432/prod
+            """
+        let filtered = GatewayLogic.outboundText(leak, redact: true)
+        #expect(filtered.redacted)
+        #expect(!filtered.text.contains("sk-ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789abcd"))
+        #expect(!filtered.text.contains("hunter2"))
+        // Ordinary prose is untouched — the firewall must not mangle normal replies.
+        let ordinary = "Post-quantum cryptography resists attacks from quantum computers."
+        #expect(GatewayLogic.outboundText(ordinary, redact: true) == (ordinary, false))
+        // Opt-out (a workspace the owner treats as private) passes bytes through.
+        #expect(GatewayLogic.outboundText(leak, redact: false) == (leak, false))
+    }
+
+    @Test("ELDR_BUZZ_REDACT defaults ON and only \"0\" disables it")
+    func redactionEnvDefaultsOn() throws {
+        let base = [
+            "BUZZ_PRIVATE_KEY": Self.agentKeyHex, "BUZZ_RELAY_URL": "ws://127.0.0.1:1",
+            "ELDR_BUZZ_CHANNELS": "c1",
+        ]
+        #expect(try BuzzGatewayConfig.fromEnvironment(base).0.redactOutbound)
+        #expect(try BuzzGatewayConfig.fromEnvironment(base.merging(["ELDR_BUZZ_REDACT": "1"]) { _, b in b }).0.redactOutbound)
+        #expect(!(try BuzzGatewayConfig.fromEnvironment(base.merging(["ELDR_BUZZ_REDACT": "0"]) { _, b in b }).0.redactOutbound))
+    }
+
     @Test("channelId extracts the h tag")
     func channelIdExtraction() {
         let event = NostrEvent(
@@ -135,9 +165,16 @@ struct BuzzGatewayTests {
             systemPrompt: "Be concise.", ownerPubkeyHex: owner.publicKeyHex,
             respondToMentionsOnly: true, emitTurnMetrics: true, emitObserverFrames: true)
         let gatewayTransport = NostrWebSocketTransport(url: url)
+        // Fold the gateway's machine-readable status lines exactly as Huginn's
+        // supervisor does, so the GUI's status row is proven against the REAL
+        // emitter rather than a hand-written sample.
+        let statusLog = StatusCollector()
         let gateway = BuzzGateway(
             transport: gatewayTransport, keypair: agent, llm: llm, config: config, usageBox: box,
-            log: { print("GATEWAY: \($0)") })
+            log: { line in
+                print("GATEWAY: \(line)")
+                statusLog.ingest(line)
+            })
 
         let runTask = Task { try? await gateway.run() }
         defer { runTask.cancel() }
@@ -189,6 +226,16 @@ struct BuzzGatewayTests {
             #expect(payload.turn?.totalTokens == 54)
             #expect(payload.turnSeq == 1)
         }
+
+        // The supervisor's view of the same run: connected, listening on one
+        // channel, one reply, the endpoint's real token count.
+        let counters = statusLog.counters
+        #expect(counters.authenticated)
+        #expect(counters.agentPubkey == agent.publicKeyHex)
+        #expect(counters.channelsListening == 1)
+        #expect(counters.replies == 1)
+        #expect(counters.tokens == 54)
+        #expect(counters.lastFailure == nil)
     }
 
     /// Same loopback E2E but driving the REAL local model (MLX / Huginn /
@@ -274,6 +321,24 @@ struct BuzzGatewayTests {
             group.cancelAll()
             return result
         }
+    }
+}
+
+/// Collects the gateway's status lines from its `log` closure (which fires on
+/// the gateway's actor and on URLSession threads) and folds them exactly as
+/// Huginn's supervisor does. Lock-guarded, so `@unchecked Sendable` is justified.
+private final class StatusCollector: @unchecked Sendable {
+    private let lock = NSLock()
+    private var value = BuzzGatewayCounters()
+    func ingest(_ line: String) {
+        lock.lock()
+        value.ingest(line: line)
+        lock.unlock()
+    }
+    var counters: BuzzGatewayCounters {
+        lock.lock()
+        defer { lock.unlock() }
+        return value
     }
 }
 

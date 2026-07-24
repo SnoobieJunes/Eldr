@@ -64,11 +64,23 @@ public actor BuzzGateway {
     public func run() async throws {
         startedAt = Int64(Date().timeIntervalSince1970)
         log(config.disclosureBanner)
-        try await connectAndAuthenticate()
+        emit(.starting(relay: config.relayURL.absoluteString, agentPubkey: keypair.publicKeyHex))
+        do {
+            try await connectAndAuthenticate()
+        } catch {
+            emit(.failed(message: "authentication failed: \(error)"))
+            throw error
+        }
+        emit(.connected(relay: config.relayURL.absoluteString))
         try await publishProfile()
         try await announceMemberships()
         await serve()
     }
+
+    /// Print ONE machine-readable status line (`BuzzGatewayStatus`) for a
+    /// supervisor — Huginn's `BuzzGatewayService` folds these into the status
+    /// row's counters. Human logging continues unchanged alongside it.
+    private func emit(_ status: BuzzGatewayStatus) { log(status.line) }
 
     // MARK: - Join
 
@@ -93,7 +105,7 @@ public actor BuzzGateway {
     private func publishProfile() async throws {
         let profile = BuzzEvents.profile(
             pubkey: keypair.publicKeyHex, displayName: config.displayName, name: config.displayName,
-            about: config.about)
+            about: config.about, picture: config.pictureURL)
         _ = try? await publishSigned(profile, label: "kind:0 profile")
         if let owner = config.ownerPubkeyHex {
             let agentProfile = BuzzEvents.agentProfile(
@@ -133,6 +145,7 @@ public actor BuzzGateway {
             kinds: [BuzzEvents.Kind.streamMessage], hTags: config.channelIds, since: startedAt)
         let stream = await transport.subscribe([filter])
         log("listening on \(config.channelIds.count) channel(s) for @mentions of \(config.displayName)")
+        emit(.listening(channels: config.channelIds.count))
         do {
             for try await event in stream {
                 await handleInbound(event)
@@ -171,17 +184,25 @@ public actor BuzzGateway {
 
         let messages = buildMessages(channel: channel, triggering: event)
         usageBox.reset()
-        let reply: String
+        var reply: String
         do {
             let response = try await llm.complete(messages: messages, tools: [])
             reply = response.content.trimmingCharacters(in: .whitespacesAndNewlines)
         } catch {
             log("LLM turn failed: \(error)")
+            emit(.failed(message: "LLM turn failed"))
             await emitObserver(
                 kind: "session_resolved", channel: channel, turnId: turnId,
                 payload: ["status": "error"])
             return
         }
+        // EGRESS FIREWALL (Phase 4): this is the exact hop where E2EE terminates —
+        // whatever crosses it is readable by the workspace's relay operator.
+        let outbound = GatewayLogic.outboundText(reply, redact: config.redactOutbound)
+        if outbound.redacted {
+            log("egress firewall: redacted secret-shaped content from this reply")
+        }
+        reply = outbound.text
         guard !reply.isEmpty else {
             log("model produced no text; not replying")
             await emitObserver(
@@ -201,11 +222,14 @@ public actor BuzzGateway {
                 repliesSent += 1
                 appendHistory(channel: channel, role: .assistant, name: config.displayName, text: reply)
                 log("replied in \(channel.prefix(8))… (\(reply.count) chars)")
+                emit(.reply(channel: channel, characters: reply.count))
             } else {
                 log("reply rejected: \(ack.message ?? "")")
+                emit(.failed(message: "relay rejected the reply: \(ack.message ?? "no reason given")"))
             }
         } catch {
             log("reply publish failed: \(error)")
+            emit(.failed(message: "reply publish failed"))
         }
 
         await emitTurnMetric(channel: channel, turnId: turnId)
@@ -238,8 +262,19 @@ public actor BuzzGateway {
     // MARK: - NIP-AM emission
 
     private func emitTurnMetric(channel: String, turnId: String) async {
+        // The usage latch is drained UNCONDITIONALLY (and the supervisor's token
+        // counter fed from it) — NIP-AM emission needs an owner key, but the
+        // owner's own "tokens today" row must work without one.
+        let observed = usageBox.take()
+        if let observed {
+            let turnTotal =
+                observed.totalTokens
+                ?? [observed.promptTokens, observed.completionTokens].compactMap { $0 }
+                    .reduce(0, +)
+            if turnTotal > 0 { emit(.tokens(turn: turnTotal)) }
+        }
         guard config.emitTurnMetrics, let owner = config.ownerPubkeyHex else { return }
-        guard let usage = usageBox.take(), usage.hasAnyCount else {
+        guard let usage = observed, usage.hasAnyCount else {
             // NIP-AM §Publisher Behavior: no observed usage ⇒ no event.
             return
         }
@@ -355,6 +390,22 @@ public enum GatewayLogic {
         let haystack = event.content.lowercased()
         let name = displayName.lowercased()
         return !name.isEmpty && (haystack.contains("@" + name) || haystack.contains(name))
+    }
+
+    /// The EGRESS FIREWALL (WS-I7 Phase 4): what the agent is actually allowed to
+    /// say into a Buzz channel. A local model that just read a `.env`, an SSH key,
+    /// or a `Bearer …` header off the owner's own disk must not paste it across a
+    /// boundary where E2EE terminates and the relay operator can read it. A false
+    /// positive costs a redaction marker in someone else's channel; a false
+    /// negative leaks a live credential — so this fails toward redacting (SPEC §0),
+    /// reusing the same `CredentialRedactor` the watch-along fan-out uses.
+    ///
+    /// Returns the text to publish and whether anything was scrubbed (the caller
+    /// logs the fact, never the secret).
+    public static func outboundText(_ reply: String, redact: Bool) -> (text: String, redacted: Bool) {
+        guard redact else { return (reply, false) }
+        let scrubbed = CredentialRedactor.scrub(reply)
+        return (scrubbed, scrubbed != reply)
     }
 
     /// RFC 3339 timestamp with fractional seconds (NIP-AM/AO `timestamp`).

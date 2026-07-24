@@ -504,21 +504,41 @@ enum LogBackscroll {
 
 // MARK: - Console sources
 
-/// What a console can show: the two file-backed tool logs, or the in-memory
-/// diagnostics bus. Codable+Hashable because "Open as window" routes a source
-/// value through a `WindowGroup(for:)` scene.
-enum LogConsoleSource: String, CaseIterable, Codable, Hashable, Identifiable, Sendable {
+/// What a console can show: the file-backed tool logs, one Buzz gateway child's
+/// log, or the in-memory diagnostics bus. Codable+Hashable because "Open as
+/// window" routes a source value through a `WindowGroup(for:)` scene.
+///
+/// WS-I7 added the associated-value `buzzGateway` case (one log file per
+/// connection), so this is no longer a raw-value enum; `allCases` lists the
+/// FIXED sources the picker offers — a per-connection log is opened from the
+/// Connections tab, which knows the id.
+enum LogConsoleSource: CaseIterable, Codable, Hashable, Identifiable, Sendable {
     case mlxServer
     case agent
     case diagnostics
+    /// One `eldr-buzz-agent` child's log. `title` carries the connection's
+    /// display name so an opened window/sheet says which agent it is.
+    case buzzGateway(connectionID: String, name: String)
 
-    var id: String { rawValue }
+    /// The sources the console's own picker offers. A Buzz gateway log is
+    /// per-connection, so it is routed in explicitly rather than enumerated.
+    static var allCases: [LogConsoleSource] { [.mlxServer, .agent, .diagnostics] }
+
+    var id: String {
+        switch self {
+        case .mlxServer: return "mlxServer"
+        case .agent: return "agent"
+        case .diagnostics: return "diagnostics"
+        case .buzzGateway(let connectionID, _): return "buzz-\(connectionID)"
+        }
+    }
 
     var title: String {
         switch self {
         case .mlxServer: return "MLX server"
         case .agent: return "Agent (eldr-acp)"
         case .diagnostics: return "Diagnostics"
+        case .buzzGateway(_, let name): return "Buzz gateway — \(name)"
         }
     }
 
@@ -532,6 +552,8 @@ enum LogConsoleSource: String, CaseIterable, Codable, Hashable, Identifiable, Se
         case .mlxServer: return MLXService.serverLogPath(paths: paths)
         case .agent: return paths.logFile
         case .diagnostics: return nil
+        case .buzzGateway(let connectionID, _):
+            return paths.buzzLogFile(connectionID: connectionID)
         }
     }
 }
@@ -666,7 +688,7 @@ final class LogConsoleModel: ObservableObject {
     /// semantics), diagnostics clears the in-memory bus.
     func clear() {
         switch source {
-        case .mlxServer, .agent:
+        case .mlxServer, .agent, .buzzGateway:
             tailer?.clear()
             // The tailer bumps its generation on the reseed; drop our copy now
             // so the view empties immediately rather than on the next publish.
@@ -695,7 +717,7 @@ final class LogConsoleModel: ObservableObject {
 
     private func attach(to source: LogConsoleSource) {
         switch source {
-        case .mlxServer, .agent:
+        case .mlxServer, .agent, .buzzGateway:
             guard let path = source.filePath(paths: paths) else { return }
             let tailer = LogTailer(path: path)
             self.tailer = tailer

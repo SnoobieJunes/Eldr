@@ -20,6 +20,7 @@ import EldrBuzzGateway
 //   ELDR_BUZZ_CHANNELS            comma-separated channel UUIDs
 //   ELDR_BUZZ_DISPLAY_NAME        kind:0 display name / mention trigger (default "Eldr")
 //   ELDR_BUZZ_ABOUT               kind:0 about
+//   ELDR_BUZZ_PICTURE             kind:0 avatar URL (https://…; a URL, not a data: blob)
 //   ELDR_BUZZ_SYSTEM_PROMPT       persona / system prompt
 //   ELDR_BUZZ_OWNER_PUBKEY        owner x-only pubkey hex (enables NIP-AM/AO)
 //   ELDR_BUZZ_OWNER_PRIVATE_KEY   owner key (local demo: derives owner pubkey + auth tag)
@@ -27,6 +28,10 @@ import EldrBuzzGateway
 //   ELDR_BUZZ_MENTIONS_ONLY       "0" to answer every message (default: mentions only)
 //   ELDR_BUZZ_EMIT_METRICS        "0" to disable NIP-AM (default on)
 //   ELDR_BUZZ_EMIT_OBSERVER       "0" to disable NIP-AO (default on)
+//   ELDR_BUZZ_REDACT              "0" to disable the outbound egress firewall
+//                                 (default ON: replies are scrubbed of
+//                                 secret-shaped content before they cross into
+//                                 the signed-not-E2EE Buzz channel)
 //
 // The brain (mirrors eldr-acp):
 //   ELDR_LLM_URL / ELDR_LLM_TOKEN / ELDR_LLM_MODEL   (default http://127.0.0.1:1337/v1)

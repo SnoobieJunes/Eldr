@@ -126,6 +126,7 @@
 				BB0000000000000000000501 /* Frameworks */,
 				BB0000000000000000000A01 /* Resources */,
 				BB0000000000000000000A02 /* Build and bundle eldr-acp */,
+				BB0000000000000000000A03 /* Build and bundle eldr-buzz-agent */,
 			);
 			buildRules = (
 			);
@@ -256,6 +257,25 @@
 			shellPath = /bin/sh;
 			shellScript = "set -e\n# Compile the eldr-acp CLI (Release) and bundle it into the app's Resources\n# so InstallerService can copy it to ~/.local/bin. PQRCACP has zero external\n# dependencies, so this build is fully offline.\nPKG=\"$SRCROOT/../../Packages/PQRCACP\"\nSWIFT=\"$(xcrun --find swift)\"\n\"$SWIFT\" build -c release --package-path \"$PKG\" --product eldr-acp\nBIN=\"$PKG/.build/release/eldr-acp\"\nif [ ! -f \"$BIN\" ]; then echo \"error: eldr-acp was not built at $BIN\" >&2; exit 1; fi\nDEST=\"$BUILT_PRODUCTS_DIR/$CONTENTS_FOLDER_PATH/Resources\"\nmkdir -p \"$DEST\"\ncp -f \"$BIN\" \"$DEST/eldr-acp\"\nchmod 0755 \"$DEST/eldr-acp\"\necho \"bundled eldr-acp -> $DEST/eldr-acp\"\n";
 		};
+		BB0000000000000000000A03 /* Build and bundle eldr-buzz-agent */ = {
+			isa = PBXShellScriptBuildPhase;
+			alwaysOutOfDate = 1;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			inputFileListPaths = (
+			);
+			inputPaths = (
+			);
+			name = "Build and bundle eldr-buzz-agent";
+			outputFileListPaths = (
+			);
+			outputPaths = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+			shellPath = /bin/sh;
+			shellScript = "set -e\n# WS-I7: compile the eldr-buzz-agent gateway (Release) and bundle it into the\n# app's Resources so InstallerService can copy it to ~/.local/bin, exactly like\n# eldr-acp above. Huginn SUPERVISES this binary as a child process; it does not\n# link EldrNode (that would pull the whole node package into the app).\nPKG=\"$SRCROOT/../../Packages/EldrNode\"\nSWIFT=\"$(xcrun --find swift)\"\n\"$SWIFT\" build -c release --package-path \"$PKG\" --product eldr-buzz-agent\nBIN=\"$PKG/.build/release/eldr-buzz-agent\"\nif [ ! -f \"$BIN\" ]; then echo \"error: eldr-buzz-agent was not built at $BIN\" >&2; exit 1; fi\nDEST=\"$BUILT_PRODUCTS_DIR/$CONTENTS_FOLDER_PATH/Resources\"\nmkdir -p \"$DEST\"\ncp -f \"$BIN\" \"$DEST/eldr-buzz-agent\"\nchmod 0755 \"$DEST/eldr-buzz-agent\"\necho \"bundled eldr-buzz-agent -> $DEST/eldr-buzz-agent\"\n";
+		};
 /* End PBXShellScriptBuildPhase section */
 
 /* Begin PBXSourcesBuildPhase section */
@@ -366,7 +386,7 @@
 				CODE_SIGN_STYLE = Automatic;
 				COMBINE_HIDPI_IMAGES = YES;
 				CURRENT_PROJECT_VERSION = 1;
-				DEVELOPMENT_TEAM = "";
+				DEVELOPMENT_TEAM = 49CQA5YX6U;
 				ENABLE_HARDENED_RUNTIME = YES;
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = NO;
@@ -392,7 +412,7 @@
 				CODE_SIGN_STYLE = Automatic;
 				COMBINE_HIDPI_IMAGES = YES;
 				CURRENT_PROJECT_VERSION = 1;
-				DEVELOPMENT_TEAM = "";
+				DEVELOPMENT_TEAM = 49CQA5YX6U;
 				ENABLE_HARDENED_RUNTIME = YES;
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = NO;
