@@ -212,21 +212,22 @@ prose usually does.
 ## 5. What shipped
 
 Eight repos. **Green on macOS (Xcode 27 / Swift 6.4) AND on Linux (aarch64,
-Swift 6.2.4, `swift:6.2` container).** **483 tests on macOS, 466 on Linux** — the difference is entirely platform-gated
+Swift 6.2.4, `swift:6.2` container).** **489 tests on macOS, 472 on Linux** — the difference is entirely platform-gated
 suites, itemised below.
 
 | Repo | Deps | macOS | Linux | Notes |
 |---|---|---|---|---|
 | `swift-message-padding` | none | 10 | 10 | catalog priority 3. Generalised: caller-supplied bucket ladders |
-| `swift-credential-redactor` | none | 12 | 12 | catalog priority 2 ("easiest win" — correct) |
-| `swift-reasoning-trace` | none | 18 | 18 | had **no upstream tests**; written from scratch |
-| `untrusted-data-envelope` | none | 30 | 30 | catalog priority 4, the flagship. Ships NIP-AD (CC0) |
+| `swift-credential-redactor` | none | 13 | 13 | catalog priority 2 ("easiest win" — correct) |
+| `swift-reasoning-trace` | none | 19 | 19 | had **no upstream tests**; written from scratch |
+| `untrusted-data-envelope` | none | 32 | 32 | catalog priority 4, the flagship. Ships NIP-AD (CC0) |
 | `swift-pqxdh` | swift-crypto | 18 | 18 | catalog priority 6 |
-| `swift-double-ratchet` | swift-crypto | 28 | 28 | catalog priority 6; decoupled per §2.1 |
-| `a2a-swift` | none | 89 | 80 | catalog priority 8; 9 gated, see §5.1 |
+| `swift-double-ratchet` | swift-crypto | 30 | 30 | catalog priority 6; decoupled per §2.1 |
+| `swift-a2a` | none | 89 | 80 | catalog priority 8; renamed — `a2a-swift` was taken |
 | `eldr-acp` | a2a-swift¹ | 278 | 270 | catalog priority 7, biggest asset; 8 gated (`A2AHarness` is `#if os(macOS)`) |
 
 ¹ `A2AHarness` target only; the core library links nothing on Apple platforms.
+Publication order is a hard gate: `swift-a2a` must be pushed and tagged first.
 
 ### 5.1 Linux verification — done, and it found a real bug
 
@@ -334,6 +335,42 @@ catchphrases repeated across repos until they read as a tic. Cut throughout.
 The pattern worth generalising: **claims about code age badly when the code moves
 and the prose doesn't, and a security property provided by a different layer does
 not survive an extraction** — but the sentence asserting it usually does.
+
+## 5.3 A second review pass, and what it found
+
+Four more reviews were run over the finished repos. They found three defects in
+code, not documentation, each verified by execution before anything was changed:
+
+- **`swift-reasoning-trace` leaked the entire scratchpad on uppercase markers.**
+  The fast-path guard was case-sensitive, so it short-circuited before four
+  `.caseInsensitive` searches could run — those options were dead code. That is
+  precisely the failure the library exists to prevent.
+- **`swift-credential-redactor` was not idempotent**, though the README asserted
+  it provably was. A token in git-remote userinfo double-wrapped into
+  `‹redacted:‹redacted:token›` because both value classes admitted the marker
+  delimiters.
+- **The forward-secrecy claim in `swift-double-ratchet` was false** for
+  undelivered messages — see §4.5.
+
+Plus two publication blockers: `eldr-acp` did not build for anyone (a path
+dependency that silently worked only when a sibling checkout happened to sit
+beside it), and **the name `a2a-swift` was already taken** by a package on the
+Swift Package Index.
+
+### 4.5 Skipped keys are a forward-secrecy exception
+
+Measured: after five sends of which only the last arrived, **4 of 4 undelivered
+messages were readable from a stolen state**, and still readable 80 messages
+later — there is no clock in the ratchet to age them out. This is inherent to any
+ratchet tolerating out-of-order delivery, Signal's included, and applies upstream
+too. It is not a defect; it was simply not what "message keys are used once and
+deleted" implies. Now documented, pinned by two tests, and mitigable via a new
+`purgeSkippedKeys()`.
+
+Also worth recording for upstream: `PQXDH.respond` never binds `ik_dh` to `ik`,
+so the extracted handshake has no authentication at all — fine in Eldr, where the
+kind-10420 check sits above it, and a reminder that **a property provided by
+another layer does not survive extraction even though the prose does**.
 
 ---
 
