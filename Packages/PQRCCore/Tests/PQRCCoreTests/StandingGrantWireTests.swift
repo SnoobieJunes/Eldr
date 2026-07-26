@@ -277,9 +277,11 @@ struct StandingGrantWireTests {
     @Test func durationsAreBoundedInDays() throws {
         let alice = try Self.alice()
         #expect(PQRCConstants.maxStandingGrantDuration == 30 * 24 * 60 * 60)
-        #expect(
-            PQRCConstants.allowedStandingGrantDurations
-                == [1, 3, 7, 14, 30].map { $0 * 24 * 60 * 60 })
+        // Bound to a local first: inside #expect the literal-plus-map is one
+        // expression the type-checker gives up on (it maps untyped integer
+        // literals through arithmetic, then compares to [Int64]).
+        let expectedDurations: [Int64] = [1, 3, 7, 14, 30].map { $0 * 24 * 60 * 60 }
+        #expect(PQRCConstants.allowedStandingGrantDurations == expectedDurations)
         // Every allowed duration is inside the cap; the cap itself is the longest.
         for duration in PQRCConstants.allowedStandingGrantDurations {
             #expect(duration <= PQRCConstants.maxStandingGrantDuration)

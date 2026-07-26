@@ -994,11 +994,27 @@ public actor PQRCMessenger {
             return
         }
         do {
-            let consumed = try await prekeyManager.consume(
-                spkUsed: handshake.spkUsed, otpUsed: handshake.otpUsed,
-                otpPQUsed: handshake.otpPQUsed, lrpUsed: handshake.lrpUsed)
+            // `consume(_:)` validates the handshake — suite, the ik → ik_dh
+            // binding, contradictory prekey claims, kem_pk — BEFORE resolving
+            // anything, so a bad message cannot spend a one-time prekey.
+            let consumed = try await prekeyManager.consume(handshake)
             let response = try PQXDH.respond(
                 myIdentityPub: identity.publicKeyData, consumed: consumed, message: handshake)
+            // Defence in depth. The seal signature already pins the sender's
+            // Nostr key and the guard above ties `ik` to their verified binding,
+            // so this cannot currently fail — but `respond` now returns an
+            // identity it has PROVEN owns `ik_dh`, and that is the value worth
+            // agreeing with. Without this, the whole chain rests on an invariant
+            // enforced two layers away, and the next unwrap path to be written
+            // inherits the gap silently.
+            guard response.initiatorIdentityPub == contact.binding.identityPubkey else {
+                eventContinuation?.yield(
+                    .protocolViolation(
+                        senderIdentityHex: contact.identityHex,
+                        reason: "handshake identity binding mismatch",
+                        wrapEventID: unwrapped.wrapEventID))
+                return
+            }
             let session = PQRCSession(
                 response: response, myKEMPrivate: consumed.otpPQ ?? consumed.pqpk,
                 peerIdentityPubkey: contact.binding.identityPubkey,

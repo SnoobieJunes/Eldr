@@ -89,7 +89,13 @@ public enum PQRCConstants {
     public static let rumorEventKind = 1420
 
     /// Handshake suite identifier (APP-SPEC §18 D2): explicit PQXDH hybrid.
-    public static let handshakeSuite = "hybrid-v1"
+    ///
+    /// Bumped v1 → v2 when the handshake gained PQXDH's dh2 leg and the
+    /// `ik_dh_sig` binding. Both change the wire format and the derived SK, and
+    /// the suite string is exactly the mechanism that turns that into a legible
+    /// `handshakeSuiteUnsupported` for a peer on the old build instead of a
+    /// handshake that "succeeds" and then silently fails to decrypt anything.
+    public static let handshakeSuite = "hybrid-v2"
 
     /// Thread agent loop guard (APP-SPEC §18 D14): pause after this many
     /// consecutive agent messages with no human message.
