@@ -97,6 +97,46 @@ struct TownGrantsModelTests {
         #expect(model.grants.first?.problem?.contains("INVALID") == true)
     }
 
+    /// The panel must agree with `FileStandingGrantStore.liveGrants()` on EVERY reason
+    /// the node drops an entry. The duration cap was checked by the node and not by
+    /// Huginn, so an over-long grant rendered as "valid" here and was then ignored by
+    /// the town plane with no visible explanation anywhere.
+    @Test func overLongGrant_isLabeledAndRefused_matchingTheNode() async throws {
+        let paths = try tempPaths()
+        defer { try? FileManager.default.removeItem(atPath: paths.dir) }
+        let owner = try PQRCIdentity(seed: Data(repeating: 0x64, count: 32))
+        let ownerHex = owner.publicKeyData.hexString
+        let peer = String(repeating: "ab", count: 32)
+        let model = TownGrantsModel(grantsPath: paths.grants, peersPath: paths.peers)
+
+        // Properly signed, structurally valid, unexpired — but longer-lived than the
+        // protocol cap, so the node refuses it.
+        let now = Int64(Date().timeIntervalSince1970)
+        let overLong = try StandingGrant.make(
+            grantID: "toolong", peer: peer, planes: [.wall],
+            budget: .init(messagesPerDay: 10, bytesPerDay: 1000, maxConcurrentTasks: 1),
+            activeUntil: now + PQRCConstants.maxStandingGrantDuration + 86_400,
+            identity: owner)
+        #expect(overLong.hasValidSignature(), "precondition: the grant itself is sound")
+
+        model.importText = String(decoding: try JSONEncoder().encode(overLong), as: UTF8.self)
+        model.importGrant(ownerHex: ownerHex, now: now)
+        #expect(model.grants.isEmpty, "an over-long grant must not be staged")
+        #expect(model.importStatus?.contains("TOO LONG") == true)
+
+        // And when one is already in the file, it is shown and labeled, not hidden.
+        let file = try JSONSerialization.data(
+            withJSONObject: [
+                "grants": [
+                    try JSONSerialization.jsonObject(with: JSONEncoder().encode(overLong))
+                ]
+            ])
+        try file.write(to: URL(fileURLWithPath: paths.grants))
+        model.reload(ownerHex: ownerHex, now: now)
+        #expect(model.grants.count == 1)
+        #expect(model.grants.first?.problem?.contains("TOO LONG") == true)
+    }
+
     @Test func peersRoster_roundTripsInTheNodeShape() async throws {
         let paths = try tempPaths()
         defer { try? FileManager.default.removeItem(atPath: paths.dir) }

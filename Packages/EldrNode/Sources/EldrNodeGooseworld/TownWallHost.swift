@@ -42,9 +42,33 @@ public actor TownWallHost {
         public let label: String
 
         public init(identityHex: String, townID: String, label: String) {
-            self.identityHex = identityHex.lowercased()
+            self.identityHex = Self.canonical(identityHex)
             self.townID = townID
             self.label = label
+        }
+
+        /// The identity normalization every construction path must share.
+        static func canonical(_ hex: String) -> String {
+            hex.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        }
+
+        /// Decoding MUST normalize too, and the synthesized `init(from:)` does not: it
+        /// assigns the stored properties directly and never calls the memberwise init
+        /// above. So a `town-peers.json` written by hand — which is exactly what
+        /// `docs/guide/DEMO-GOOSEWORLD.md` step 3 instructs — with an UPPERCASE identity hex
+        /// decoded un-normalized, and then failed silently in two places at once:
+        /// `grantCovers` compares against `StandingGrant.peer`, which `validateStructure`
+        /// pins to lowercase, with a deliberately case-sensitive `==`, so the peer was
+        /// dropped from every fan-out; and the roster lookup that stamps the author TOWN
+        /// missed, so the peer's posts rendered under a hex-prefix id instead of its town
+        /// label. No error was logged for either — the wall just quietly did not reach
+        /// that town. Normalizing here fixes every decode path at once.
+        public init(from decoder: any Decoder) throws {
+            let container = try decoder.container(keyedBy: CodingKeys.self)
+            self.identityHex = Self.canonical(
+                try container.decode(String.self, forKey: .identityHex))
+            self.townID = try container.decode(String.self, forKey: .townID)
+            self.label = try container.decode(String.self, forKey: .label)
         }
     }
 

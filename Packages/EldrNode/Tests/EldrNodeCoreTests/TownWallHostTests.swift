@@ -34,6 +34,35 @@ struct TownWallHostTests {
     static let issuedAt = GooseworldTwoTownE2ETests.issuedAt
     static let liveNow = GooseworldTwoTownE2ETests.liveNow
 
+    /// A hand-written `town-peers.json` (what DEMO-GOOSEWORLD.md step 3 asks for) with
+    /// an UPPERCASE identity hex must still match its grant. `StandingGrant.peer` is
+    /// pinned lowercase by `validateStructure` and `StandingGrantAdmission` compares it
+    /// case-sensitively, so an un-normalized roster entry silently excluded that peer
+    /// from every fan-out — no error, just a wall that never reached the town. The
+    /// memberwise init always normalized; the SYNTHESIZED `Codable` init did not, and
+    /// the file path only ever uses the latter.
+    @Test func peerRosterDecodingNormalizesIdentityCase() throws {
+        let lower = String(repeating: "ab", count: 32)
+        let json = """
+            [{"identityHex":"\(lower.uppercased())","townID":"town-b","label":"Town B"}]
+            """
+        let decoded = try JSONDecoder().decode(
+            [TownWallHost.TownPeer].self, from: Data(json.utf8))
+        #expect(decoded.count == 1)
+        #expect(
+            decoded[0].identityHex == lower,
+            "a decoded roster entry must carry the same lowercase hex a grant names")
+        // Surrounding whitespace is the other way a hand-edited entry misses.
+        let padded = try JSONDecoder().decode(
+            [TownWallHost.TownPeer].self,
+            from: Data(#"[{"identityHex":"  \#(lower)  ","townID":"t","label":"l"}]"#.utf8))
+        #expect(padded[0].identityHex == lower)
+        // And the memberwise path stays equivalent, so both agree.
+        #expect(
+            TownWallHost.TownPeer(identityHex: lower.uppercased(), townID: "t", label: "l")
+                .identityHex == lower)
+    }
+
     /// Poll until `condition`, the suite's standard deterministic-readiness wait.
     private func waitUntil(
         _ timeoutMillis: Int = 5_000, _ condition: @Sendable () async -> Bool

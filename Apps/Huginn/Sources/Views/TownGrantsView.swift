@@ -89,6 +89,14 @@ final class TownGrantsModel: ObservableObject {
             problem = "INVALID structure — the node will drop it"
         } else if !grant.hasValidSignature() {
             problem = "INVALID signature — tampered or corrupted; the node will drop it"
+        } else if !grant.hasBoundedDuration(now: now) {
+            // The node's FileStandingGrantStore.liveGrants() runs this check too and
+            // drops anything that fails it. Huginn omitted it, so a grant living longer
+            // than the protocol cap rendered as "valid" here and was then silently
+            // ignored by the node — the exact "Huginn says it's fine, the town plane
+            // still won't talk" confusion this panel exists to prevent. The panel must
+            // label every entry the node would drop.
+            problem = "TOO LONG — over the standing-grant duration cap; the node will drop it"
         } else if let owner, grant.enabledBy.hexString != owner {
             problem = "FOREIGN signer — not the paired owner; the node will drop it"
         } else if grant.activeUntil <= now {
@@ -207,6 +215,25 @@ struct TownGrantsView: View {
                         .font(.caption)
                         .foregroundStyle(.orange)
                 }
+                // Whether this panel is editing the file the node actually reads. It
+                // used to assert that it was; a node started per DEMO-GOOSEWORLD.md
+                // reads <workdir>/.eldr/town-grants.json, so importing here changed
+                // nothing and said so nowhere. Now the panel states which case it is.
+                if ConfigPaths.standard.townFilesArePinnedToTheNode {
+                    Label(
+                        "Pinned to the node's own files via ELDR_TOWN_GRANTS_FILE — the node re-reads them on change, so an import takes effect on the peer's next frame.",
+                        systemImage: "link"
+                    )
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                } else {
+                    Label(
+                        "These are Huginn's default paths. A node launched with ELDR_TOWN_ID reads $ELDR_TOWN_GRANTS_FILE, or <node workdir>/.eldr/town-grants.json — NOT these. Export ELDR_TOWN_GRANTS_FILE and ELDR_TOWN_PEERS_FILE (in this Mac's eldr-acp env file, so a Dock-launched Huginn sees them too) to point both sides at one pair of files; otherwise copy the files to the node yourself.",
+                        systemImage: "exclamationmark.triangle"
+                    )
+                    .font(.caption)
+                    .foregroundStyle(.orange)
+                }
             }
             Section("Standing grants (\(model.grantsPath))") {
                 if model.grants.isEmpty {
@@ -284,7 +311,7 @@ struct TownGrantsView: View {
                         [URL(fileURLWithPath: model.grantsPath)])
                 }
             } footer: {
-                Text("The node re-reads these files on change: importing takes effect on the peer's next frame, and removing an entry is that file's revocation. Grants are day-bounded and signed by the phone; Huginn only verifies and stages them.")
+                Text("Grants are day-bounded and signed by the phone; Huginn only verifies and stages them. Removing an entry is that file's revocation.")
             }
         }
         .formStyle(.grouped)
