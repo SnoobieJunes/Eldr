@@ -276,6 +276,29 @@ public actor LocalRelayConnection: RelayTransport {
         await relay.handleSubscribe(filters: filters, authedPubkey: authedPubkey)
     }
 
+    /// The in-process relay can answer the bounded question exactly, because
+    /// `handleSubscribeSplit` takes the backlog and registers the live
+    /// subscriber atomically inside the actor — no event is duplicated across
+    /// the boundary or lost at it.
+    public func subscribeFrames(_ filters: [NostrFilter]) async -> AsyncThrowingStream<
+        SubscriptionFrame, Error
+    > {
+        let split = await relay.handleSubscribeSplit(filters: filters, authedPubkey: authedPubkey)
+        return AsyncThrowingStream { continuation in
+            for event in split.backlog { continuation.yield(.event(event)) }
+            continuation.yield(.endOfStoredEvents)
+            let task = Task {
+                do {
+                    for try await event in split.live { continuation.yield(.event(event)) }
+                    continuation.finish()
+                } catch {
+                    continuation.finish(throwing: error)
+                }
+            }
+            continuation.onTermination = { _ in task.cancel() }
+        }
+    }
+
     public func authenticate(keypair: NostrKeypair, randomSource: any RandomSource) async throws {
         let challenge = await relay.issueChallenge(connectionID: connectionID)
         let authEvent = try keypair.sign(

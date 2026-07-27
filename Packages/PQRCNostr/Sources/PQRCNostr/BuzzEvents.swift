@@ -10,14 +10,65 @@ import PQRCCore
 /// builders exactly (verified against `crates/buzz-sdk/src/builders.rs` and the
 /// NIP-AM / NIP-AO drafts) so a Buzz relay accepts them unchanged.
 public enum BuzzEvents {
-    // Buzz kind registry (subset Eldr emits). See buzz-core/src/kind.rs.
+    // Buzz kind registry (subset Eldr emits or reads). See buzz-core/src/kind.rs.
+    //
+    // `required_scope_for_kind` (buzz-relay/src/handlers/ingest.rs) is a CLOSED
+    // ALLOWLIST — its fall-through is `Err("restricted: unknown event kind")`.
+    // Every kind below was checked against it. This is also why PQRC's own
+    // 10420/10421/10422/10050 cannot ride a Buzz relay: not a numbering clash,
+    // just absence from someone else's registry. Renumbering PQRC would fix
+    // nothing and would break our published NIP.
     public enum Kind {
         public static let profile = 0  // NIP-01 kind:0 metadata
+        public static let deletion = 5  // NIP-09 deletion request
+        public static let reaction = 7  // NIP-25 reaction
         public static let streamMessage = 9  // NIP-29 group chat message
+        public static let giftWrap = 1059  // NIP-59 — Eldr's own E2EE envelope
         public static let agentProfile = 10100  // agent metadata + owner ref
-        public static let putUser = 9000  // NIP-29 add-user (self-announce as bot)
+        public static let presence = 20001  // ephemeral presence
+        public static let typing = 20002  // ephemeral typing indicator
         public static let observerFrame = 24200  // NIP-AO ephemeral telemetry/control
+        public static let httpAuth = 27235  // NIP-98 HTTP auth
+        public static let readState = 30078  // NIP-RS cross-device read state
+
+        // NIP-29 membership/administration commands (client → relay).
+        public static let putUser = 9000  // add-user (self-announce as bot)
+        public static let removeUser = 9001  // remove-user
+        public static let createGroup = 9007  // create channel
+        public static let joinRequest = 9021  // join an OPEN channel
+        public static let leaveRequest = 9022  // leave a channel
+
+        // NIP-29 group state (relay-SIGNED — never client-submitted, read only).
+        public static let groupMetadata = 39000  // d, name, closed[, about, private, hidden]
+        public static let groupAdmins = 39001  // d + p tags with role labels
+        public static let groupMembers = 39002  // d + p tags for all members
+
+        // Buzz-native message variants. 40002/40003 are flagged in Buzz's own
+        // NOSTR.md as "Buzz-only — no standard NIP-29 client renders these";
+        // their `content` is plain text exactly like kind:9 (verified against
+        // mobile/lib/features/channels/timeline_message.dart), so reading them
+        // costs one extra kind in the filter and nothing else. We READ these and
+        // WRITE plain kind:9 — which is what Buzz's own mobile client sends.
+        public static let streamMessageV2 = 40002
+        public static let streamMessageEdit = 40003
+        public static let systemMessage = 40099
+
+        // Relay-signed membership notifications, community-global and p-gated.
+        public static let memberAdded = 44100
+        public static let memberRemoved = 44101
+
         public static let turnMetric = 44200  // NIP-AM durable per-turn usage
+
+        /// Every kind a workspace timeline renders. A REQ **must** enumerate
+        /// kinds explicitly: Buzz rejects a subscription that could match a
+        /// p-gated kind without a matching `#p`, and omitting `kinds` entirely
+        /// trips that gate (`docs/done/2026-07-24/ELDR-BUZZ-PAIRING.md §10`).
+        public static let timelineKinds = [
+            streamMessage, streamMessageV2, streamMessageEdit, systemMessage, reaction, deletion,
+        ]
+
+        /// The relay-signed group-state kinds, for a discovery REQ.
+        public static let discoveryKinds = [groupMetadata, groupAdmins, groupMembers]
     }
 
     // MARK: - kind:0 profile
@@ -77,6 +128,60 @@ public enum BuzzEvents {
         NostrEvent(
             pubkey: pubkey, createdAt: now(), kind: Kind.putUser,
             tags: [["h", channelId], ["p", pubkey], ["role", "bot"]], content: "")
+    }
+
+    // MARK: - Human-member channel actions (WS-BM1)
+
+    /// NIP-25 reaction to a message. Buzz derives the channel from the target
+    /// event's own `#e` tag and **ignores a client-supplied `#h`** — a reaction
+    /// to an unknown event is rejected fail-closed — but the `h` tag is sent
+    /// anyway because Buzz's own docs recommend it and other NIP-29 relays need it.
+    public static func reaction(
+        pubkey: String, channelId: String, targetEventId: String, targetAuthorPubkey: String? = nil,
+        emoji: String = "+"
+    ) -> NostrEvent {
+        var tags: [[String]] = [["h", channelId], ["e", targetEventId]]
+        if let targetAuthorPubkey { tags.append(["p", targetAuthorPubkey.lowercased()]) }
+        return NostrEvent(
+            pubkey: pubkey, createdAt: now(), kind: Kind.reaction, tags: tags, content: emoji)
+    }
+
+    /// NIP-09 deletion of one of our own messages. Buzz validates author-match
+    /// against the target: only self-authored events can go this way (an admin
+    /// removing someone else's message is kind:9005, which is not ours to send).
+    public static func deleteMessage(
+        pubkey: String, channelId: String, targetEventId: String, reason: String = ""
+    ) -> NostrEvent {
+        NostrEvent(
+            pubkey: pubkey, createdAt: now(), kind: Kind.deletion,
+            tags: [["h", channelId], ["e", targetEventId]], content: reason)
+    }
+
+    /// NIP-29 join request. **Open channels only** — Buzz rejects this at ingest
+    /// for private channels, where an owner/admin must add you instead. On
+    /// success the relay adds the member and emits the discovery + kind:44100
+    /// notification events.
+    public static func joinRequest(pubkey: String, channelId: String, reason: String = "")
+        -> NostrEvent
+    {
+        NostrEvent(
+            pubkey: pubkey, createdAt: now(), kind: Kind.joinRequest, tags: [["h", channelId]],
+            content: reason)
+    }
+
+    /// NIP-29 leave request. Any member may leave; the relay's last-owner guard
+    /// refuses the one that would orphan a channel.
+    public static func leaveRequest(pubkey: String, channelId: String) -> NostrEvent {
+        NostrEvent(
+            pubkey: pubkey, createdAt: now(), kind: Kind.leaveRequest, tags: [["h", channelId]],
+            content: "")
+    }
+
+    /// Ephemeral typing indicator (not stored; fanned out over Redis pub/sub).
+    public static func typingIndicator(pubkey: String, channelId: String) -> NostrEvent {
+        NostrEvent(
+            pubkey: pubkey, createdAt: now(), kind: Kind.typing, tags: [["h", channelId]],
+            content: "")
     }
 
     // MARK: - kind:10100 agent profile (owner reference) — additive provenance
