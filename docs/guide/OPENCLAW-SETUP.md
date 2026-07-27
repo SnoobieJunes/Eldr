@@ -38,7 +38,7 @@ credential plumbing is a no-op.
 | OpenClaw installed | With its `acpx` plugin available. |
 | A local OpenAI-compatible LLM endpoint | LM Studio or Ollama on e.g. `http://127.0.0.1:1337/v1`. The model **must support tool/function calling**; prefer an **instruct** model over a reasoning model for snappy, low-confusion tool use. |
 
-There are **two ways** to set this up. **Path A** (the Configurator GUI) is
+There are **two ways** to set this up. **Path A** (the Huginn GUI) is
 recommended — it does every step below for you. **Path B** is the manual
 equivalent for anyone not using the GUI.
 
@@ -67,7 +67,7 @@ in a wizard and registers OpenClaw first-class, exactly like Xcode (A42).
 
    This merges the agent into OpenClaw's `acpx` plugin config **without
    clobbering** your existing settings — only the agent entry is added. If
-   contextgraph is enabled in the Configurator, its OpenClaw plugin entry is
+   contextgraph is enabled in Huginn, its OpenClaw plugin entry is
    written at the same time (A43).
 
 That's it — skip to [Verify it works](#verify-it-works).
@@ -76,7 +76,7 @@ That's it — skip to [Verify it works](#verify-it-works).
 
 ## Path B — Manual
 
-For setups not using the Configurator. This produces the identical result.
+For setups not using Huginn. This produces the identical result.
 
 1. **Build + install the agent** ([`SETUP-GUIDE.md §9`](SETUP-GUIDE.md) step 1):
    ```bash
@@ -152,7 +152,7 @@ with defaults and per-model recipes in [`SETUP-GUIDE.md §9`](SETUP-GUIDE.md)
 tune only if your model struggles. Set them in `~/.config/eldr-acp/env`.
 
 **contextgraph (optional, A43).** For smarter context assembly, contextgraph
-ships its own OpenClaw plugin. The Configurator writes that plugin entry pointed
+ships its own OpenClaw plugin. Huginn writes that plugin entry pointed
 at the same local service when contextgraph is enabled before the "Register in
 OpenClaw" step; the agent-level route (`ELDR_ACP_CONTEXTGRAPH=1`) works under any
 ACP client. See [`SETUP-GUIDE.md §9.4`](SETUP-GUIDE.md) "contextgraph".

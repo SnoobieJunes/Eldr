@@ -244,5 +244,5 @@ A full PQRC deployment in one process — five seeded personas + an in-process r
 
 ---
 
-*Cross-references:* `USER-GUIDE.md` (end-user walkthrough), `SETUP-GUIDE.md` / `CONDUIT-SETUP.md` (deployment runbooks), `docs/DEMO.md` (demo script), `TEST-PLAN.md` (full test matrix), `Apps/Huginn/README.md` (Mac app).
+*Cross-references:* `USER-GUIDE.md` (end-user walkthrough), `SETUP-GUIDE.md` / `CONDUIT-SETUP.md` (deployment runbooks), `docs/guide/DEMO.md` (demo script), `TEST-PLAN.md` (full test matrix), `Apps/Huginn/README.md` (Mac app).
 </content>

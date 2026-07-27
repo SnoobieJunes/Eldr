@@ -1,7 +1,8 @@
 # Extraction catalog — soundness audit and execution report
 
 Status: **executed, adversarially reviewed, 8 repos green on macOS + Linux** · 2026-07-24
-Companion to [`OPEN-SOURCE-EXTRACTION-CATALOG.md`](OPEN-SOURCE-EXTRACTION-CATALOG.md)
+Companion to [`OPEN-SOURCE-EXTRACTION-CATALOG.md`](../done/2026-07-24/OPEN-SOURCE-EXTRACTION-CATALOG.md)
+(archived 2026-07-24 — this document supersedes it)
 
 The catalog was a static-analysis survey; its own closing caveat said so ("no
 extraction attempted"). This document is what happened when the extraction was
@@ -383,7 +384,7 @@ Ordered by value.
 |---|---|---|---|
 | `swift-consent-grants` | `Envelope/StandingGrant.swift` (411) | **Reference impl for NIP-AC.** Pairs directly with the NIP PR — highest strategic value left | S–M |
 | `swift-nostr-giftwrap` | `GiftWrap.swift`, `SealCipher.swift` | Catalog priority 5. Error-prone to reimplement; high reuse | S–M |
-| `swift-agent-binding` | `IdentityBinding.swift` + `AgentKeyDeriver` | Reference impl for NIP-AS. `AgentKeyDeriver` was deliberately **removed** from `swift-pqxdh` to leave this repo a clean home | S |
+| `swift-agent-binding` | `IdentityBinding.swift` + `AgentKeyDeriver` | Reference impl for the NIP-OA unsigned-carriers amendment (the NIP-AS draft it was written against was withdrawn 2026-07-24). `AgentKeyDeriver` was deliberately **removed** from `swift-pqxdh` to leave this repo a clean home | S |
 | `mcp-codename-wall` | `MCPServer.swift`, `SecureChatBridge.swift` | Seam is already clean | M |
 | `swift-encrypted-store` | `Store/*` | Small, self-contained | S |
 | `swift-secure-enclave-vault` | app + Huginn wrappers | Apple-only; needs signing to test | M |
@@ -397,8 +398,11 @@ Ordered by value.
 
 ## 7. Standing caveats, updated
 
-- **Verified:** macOS build + test (477 tests) **and Linux build + test (460
-  tests)**, all 8 repos. Linux via colima + `swift:6.2` on aarch64.
+- **Verified:** macOS build + test (**489** tests) **and Linux build + test (**472**
+  tests)**, all 8 repos. Linux via colima + `swift:6.2` on aarch64. (These are §5's
+  figures. An earlier revision of this section said 477/460 — the pre-§5.2/§5.3
+  counts, before the adversarial passes added tests. Re-counted 2026-07-24 from the
+  repos themselves: 10, 13, 19, 32, 18, 30, 89, 278 = 489.)
 - **Unverified:** the a2aproject and `wiedymi/swift-acp` claims in §2.4 (both
   README files now hedge rather than assert); any interop against another A2A
   implementation; x86-64 Linux (only aarch64 was tested).

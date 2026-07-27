@@ -5,8 +5,8 @@ Eight repos are built, tested, and committed locally in
 pushed.** This is the checklist to change that.
 
 Companion: [`OSS-EXTRACTION-AUDIT.md`](OSS-EXTRACTION-AUDIT.md) (what shipped and
-why), [`OPEN-SOURCE-EXTRACTION-CATALOG.md`](OPEN-SOURCE-EXTRACTION-CATALOG.md)
-(the original survey).
+why), and the original survey it superseded,
+[`archive/2026-07-24/OPEN-SOURCE-EXTRACTION-CATALOG.md`](../done/2026-07-24/OPEN-SOURCE-EXTRACTION-CATALOG.md).
 
 ---
 
@@ -31,7 +31,8 @@ pushing — a promise you quietly stop keeping is worse than a narrower one made
 honestly.
 
 **4. Order matters for exactly one pair.**
-`eldr-acp` currently depends on `a2a-swift` by **local path**. See step 4.
+`eldr-acp` depends on `swift-a2a` by **published URL**, so `swift-a2a` must be
+pushed and tagged `0.1.0` before `eldr-acp` will resolve for anyone. See step 4.
 
 ---
 
@@ -70,15 +71,15 @@ Re-run the suites if you want the assurance fresh:
 for r in */; do (cd "$r" && echo "--- $r" && swift test 2>&1 | grep "Test run with"); done
 ```
 
-Expected on macOS: 10, 11, 17, 28, 18, 26, 89 (4 targets), 278 (2 targets) —
-**477 total**.
+Expected on macOS: 10, 13, 19, 32, 18, 30, 89 (4 targets), 278 (2 targets) —
+**489 total**.
 
 To re-run the Linux verification (needs `colima start` first):
 
 ```bash
 docker run --rm -v "$PWD":/src swift:6.2 bash -lc '
   REPOS="swift-message-padding swift-credential-redactor swift-reasoning-trace
-         untrusted-data-envelope swift-pqxdh swift-double-ratchet a2a-swift eldr-acp"
+         untrusted-data-envelope swift-pqxdh swift-double-ratchet swift-a2a eldr-acp"
   for r in $REPOS; do
     mkdir -p /tmp/w/$r
     tar -C /src/$r --exclude=.build --exclude=.swiftpm -cf - . | tar -C /tmp/w/$r -xf -
@@ -94,7 +95,7 @@ docker run --rm -v "$PWD":/src swift:6.2 bash -lc '
   done'
 ```
 
-Expected on Linux: 10, 11, 17, 28, 18, 26, 80, 270 — **460 total**. The
+Expected on Linux: 10, 13, 19, 32, 18, 30, 80, 270 — **472 total**. The
 `--exclude=.build` matters: mounting the host tree directly lets a macOS `.build`
 leak into the container and the eldr-acp end-to-end test then execs an arm64-macOS
 binary ("Exec format error").
@@ -114,7 +115,7 @@ create swift-reasoning-trace     "Strips a reasoning model's chain-of-thought sc
 create untrusted-data-envelope   "Structural prompt-injection containment for text handed to an LLM. Reference implementation of NIP-AD. Zero dependencies."
 create swift-pqxdh               "Post-quantum asynchronous key agreement: hybrid X25519 + ML-KEM-768 X3DH."
 create swift-double-ratchet      "The Signal Double Ratchet with a periodic ML-KEM-768 post-quantum rekey."
-create a2a-swift                 "A clean-room Swift SDK for the Agent2Agent (A2A) protocol v1.0. Zero dependencies."
+create swift-a2a                 "A clean-room Swift SDK for the Agent2Agent (A2A) protocol v1.0. Zero dependencies."
 create eldr-acp                  "A hardened Swift Agent Client Protocol agent: path jail, permission gating, encrypted audit log."
 ```
 
@@ -144,7 +145,7 @@ done
 ```
 
 > **Both jobs have been verified locally.** Linux was run under colima with the
-> `swift:6.2` container on aarch64 — all eight repos build and test green (460
+> `swift:6.2` container on aarch64 — all eight repos build and test green (472
 > tests; the 17-test gap versus macOS is platform-gated suites, itemised in the
 > audit §5.1). CI runs the same image, so a red Linux job means an environment
 > difference — most likely **x86-64**, which was not tested locally, since GitHub's
@@ -152,37 +153,47 @@ done
 
 ---
 
-## Step 4 — The `a2a-swift` → `eldr-acp` pair
+## Step 4 — The `swift-a2a` → `eldr-acp` pair
 
-`eldr-acp/Package.swift` has:
+> **Corrected 2026-07-24.** An earlier revision of this step said
+> `eldr-acp/Package.swift` still carried `.package(path: "../a2a-swift")` and gave a
+> `perl -pi -e` one-liner to rewrite it. Both were wrong, and wrong in a way that
+> fails silently: the manifest **already** declares the URL form
+> (`eldr-acp/Package.swift:49`), so the substitution would have matched nothing and
+> reported success. The repo is also named **`swift-a2a`**, not `a2a-swift` — that
+> rename is recorded in the audit (§5.3, "the name `a2a-swift` was already taken by
+> a package on the Swift Package Index") but had not been carried into this file.
+
+`eldr-acp/Package.swift:49` already reads:
 
 ```swift
-.package(path: "../a2a-swift"),
+.package(url: "https://github.com/SnoobieJunes/swift-a2a.git", from: "0.1.0"),
 ```
 
-A path dependency works locally and **does not resolve for anyone else**. So:
+So there is **nothing to edit**. What remains is purely an ordering constraint:
+that URL must resolve before anyone (including CI) builds `eldr-acp`, which means
+`swift-a2a` must be pushed **and tagged `0.1.0`** first.
 
 ```bash
 cd ~/Development\ Projects/eldr-oss
 
-# 4a. Push a2a-swift and tag it first.
-git -C a2a-swift push -u origin main
-git -C a2a-swift tag -a 0.1.0 -m "0.1.0 — initial extraction"
-git -C a2a-swift push origin 0.1.0
+# 4a. Push swift-a2a and tag it. This must complete before 4b.
+git -C swift-a2a push -u origin main
+git -C swift-a2a tag -a 0.1.0 -m "0.1.0 — initial extraction"
+git -C swift-a2a push origin 0.1.0
 
-# 4b. Now switch eldr-acp to the URL dependency.
+# 4b. Confirm eldr-acp resolves against the PUBLISHED package, not a local copy.
+#     Wipe the resolved state first, or SwiftPM may reuse a cached checkout and
+#     you will not learn whether the URL actually works for anyone else.
 cd eldr-acp
-# The manifest carries a NOTE FOR PUBLISHING comment at this exact line.
-perl -pi -e 's{\.package\(path: "\.\./a2a-swift"\),}{.package(url: "https://github.com/SnoobieJunes/a2a-swift.git", from: "0.1.0"),}' Package.swift
-swift build && swift test          # must still be 278 tests green
-git add Package.swift
-git -c user.name=SnoobieJunes -c user.email=leroy@auston.org commit -s \
-    -m "build: depend on published a2a-swift instead of a local path"
+rm -rf .build .swiftpm/xcode/package.xcworkspace/xcshareddata/swiftpm/Package.resolved
+swift package resolve            # must fetch from github.com, not ../swift-a2a
+swift build && swift test        # must still be 278 tests green
 git push -u origin main
 ```
 
-If `a2a-swift` is a **private** repo, the URL dependency needs SSH auth
-(`git@github.com:...`) or a token. Simplest path: make `a2a-swift` public at this
+If `swift-a2a` is a **private** repo, the URL dependency needs SSH auth
+(`git@github.com:...`) or a token. Simplest path: make `swift-a2a` public at this
 point, or keep both private and use the SSH URL.
 
 ---
@@ -215,7 +226,7 @@ Worth doing, quickly:
 
 ```bash
 for r in swift-message-padding swift-credential-redactor swift-reasoning-trace \
-         untrusted-data-envelope swift-pqxdh swift-double-ratchet a2a-swift eldr-acp; do
+         untrusted-data-envelope swift-pqxdh swift-double-ratchet swift-a2a eldr-acp; do
   gh repo edit "SnoobieJunes/$r" \
     --enable-issues --enable-wiki=false --enable-projects=false \
     --delete-branch-on-merge
@@ -238,10 +249,10 @@ Then, in the GitHub UI or via `gh api`:
 The two with an actual audience beyond you:
 
 - **`untrusted-data-envelope`** — the strongest. It pairs with the NIP-AD PR to
-  `block/buzz` (see [`nips-contrib/`](nips-contrib/)). Landing the PR first and
+  `block/buzz` (see [`nips-contrib/`](../nips-contrib/)). Landing the PR first and
   then pointing at a working reference implementation is a much better story than
   either alone. **Sequence: PR first, repo link in the PR discussion.**
-- **`a2a-swift`** — genuinely fills a gap *if* the a2aproject org still has no
+- **`swift-a2a`** — genuinely fills a gap *if* the a2aproject org still has no
   Swift SDK. **Verify that before saying it out loud** — the README hedges
   correctly, but a launch post that asserts it and is wrong is embarrassing in a
   way the README is not.

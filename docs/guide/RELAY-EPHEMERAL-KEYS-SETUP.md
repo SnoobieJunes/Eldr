@@ -4,7 +4,7 @@
 **Goal:** make the relay support EldrChat's **ephemeral receiving keys** (NIP-XX §13,
 SPEC §9.3, kind `10422`) so the app feature can be switched on in a later session.
 **Status when you start:** the relay is the strict **anchor** relay described in
-`docs/RELAY-DEPLOY-CROSTINI.md` (khatru/Go preferred; NIP-42 AUTH read-gate on
+`docs/guide/RELAY-DEPLOY-CROSTINI.md` (khatru/Go preferred; NIP-42 AUTH read-gate on
 kind-1059 by `p`-tag match). Nothing here changes message confidentiality — it only
 changes which **routing tag** the relay will deliver on.
 

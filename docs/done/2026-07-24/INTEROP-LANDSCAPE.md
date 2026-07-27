@@ -1,3 +1,13 @@
+> **ARCHIVED 2026-07-24 — historical. Do not build from this.**
+> The analysis that opened the Buzz/goosetown interop question. Its workstreams
+> WS-I1–WS-I7 all shipped (DEVIATIONS **AC144**, **AC146**); the live successors are
+> [`../../ELDR-BUZZ-INTEROP.md`](../../guide/ELDR-BUZZ-INTEROP.md) (how to run what was
+> built) and [`../../plan/ELDR-BUZZ-MOBILE-RELAY.md`](../../plan/ELDR-BUZZ-MOBILE-RELAY.md)
+> (what is still in flight). Kept because §5 (the per-agent identity gap), §8.1
+> (the E2EE-termination rule) and §8.2 ("do not ask Block to adopt PQRC") are the
+> reasoning behind decisions the live docs only state.
+> **Note §11's own caveat still applies to this file: nothing in it was built or run.**
+
 # Interop Landscape — Eldr, Buzz, Goosetown, and what it takes to be the roads
 
 > **Analysis + decision doc. Nothing here is a claim that a feature shipped.**

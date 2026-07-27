@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 import Foundation
 
-// Phase 1 (docs/ACPRouterplan.md §5 step 2): the phone-facing ACP client. Wraps the now
+// Phase 1 (docs/done/2026-07-17/ACPRouterplan.md §5 step 2): the phone-facing ACP client. Wraps the now
 // transport-agnostic `ACPClientDriver` over an `ACPTransport` and surfaces a TYPED
 // AsyncStream of UI events (assistant text, tool-call lifecycle, available commands) for
 // the chat UI, plus `prompt(...)` and an injected permission handler. The phone advertises

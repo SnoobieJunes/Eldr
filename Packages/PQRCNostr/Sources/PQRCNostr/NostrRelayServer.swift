@@ -21,7 +21,7 @@ import PQRCCore
 /// Debug/demo tooling only: it is NEVER compiled into a Release app build and
 /// holds events in memory with no persistence. Production deployments use an
 /// AUTH-gated strfry/khatru anchor relay (SPEC §9.1, §15) — see
-/// docs/SETUP-GUIDE.md.
+/// docs/guide/SETUP-GUIDE.md.
 public actor NostrRelayServer {
     private let relay: LocalRelaySimulator
     private let requestedPort: UInt16

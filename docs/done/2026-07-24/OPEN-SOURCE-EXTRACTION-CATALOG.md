@@ -1,3 +1,13 @@
+> **ARCHIVED 2026-07-24 — historical. Do not build from this.**
+> The static-analysis survey that preceded the extraction. Superseded by
+> [`../../OSS-EXTRACTION-AUDIT.md`](../../guide/OSS-EXTRACTION-AUDIT.md), which records what
+> happened when the extraction was actually attempted — **four claims in this file are
+> wrong** (audit §2) and **one structural recommendation is reversed** (audit §3: do
+> *not* factor a shared `swift-pqrc-types`). To publish, see
+> [`../../OSS-RELEASE-RUNBOOK.md`](../../guide/OSS-RELEASE-RUNBOOK.md).
+> Kept because its packaging philosophy — many small single-purpose repos, one
+> primitive each — survived contact with the code and still governs.
+
 # Eldr Open-Source Extraction & Contribution Catalog
 
 Status: **survey / plan** · Last updated: 2026-07-24

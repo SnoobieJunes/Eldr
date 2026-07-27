@@ -5,7 +5,7 @@ import Foundation
 /// Buzz Desktop imports to create a managed agent in its **Agents tab**.
 ///
 /// This is how an Eldr/Huginn-hosted local model becomes a *Buzz-managed* agent
-/// (Path B, `docs/ELDR-BUZZ-GUI-PLAN.md §7`): Huginn writes a `.agent.json`
+/// (Path B, `docs/done/2026-07-24/ELDR-BUZZ-GUI-PLAN.md §7`): Huginn writes a `.agent.json`
 /// wired to the local model's provider/model/runtime; the user imports it and
 /// Buzz opens its "Edit agent" draft pre-filled (the exact screen the owner
 /// showed), then saves — the agent runs under Buzz's own management, brained by

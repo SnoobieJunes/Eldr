@@ -13,7 +13,7 @@ eldrctl conduit instructions
 
 > **Honest status.** This is the *provisioning* layer. The live two-device pairing (Stage 1,
 > eldr-acp over the relay) and the sybilclaw-gateway round-trip (Stage 2) are wired and
-> tested headlessly but **not yet proven on real hardware** (`docs/DEMO-SYBILCLAW.md`).
+> tested headlessly but **not yet proven on real hardware** (`docs/guide/DEMO-SYBILCLAW.md`).
 > `eldrctl` makes them easy to stand up so they can finally be exercised on two devices; it
 > does not by itself make them work. Report what you actually observe.
 

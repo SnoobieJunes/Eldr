@@ -2,7 +2,7 @@
 
 Written for someone who has **never opened a pull request**. Every command is
 copy-pasteable. Nothing here touches the Eldr repo; you are contributing three
-documents to somebody else's project.
+documents to someone else's project.
 
 **Time:** ~20 minutes, most of it waiting for GitHub.
 
@@ -22,32 +22,39 @@ expected way to propose anything, and it costs the maintainers nothing to close.
 
 ## The two PRs
 
-We are splitting three specs across **two** PRs. Reasoning:
+We are splitting two new drafts and one amendment across **three** PRs. Reasoning:
 
-| PR | Contains | Why grouped this way |
+| PR | Contains | Why separate |
 |---|---|---|
 | **PR 1** | `NIP-AD` — Untrusted Data Admission | Standalone, uncontested, fills a hole Buzz's own NIP-AE explicitly punts on ("Admission control is the implementer's problem"). Highest chance of a clean merge. Nothing else depends on it. |
-| **PR 2** | `NIP-AS` — Sealed Attestation<br>`NIP-AC` — Consent Windows | These two cross-reference each other and argue one story (authorization under an *untrusted* relay). Splitting them leaves dangling links and makes each look weaker than it is. |
+| **PR 2** | `NIP-AC` — Agent Consent Windows | The one that pushes on Buzz's trusted-relay assumption. Kept apart so it can't drag the other two down. |
+| **PR 3** | amendment to `NIP-OA` — unsigned carriers | A few lines added to a NIP they already own. Small, self-contained, and arguably the likeliest of the three to land. |
 
-Keeping PR 1 separate matters: it is the strongest of the three and shouldn't
-share a fate with the two that push on Buzz's trusted-relay assumption.
+> If you'd rather do one PR with everything, the mechanics below are identical —
+> just change which files you copy and which body you use.
 
-> If you'd rather do one PR with all three, or three PRs, the mechanics below
-> are identical — just change which files you copy and which body you use.
-
-### Naming note (already handled, but know why)
+### Naming note (already handled, but worth knowing why)
 
 The drafts were `NIP-C1/C2/C3`. Buzz uses **two-letter** codes and already has a
 **`NIP-CW`** (Channel Window), which collided with "Consent Windows". They are
 now:
 
 - `NIP-AD` — Untrusted Data Admission
-- `NIP-AS` — Sealed Attestation
 - `NIP-AC` — Agent Consent Windows
 
-All three are free in their tree and fit their `A*` agent-plane family
-(`NIP-AA`, `AE`, `AM`, `AO`, `AP`). Each file says maintainers are free to
-reassign the code.
+Both are free in their tree and fit their `A*` agent-plane family (`NIP-AA`,
+`AE`, `AM`, `AO`, `AP`). Each file says maintainers are free to reassign the code.
+
+### NIP-AS was withdrawn
+
+`NIP-C2` / `NIP-AS` (Sealed Attestation) is **not** being submitted as a NIP. A
+cross-reference against NIP-OA, NIP-17 and NIP-59 showed it was almost entirely a
+second name for something NIP-OA already permits — the tag, preimage, grammar and
+signature were all NIP-OA's unchanged. The one genuine obstacle is NIP-OA's
+requirement that `id` and `sig` be valid before an `auth` tag counts as
+provenance, which a NIP-59 rumor structurally cannot satisfy. That is a
+verification rule, so it is PR 3 above. The old draft remains in Eldr's git
+history.
 
 ---
 
@@ -62,8 +69,8 @@ gh auth login
 ```
 
 Answer the prompts: **GitHub.com** → **HTTPS** → **Yes** (authenticate Git) →
-**Login with a web browser**. It shows a one-time code, you paste it in the
-browser, done.
+**Login with a web browser**. It shows a one-time code; paste it in the
+browser and you're done.
 
 Verify:
 
@@ -133,21 +140,17 @@ cp ~/Development\ Projects/Eldr/docs/nips-contrib/NIP-AD-untrusted-data-admissio
 
 Note the rename: their tree uses bare `NIP-XX.md` filenames.
 
-### 2c. Fix the internal cross-links
+### 2c. Check the internal cross-links
 
-The draft links to `NIP-AS-sealed-attestation.md` and
-`NIP-AC-consent-windows.md`, which won't exist in their tree under those names.
-Point them at the names PR 2 will use (a link to a not-yet-merged file is fine —
-it's a plain markdown link, nothing breaks):
+No rewrite is needed. NIP-AD links only to `NIP-AE.md`, `NIP-AM.md`, `NIP-AO.md`,
+`NIP-AP.md` and `NIP-OA.md`, all of which already exist in their tree under
+exactly those names. Confirm before committing:
 
 ```bash
 cd ~/Development\ Projects/buzz
-sed -i '' 's/NIP-AS-sealed-attestation\.md/NIP-AS.md/g; s/NIP-AC-consent-windows\.md/NIP-AC.md/g' docs/nips/NIP-AD.md
-grep -n 'NIP-A[SC]' docs/nips/NIP-AD.md    # sanity check
+grep -oE '\[NIP-[A-Z0-9]+\]\([^)]+\)' docs/nips/NIP-AD.md | sort -u
+# expect only NIP-AE / NIP-AM / NIP-AO / NIP-AP / NIP-OA
 ```
-
-*(This exact `sed` was tested against a copy of the file — it rewrites all three
-long-form cross-references and leaves nothing behind.)*
 
 > **On `[NIP-59](59.md)` and similar links to numbered NIPs:** these point at
 > files that don't exist in `docs/nips/` either. That's correct — it is Buzz's
@@ -212,52 +215,93 @@ moment to catch a typo.
 
 ---
 
-## Step 3 — PR 2: NIP-AS + NIP-AC
+## Step 3 — PR 2: NIP-AC
 
 Same shape. Note `git checkout main` first — you want this branch off `main`,
-**not** off your NIP-AD branch, so the two PRs stay independent.
+**not** off your NIP-AD branch, so the PRs stay independent.
 
 ```bash
 cd ~/Development\ Projects/buzz
 git checkout main
-git checkout -b nip-as-ac-sealed-attestation-consent-windows
+git checkout -b nip-ac-agent-consent-windows
 
-cp ~/Development\ Projects/Eldr/docs/nips-contrib/NIP-AS-sealed-attestation.md docs/nips/NIP-AS.md
-cp ~/Development\ Projects/Eldr/docs/nips-contrib/NIP-AC-consent-windows.md    docs/nips/NIP-AC.md
+cp ~/Development\ Projects/Eldr/docs/nips-contrib/NIP-AC-consent-windows.md docs/nips/NIP-AC.md
 
-# Same link rewrite, both files.
-sed -i '' 's/NIP-AS-sealed-attestation\.md/NIP-AS.md/g; s/NIP-AC-consent-windows\.md/NIP-AC.md/g; s/NIP-AD-untrusted-data-admission\.md/NIP-AD.md/g' docs/nips/NIP-AS.md docs/nips/NIP-AC.md
+# NIP-AC links to NIP-AD by its long filename; point it at the name PR 1 uses.
+sed -i '' 's/NIP-AD-untrusted-data-admission\.md/NIP-AD.md/g' docs/nips/NIP-AC.md
+grep -oE '\[NIP-[A-Z0-9]+\]\([^)]+\)' docs/nips/NIP-AC.md | sort -u   # sanity check
 
-git add docs/nips/NIP-AS.md docs/nips/NIP-AC.md
-git status      # expect exactly two new files
+git add docs/nips/NIP-AC.md
+git status      # expect exactly one new file
 ```
 
 ```bash
-git commit -m "docs(nips): NIP-AS sealed attestation + NIP-AC agent consent windows
+git commit -m "docs(nips): NIP-AC agent consent windows
 
-NIP-AS carries a NIP-OA-equivalent owner attestation inside a NIP-59 gift wrap,
-so a recipient can verify agent provenance without the owner-agent linkage
-becoming public. Identical credential math to NIP-OA; only the tag position
-moves.
-
-NIP-AC adds a bounded, human-signed, owner-revocable authorization window.
-NIP-AA Revocation Semantics notes an owner cannot unilaterally revoke a NIP-OA
+Adds a bounded, human-signed, owner-revocable authorization window. NIP-AA
+Revocation Semantics notes an owner cannot unilaterally revoke a NIP-OA
 credential; this supplies the missing instrument for deployments with no
 trusted relay to drop membership.
 
-Both include BIP-340 test vectors using NIP-OA's pinned test keys."
+Composes with NIP-OA rather than replacing it. Includes BIP-340 test vectors
+using NIP-OA's pinned test keys, including a negative agent-signed vector."
 ```
 
 ```bash
-git push -u fork nip-as-ac-sealed-attestation-consent-windows
+git push -u fork nip-ac-agent-consent-windows
 
 gh pr create \
   --repo block/buzz \
   --base main \
-  --head SnoobieJunes:nip-as-ac-sealed-attestation-consent-windows \
-  --title "docs(nips): NIP-AS sealed attestation + NIP-AC agent consent windows" \
-  --body-file ~/Development\ Projects/Eldr/docs/nips-contrib/pr-body-2-nip-as-ac.md
+  --head SnoobieJunes:nip-ac-agent-consent-windows \
+  --title "docs(nips): NIP-AC agent consent windows" \
+  --body-file ~/Development\ Projects/Eldr/docs/nips-contrib/pr-body-2-nip-ac.md
 ```
+
+---
+
+## Step 3b — PR 3: the NIP-OA amendment
+
+This one edits an existing file instead of adding a new one. Open
+`NIP-OA-amendment-unsigned-carriers.md`, copy the fenced `## Unsigned Carriers`
+block, and paste it into `docs/nips/NIP-OA.md` immediately after the
+`## Client Behavior` section.
+
+```bash
+cd ~/Development\ Projects/buzz
+git checkout main
+git checkout -b nip-oa-unsigned-carriers
+
+# edit docs/nips/NIP-OA.md by hand — paste the block after ## Client Behavior
+git diff                     # expect one added section, nothing else touched
+git add docs/nips/NIP-OA.md
+```
+
+```bash
+git commit -m "docs(nips): NIP-OA verification inside unsigned carriers
+
+NIP-OA permits an auth tag on any event but requires id and sig to be valid
+before treating it as provenance. A NIP-59 rumor has an id and no sig, so an
+auth tag inside a gift wrap is currently unverifiable even though everything
+the preimage needs is present and NIP-17 already binds the seal's pubkey to the
+rumor's.
+
+Specifies that an enclosing signed layer may satisfy the authenticity
+precondition. No new tag, kind, cryptography, or condition grammar."
+```
+
+```bash
+git push -u fork nip-oa-unsigned-carriers
+
+gh pr create \
+  --repo block/buzz \
+  --base main \
+  --head SnoobieJunes:nip-oa-unsigned-carriers \
+  --title "docs(nips): NIP-OA verification inside unsigned carriers"
+```
+
+Write the body from the amendment file's "The gap" and "The change" sections —
+it is short enough to paste directly into the PR description.
 
 ---
 
@@ -270,8 +314,8 @@ CI will run. Buzz's `just ci` covers Rust fmt/clippy, unit tests, and mobile —
 almost certainly unrelated to you; say so politely and ask.
 
 Their PR checklist mentions `just ci` passing locally. For a documentation-only
-PR that is not meaningful, and the PR body says so explicitly. Do not try to run
-`just ci` — it wants Docker, Postgres, Redis, Flutter, and a Rust toolchain, and
+PR, that is not meaningful, and the PR body says so explicitly. Do not try to run
+`just ci` — it requires Docker, Postgres, Redis, Flutter, and a Rust toolchain, and
 proves nothing about a markdown file.
 
 ### Watching for a response
@@ -308,7 +352,7 @@ within a few business days."
   defer. It's their spec tree. A merged 80%-version beats a perfect rejected one.
 
 - **If they want it as a discussion instead of a PR:** both PR bodies already
-  offer this. Just say "happy to move it" and close the PR — nothing is lost,
+  offer this. Just say "happy to move it" and close the PR — nothing is lost;
   the branch still exists.
 
 - **If they don't respond for two weeks:** one polite bump comment. Then leave
@@ -329,7 +373,7 @@ Nothing is destroyed. You can reopen or re-submit later.
 | Worry | Reality |
 |---|---|
 | "I'll break their repo." | You cannot. You have no write access. A PR is a *request*. |
-| "My fork is now a permanent obligation." | No. Delete it whenever: `gh repo delete SnoobieJunes/buzz`. |
+| "My fork is now a permanent obligation." | No. You can delete it whenever you like: `gh repo delete SnoobieJunes/buzz`. |
 | "I committed to the wrong branch." | `git log --oneline -3` to see, then `git checkout -b right-branch` and re-commit; or `git reset --soft HEAD~1` to undo the commit and keep the changes. |
 | "I pushed something embarrassing." | Push a fix commit. Everyone does this. Nobody remembers. |
 | "They'll think I'm competing with them." | Both PR bodies disclose Eldr up front, by name, with what it is and what it isn't. Disclosure is what makes this normal rather than awkward. |
@@ -343,10 +387,11 @@ Nothing is destroyed. You can reopen or re-submit later.
   relay changes, adds no event kind, contradicts nothing, and arrives with
   vectors from working code. The worst realistic outcome is "interesting, we'd
   want it shaped differently."
-- **NIP-AS** — moderate. Clean and cheap (NIP-OA's math, moved), but it only
-  matters if you care about metadata privacy, which is more Eldr's axiom than
-  Buzz's. Explicitly marked as *not* a NIP-AA replacement, which should defuse
-  the obvious objection.
+- **NIP-OA amendment** — best odds of the three, now that it is an amendment
+  rather than the NIP-AS draft. It fixes an interaction between two of their own
+  specs, adds nothing, and is a few lines. The likely objection is "we don't care
+  about gift-wrapped agent traffic," which is a scoping answer rather than a
+  correctness one.
 - **NIP-AC** — hardest. It argues their revocation story is incomplete, which is
   true *under an untrusted relay* and false under theirs. The framing throughout
   is "counterpart, not correction." Expect discussion. Discussion is a win; this

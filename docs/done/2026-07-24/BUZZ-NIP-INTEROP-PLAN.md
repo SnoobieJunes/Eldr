@@ -1,3 +1,11 @@
+> **ARCHIVED 2026-07-24 — historical. Do not build from this.**
+> Self-declared IMPLEMENTED at the top of its own body. The adopt/align/contribute
+> work landed as DEVIATIONS **AC144**. Live successors:
+> [`../../ELDR-BUZZ-INTEROP.md`](../../guide/ELDR-BUZZ-INTEROP.md) and
+> [`../../nips-contrib/`](../../nips-contrib/).
+> **Its C1/C2/C3 NIP codes are obsolete** — C1 → NIP-AD, C3 → NIP-AC, C2 withdrawn
+> in favour of a NIP-OA amendment. See `../../nips-contrib/README.md`.
+
 # Buzz NIP Interop & Contribution Plan
 
 Status: **IMPLEMENTED (2026-07-24)** — the adopt/align/contribute work below

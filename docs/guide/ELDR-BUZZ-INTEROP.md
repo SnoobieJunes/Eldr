@@ -2,8 +2,10 @@
 
 Status: **built + tested 2026-07-24** on branch `gooseworld-on-main`. This
 implements the WS-I / WS-A / WS-B / WS-C workstreams from
-[`INTEROP-LANDSCAPE.md`](INTEROP-LANDSCAPE.md) and
-[`BUZZ-NIP-INTEROP-PLAN.md`](BUZZ-NIP-INTEROP-PLAN.md).
+[`INTEROP-LANDSCAPE.md`](../done/2026-07-24/INTEROP-LANDSCAPE.md) and
+[`BUZZ-NIP-INTEROP-PLAN.md`](../done/2026-07-24/BUZZ-NIP-INTEROP-PLAN.md).
+> Both were archived on 2026-07-24 once their workstreams shipped; they are kept
+> verbatim for the reasoning, not as current instructions.
 
 > **Truthful-reporting note (CLAUDE.md).** Every claim below is labelled
 > *proven* (a test ran and passed), *source-grounded* (verified against Buzz's
@@ -74,7 +76,7 @@ Buzz Desktop's `buzz-acp` harness spawns an ACP agent per turn. Point it at
 
 Neither path needs a terminal any more. Huginn's **Connections** tab is the
 product surface over everything above; the full design is
-`docs/ELDR-BUZZ-GUI-PLAN.md`.
+[`archive/2026-07-24/ELDR-BUZZ-GUI-PLAN.md`](../done/2026-07-24/ELDR-BUZZ-GUI-PLAN.md).
 
 **Path A, in five clicks** — *Connect an AI to a workspace…*
 
@@ -265,13 +267,21 @@ export ELDR_BUZZ_OWNER_PRIVATE_KEY="nsec1…"   # derives owner pubkey + compute
 Three specs only Eldr has, written PR-ready for `block/buzz/docs/nips`
 (`docs/nips-contrib/`):
 
-- **NIP-C1 Untrusted Data Admission** — closes the memory-poisoning hole
+- **NIP-AD Untrusted Data Admission** — closes the memory-poisoning hole
   `NIP-AE.md §Security` names and punts on. Reference impl ships in Eldr
   (`UntrustedDataEnvelope`, `TownWall`).
-- **NIP-C2 Sealed Attestation** — NIP-OA provenance *without* the permanent
-  public owner↔agent linkage, carried inside a NIP-59 seal.
-- **NIP-C3 Consent Windows** — the revocable, wall-clock-honest authorization
+- **NIP-AC Agent Consent Windows** — the revocable, wall-clock-honest authorization
   NIP-OA/NIP-AA can't express under an untrusted relay.
+- **A NIP-OA amendment (unsigned carriers)** — NIP-OA provenance *without* the
+  permanent public owner↔agent linkage, carried inside a NIP-59 seal. This began
+  as a third draft ("NIP-AS Sealed Attestation") and was withdrawn on 2026-07-24
+  once it turned out to be one verification rule NIP-OA already almost permits,
+  not a NIP of its own.
+
+> **Codes renamed 2026-07-24.** These were `NIP-C1/C2/C3`; Buzz uses two-letter
+> codes and `NIP-CW` was already taken by Channel Window. See
+> [`nips-contrib/README.md`](../README.md) for the mapping and the
+> upstream-namespace caveat.
 
 The reusable asset flowing the other way — NIP-OA/NIP-AM/NIP-AO — is now spoken
 natively by Eldr, byte-exact against Block's vectors. That is the adoption path:

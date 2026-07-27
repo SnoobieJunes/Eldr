@@ -1,12 +1,22 @@
 # Gooseworld — Eldr as the secure way goosetowns connect
 
-> **Design / vision doc — not a shipped feature of this tree.** "Gooseworld" is a
-> working codename (public framing: *Eldr — secure inter-town transport for
-> Goosetown*); it stays a codename until the goose/AAIF trademark posture is
-> checked. The transport and protocol pieces described here are developed on a
-> separate branch and are **not** part of this published tree yet — each line's
-> status is marked honestly (*Shipped* / *Wired + tested* / *New* / *Phase 0*).
-> "goose", "goosetown", and "Gas Town" are other projects' names, used descriptively.
+> **Vision + positioning doc.** "Gooseworld" is a working codename (public
+> framing: *Eldr — secure inter-town transport for Goosetown*); it stays a
+> codename until the goose/AAIF trademark posture is checked. "goose",
+> "goosetown", and "Gas Town" are other projects' names, used descriptively.
+>
+> **Status corrected 2026-07-24.** An earlier header said the transport and
+> protocol pieces "are developed on a separate branch and are **not** part of this
+> published tree yet." That was true when written and is **no longer true** — the
+> cross-town work was rebased onto `main` and the workstreams below (WS-G1–G7)
+> are implemented; see DEVIATIONS AC126–AC145. The per-line *Shipped* /
+> *Wired + tested* / *New* markers in §2 remain the authority for any single
+> claim, and §6–§7 are kept for the reasoning, not as an open backlog.
+>
+> **What is genuinely still open** is owner-gated, not engineering: the live
+> two-machine ritual ([`DEMO-GOOSEWORLD.md`](../guide/DEMO-GOOSEWORLD.md)) has not been
+> performed, and publication is unstarted
+> ([`UPSTREAM-GOOSE-EXTENSION.md`](../guide/UPSTREAM-GOOSE-EXTENSION.md)).
 
 Plan-of-record draft, 2026-07-18. Working rules: evidence over enthusiasm,
 *Shipped* vs *New* marked honestly, privacy ties resolve per SPEC §0.
@@ -159,7 +169,7 @@ panel (approve/inspect/revoke), phone indicator chips, gate-class tests
   hardware-keystore ladder — TPM where present, hardened-passphrase KEK only where
   no secure element exists). EldrNodeCore is already platform-agnostic + DI'd.
 - **WS-G7 — docs, positioning, upstream.** THREAT_MODEL §agent-towns (§4 above),
-  DEVIATIONS entries, `docs/DEMO-GOOSEWORLD.md` (two Macs, two goosetowns, one wall,
+  DEVIATIONS entries, `docs/guide/DEMO-GOOSEWORLD.md` (two Macs, two goosetowns, one wall,
   humans lurking with a kill switch — crossfire review across *owners*, not just
   models, is the money shot). Publish the goose extension to the goose community; it
   is the distribution wedge the A2A upstream submission was always looking for.

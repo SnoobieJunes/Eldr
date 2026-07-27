@@ -5,7 +5,7 @@ setup wizard, a live configuration panel, a log viewer, an in-app test chat, a
 self-learning per-project memory, and an EldrChat bridge — then ships as a DMG.
 
 It is the **GUI alternative** to the manual command-line setup documented in
-[`docs/SETUP-GUIDE.md §9`](../../docs/SETUP-GUIDE.md). Everything the wizard does
+[`docs/guide/SETUP-GUIDE.md §9`](../../docs/guide/SETUP-GUIDE.md). Everything the wizard does
 (build/install the binary, write the env file, register the launcher) you can do by
 hand; the Configurator just does it for you and adds live monitoring on top.
 
@@ -284,13 +284,13 @@ After the wizard's *Install* step, point Xcode at the launcher:
 
 The full manual equivalent — including the per-model tuning knobs, the skills, and
 using other ACP clients (Zed, OpenClaw, Goose-style) — is in
-[`docs/SETUP-GUIDE.md §9`](../../docs/SETUP-GUIDE.md).
+[`docs/guide/SETUP-GUIDE.md §9`](../../docs/guide/SETUP-GUIDE.md).
 
 ---
 
 ## Signing & distribution
 
-See [`docs/SIGNING-AND-DISTRIBUTION.md`](../../docs/SIGNING-AND-DISTRIBUTION.md) for
+See [`docs/guide/SIGNING-AND-DISTRIBUTION.md`](../../docs/guide/SIGNING-AND-DISTRIBUTION.md) for
 the full walkthrough (the difference between an Apple Development cert and a Developer
 ID Application cert, how to obtain the latter, how to make an app-specific password
 and find your Team ID, and how to run `build-dmg.sh`). In short:

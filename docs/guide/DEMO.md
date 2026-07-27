@@ -2,8 +2,14 @@
 
 The Local Universe (APP-SPEC §15) is a complete PQRC deployment inside one
 process: five seeded personas (Alice, Bob, Carol, Dave — and Eve, whom nobody
-knows), an in-process AUTH-gated relay, and a Blossom blob store with a mirror.
-No bytes leave the device.
+knows) and an in-process AUTH-gated relay. No bytes leave the device.
+
+> **On the Blossom simulators.** `LocalUniverse.swift:34-35` still constructs two
+> `LocalBlossomSimulator`s (a primary and a mirror) to satisfy the `BlobStore`
+> seam's initializer. They are **vestigial** — the product is text-only and the
+> blob path is permanently rejected (CLAUDE.md invariant 4). Nothing in the demo
+> script below routes through them; large content takes the relay-chunking path
+> (step 5). Do not read their presence as a supported feature.
 
 ## Running it
 
@@ -71,7 +77,8 @@ the other side of the conversation.
    rejoined on receipt — no blob server. *Verify:* the composer collapsed it into
    a chip; each stored envelope is bucket-padded (the relay sees only a burst of
    N constant-size events, never the total size). (The `ptr`/Blossom pointer path
-   exists in core but is reserved for binary attachments, out of scope for v1.)
+   still exists in core as vestigial code and is **never** taken — invariant 4
+   rejects a blob server permanently, not just for v1.)
 
 5.5 **Message request.** Eve — whom Alice has never verified — initiates a
    handshake. *Verify:* as Alice, Eve appears under **Message Requests**, never
@@ -106,7 +113,7 @@ Budgets (APP-SPEC §12) are wired in `PQRCTests/PerformancePipelineTests` and
 `PQRCUITests/PerformanceUITests` with XCTest metrics; CI treats them
 baseline-relative. Simulator reference numbers from this machine (Apple
 silicon, iPhone 17 Pro simulator): 1 KB pad+encrypt+wrap ≈ 5.5 ms (budget
-10 ms); 64 KB inline encrypt ≈ 0.13 ms; 1 MB blob path ≈ well under 250 ms;
-500-envelope drain ≈ 4.4 s against a 3 s budget on hardware — simulator
+10 ms); 64 KB inline encrypt ≈ 0.13 ms; 1 MB via relay chunking ≈ well under
+250 ms; 500-envelope drain ≈ 4.4 s against a 3 s budget on hardware — simulator
 numbers are soft (TEST-PLAN §11); record device numbers here when hardware
 runs happen.

@@ -1,3 +1,14 @@
+> **ARCHIVED 2026-07-24 — historical. Do not build from this.**
+> Written as "Design doc. Nothing here is implemented." Two things overtook it:
+> its Options A/B (gateway key authorization) **shipped** in Huginn ▸ Connections
+> (DEVIATIONS **AC146**), and for a *human* joining a workspace the ceremony here is
+> the wrong door entirely — Buzz's NIP-98 invite-claim route is membership-gate-exempt
+> and is what their own client uses (DEVIATIONS **AC147**).
+> Live successors: [`../../ELDR-BUZZ-INTEROP.md`](../../guide/ELDR-BUZZ-INTEROP.md) and
+> [`../../plan/ELDR-BUZZ-MOBILE-RELAY.md`](../../plan/ELDR-BUZZ-MOBILE-RELAY.md) §2.2.
+> Still worth reading for §7 (a Buzz destination is `(relay host, channel UUID)`,
+> never the UUID alone) and §10 (the security notes), both still true.
+
 # Eldr ↔ Buzz Pairing — key architecture and both attestation modes
 
 > **Design doc. Nothing here is implemented.** Companion to

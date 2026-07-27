@@ -1,4 +1,14 @@
 <!-- SPDX-License-Identifier: Apache-2.0 -->
+> **ARCHIVED 2026-07-24 — historical. Do not build from this.**
+> Its own header says "Status: PLAN, not implementation." That is **no longer true**:
+> the port shipped as WS-L0–WS-L5 (DEVIATIONS **AC133**, **AC139**, **AC141**), and a
+> Linux `eldr-node` now compiles, holds its identity, dials the relay over SwiftNIO,
+> and runs the full agent tool-host with a re-seamed PTY.
+> **Two of its technical calls were proven wrong by doing the work** and are corrected
+> in the ledger, not here: swift-crypto *does* ship a memory-hard KDF (scrypt via
+> `CryptoExtras`, so no Argon2 dependency was needed — AC139), and the TPM rung landed
+> as systemd-creds sealing rather than an in-process `tpm2-tss` shim.
+
 # Linux eldr-node — a town on Linux (GOOSEWORLD §6 WS-G6 follow-up)
 
 **Status: PLAN, not implementation.** This is the honest engineering path for running an

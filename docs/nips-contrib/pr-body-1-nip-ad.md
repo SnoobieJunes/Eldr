@@ -51,7 +51,7 @@ Four rules, each closing a specific, demonstrated bypass:
    fields** rendered outside the quoted block (Trojan Source / CVE-2021-42574,
    and forged roster rows).
 
-Plus: refuse oversize content rather than truncate (truncation can strip a
+In addition: refuse oversize content rather than truncate (truncation can strip a
 closing marker), and compute structural header fields from typed values rather
 than from content text.
 
@@ -69,7 +69,7 @@ messenger on the same Nostr substrate. It's a different shape from Buzz — solo
 untrusted-relay, post-quantum ratcheted, E2EE — and I'm not proposing anything
 that would pull Buzz toward it. This draft is a spec Eldr already runs, offered
 for the shared agent plane because NIP-AE names the gap and I had a
-tested answer sitting in a repo. The reference implementation is Eldr's
+tested answer already implemented. The reference implementation is Eldr's
 `UntrustedDataEnvelope`; the vectors above are its literal output.
 
 Eldr also speaks Buzz's existing agent-plane crypto byte-exact against your own
@@ -82,20 +82,20 @@ the point; this is a contribution, not a fork.
 Eldr's protocol documents are CC0 1.0 (public domain) by deliberate choice, so
 contributing this under Apache-2.0 is unencumbered. I'm the sole copyright
 holder, there's no employer with a claim, and per CONTRIBUTING I'm submitting it
-under the Apache 2.0 license with the right to do so.
+under the Apache-2.0 license with the right to do so.
 
 ## Notes for review
 
 - **Naming.** I used `NIP-AD` to fit the existing `A*` agent-plane family
   (`AA`/`AE`/`AM`/`AO`/`AP`) and because it's unclaimed in `docs/nips/`. Rename
-  it to whatever you like — the file says so.
+  it as you see fit — the file says so.
 - **CI.** This is documentation-only; `just ci` covers Rust fmt/clippy/tests and
-  mobile, none of which this touches. I haven't run it locally (it wants Docker,
-  Postgres, Redis, and Flutter to validate a markdown file). Say the word if
-  you'd like it run anyway.
-- **Cross-links.** Links to `NIP-AS.md` / `NIP-AC.md` refer to a companion PR.
-  They're plain markdown links and harmless if that PR doesn't land — happy to
-  strip them.
-- **Happy to move this to a Discussion or issue** if you'd rather talk about the
+  mobile, none of which this touches. I haven't run it locally (it requires
+  Docker, Postgres, Redis, Flutter, and a Rust toolchain, and this change is
+  markdown-only). I can run it if you'd like.
+- **Cross-links.** This draft links only to `NIP-AE.md`, `NIP-AM.md`,
+  `NIP-AO.md`, `NIP-AP.md` and `NIP-OA.md`, all already in the tree. Nothing here
+  depends on a companion PR.
+- **I'm happy to move this to a Discussion or issue** if you'd rather talk about the
   approach before a file lands in the tree. I opened it as a PR because the
   draft is complete and concrete, not to skip the conversation.

@@ -37,7 +37,7 @@ This is **staged** so there is always a working fallback:
 - A Mac (Apple Silicon) already running **sybilclaw** (its gateway daemon, default
   `:18789`).
 - **Huginn.app** — the Eldr agent cockpit (build the notarized DMG with
-  `Apps/Huginn/build-dmg.sh`; see `docs/SIGNING-AND-DISTRIBUTION.md`).
+  `Apps/Huginn/build-dmg.sh`; see `docs/guide/SIGNING-AND-DISTRIBUTION.md`).
 - A local, OpenAI-compatible LLM (LM Studio / Ollama / vLLM) for `eldr-acp`.
 - *(Stages 1–2 only)* an iPhone running EldrChat.
 

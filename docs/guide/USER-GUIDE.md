@@ -347,7 +347,7 @@ Two integrations are available if you run EldrChat on a Mac:
   prompt will let the agent act without asking, so only register it with an editor
   you trust. It uses your conversations for nothing — it touches only your code.
 
-Both are off by default and documented step-by-step in **docs/SETUP-GUIDE.md §9**
+Both are off by default and documented step-by-step in **docs/guide/SETUP-GUIDE.md §9**
 (Xcode 27 registration) and the in-app Settings.
 
 For the Xcode 27 agent, there's also a point-and-click **Huginn**

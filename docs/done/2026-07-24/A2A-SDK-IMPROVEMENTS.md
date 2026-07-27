@@ -1,3 +1,14 @@
+> **ARCHIVED 2026-07-24 — historical. NEVER IMPLEMENTED.**
+> A plan from 2026-07-18 whose §6 checkboxes were never ticked, with no owner, and
+> zero inbound references from any other document. Its premise has since flipped:
+> it was written under DEVIATIONS **AC112** ("keep SwiftA2A internal; drop the official
+> Swift SDK ambition"), and the SDK was subsequently **extracted and published as its
+> own repo** (`swift-a2a`, 89 tests) — see
+> [`../../OSS-EXTRACTION-AUDIT.md`](../../guide/OSS-EXTRACTION-AUDIT.md) §5.
+> Kept because C1 (SSE reconnection with `Last-Event-ID` resume and a deterministic,
+> injected-clock backoff) is still a real gap in the client, and §1's table of
+> properties to preserve is still the right constraint list if anyone picks it up.
+
 # A2A SDK Improvements — cherry-picks from the Victory-Apps comparison (plan)
 
 **Status:** proposed, not yet implemented · **Date:** 2026-07-18 · **Owner:** —

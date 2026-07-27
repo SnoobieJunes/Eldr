@@ -26,20 +26,32 @@ No third-party services are required for anything in this guide.
 ```bash
 git clone <repo> && cd Eldr
 
-# All protocol logic lives in SPM packages and tests headlessly:
-swift test --package-path Packages/PQRCCore     # crypto, ratchet, PQXDH, vectors, SiloKey
-swift test --package-path Packages/PQRCNostr    # envelope, transports, S1 local link, NearbyRelayHub, chaos matrix
-swift test --package-path Packages/PQRCAgent    # agent integrity + AgentSkills + reasoning-trace stripping
-swift test --package-path Packages/PQRCMCP      # MCP server protocol suite (A35)
-swift test --package-path Packages/PQRCACP      # ACP agent suite (A36)
+# All protocol logic lives in SPM packages and tests headlessly.
+# There are EIGHT of them — run the whole matrix, not the first few:
+for p in PQRCCore PQRCNostr PQRCAgent PQRCACP PQRCMCP EldrNode Eldrctl SwiftA2A; do
+  swift test --package-path "Packages/$p" || break
+done
 ```
 
-The last two packages are **standalone agent-interop tools** with no app/crypto
+What each one covers:
+
+| Package | Suite |
+|---|---|
+| `PQRCCore` | crypto, ratchet, PQXDH, frozen vectors, SiloKey |
+| `PQRCNostr` | envelope, transports, S1 local link, NearbyRelayHub, chaos matrix, Buzz interop codecs |
+| `PQRCAgent` | agent integrity, AgentSkills, reasoning-trace stripping, the PCC build gate |
+| `PQRCACP` | ACP agent suite (A36) — **hangs under a sandboxed shell; run it with the sandbox off** |
+| `PQRCMCP` | MCP server protocol suite (A35) |
+| `EldrNode` | headless node serve loop, town A2A plane, the Buzz gateway |
+| `Eldrctl` | SSH installer / conduit provisioner |
+| `SwiftA2A` | A2A v1.0 core, client, server, HTTP transport |
+
+`PQRCMCP` and `PQRCACP` are **standalone agent-interop tools** with no app/crypto
 deps (DEVIATIONS A35/A36): `PQRCMCP` builds `pqrc-mcp` (EldrChat as a read-only
 MCP secure-chat source); `PQRCACP` builds `eldr-acp` (the on-device LLM as an ACP
 coding agent for Xcode 27). Both run their tests network-free.
 
-All three must be green. `PQRCNostr` includes the SPEC §10 local-link suite
+All eight must be green. `PQRCNostr` includes the SPEC §10 local-link suite
 (`LocalLinkTests`) running against the deterministic `LocalLinkSimulator` —
 co-present delivery, relay fallback, partition/rejoin, replay/tamper/forged-
 hello adversarial cases. No network, no radios, no real clock.
@@ -64,7 +76,7 @@ plugin). If a simulator wedges with "Application failed preflight checks":
 
 To just *use* the app with zero infrastructure: run the scheme with launch
 argument `--local-universe` (or `--local-universe --demo-script` for the
-scripted Alice/Bob demo per docs/DEMO.md). The Local Universe is fully
+scripted Alice/Bob demo per docs/guide/DEMO.md). The Local Universe is fully
 in-process — five personas over a simulated relay.
 
 ## 4. Building and running the PQRC relay server (`pqrc-relay`)
@@ -278,12 +290,10 @@ strfry or khatru:
 ## 8. Command crib sheet
 
 ```bash
-# Everything headless, fast:
-swift test --package-path Packages/PQRCCore
-swift test --package-path Packages/PQRCNostr
-swift test --package-path Packages/PQRCAgent
-swift test --package-path Packages/PQRCMCP     # MCP server (A35)
-swift test --package-path Packages/PQRCACP     # ACP agent (A36)
+# Everything headless, fast — all EIGHT packages:
+for p in PQRCCore PQRCNostr PQRCAgent PQRCACP PQRCMCP EldrNode Eldrctl SwiftA2A; do
+  swift test --package-path "Packages/$p" || break
+done
 
 # Opt-in socket suites:
 PQRC_LOOPBACK_TESTS=1 swift test --package-path Packages/PQRCNostr --filter Loopback
@@ -306,8 +316,8 @@ EldrChat ships an **Agent Client Protocol** agent so a self-hosted LLM can pilot
 Xcode 27 (write code, build, run on simulators). Xcode 27 is the ACP *client*;
 `eldr-acp` is the *agent* it spawns over stdio (A36).
 
-> **GUI alternative — the Eldr ACP Configurator.** If you'd rather not do the manual
-> steps below, the **Eldr ACP Configurator** macOS app
+> **GUI alternative — Huginn.** If you'd rather not do the manual
+> steps below, the **Huginn** macOS app (renamed from "Eldr ACP Configurator")
 > (`Apps/Huginn/`) wraps all of this in a 5-step setup wizard: connect
 > your LLM, test it, install the binary + launcher, register it in Xcode, and start
 > using it — plus a live config panel, a log viewer, an in-app test chat, and
@@ -316,8 +326,8 @@ Xcode 27 (write code, build, run on simulators). Xcode 27 is the ACP *client*;
 > open `Apps/Huginn/Huginn.xcodeproj` and Run). It writes
 > the same `~/.config/eldr-acp/env` and `~/.local/bin/eldr-acp-xcode` documented
 > here, so the two approaches are interchangeable. See
-> [`Apps/Huginn/README.md`](../Apps/Huginn/README.md), and
-> [`docs/SIGNING-AND-DISTRIBUTION.md`](SIGNING-AND-DISTRIBUTION.md) for packaging it
+> [`Apps/Huginn/README.md`](../../Apps/Huginn/README.md), and
+> [`docs/guide/SIGNING-AND-DISTRIBUTION.md`](SIGNING-AND-DISTRIBUTION.md) for packaging it
 > as a DMG. The manual command-line setup follows.
 
 **1. Build + install the agent**
@@ -434,8 +444,8 @@ drops into all of them. Configure the launcher as the agent command:
   ```json
   { "agent_servers": { "eldr": { "command": "/Users/<you>/.local/bin/eldr-acp-xcode", "args": [] } } }
   ```
-- **OpenClaw — one-click in the Configurator (A42).** Full walkthrough:
-  [`docs/OPENCLAW-SETUP.md`](OPENCLAW-SETUP.md). The Eldr ACP Configurator now
+- **OpenClaw — one-click in Huginn (A42).** Full walkthrough:
+  [`docs/guide/OPENCLAW-SETUP.md`](OPENCLAW-SETUP.md). Huginn now
   registers OpenClaw first-class, like Xcode: it installs a dedicated
   `~/.local/bin/eldr-acp-openclaw` launcher and the wizard's **"Register in OpenClaw"**
   step merges the agent into OpenClaw's config (default `~/.config/openclaw/config.json`,
@@ -529,12 +539,12 @@ runs as a local HTTP service on `:8302`. Eldr can leverage it at **two** layers:
    `POST /ingest`. It health-checks once per session and **falls back to the built-in
    recent-window budgeting** if the service is down — no turn ever fails because
    contextgraph is offline. Toggle it (and install/start the service from a checkout)
-   in the Configurator's **Configuration ▸ ContextGraph** section.
+   in Huginn's **Configuration ▸ ContextGraph** section.
 2. **OpenClaw-plugin route.** contextgraph ships its own OpenClaw plugin; enabling
    contextgraph before the wizard's "Register in OpenClaw" step also writes its plugin
    entry pointed at the same endpoint.
 
 Run the service yourself per its README (`pip install -r requirements.txt`,
 `python -m spacy download en_core_web_sm`, `./scripts/install-service.sh`), or let the
-Configurator run those steps for you — note this depends on your Python toolchain.
+Huginn run those steps for you — note this depends on your Python toolchain.
 Verify reachability with `curl http://localhost:8302/health`.

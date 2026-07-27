@@ -1,3 +1,11 @@
+> **ARCHIVED 2026-07-24 — historical. Do not build from this.**
+> Built the same day it was written; every checkbox in its §6 is ticked
+> (DEVIATIONS **AC146**). The shipped surface is described in
+> [`../../ELDR-BUZZ-INTEROP.md`](../../guide/ELDR-BUZZ-INTEROP.md) §"The GUI over both paths".
+> Kept because its §5 records *why* four open decisions resolved the way they did,
+> and because AC146 documents a real design flaw found in this plan's own §2 while
+> building it (an invite token cannot be pasted before the agent key it attests exists).
+
 # WS-I7 — "Connect my AI to a Buzz workspace" (Huginn GUI flow + plan)
 
 Status: **BUILT — 2026-07-24 (AC146)** · both paths, Phases 1–4 · engine

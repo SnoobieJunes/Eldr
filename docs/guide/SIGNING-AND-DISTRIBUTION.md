@@ -5,7 +5,7 @@ How to sign, notarize, and package the **Huginn** macOS app
 
 This is the **distribution** story only. The app builds and runs from Xcode with no
 certificates at all — see
-[`Apps/Huginn/README.md`](../Apps/Huginn/README.md) for
+[`Apps/Huginn/README.md`](../../Apps/Huginn/README.md) for
 build/run. You need the steps below only when you want to hand the DMG to someone
 else's Mac (DEVIATIONS AC12).
 

@@ -4,7 +4,7 @@ import Testing
 
 @testable import PQRCACP
 
-// Phase 1 / the selectable-backend scaffold (docs/ACPRouterplan.md): prove the
+// Phase 1 / the selectable-backend scaffold (docs/done/2026-07-17/ACPRouterplan.md): prove the
 // transport-agnostic `runACPProxy` bridges an external harness BOTH ways, and that the
 // data-driven `HarnessRegistry` stays the drop-in seam. Headless, network-free, and with NO
 // real external binary — a fake "harness" is just another `InMemoryACPTransport` end that
