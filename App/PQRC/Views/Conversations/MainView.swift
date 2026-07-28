@@ -82,7 +82,12 @@ struct MainView: View {
             // the detail pane on wide screens; rebuilds per selection so state
             // (composer, scroll) doesn't bleed between conversations.
             NavigationStack {
-                if let selection, let route = BuzzRoute.parse(selection) {
+                if let selection, WorldRoute.isWorld(selection) {
+                    // Checked BEFORE the conversation fallthrough for the same reason
+                    // `buzz:` is: a `world:` id is not a conversation id, and rendering
+                    // it as one would look like a broken chat.
+                    WorldView(model: model, workspaces: workspaces)
+                } else if let selection, let route = BuzzRoute.parse(selection) {
                     // A workspace route NEVER falls through to ConversationView —
                     // a `buzz:` id is not a conversation id, and treating it as
                     // one would look like a broken chat rather than a loading
@@ -265,6 +270,10 @@ struct MainView: View {
             if let workspaces {
                 BuzzWorkspacesSection(workspaces: workspaces, showJoin: $showJoinWorkspace)
             }
+            // WS-D1a — "who am I attached to?", as a peer of conversations and
+            // workspaces. Authorization only: the phone cannot see town liveness
+            // (that lives in the node's memory on the Mac), and the view says so.
+            WorldSidebarSection()
         }
         // ⌘F-focusable, type-to-filter conversation search. On iPhone/iPad it's
         // the familiar pull-to-reveal search bar; on Mac it's always visible in

@@ -45,19 +45,30 @@ public final class GooseworldSocketHost: @unchecked Sendable {
     /// line is dropped, not buffered — same bounded posture as every other intake.
     static let maxLineBytes = 1024 * 1024
 
+    /// WS-D1n — the dashboard method name. Deliberately slash-namespaced so it cannot
+    /// collide with an MCP tool name (`world_wall_post` &c. are underscore-separated).
+    static let statusMethod = "world/status"
+
     private let endpoint: Endpoint
     private let token: String
     private let server: GooseworldMCPServer
+    /// WS-D1n — supplies the dashboard read model. nil ⇒ `world/status` is simply not
+    /// implemented and falls through to the MCP server's unknown-method answer.
+    private let statusProvider: (@Sendable () async -> TownStatusSnapshot)?
 
     private let stateLock = NSLock()
     private var listenFD: Int32 = -1
     private var stopped = false
     private let acceptQueue = DispatchQueue(label: "eldr-node.gooseworld.accept")
 
-    public init(endpoint: Endpoint, token: String, server: GooseworldMCPServer) {
+    public init(
+        endpoint: Endpoint, token: String, server: GooseworldMCPServer,
+        statusProvider: (@Sendable () async -> TownStatusSnapshot)? = nil
+    ) {
         self.endpoint = endpoint
         self.token = token
         self.server = server
+        self.statusProvider = statusProvider
     }
 
     /// Bind + listen + begin accepting. Each connection is serviced independently; the
@@ -189,12 +200,74 @@ public final class GooseworldSocketHost: @unchecked Sendable {
                     authenticated = true
                     continue
                 }
+                // WS-D1n: the dashboard method is answered HERE, ahead of the MCP
+                // server, and only after the same token gate.
+                if let response = await self.statusResponse(for: line) {
+                    guard Self.writeAll(fd, Array((response + "\n").utf8)) else { break }
+                    continue
+                }
                 if let response = await server.handle(line: line) {
                     guard Self.writeAll(fd, Array((response + "\n").utf8)) else { break }
                 }
             }
             close(fd)
         }
+    }
+
+    // MARK: - WS-D1n: the dashboard method
+
+    /// JSON-RPC ids are a number, a string, or absent (a notification). Modelled exactly
+    /// so the reply echoes the caller's id in its original type rather than coercing it.
+    private enum RPCID: Encodable {
+        case number(Int)
+        case string(String)
+
+        func encode(to encoder: Encoder) throws {
+            var c = encoder.singleValueContainer()
+            switch self {
+            case .number(let n): try c.encode(n)
+            case .string(let s): try c.encode(s)
+            }
+        }
+    }
+
+    private struct StatusEnvelope: Encodable {
+        let jsonrpc = "2.0"
+        let id: RPCID
+        let result: TownStatusSnapshot
+    }
+
+    /// Answer `world/status`, or nil to let the line fall through to the MCP server.
+    ///
+    /// **Why this lives here and not in `GooseworldMCPServer`.** The dashboard needs
+    /// structured data; the MCP server's `world_towns` deliberately returns prose framed
+    /// by `UntrustedDataEnvelope` for a model to read. Adding a structured variant to the
+    /// server would widen the AGENT's capability surface — a flock could then enumerate
+    /// towns in a machine-readable form — and those four tool descriptions are
+    /// injection-hardened and CC0-donatable. Intercepting at the socket instead means
+    /// `world/status` is not a tool, never appears in `tools/list`, and is unreachable by
+    /// any goose flock, while still inheriting this socket's token gate and loopback bind.
+    private func statusResponse(for line: String) async -> String? {
+        guard let statusProvider,
+            let data = line.data(using: .utf8),
+            let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+            obj["method"] as? String == Self.statusMethod
+        else { return nil }
+
+        // A notification (no id) gets no reply, per JSON-RPC.
+        let id: RPCID
+        if let n = obj["id"] as? Int {
+            id = .number(n)
+        } else if let s = obj["id"] as? String {
+            id = .string(s)
+        } else {
+            return nil
+        }
+
+        let snapshot = await statusProvider()
+        guard let encoded = try? JSONEncoder().encode(StatusEnvelope(id: id, result: snapshot))
+        else { return nil }
+        return String(decoding: encoded, as: UTF8.self)
     }
 
     /// Blocking write-all; false on error (mirrors the extension's own `writeAll`).

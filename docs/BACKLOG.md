@@ -67,6 +67,7 @@ These are eyeball passes. The code is written and the tests are green; no one ha
 - **iPad / Mac landscape pass** on every primary screen — conversation list, ConversationView, ThreadView, Settings, Onboarding. Built iPhone-portrait-first. (`CLAUDE.md` § Platform expansion — *"a verification pass, not new layout work"*.)
 - **The Huginn MLX overhaul**, WS-M3/M4/M5 — download progress, detail popover, loss chart, dataset assistant, the Advanced disclosure. Six separate `NEEDS OWNER` entries in `private/LOOP-STATE.md`.
 - **The Buzz Connections tab** — banner, section, tab look, paste flow (DEVIATIONS AC146).
+- **The World dashboard, list *and* map, on both apps** (DEVIATIONS AC155). Huginn's tab was eyeballed once mid-build; the **maps have never been seen on screen** — check the radial layout at 1 town and at the 8-town fan-out cap, that a live edge's pulse reads as traffic rather than decoration, and that the phone's all-dashed map plus its legend actually land as "authorization, not connection". Also confirm the consolidated tab didn't lose anything: Town Grants and Buzz Connections now live one level down.
 - **Per-chat egress firewall with a real cloud AI** — confirm ON redacts and bounds, OFF sends raw.
 - **Encrypted Mac-AI memory + unpair shred**, **interactive terminal kill**, **MCP codename passthrough**, **node-side image input** — the remaining `private/meatsuittasks.md` device checks.
 
@@ -83,6 +84,8 @@ Each has a written plan. Estimates are the plans' own, solo-developer days.
 | **Push the 8 OSS repos.** Built, tested, committed, **zero remotes**. Publication order matters for exactly one pair (`swift-a2a` before `eldr-acp`). | ~1 day | [`guide/OSS-RELEASE-RUNBOOK.md`](guide/OSS-RELEASE-RUNBOOK.md) |
 | **Submit the 3 NIP PRs** to `block/buzz`. Bodies pre-written, every command given. | ~20 min | [`nips-contrib/PR-SUBMISSION-RUNBOOK.md`](nips-contrib/PR-SUBMISSION-RUNBOOK.md) |
 | **Relay-side work for ephemeral receiving keys** (kind 10422). The app toggle **must not** be flipped until the relay passes the §6 gate — today it breaks inbound delivery. | — | [`guide/RELAY-EPHEMERAL-KEYS-SETUP.md`](guide/RELAY-EPHEMERAL-KEYS-SETUP.md) |
+| **The node-served web dashboard (WS-D2/D3-web).** Deliberately deferred when AC155 shipped native-first, so a **Linux town has no dashboard at all** — `world/status` exists and is transport-agnostic, but only the two Apple apps can read it. Needs the specced loopback HTTP+SSE server: token-gated, `Origin`/`Host`-validated against DNS rebinding, no write path, no-CDN vendored frontend. | ~2–3 days | DEVIATIONS AC155; original spec in the retired gooseworld-v2 plan |
+| **Streaming dashboard updates.** AC155 refreshes on demand and labels every row with when it was confirmed. Live updates need WS-D1n's observer hooked *after* the authorizer in `routeInboundA2A` and delivered **non-blocking** to a bounded `AsyncStream` — an awaited observer would head-of-line-block all three planes (an availability DoS). Would also let the Mac map pulse per actual message instead of per live-state. | ~1 day | DEVIATIONS AC155 |
 
 ### B2 · The Buzz mobile plan — Phase 1 done, 2 and 3 not started
 
