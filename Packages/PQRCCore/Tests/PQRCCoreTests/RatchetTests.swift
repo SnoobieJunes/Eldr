@@ -20,7 +20,8 @@ enum RatchetFixture {
         let bobKEM = try MLKEM768.PrivateKey(seedRepresentation: material.bytes(64), publicKey: nil)
 
         let dummyHandshake = HandshakeMessage(
-            suite: PQRCConstants.handshakeSuite, ik: Data(), ikDH: Data(), ek: Data(),
+            suite: PQRCConstants.handshakeSuite, ik: Data(), ikDH: Data(),
+            ikDHSig: Data(), ek: Data(),
             kemCT: Data(), kemPK: aliceKEM.publicKey.rawRepresentation,
             spkUsed: Data(), otpUsed: nil, otpPQUsed: nil, lrpUsed: false
         )
@@ -33,6 +34,7 @@ enum RatchetFixture {
         )
         let response = PQXDH.ResponseResult(
             sharedSecret: SymmetricKey(data: sk),
+            initiatorIdentityPub: Data(),
             myRatchetPrivate: bobRatchetPriv,
             peerKEMPubkey: aliceKEM.publicKey.rawRepresentation,
             usedLastResort: false

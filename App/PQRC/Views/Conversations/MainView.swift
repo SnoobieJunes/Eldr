@@ -14,6 +14,12 @@ struct MainView: View {
     @State private var showNewChat = false
     @State private var showNewGroup = false
     @State private var showSettings = false
+    /// WS-BM3 — Buzz workspaces. A peer of conversations in the sidebar, never
+    /// mixed into the same list: a workspace channel is plaintext to its
+    /// operator and an Eldr conversation is not, and that difference must not
+    /// be reduced to styling.
+    @State private var workspaces: BuzzWorkspaceModel?
+    @State private var showJoinWorkspace = false
     @State private var deepLinkNpub: String?
     @State private var deepLinkContactType: String?
     /// Conversation-list search text (⌘F on Mac). Filters the list by title.
@@ -76,7 +82,26 @@ struct MainView: View {
             // the detail pane on wide screens; rebuilds per selection so state
             // (composer, scroll) doesn't bleed between conversations.
             NavigationStack {
-                if let selection {
+                if let selection, let route = BuzzRoute.parse(selection) {
+                    // A workspace route NEVER falls through to ConversationView —
+                    // a `buzz:` id is not a conversation id, and treating it as
+                    // one would look like a broken chat rather than a loading
+                    // workspace.
+                    if let workspaces,
+                        let workspace = workspaces.workspaces.first(where: {
+                            $0.id == route.workspace
+                        }),
+                        let channel = (workspaces.channels[route.workspace] ?? []).first(where: {
+                            $0.id == route.channel
+                        })
+                    {
+                        BuzzChannelView(
+                            workspace: workspace, channel: channel, workspaces: workspaces)
+                            .id(selection)
+                    } else {
+                        ProgressView("Opening workspace…")
+                    }
+                } else if let selection {
                     ConversationView(model: model, conversationID: selection)
                         .id(selection)
                         .onAppear { model.markRead(selection) }
@@ -96,6 +121,20 @@ struct MainView: View {
         }
         .sheet(isPresented: $showNewGroup) {
             NewGroupView(model: model)
+        }
+        .sheet(isPresented: $showJoinWorkspace) {
+            if let workspaces {
+                BuzzJoinWorkspaceView(workspaces: workspaces)
+            }
+        }
+        // Built here rather than at app start so it is scoped to the ACTIVE
+        // silo: each account keeps its own workspaces and its own per-workspace
+        // keys, in that silo's Keychain service.
+        .task(id: session.activeSiloID) {
+            let silo = session.activeSiloID ?? ""
+            workspaces = BuzzWorkspaceModel(
+                registry: BuzzWorkspaceRegistry(
+                    siloID: silo, keychain: KeychainStore(service: AppSession.siloService(silo))))
         }
         .sheet(isPresented: $showSettings) {
             // Contacts (deep inside Settings) can ask to open a chat in the MAIN
@@ -219,6 +258,12 @@ struct MainView: View {
                 } else if visibleConversations.isEmpty {
                     Text("No conversations match “\(searchText)”.")
                 }
+            }
+            // Below conversations, never interleaved with them: workspace
+            // messages are readable by the workspace's operator and Eldr
+            // conversations are not (WS-BM3 / DEVIATIONS AC147).
+            if let workspaces {
+                BuzzWorkspacesSection(workspaces: workspaces, showJoin: $showJoinWorkspace)
             }
         }
         // ⌘F-focusable, type-to-filter conversation search. On iPhone/iPad it's

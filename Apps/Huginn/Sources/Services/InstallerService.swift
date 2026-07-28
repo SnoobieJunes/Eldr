@@ -24,6 +24,16 @@ final class InstallerService: ObservableObject {
     /// The bundled binary shipped inside the app (copied in by the Run Script phase).
     var bundledBinary: URL? { Bundle.main.url(forResource: "eldr-acp", withExtension: nil) }
 
+    /// WS-I7: the Buzz gateway daemon, bundled by the same build phase pattern.
+    /// Optional — an app built without it still installs the agent; the Connections
+    /// tab says the gateway is unavailable rather than failing the whole install.
+    var bundledBuzzAgent: URL? { Bundle.main.url(forResource: "eldr-buzz-agent", withExtension: nil) }
+
+    /// True once `eldr-buzz-agent` is executable in `~/.local/bin`.
+    var buzzAgentInstalled: Bool {
+        FileManager.default.isExecutableFile(atPath: paths.installedBuzzAgent)
+    }
+
     // MARK: - State
 
     func refreshState() async {
@@ -74,6 +84,10 @@ final class InstallerService: ObservableObject {
             try writeLauncher()
             // Ensure the config dir exists so `source env` never errors.
             try fm.createDirectory(atPath: paths.configDir, withIntermediateDirectories: true)
+            // WS-I7: the Buzz gateway rides along (Huginn spawns it directly, so it
+            // needs no launcher). Best-effort: an app built without the bundled
+            // binary must still complete the agent install.
+            try? installBuzzAgent()
         } catch let error as InstallError {
             lastError = error.message
             throw error
@@ -82,6 +96,20 @@ final class InstallerService: ObservableObject {
             throw error
         }
         await refreshState()
+    }
+
+    /// Copy the bundled `eldr-buzz-agent` into `~/.local/bin` (0755). Separate from
+    /// `install()` so the Connections tab can repair just this one binary, and so a
+    /// missing bundle copy is a stated error rather than a failed agent install.
+    func installBuzzAgent() throws {
+        guard let bundled = bundledBuzzAgent else { throw InstallError.missingBundledBinary }
+        let fm = FileManager.default
+        try fm.createDirectory(atPath: paths.binDir, withIntermediateDirectories: true)
+        if fm.fileExists(atPath: paths.installedBuzzAgent) {
+            try fm.removeItem(atPath: paths.installedBuzzAgent)
+        }
+        try fm.copyItem(atPath: bundled.path, toPath: paths.installedBuzzAgent)
+        try fm.setAttributes([.posixPermissions: 0o755], ofItemAtPath: paths.installedBuzzAgent)
     }
 
     /// The launchers ACP clients invoke. Each sources the env file (so the GUI's

@@ -1,5 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
+#if canImport(CryptoKit)
 import CryptoKit
+#else
+import Crypto  // swift-crypto: same SHA256 API where CryptoKit is absent (Linux node)
+#endif
 import Foundation
 
 // Phase-1c plumbing: a JSONL event log and a project-context locator. Both are

@@ -14,10 +14,11 @@ import PQRCNostr
 ///
 /// Dev/demo tooling only — events live in memory, nothing persists across
 /// restarts. Production = AUTH-gated strfry/khatru (SPEC §9.1, §15); see
-/// docs/SETUP-GUIDE.md for both paths.
+/// docs/guide/SETUP-GUIDE.md for both paths.
 @main
 struct PQRCRelayMain {
     static func main() async throws {
+        #if canImport(Network)
         let arguments = parse(CommandLine.arguments)
         let chaos = ChaosOptions(
             latencyJitterMillis: Int(arguments["jitter"] ?? "0") ?? 0,
@@ -46,6 +47,16 @@ struct PQRCRelayMain {
         while true {
             try await Task.sleep(for: .seconds(3600))
         }
+        #else
+        // The built-in relay server uses Network.framework (Apple-only). A Linux host runs a
+        // khatru/strfry relay instead, or the Linux node connects to a relay hosted elsewhere.
+        // (A NIO-based Linux relay is a natural follow-up — the NIO WebSocket code exists in
+        // NIOWebSocketChannel/WS-L5.)
+        FileHandle.standardError.write(Data(
+            ("pqrc-relay: the built-in relay uses Network.framework (Apple-only). On Linux run a "
+                + "khatru/strfry relay, or point the node at a relay hosted elsewhere.\n").utf8))
+        exit(1)
+        #endif
     }
 
     /// Tiny `--flag value` parser — avoids an ArgumentParser dependency for a

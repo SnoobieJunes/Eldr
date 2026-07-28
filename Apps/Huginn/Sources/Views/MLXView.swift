@@ -816,6 +816,7 @@ private struct MLXModelsSection: View, Equatable {
             && lhs.brainSwapAvailable == rhs.brainSwapAvailable
             && lhs.downloadProgress == rhs.downloadProgress
             && lhs.downloadPreflight == rhs.downloadPreflight
+            && lhs.cacheDir == rhs.cacheDir
     }
 
     var body: some View {
@@ -834,6 +835,21 @@ private struct MLXModelsSection: View, Equatable {
             Text(cacheDir)
                 .font(.system(.caption2, design: .monospaced)).foregroundStyle(.secondary)
                 .lineLimit(1).truncationMode(.middle)
+            HStack(spacing: 8) {
+                Button("Change…") { pickFolder { service.setModelsDirectory($0) } }
+                    .controlSize(.small)
+                    .help("Store downloaded models in a folder of your choice instead of the default Hugging Face cache.")
+                if service.isUsingCustomModelsDir {
+                    Button("Use Default") { service.setModelsDirectory(nil) }
+                        .controlSize(.small)
+                        .help("Revert to ~/.cache/huggingface/hub.")
+                }
+                Spacer()
+            }
+            if service.isUsingCustomModelsDir {
+                Text("Custom models folder — restart the MLX server to load models from here.")
+                    .font(.caption2).foregroundStyle(.secondary)
+            }
 
             if cachedModels.count > 1 {
                 Picker("Sort", selection: $cacheSort) {

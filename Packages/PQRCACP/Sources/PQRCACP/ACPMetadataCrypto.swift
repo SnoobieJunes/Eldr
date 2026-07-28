@@ -1,5 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
+#if canImport(CryptoKit)
 import CryptoKit
+#else
+import Crypto  // swift-crypto: same AES.GCM/SymmetricKey API where CryptoKit is absent (Linux node)
+#endif
 import Foundation
 
 /// Shared AES-256-GCM codec for the eldr-acp at-rest METADATA files (`events.jsonl`,

@@ -1,11 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 import Crypto
 import EldrNodeCore
+import EldrNodeGooseworld
 import Foundation
 import PQRCACP
 import PQRCCore
 import PQRCNostr
+#if canImport(os)
 import os
+#endif
 
 /// `eldr-node` — the STANDALONE HEADLESS node (ACPRouterplan Phase 4: "run the host on
 /// another machine"). It loads/creates the node's PQRC identity from the macOS Keychain,
@@ -68,12 +71,37 @@ struct EldrNodeMain {
 
         // --owner is REQUIRED. Fail closed if absent: a node with no pinned owner has no
         // C-3 gate target, so it must not serve anyone.
+        // Canonical lowercase, once, at the entry point. Every downstream comparison —
+        // the C-3 gate's `senderIdentityHex == ownerIdentityHex`, the grant store's
+        // granter pin, the admission predicate — is a case-SENSITIVE `==` against a hex
+        // string derived from key bytes, which is always lowercase. An uppercase
+        // `--owner` therefore matched nothing anywhere: the node started, connected to
+        // the relay, and silently ignored its own owner's phone with no error printed.
+        // Normalizing here (rather than in each comparison) keeps one notion of "same
+        // identity" and matches what the downstream types already do to their copies.
         guard let ownerIdentityHex = arguments["owner"]?
-            .trimmingCharacters(in: .whitespacesAndNewlines), !ownerIdentityHex.isEmpty
+            .trimmingCharacters(in: .whitespacesAndNewlines).lowercased(),
+            !ownerIdentityHex.isEmpty
         else {
             FileHandle.standardError.write(Data(
                 ("eldr-node: --owner <phone-identity-hex> is REQUIRED "
                     + "(the C-3 gate target). Refusing to serve with no owner.\n").utf8))
+            exit(2)
+        }
+        // Shape-check it too. A PQRC identity is a 32-byte key in hex; anything else
+        // (an npub, a truncated paste, a node id) can never equal a verified sender, so
+        // the node would fail closed on every frame — correct, but indistinguishable
+        // from "the relay is down" while you are standing in front of a demo. Say it
+        // now, loudly, instead of serving nobody in silence.
+        let isCanonicalHex =
+            ownerIdentityHex.count == 64
+            && ownerIdentityHex.allSatisfy { $0.isHexDigit && !$0.isUppercase }
+        guard isCanonicalHex else {
+            FileHandle.standardError.write(Data(
+                ("eldr-node: --owner must be the phone's 64-character hex PQRC identity "
+                    + "(got \(ownerIdentityHex.count) characters). An npub or a truncated "
+                    + "paste can never match a verified sender, so the node would accept "
+                    + "nothing. Refusing to start.\n").utf8))
             exit(2)
         }
 
@@ -95,13 +123,20 @@ struct EldrNodeMain {
             // Load/create the node identity from the Keychain (inv. 10 access rules; key
             // bytes never logged). Each secret is independent so a partial prior run still
             // resolves the rest.
-            let keychain = NodeKeychain()
+            let keychain = try makeIdentityStore()
             let nostrKeypair = try loadOrCreateNostrKeypair(keychain)
             let identity = try loadOrCreatePQRCIdentity(keychain)
             let identityDH = try loadOrCreateIdentityDH(keychain)
             let prekeyManager = try await loadOrCreatePrekeyManager(keychain, identity: identity)
 
-            let transport = await NostrWebSocketTransport(url: relayWSURL).connect()
+            let transport: any RelayTransport
+            #if canImport(Network)
+            transport = await NostrWebSocketTransport(url: relayWSURL).connect()
+            #else
+            // Linux: URLSessionWebSocketTask can't connect ("WebSockets not supported by
+            // libcurl"), so dial the relay over SwiftNIO instead (WS-L5).
+            transport = try await NIONostrTransport(url: relayWSURL).connect()
+            #endif
             let messenger = try PQRCMessenger(
                 identity: identity, nostrKeypair: nostrKeypair, prekeyManager: prekeyManager,
                 identityDH: identityDH, transports: [transport], clock: SystemClock(),
@@ -112,7 +147,7 @@ struct EldrNodeMain {
             // seeded by `--import-token` — never the env file.
             var llmEnv = env
             if llmEnv["ELDR_LLM_TOKEN"]?.nonEmpty == nil,
-                let stored = NodeKeychain().load(account: tokenAccount),
+                let stored = keychain.load(account: tokenAccount),
                 let token = String(data: stored, encoding: .utf8)?.nonEmpty
             {
                 llmEnv["ELDR_LLM_TOKEN"] = token
@@ -153,11 +188,11 @@ struct EldrNodeMain {
                 : OpenAICompatibleLLMClient(config: llmConfig)
             let harnessDescriptor: HarnessDescriptor
             if let cloudHarness, cloudHarness.kind == .a2aRemote {
-                let bearerToken = NodeKeychain().load(account: a2aBearerAccount(for: cloudHarness.id))
+                let bearerToken = keychain.load(account: a2aBearerAccount(for: cloudHarness.id))
                     .flatMap { String(data: $0, encoding: .utf8) }
                 harnessDescriptor = cloudHarness.withBearerToken(bearerToken)
             } else if let cloudHarness {
-                let vendorKey = NodeKeychain().load(account: vendorKeyAccount(for: cloudHarness.id))
+                let vendorKey = keychain.load(account: vendorKeyAccount(for: cloudHarness.id))
                     .flatMap { String(data: $0, encoding: .utf8) }
                 harnessDescriptor = cloudHarness.withVendorKey(vendorKey)
             } else {
@@ -201,26 +236,48 @@ struct EldrNodeMain {
                     "eldr-node: key publish failed (will still serve if peers already have our keys)\n".utf8))
             }
 
+            // WS-G5 NIP-11 chunk sizing: the frame budget comes from the RELAY (the most
+            // restrictive advertised `max_content_length`, folded through the padding-
+            // bucket math by `chunkTextBudget()`), not a constant — so a hub that raises
+            // its limit is used automatically, and an unknown limit falls back to the
+            // same strict-65535-safe 16 KiB budget the proven e2e used.
+            let frameBudget = await messenger.chunkTextBudget()
+            let nodeMessenger = PQRCNodeMessenger(messenger: messenger)
+
+            // WS-G5: the town plane (wall host + eldr-gooseworld socket + grant-backed
+            // admission), enabled iff ELDR_TOWN_ID is set. nil keeps the exact pre-WS-G5
+            // posture: deny-all authorizer, no service, no socket.
+            let townPlane = await GooseworldWiring.fromEnvironment(
+                env, ownerHex: ownerIdentityHex, workdir: workdir,
+                chunkTextBudget: frameBudget,
+                sendFramed: { [nodeMessenger] framed, peerHex in
+                    try await nodeMessenger.sendFramed(framed, to: peerHex)
+                })
+            for line in townPlane?.statusLines ?? [] { print("  \(line)") }
+
             // Clean SIGINT shutdown: cancel the serve task so the transport closes and the
             // agent loop unwinds, then exit. `signal(SIGINT, SIG_IGN)` + a DispatchSource
             // is the cooperative pattern (a bare handler can't touch Swift concurrency).
             let serveTask = Task {
                 let node = EldrNodeCore()
                 await node.serve(
-                    messenger: PQRCNodeMessenger(messenger: messenger),
+                    messenger: nodeMessenger,
                     ownerIdentityHex: ownerIdentityHex,
-                    maxFrameBytes: relayACPMaxFrameBytes,
+                    maxFrameBytes: frameBudget,
                     llm: llm,
                     toolEnvironment: toolEnvironment,
                     config: .default,
                     streamingEnabled: false,
-                    descriptor: harnessDescriptor)
+                    descriptor: harnessDescriptor,
+                    townAuthorizer: townPlane?.authorizer ?? DenyAllTownAuthorizer(),
+                    townService: townPlane?.service)
             }
 
             signal(SIGINT, SIG_IGN)
             let sigint = DispatchSource.makeSignalSource(signal: SIGINT, queue: .main)
             sigint.setEventHandler {
                 print("\neldr-node: shutting down…")
+                townPlane?.socketHost?.stop()  // close the goose socket before the exit
                 serveTask.cancel()
                 Task {
                     await messenger.stop()
@@ -238,12 +295,6 @@ struct EldrNodeMain {
             exit(1)
         }
     }
-
-    /// The relay's per-message byte budget for framing/chunking ACP lines: the relay's
-    /// event-size cap minus gift-wrap overhead. 16 KiB matches the proven e2e budget and
-    /// the Configurator's `relayACPMaxFrameBytes`, staying well under a strict 65 535-byte
-    /// relay even after wrapping.
-    static let relayACPMaxFrameBytes = 16 * 1024
 
     /// The Keychain account the LLM token is seeded into by `--import-token` and read back
     /// at serve time (C-8: the token lives in the Keychain, never the env file).
@@ -278,7 +329,7 @@ struct EldrNodeMain {
             exit(2)
         }
         do {
-            try NodeKeychain().save(Data(token.utf8), account: tokenAccount)
+            try makeIdentityStore().save(Data(token.utf8), account: tokenAccount)
             FileHandle.standardError.write(Data(
                 "eldr-node: LLM token imported to the Keychain (account \(tokenAccount)).\n".utf8))
         } catch {
@@ -309,7 +360,7 @@ struct EldrNodeMain {
             HarnessRegistry.descriptor(id: harnessID)?.kind == .a2aRemote
             ? a2aBearerAccount(for: harnessID) : vendorKeyAccount(for: harnessID)
         do {
-            try NodeKeychain().save(Data(key.utf8), account: account)
+            try makeIdentityStore().save(Data(key.utf8), account: account)
             FileHandle.standardError.write(Data(
                 "eldr-node: vendor key for \(harnessID) imported to the Keychain.\n".utf8))
         } catch {
@@ -328,7 +379,7 @@ struct EldrNodeMain {
         let relayURL =
             arguments["relay"]?.nonEmpty ?? env["PQRC_RELAY_URL"]?.nonEmpty
         do {
-            let keypair = try loadOrCreateNostrKeypair(NodeKeychain())
+            let keypair = try loadOrCreateNostrKeypair(makeIdentityStore())
             print(pairingLink(npub: keypair.npub, relay: relayURL))
         } catch {
             FileHandle.standardError.write(Data(
@@ -352,7 +403,7 @@ struct EldrNodeMain {
 
     // MARK: - Identity load-or-create (macOS Keychain; key bytes never logged)
 
-    private static func loadOrCreateNostrKeypair(_ keychain: NodeKeychain) throws -> NostrKeypair {
+    private static func loadOrCreateNostrKeypair(_ keychain: any IdentityStore) throws -> NostrKeypair {
         if let data = keychain.load(account: "node-nostr-key") {
             return try NostrKeypair(privateKey: data)
         }
@@ -361,7 +412,7 @@ struct EldrNodeMain {
         return keypair
     }
 
-    private static func loadOrCreatePQRCIdentity(_ keychain: NodeKeychain) throws -> PQRCIdentity {
+    private static func loadOrCreatePQRCIdentity(_ keychain: any IdentityStore) throws -> PQRCIdentity {
         if let seed = keychain.load(account: "node-pqrc-identity-seed") {
             return try PQRCIdentity(seed: seed)
         }
@@ -371,7 +422,7 @@ struct EldrNodeMain {
     }
 
     private static func loadOrCreateIdentityDH(
-        _ keychain: NodeKeychain
+        _ keychain: any IdentityStore
     ) throws -> Curve25519.KeyAgreement.PrivateKey {
         if let seed = keychain.load(account: "node-identity-dh") {
             return try Curve25519.KeyAgreement.PrivateKey(rawRepresentation: seed)
@@ -383,7 +434,7 @@ struct EldrNodeMain {
     }
 
     private static func loadOrCreatePrekeyManager(
-        _ keychain: NodeKeychain, identity: PQRCIdentity
+        _ keychain: any IdentityStore, identity: PQRCIdentity
     ) async throws -> PrekeyManager {
         let manager: PrekeyManager
         if let blob = keychain.load(account: "node-prekey-state"),

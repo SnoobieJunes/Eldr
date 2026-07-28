@@ -4,7 +4,7 @@ import Testing
 
 @testable import PQRCACP
 
-// Phase 1 / the selectable-backend scaffold (docs/ACPRouterplan.md): prove the
+// Phase 1 / the selectable-backend scaffold (docs/done/2026-07-17/ACPRouterplan.md): prove the
 // transport-agnostic `runACPProxy` bridges an external harness BOTH ways, and that the
 // data-driven `HarnessRegistry` stays the drop-in seam. Headless, network-free, and with NO
 // real external binary — a fake "harness" is just another `InMemoryACPTransport` end that
@@ -215,7 +215,10 @@ struct ACPProxyTests {
         #expect(HarnessRegistry.all.filter { $0.kind == .builtIn }.count == 1)
 
         // Installed launchers (not provisional) + the five Phase-2 placeholders.
-        for required in ["xcode-acp", "openclaw", "claude-code", "codex", "gemini-cli", "opencode", "cursor"] {
+        for required in [
+            "xcode-acp", "openclaw", "claude-code", "codex", "gemini-cli", "opencode", "cursor",
+            "goose-acp",  // WS-G2
+        ] {
             #expect(ids.contains(required), "registry missing \(required)")
         }
 
@@ -224,8 +227,8 @@ struct ACPProxyTests {
     }
 
     // 3b ─ Kind/provisional discipline: every non-built-in is a `.stdioSpawn` with a non-empty
-    // command; the three remaining Phase-2 placeholders are flagged provisional (commands to
-    // confirm), while the built-in, the two installed launchers, AND claude-code/gemini-cli
+    // command; the Phase-2 placeholders and the not-yet-installed `hermes-acp` (AC140) are flagged
+    // provisional (commands to confirm), while the built-in, the two installed launchers, AND claude-code/gemini-cli
     // (WS3d — confirmed against the real installed binaries, see HarnessDescriptor.swift) are
     // NOT.
     @Test func descriptorKindsAndProvisionalFlagsAreConsistent() {
@@ -237,13 +240,18 @@ struct ACPProxyTests {
 
         let provisional = Set(
             HarnessRegistry.all.filter { $0.isProvisional }.map { $0.id })
-        #expect(provisional == ["codex", "opencode", "cursor", "a2a-local-sample"])
+        // `hermes-acp` is provisional too (AC140): Hermes is not installed on the dev machine,
+        // so its command/args are the documented launch invocation, not a verified handshake.
+        #expect(provisional == ["codex", "opencode", "cursor", "hermes-acp", "a2a-local-sample"])
         // Installed/built-in/WS3d-verified are confirmed, not provisional.
         #expect(HarnessRegistry.descriptor(id: "xcode-acp")?.isProvisional == false)
         #expect(HarnessRegistry.descriptor(id: "openclaw")?.isProvisional == false)
         #expect(HarnessRegistry.descriptor(id: "eldr-acp")?.isProvisional == false)
         #expect(HarnessRegistry.descriptor(id: "claude-code")?.isProvisional == false)
         #expect(HarnessRegistry.descriptor(id: "gemini-cli")?.isProvisional == false)
+        // WS-G2 — goose's `acp` subcommand was driven through a real initialize handshake
+        // (see `GooseHarnessTests`), so it is verified, not scaffolding.
+        #expect(HarnessRegistry.descriptor(id: "goose-acp")?.isProvisional == false)
     }
 }
 

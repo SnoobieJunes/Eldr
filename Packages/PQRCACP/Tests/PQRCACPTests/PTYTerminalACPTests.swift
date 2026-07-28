@@ -7,16 +7,20 @@ import Testing
 // Phase D4 — the INTERACTIVE PTY terminal driven THROUGH the ACP agent (node side):
 // the model calls `open_terminal`, the agent spawns a real `PTYProcess`, its output
 // streams to the client as `terminal_output` session/updates, the client writes stdin
-// via `terminal/input`, and `terminal/release` (the phone's Stop) kills it. macOS-only
-// (PTYProcess + ACPAgent are node-side). Hermetic: scripted LLM, no network.
+// via `terminal/input`, and `terminal/release` (the phone's Stop) kills it. Node-only,
+// macOS + Linux (PTYProcess + ACPAgent are node-side). Hermetic: scripted LLM, no network.
 //
 // The phone-side CONSENT GATE (the standing autonomous-changes consent, fail-closed
 // without it) is tested at the App layer (PersonaRuntime). Here we use
 // `allowUngatedTools` so the node's C-1 permission round-trip is satisfied and we can
 // exercise the MECHANISM + the safeguards the node owns (always-killable, fail-closed
 // teardown, no PTY output at rest).
-#if os(macOS)
+#if os(macOS) || os(Linux)
+#if canImport(Darwin)
 import Darwin
+#else
+import Glibc
+#endif
 
 @Suite("Phase D4 — interactive PTY over ACP (node side)")
 struct PTYTerminalACPTests {
@@ -215,7 +219,7 @@ struct PTYTerminalACPTests {
         let outSnapshot = await sink.terminalOutputText()
         #expect(gotPID, "could not read the backgrounded child's PID; got: \(outSnapshot)")
         let childPID = await sink.parsedChildPID() ?? 0
-        #expect(kill(childPID, 0) == 0, "the child should be alive before teardown")
+        #expect(testProcessIsAlive(childPID), "the child should be alive before teardown")
         #expect(await agent.liveTerminalCount() == 1)
 
         // FAIL-CLOSED TEARDOWN (the node-side guarantee runACPAgent invokes when the
@@ -229,7 +233,7 @@ struct PTYTerminalACPTests {
             "teardown must emit a terminal_closed update")
 
         let pidForClosure = childPID
-        let childGone = await waitUntil(5_000) { kill(pidForClosure, 0) != 0 }
+        let childGone = await waitUntil(5_000) { !testProcessIsAlive(pidForClosure) }
         #expect(childGone, "teardown must kill the backgrounded child — no orphaned shell")
     }
 
@@ -310,4 +314,4 @@ struct PTYTerminalACPTests {
         // (If no events file was written at all, that trivially satisfies "never at rest".)
     }
 }
-#endif  // os(macOS)
+#endif  // os(macOS) || os(Linux)

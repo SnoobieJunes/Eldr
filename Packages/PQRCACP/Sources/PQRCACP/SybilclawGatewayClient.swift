@@ -1,6 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0
 import Foundation
+#if canImport(FoundationNetworking)
+import FoundationNetworking  // URLSession/URLSessionWebSocketTask live here on Linux
+#endif
+#if canImport(os)
 import os
+#endif
 
 // WS-B5: the ONE OpenClaw / sybilclaw Gateway WebSocket client. Previously this type was
 // hand-duplicated — Apps/Huginn/Sources/Services/SybilclawGatewayClient.swift (the chat

@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 import Foundation
 
-// Phase 1 item 1 of docs/ACPRouterplan.md: "a transport-agnostic runACPAgent/runACPProxy
+// Phase 1 item 1 of docs/done/2026-07-17/ACPRouterplan.md: "a transport-agnostic runACPAgent/runACPProxy
 // driver." `runACPAgent` (ACPTransport.swift) drives the BUILT-IN agent. `runACPProxy` is its
 // sibling for EXTERNAL harnesses: the node, having authenticated the phone and decrypted the
 // stream, "pipes the verified, decrypted ACP stream both ways" between the phone transport
@@ -67,11 +67,11 @@ public func runACPProxy(client: any ACPTransport, harness: any ACPTransport) asy
 /// failure the client transport is closed so the phone sees a clean disconnect rather than
 /// a hang.
 ///
-/// macOS-only because the default factory's `.stdioSpawn` branch spawns a `Process`. The
-/// node (Mac/server/Pi) hosts harnesses; the phone is the ACP client and calls
-/// `runACPAgent`/drives a remote one, never `runHarness`. Same gating as `runACPAgent` and
-/// `StdioHarnessTransport`.
-#if os(macOS)
+/// Node-only (macOS + Linux) because the default factory's `.stdioSpawn` branch spawns a
+/// `Process`. The node (Mac/server/Pi) hosts harnesses; the phone is the ACP client and
+/// calls `runACPAgent`/drives a remote one, never `runHarness`. Same gating as
+/// `runACPAgent` and `StdioHarnessTransport`.
+#if os(macOS) || os(Linux)
 public func runHarness(
     descriptor: HarnessDescriptor,
     client: any ACPTransport,
@@ -109,4 +109,4 @@ public func runHarness(
         await runACPProxy(client: client, harness: harness)
     }
 }
-#endif  // os(macOS) — runHarness spawns a Process for .stdioSpawn (node-side only)
+#endif  // os(macOS) || os(Linux) — runHarness spawns a Process for .stdioSpawn (node-side only)

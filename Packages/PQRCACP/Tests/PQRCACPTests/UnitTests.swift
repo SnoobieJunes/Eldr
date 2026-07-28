@@ -54,6 +54,78 @@ struct JSONValueTests {
     }
 }
 
+/// Regression cover for the on-device MLX backend's two disagreements with OpenAI,
+/// which together produced a live "HTTP 404: request rejected" on every coding-agent
+/// turn once a project had an `eldr.md`: `mlx_lm.server` allows exactly ONE system
+/// message, and it reports the reason as a bare string rather than `error.message`.
+@Suite("MLX-compatible request/error shaping")
+struct MLXCompatibilityTests {
+    @Test func leadingSystemRunIsJoinedIntoOne() {
+        let messages = [
+            LLMMessage(role: .system, content: "--- Project Context (eldr.md) ---\nfacts\n---"),
+            LLMMessage(role: .system, content: "operating prompt"),
+            LLMMessage(role: .system, content: "  "),  // blank section: dropped, no stray gap
+            LLMMessage(role: .user, content: "Hello"),
+        ]
+        let out = OpenAICompatibleLLMClient.coalescingLeadingSystem(messages)
+        #expect(out.count == 2)
+        #expect(out.map(\.role) == [.system, .user])
+        #expect(
+            out[0].content == "--- Project Context (eldr.md) ---\nfacts\n---\n\noperating prompt")
+        #expect(out[1].content == "Hello")
+    }
+
+    @Test func singleOrAbsentSystemMessageIsUntouched() {
+        let one = [
+            LLMMessage(role: .system, content: "only"), LLMMessage(role: .user, content: "hi"),
+        ]
+        #expect(OpenAICompatibleLLMClient.coalescingLeadingSystem(one) == one)
+        let none = [LLMMessage(role: .user, content: "hi")]
+        #expect(OpenAICompatibleLLMClient.coalescingLeadingSystem(none) == none)
+    }
+
+    @Test func onlyTheLeadingRunIsJoined() {
+        // A non-leading system message is left where it is rather than hoisted.
+        let messages = [
+            LLMMessage(role: .system, content: "a"),
+            LLMMessage(role: .system, content: "b"),
+            LLMMessage(role: .user, content: "hi"),
+            LLMMessage(role: .system, content: "later"),
+        ]
+        let out = OpenAICompatibleLLMClient.coalescingLeadingSystem(messages)
+        #expect(out.map(\.role) == [.system, .user, .system])
+        #expect(out[0].content == "a\n\nb")
+        #expect(out[2].content == "later")
+    }
+
+    @Test func allBlankSystemRunIsDroppedEntirely() {
+        let messages = [
+            LLMMessage(role: .system, content: ""),
+            LLMMessage(role: .system, content: "   \n "),
+            LLMMessage(role: .user, content: "hi"),
+        ]
+        let out = OpenAICompatibleLLMClient.coalescingLeadingSystem(messages)
+        #expect(out.map(\.role) == [.user])
+    }
+
+    @Test func readsBothErrorBodyShapes() {
+        // mlx_lm.server: bare string. This exact body was a live 404.
+        #expect(
+            OpenAICompatibleLLMClient.apiErrorMessage(
+                Data(#"{"error": "System message must be at the beginning."}"#.utf8))
+                == "System message must be at the beginning.")
+        // OpenAI: nested object.
+        #expect(
+            OpenAICompatibleLLMClient.apiErrorMessage(
+                Data(#"{"error":{"message":"invalid model"}}"#.utf8)) == "invalid model")
+        // Neither shape, or an empty explanation → the generic note.
+        #expect(OpenAICompatibleLLMClient.apiErrorMessage(Data("not json".utf8)) == "request rejected")
+        #expect(
+            OpenAICompatibleLLMClient.apiErrorMessage(Data(#"{"error":"  "}"#.utf8))
+                == "request rejected")
+    }
+}
+
 @Suite("OpenAI codec")
 struct OpenAICodecTests {
     @Test func decodesPlainContent() throws {
@@ -361,8 +433,15 @@ struct ClientConnectionTests {
                 method: "fs/read_text_file",
                 params: .object(["path": .string("/x")]))
         }
-        // Let the request hit the sink, then read the id it used.
-        try await Task.sleep(nanoseconds: 50_000_000)
+        // Let the request hit the sink, then read the id it used. Bounded POLL, not a
+        // fixed sleep: under a loaded/virtualized host (the Linux container VM) 50 ms
+        // was not always enough for the detached Task to even start — same
+        // deterministic-readiness rule the PTY tests follow.
+        var waited = 0
+        while await sink.last() == nil, waited < 5_000 {
+            try await Task.sleep(nanoseconds: 20_000_000)
+            waited += 20
+        }
         let sent = try #require(await sink.last())
         let id = try #require(JSONValue.parse(sent)?["id"]?.intValue)
         #expect(id < 0)  // outbound ids are negative
@@ -384,7 +463,12 @@ struct ClientConnectionTests {
         let task = Task {
             try await connection.request(method: "terminal/create", params: .object([:]))
         }
-        try await Task.sleep(nanoseconds: 50_000_000)
+        // Bounded poll, not a fixed sleep — see outboundRequest_correlatesResponseById.
+        var waited = 0
+        while await sink.last() == nil, waited < 5_000 {
+            try await Task.sleep(nanoseconds: 20_000_000)
+            waited += 20
+        }
         let id = try #require(JSONValue.parse(await sink.last() ?? "")?["id"]?.intValue)
         let errorResponse = JSONValue.object([
             "jsonrpc": .string("2.0"), "id": .int(id),

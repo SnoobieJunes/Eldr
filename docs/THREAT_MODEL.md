@@ -403,6 +403,80 @@ Honest accounting of what is and isn't encrypted at rest (DEVIATIONS AC69–AC72
 | Off-device AI exfiltrating identities / bulk context | egress firewall (default ON): codename redaction + 64 KB outbound cap; default context = marked-only unless actively engaged; explicit consent before the first remote/hub call (§2.12) |
 | Reasoning model leaking its scratchpad into chat | `<think>`/Harmony chain-of-thought stripped from every reply before it renders (A34) |
 
+## 4a. Agent towns (gooseworld) — cross-town agent traffic
+
+When Eldr becomes the channel *between* goosetowns (`private/GOOSEWORLD.md`), a new
+adversary sits across the relay: another human's autonomous, shell-spawning node. The
+message-security properties do not change — a peer town's frames are the same PQ-E2EE,
+gift-wrapped, ratcheted ciphertext any chat carries, so a hostile relay learns nothing new.
+The new risk is entirely at the **application boundary**, where a remote town's text flows
+toward an orchestrator that runs code. These classes are addressed in priority order; the
+honest status of each is marked.
+
+| Threat | Mitigation | Status |
+|---|---|---|
+| **Cross-town prompt injection → code execution** (the dominant risk: a remote wall post or task result is untrusted input flowing into an agent that spawns shells) | `world_wall_read` delivers all remote content as quarantined, quoted DATA inside a four-layer envelope — per-read 128-bit nonce markers (generated after fetch, never posted back), every content line `> `-quoted after splitting on all Unicode line breaks, ANSI/C0/C1/bidi controls escaped to visible `<U+XXXX>`, headers rebuilt from struct fields — so no post body can forge a marker, a header, or a "priority" flag. The C-1 fail-closed permission gate and C-2 path jail on everything a task triggers are unchanged; "never push without approval" stays enforced LOCALLY, not trusted remotely. A dedicated adversarial audit (AC134) found and fixed one real breakout — a town **label** rendered outside the quoted envelope let a raw U+2028 forge a roster row — and tombstoned the rest (full `Bidi_Control` coverage, FS/GS/RS, nonce-never-persisted, oversize-refused). | **Shipped + audited** (PQRCMCP injection suite, DEVIATIONS AC129 + AC134) |
+| **Delegation exfiltration** (the task text IS the leak to the remote town) | `standing_grant` scopes each cross-town authorization to one peer, named planes, and per-day byte/message budgets + a tool ceiling — so exposure is a deliberate, bounded, revocable choice, not an open pipe. The per-chat egress firewall still governs what leaves toward cloud LLM backends. | **Shipped + tested** (grant object; wiring the firewall to the town send is follow-up) |
+| **Sybil towns / impersonation** | kind-10420 human↔agent binding verified in BOTH directions (invariant 7) + invite-only pairing; no open federation, no public town directory in v1. The A2A town plane admits a peer only behind an explicit authorizer (`StandingGrantTownAuthorizer`, owner-granter-pinned) — a peer cannot self-authorize. | **Shipped + tested** (AC128/AC130) |
+| **Runaway loops / cost** | `AgentEngine` loop guards for threads (6 consecutive agent messages, §4 above) + standing-grant budgets (messages/day, bytes/day, concurrent-task ceiling), all message-driven, never timer-driven. | **Shipped + tested** (AC126) |
+| **Hub abuse** | NIP-42 AUTH + invite-gated hub onboarding. | Relay-side; unchanged from §2.9a |
+| **Plane confusion** (a peer granted only the WALL using its admission to reach the code-execution-adjacent DELEGATE plane, or vice versa — the wall-era sibling of the AC131 confused-deputy) | Admission and per-line service are two separate gates sharing ONE predicate (`StandingGrantAdmission`): transport admission ORs the plane authorizers, then `PlaneRoutedTownService` re-verifies the plane EACH LINE actually needs — `world/wall.*` requires a live `.wall` grant, everything else `.delegate` — by parsed JSON-RPC method, never substring match. Adversarially tested in both directions plus the method-name-in-a-string probe. | **Shipped + tested** (AC143) |
+| **Wall transport forgery / splice** (a peer claiming another town's authorship, splicing chunk sets, or flooding partial sets) | The author's TOWN is stamped from the messenger-VERIFIED sender identity, never read from the wire (the wire's `agent` field is the peer node's own namespace, sanitized to the identifier charset); chunk sets are keyed per-sender and `WallChunking.reassemble` refuses any incomplete/mixed/duplicated set WHOLE; pending sets are bounded with oldest-first eviction (counted), so endless partials displace the flooder's own state, never grow the node; an oversize reassembled post is refused by the wall's own byte cap, never truncated. | **Shipped + tested** (AC143) |
+| **Local-socket wall access** (any local process reaching the `eldr-gooseworld` socket) | The loopback host services NOTHING before the pairing token arrives as the first line (wrong token = closed unserviced); the Unix-socket path is 0600; the TCP fallback binds 127.0.0.1 only, and the extension binary refuses non-loopback by construction. | **Shipped + tested** (AC143) |
+
+**What is deliberately NOT yet proven, stated plainly:** the town A2A plane and the
+grant-backed authorizer are wired and proven **end-to-end in one process** — an in-process
+TWO-TOWN E2E (AC131) drives two full towns over one `LocalRelaySimulator` through the real
+`serve` loop: a grant admits Town A, an agent-labeled reply returns byte-exact, every
+negative fails closed, and a granted town still cannot reach the coding plane (the
+confused-deputy crown jewel). The WALL plane now has the same one-process proof (AC143): a
+chunked post travels the real serve loop, is grant-admitted, plane-routed, reassembled
+byte-exact, and reads back quarantined as REMOTE, with cursors surviving a node restart.
+What neither covers is the **live two-machine run over the real relay** (GOOSEWORLD Phase
+0): no live network (partition/latency/NIP-42 AUTH/khatru chunk limits), no second
+OS/Keychain, and the peer service is a minimal A2A responder rather than a live goose
+flock. That is the one gap a second machine would close. Two further wall-plane limits,
+stated: the node-side wall enforces grant EXISTENCE per line but per-day byte/message
+budgets remain the engine-side send gate (`AgentEngine.authorizeTownSend` — a headless
+node does not yet meter them), and the headless grant source is an owner-curated FILE
+where removal is revocation (`FileStandingGrantStore`) — the signed
+`standing_grant_revocation` flow remains the phone/engine surface.
+The
+`PinnedTownAllowlist` config path is a transport admission check, **not** a §13-compliant
+human-signed grant, and is documented as such; the §13-shaped authorization is the standing
+grant. No public gooseworld artifact should ship before the Phase-2 hardening in this section
+is exercised on-device — connecting shells across a network without it is the one unforgivable
+version of this product (GOOSEWORLD §7, Phase 2).
+
+## 4b. Eldr↔Buzz gateway — E2EE termination at the bridge
+
+When Eldr hosts the local model as a member of a Block/Buzz workspace
+(`eldr-buzz-agent`, DEVIATIONS AC144, `docs/guide/ELDR-BUZZ-INTEROP.md`), a deliberate
+crypto-boundary change occurs and MUST be understood, not discovered.
+
+A Buzz channel is **signed-not-E2EE plaintext**: every kind:9 message is a
+signed Nostr event whose content the Buzz relay operator can read. Eldr's own
+value proposition is the opposite — the relay is hostile and sees only
+ciphertext (§2.1–2.2). Bridging the two regimes necessarily terminates E2EE at
+the gateway: to post a reply into a Buzz channel the gateway MUST emit plaintext
+to the Buzz relay.
+
+| Threat | Mitigation | Status |
+|---|---|---|
+| **Silent E2EE downgrade** (a user assumes Buzz traffic has Eldr's confidentiality) | The gateway prints an explicit disclosure at startup (`BuzzGatewayConfig.disclosureBanner`): "messages this gateway posts are readable by that relay's operator." The boundary is a documented, deliberate decision, mirroring the transparency of the `ai_window` banner. Huginn's Connections wizard raises the same statement to a **required acknowledgement** before a connection may exist, and the supervisor refuses to start an unacknowledged one (fail closed); the banner is also pinned to the tab, so it cannot be acknowledged once and forgotten. | **Shipped** (AC144, GUI gate AC146) |
+| **Third-party bridge operator** (someone other than the owner running the gateway sees the plaintext) | The gateway MUST be run by the workspace owner only; it holds the owner-attested agent key and the local-model endpoint. Documented as a hard operating rule. | **Policy** (AC144) |
+| **Uncontrolled egress of chat context toward the bridge** | The gateway now runs every outbound reply through `CredentialRedactor` before it is published (`GatewayLogic.outboundText`, `ELDR_BUZZ_REDACT`, ON by default, per-connection toggle in Huginn ▸ Connections) — the same redactor the watch-along fan-out uses, applied at the exact hop where E2EE terminates. It fails toward redacting: a false positive costs a marker, a false negative leaks a live credential. It scrubs SHAPES (keys, tokens, connection strings, PEM blocks), not semantics — a model can still be prompted into paraphrasing something private, which is what the mentions-only default, the per-connection persona, and the workspace-trust rule above are for. | **Shipped + tested** (AC146) |
+| **NIP-AM / NIP-AO telemetry leakage** | Turn metrics (44200) and observer frames (24200) are NIP-44-encrypted to the OWNER; only `p`/`agent`/`created_at` are cleartext. Turn rate is already observable from channel messages, so no new metadata class is exposed. Matches Buzz's own NIP-AM/AO security analysis. | **Shipped + tested** (AC144) |
+| **A compromised workspace correlating the owner across workspaces** | Each connection mints its OWN agent key (`buzzagent.<id>`, data-protection Keychain, `WhenUnlockedThisDeviceOnly`, never synced) — never the owner's identity key and never shared between workspaces — so two Buzz workspaces see two unrelated pubkeys. A **Rotate key** action re-mints and re-attests on demand. The owner's link to the agent is still public *within* one workspace: NIP-OA attestation names the owner pubkey by design (the alternative Eldr proposes upstream is `docs/nips-contrib/NIP-OA-amendment-unsigned-carriers.md` — attestation carried inside a NIP-59 gift wrap, verified post-unwrap; it supersedes the withdrawn NIP-AS "Sealed Attestation" draft and is not something a Buzz relay accepts today). | **Shipped** (AC146) |
+| **Owner key exposure while attesting from the GUI** | The workspace owner's key is pasted once, used in memory to sign the NIP-OA tag, and never written to disk or passed to the child process (`ELDR_BUZZ_OWNER_PRIVATE_KEY` is explicitly scrubbed from the spawn environment). Only the resulting signature and the owner's PUBLIC key persist. A test asserts neither the owner key nor the agent private key appears in the connections file. | **Shipped + tested** (AC146) |
+| **An agent that keeps speaking after the owner removes it** | Remove publishes an agent-signed retirement (kind:0 tombstone + NIP-09 kind:5 deletion request for its own profile events) and then destroys the Keychain key, so nothing on this Mac can sign as that agent again. A relay MAY refuse the retirement events — the UI reports which part landed, and key destruction is the part that always holds. | **Shipped** (AC146) |
+
+**Eldr↔Eldr traffic is unaffected** — it stays PQ-ratcheted gift-wrapped E2EE.
+Only the Buzz-channel boundary is plaintext, and only by Buzz's design. The
+honest one-line summary the product must surface: *messages crossing into a Buzz
+channel are readable by that channel's relay operator; everything on the Eldr
+side of the bridge is not.*
+
 ## 5. Cryptographic assumptions
 
 X25519, Ed25519, ML-KEM-768 (FIPS 203), AES-256-GCM, ChaCha20-Poly1305,

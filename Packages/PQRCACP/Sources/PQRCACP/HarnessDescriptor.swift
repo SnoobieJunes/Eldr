@@ -2,7 +2,7 @@
 import Foundation
 
 // Phase 1 item 3 + the "Scaffolds that make Phases 2–4 drop-in" section of
-// docs/ACPRouterplan.md: a DATA-DRIVEN backend descriptor — "how to launch/connect each
+// docs/done/2026-07-17/ACPRouterplan.md: a DATA-DRIVEN backend descriptor — "how to launch/connect each
 // harness". The plan's whole thesis is that EldrChat is a universal ACP *router*: the node
 // owns identity/E2EE/transport, and the actual coding is delegated to interchangeable ACP
 // harnesses (built-in `eldr-acp`, Xcode ACP, OpenClaw, Claude Code, Codex, Gemini CLI,
@@ -184,6 +184,32 @@ public struct HarnessDescriptor: Sendable, Equatable, Identifiable {
 ///     directory`. A bare command name here only resolves if the operator installs
 ///     via a PATH-visible method (Homebrew, system Node) or the node's own PATH is
 ///     extended — this is a real per-Mac setup step, not a code bug.
+///   • NOT provisional (WS-G2, verified 2026-07-20) — goose: `goose acp` confirmed
+///     against the real installed binary (Block/AAIF goose 1.37.0 at
+///     `~/.local/bin/goose`, whose `--help` lists `acp  Run goose as an ACP agent
+///     server on stdio`). Verified the WS3d way — a REAL `initialize` handshake driven
+///     through the production path (`runHarness` → `StdioHarnessTransport` →
+///     `runACPProxy`), not a hand-typed shell probe — and goose answered with a
+///     well-formed ACP initialize result: `protocolVersion: 1`, `agentCapabilities`
+///     (`loadSession`, prompt/mcp/session capabilities), and one `authMethods` entry
+///     `goose-provider` ("Run `goose configure` to set up your AI provider and API
+///     key"). See `GooseHarnessTests` — the live half is `.enabled(if:)`-gated on goose
+///     being resolvable, so a machine without it SKIPS rather than passing vacuously.
+///     **A configured provider is NOT needed to complete `initialize`** — proven by
+///     re-running the same handshake under an EMPTY `HOME`/`XDG_CONFIG_HOME` (no
+///     `config.yaml` anywhere), which returned the byte-identical result. goose instead
+///     advertises the requirement through `authMethods`, which is the correct ACP shape.
+///     What is still UNVERIFIED: an actual `session/prompt` turn (that DOES need a
+///     configured provider — `goose configure` — or a provider env var; none was
+///     exercised here), and `session/new`'s behaviour on an unconfigured install.
+///     `vendorKeyEnvVar` is deliberately `nil`: goose sources credentials from its own
+///     `~/.config/goose/config.yaml` + keyring, so there is no single env var the node
+///     could inject, and declaring one would make the Keychain lookup act on a lie.
+///     PATH CAVEAT, and it bites goose harder than anything else here: goose's own
+///     installer drops the binary in `~/.local/bin`, which is NOT on a GUI-launched
+///     Huginn.app's (or launchd-spawned eldr-node's) default PATH — set
+///     `ELDR_HARNESS_CMD_GOOSE_ACP` to the absolute path (`commandOverrideEnvVar(for:)`
+///     below; the `acp` argument survives the override).
 ///   • Still provisional (`isProvisional: true`) — Codex, OpenCode, Cursor:
 ///     SCAFFOLDING DATA. The commands/args are the tools' *conventional* ACP launch
 ///     invocations and MUST be confirmed against each installed tool before Phase-2
@@ -242,6 +268,44 @@ public enum HarnessRegistry {
             args: ["--experimental-acp"],
             isProvisional: false,
             vendorKeyEnvVar: "GEMINI_API_KEY"),
+
+        // goose (Block/AAIF) in ACP-agent mode: `goose acp` — "Run goose as an ACP agent
+        // server on stdio", per `goose --help` on the installed 1.37.0 build. This is the
+        // WS-G2 row of private/GOOSEWORLD.md: with it, a node's brain can BE a goosetown's
+        // goose rather than merely talk to one. Note the DIRECTION — we are the ACP
+        // *client* and goose is the *agent*; the SETUP-GUIDE caveat about goose is about
+        // the reverse arrangement (goose as a client of our agent), which is not this.
+        HarnessDescriptor(
+            id: "goose-acp",
+            displayName: "goose",
+            kind: .stdioSpawn,
+            command: "goose",
+            args: ["acp"],
+            isProvisional: false),
+
+        // Hermes (Nous Research) in ACP-agent mode: `hermes acp`. Same DIRECTION as the
+        // goose row — we are the ACP *client*, Hermes is the *agent*. PROVISIONAL: Hermes
+        // is not installed on this machine, so the command/args are the documented launch
+        // invocation, NOT a verified `initialize` handshake (unlike the goose/Claude/Gemini
+        // rows above). Two caveats a real integration must confirm: (1) `hermes acp` needs
+        // Hermes' optional `[acp]` extra installed (`uv pip install -e '.[acp]'` in the
+        // hermes-agent checkout); a base install has no ACP adapter and will fail to launch.
+        // Alt entrypoints are `hermes-acp` / `python -m acp_adapter`. (2) PATH bites here
+        // like it does goose — a uv/pipx install lands outside a GUI-launched Huginn.app's
+        // default PATH, so set `ELDR_HARNESS_CMD_HERMES_ACP` to the absolute path
+        // (`commandOverrideEnvVar(for:)`; the `acp` argument survives the override).
+        // `vendorKeyEnvVar` is `nil` for the same reason as goose: Hermes sources provider
+        // credentials from its own `~/.hermes/config.yaml`, so there is no single env var
+        // the node could inject, and declaring one would make the Keychain lookup act on a
+        // lie. UNVERIFIED: whether the adapter answers `protocolVersion: 1` in the
+        // `session/new`/`session/prompt`/`session/request_permission` shape our client drives.
+        HarnessDescriptor(
+            id: "hermes-acp",
+            displayName: "Hermes",
+            kind: .stdioSpawn,
+            command: "hermes",
+            args: ["acp"],
+            isProvisional: true),
 
         // ── Phase-2 placeholders (still PROVISIONAL — commands are defaults to confirm). ──
         // Codex: OpenAI's `codex` CLI, ACP/stdio subcommand.

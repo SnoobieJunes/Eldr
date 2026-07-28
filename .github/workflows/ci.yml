@@ -71,6 +71,45 @@ jobs:
       - name: Test
         run: swift test --package-path Packages/${{ matrix.package }}
 
+  linux:
+    # WS-L0 — the Linux port gate (GOOSEWORLD Linux port). Builds the Linux-portable
+    # packages and runs the suites verified to pass on Linux: the keystore ladder, the
+    # NIO WebSocket loopback, and (WS-L4) the FULL PQRCACP agent tool-host suite — the
+    # ACP agent, ToolExecutor shell round-trips via /bin/bash, the PTY lifecycle proofs
+    # (spawn/kill-the-orphan on a real pseudo-terminal), StdioHarnessTransport spawns,
+    # and the RunnerE2E real-binary handshake. Until this is green, the Linux-port
+    # claims stay `[unverified]`. Local equivalent (no second machine): Apple's
+    # `container` CLI —
+    #   container run --rm -v "$PWD":/src -w /src swift:6.2 swift build --package-path Packages/EldrNode
+    # (the runner has network, so no offline SwiftPM cache seeding is needed here).
+    name: linux build + verified tests (swift 6.2)
+    runs-on: ubuntu-latest
+    container: swift:6.2-jammy
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build the Linux-portable packages
+        run: |
+          set -e
+          for p in PQRCCore PQRCNostr PQRCACP PQRCMCP; do
+            echo "::group::build $p"
+            swift build --package-path "Packages/$p"
+            echo "::endgroup::"
+          done
+          # EldrNode: the reusable serve loop AND the eldr-node daemon (identity + keystore
+          # + SwiftNIO relay transport + the WS-L4 agent host) — the whole node compiles
+          # on Linux.
+          swift build --package-path Packages/EldrNode --product EldrNodeCore
+          swift build --package-path Packages/EldrNode --product eldr-node
+      - name: Linux-verified tests (keystore + NIO WebSocket + ACP agent host)
+        run: |
+          set -e
+          swift test --package-path Packages/EldrNode --filter LinuxKeystore
+          swift test --package-path Packages/PQRCNostr --filter connectsAndEchoesOverLoopback
+          # WS-L4: the whole agent tool-host suite runs on Linux (PTY + shell + spawn +
+          # runner E2E). Live goose/hermes/cloud-CLI handshakes self-skip when the
+          # binaries aren't installed — absent tools skip, they never pass vacuously.
+          swift test --package-path Packages/PQRCACP
+
   app-build:
     name: xcodebuild build (iOS + Mac Catalyst — fast gate)
     runs-on: macos-26

@@ -78,7 +78,9 @@ Apps/Huginn/       # macOS companion app (Huginn.xcodeproj) — pairs with the p
 TestVectors/       # Frozen JSON vectors (see TEST-PLAN §2).
 docs/              # ALL documentation lives here — one folder, real files (the old root
                    # copies + symlinks are gone). Canon: pqrc-SPEC-v1_1.md, NIP-XX-pqrc.md,
-                   # APP-SPEC.md, TEST-PLAN.md. Superseded material: docs/deprecated/ only.
+                   # APP-SPEC.md, TEST-PLAN.md. Indexed by docs/README.md.
+                   # What's left: docs/BACKLOG.md. Designs: docs/plan/.
+                   # How-to: docs/guide/. Finished: docs/done/<date>/.
 Eldr.xcworkspace   # ties the two apps + packages together.
 ```
 
@@ -132,13 +134,6 @@ the product a different way:
 | `.define("ELDR_PCC_SDK")` unconditional | Broke stable Xcode + 3 of 5 CI jobs; no GitHub runner has Xcode 27 (AC123) |
 | `ELDR_PCC_SDK` env-var opt-in | Dock-launched Xcode doesn't inherit shell env → PCC silently OFF in the app the owner actually runs (AC125) |
 | `.pcc_enabled` flag file | Same silent-OFF failure; also invisible to SwiftPM's manifest cache |
-
-The two failure modes are opposite and a flag can only ever pick one. The version
-gate has neither. **If PCC looks broken, the cause is the toolchain (`xcodebuild
--version` must say 27) or the device — never the gate.** Diagnose with
-`swift test --package-path Packages/PQRCAgent --filter PCCBuildGateTests`, which
-asserts the correct behavior for whichever SDK it is compiled against and fails
-loudly if the gate is ever broken again.
 
 ```bash
 # Fast inner loop (no simulator needed) — ALL EIGHT packages, not just the first three.
@@ -195,12 +190,67 @@ These come straight from the SPEC/NIP. Violating any of them is a failed build, 
 - Wire structs round-trip through Codable with stable field names matching the NIP exactly (`spk`, `pqpk`, `otp`, `otp_pq`, `lrp`, `dh`, `pn`, `n`, `pq`, `ptr`, …).
 - Unknown JSON fields are preserved-or-ignored, never fatal (forward compatibility, SPEC §12).
 
+## Documentation lifecycle — every doc has a type, and two of them expire
+
+`docs/README.md` is the index and **`docs/BACKLOG.md` is the single list of unbuilt
+work** — not a plan doc, not DEVIATIONS, not `private/`. Read the index before adding
+a document; the odds are high that the right move is editing one that already exists.
+
+**Every document is exactly one of four types.** The type decides where it lives
+and how it ends:
+
+| Type | Lives in | How it ends |
+|---|---|---|
+| **Law** | `docs/` | Never. Edited in place. SPEC, NIP, APP-SPEC, TEST-PLAN, THREAT_MODEL, the CC0 extensions. |
+| **Guide** | `docs/` | Never, but it rots — it encodes commands, counts, and version numbers. Fix it when you touch what it describes. |
+| **Ledger** | `docs/` | Never. `DEVIATIONS.md` is append-only: a wrong entry is corrected by **appending a bracketed correction**, never by rewriting history. |
+| **Plan** | `docs/plan/` | **Expires.** It leaves the moment its work lands in DEVIATIONS. |
+
+**The rule that matters, because breaking it is what caused the sprawl:**
+
+> **A finished plan moves to `docs/done/<YYYY-MM-DD>/`. It is never edited into
+> a status report and left in `docs/`.**
+
+A plan that stays put becomes three documents at once — a plan, a status board, and
+an archive — and each wants a different shape. That is where the "Status: BUILT"
+preambles stacked on top of unchanged plan bodies come from, and it is why the same
+fact ended up copied into five documents and then corrected in only one.
+
+When a plan's work lands:
+
+1. Write the DEVIATIONS entry. **That is the durable record** — not the plan doc.
+2. `git mv` the plan to `docs/done/<YYYY-MM-DD>/`, dated by retirement.
+3. Add a header: what superseded it, and what in it is still worth reading. If a
+   specific claim turned out to be *wrong* rather than merely superseded, say so —
+   those are different warnings.
+4. **Re-point every inbound reference, including Swift source comments.**
+   `grep -rn "<filename>" .` — comments in `Packages/` count. When
+   `ACPRouterplan.md` was archived, seven files under `Packages/PQRCACP/` were left
+   pointing at a path that no longer exists.
+5. **Strike the item from `docs/BACKLOG.md`**, or move it down a section if only
+   part of it landed. That file is the single answer to "what is left to build?" —
+   if it is not swept, it stops being the answer and the sprawl comes back.
+
+**Before writing any new document, in order:**
+
+- Does an existing doc own this subject? Edit it.
+- Is this a decision rather than a document? It is a DEVIATIONS entry. Most
+  "analysis docs" are one long DEVIATIONS entry that escaped.
+- Is it a plan? It goes in `docs/plan/` with an **owner** and an **exit condition**
+  in the first ten lines, and a workstream prefix that is not already taken (grep
+  DEVIATIONS: `WS-G`, `WS-L`, `WS-M`, `WS-I`, `WS-BM`, `WS-B`/`C`/`D` are in use).
+- Is it a fact already stated elsewhere? **Link it, do not copy it.**
+
+**Status honesty is per-claim, not per-document.** A banner at the top of a long
+document is how a reader ends up trusting the paragraphs underneath it that are no
+longer true. Mark the individual claim.
+
 ## Definition of done 
 
 - [ ] All **eight** packages compile; `swift test` green on every package.
 - [ ] Both app targets build: `xcodebuild test` green for **EldrChat** (incl. UI smoke tests + the accessibility audit) **and for Huginn** (macOS).
 - [ ] TEST-PLAN coverage implemented: crypto vectors frozen in `TestVectors/`, ratchet/FS/PCS proofs, envelope/padding/fuzz checks, agent-integrity suite, simulator chaos matrix, group fan-out, performance budgets wired (baseline-relative).
-- [ ] Demo "Local Universe" runs: scripted Alice/Bob conversation incl. one AI-drafted message, one `ai_window`, one shared AI thread, one >64 KB paste (**via relay chunking**), one group of 4. Script documented in `docs/DEMO.md`.
+- [ ] Demo "Local Universe" runs: scripted Alice/Bob conversation incl. one AI-drafted message, one `ai_window`, one shared AI thread, one >64 KB paste (**via relay chunking**), one group of 4. Script documented in `docs/guide/DEMO.md`.
 - [ ] `docs/THREAT_MODEL.md` generated per SPEC §15.3 (honest about IP visibility, recipient `p`-tag, no deniability, single-device).
 - [ ] `docs/DEVIATIONS.md` lists every judgment call made, each tagged `[upstream-NIP]`, `[app-only]`, or `[tech-debt]`.
 - [ ] No TODO blocks a green test run.

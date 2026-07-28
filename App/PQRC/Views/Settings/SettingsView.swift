@@ -498,7 +498,7 @@ struct SettingsView: View {
                     AppSession.setShowAgentEnvelope(on, siloID: model.siloID)
                 }))
                 .accessibilityIdentifier("show-agent-envelope-toggle")
-            Text("When your AIs talk in a shared thread, each message is wrapped in a small machine-readable header (⟡⟡ skill · from · re · scope). OFF (default) hides that frame and shows only the message body; ON shows the raw envelope. Either way the full envelope is always recorded — this only changes what's displayed.")
+            Text("When your AIs talk in a shared thread, each message can carry a small human-legible header (⟡⟡ skill · from · re · scope) that labels which AI wrote it and why. OFF (default) hides that frame and shows only the message body; ON shows it. It's a display convention, not a wire format — the thread binding and AI-vs-human provenance are enforced separately inside the encrypted envelope, not parsed from this header.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
         }

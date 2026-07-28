@@ -60,6 +60,8 @@ public struct PrekeyState: Codable, Sendable {
 /// unlinkability caveat — never a confidentiality downgrade).
 public actor PrekeyManager {
     public struct ConsumedPrekeys: Sendable {
+        /// Our long-term X25519 identity key — PQXDH's `IK_B`, needed for dh2.
+        public let ikDH: Curve25519.KeyAgreement.PrivateKey
         public let spk: Curve25519.KeyAgreement.PrivateKey
         public let otp: Curve25519.KeyAgreement.PrivateKey?
         public let otpPQ: MLKEM768.PrivateKey?
@@ -183,39 +185,73 @@ public actor PrekeyManager {
     /// Responder side: resolve the private halves an initiator says it used
     /// (D4 wire fields `spk_used` / `otp_used` / `otp_pq_used`, SHA-256 of the
     /// public key). Consumed one-time halves are deleted before returning.
+    /// Validate a handshake, then resolve the private halves it references.
+    /// **Prefer this over the field-by-field overload** — it cannot be called in
+    /// the wrong order, so a forged or malformed handshake is rejected before it
+    /// can spend a one-time prekey (invariant 11).
+    public func consume(_ message: HandshakeMessage) throws -> ConsumedPrekeys {
+        try message.validate()
+        return try consume(
+            spkUsed: message.spkUsed, otpUsed: message.otpUsed,
+            otpPQUsed: message.otpPQUsed, lrpUsed: message.lrpUsed)
+    }
+
+    /// Resolve the private halves an initiator says it used (D4 wire fields
+    /// `spk_used` / `otp_used` / `otp_pq_used`, SHA-256 of the public key).
+    /// Consumed one-time halves are deleted before returning.
+    ///
+    /// Everything is resolved BEFORE anything is deleted. Previously the DH
+    /// one-time half was removed and marked consumed, and only then was the PQ
+    /// half looked up — so a message pairing a real `otp_used` with a garbage
+    /// `otp_pq_used` threw, kept nothing, and still burned a published prekey.
+    /// That is a pool drain costing the sender nothing.
+    ///
+    /// Performs no message-level validation; unless you are resolving prekeys
+    /// for something other than a `HandshakeMessage`, call ``consume(_:)``.
     public func consume(
         spkUsed: Data, otpUsed: Data?, otpPQUsed: Data?, lrpUsed: Bool
     ) throws -> ConsumedPrekeys {
         guard sha256(spkPrivate.publicKey.rawRepresentation) == spkUsed else {
             throw PQRCError.unknownPrekey
         }
+        guard !(lrpUsed && otpUsed != nil) else {
+            throw PQRCError.handshakeMalformed
+        }
+
+        // ---- Resolve. Nothing is mutated in this phase. ----
         var otp: Curve25519.KeyAgreement.PrivateKey?
         if lrpUsed {
             // Last-resort path: reusable by design; unlinkability caveat documented.
             otp = lrpPrivate
         } else if let otpUsed {
-            if consumedOTPHashes.contains(otpUsed) {
+            guard !consumedOTPHashes.contains(otpUsed) else {
                 throw PQRCError.oneTimePrekeyAlreadyConsumed
             }
-            guard let found = otpPrivate.removeValue(forKey: otpUsed) else {
-                throw PQRCError.unknownPrekey
-            }
-            consumedOTPHashes.insert(otpUsed)
+            guard let found = otpPrivate[otpUsed] else { throw PQRCError.unknownPrekey }
             otp = found
         }
         var otpPQ: MLKEM768.PrivateKey?
         if let otpPQUsed {
-            if consumedOTPHashes.contains(otpPQUsed) {
+            guard !consumedOTPHashes.contains(otpPQUsed) else {
                 throw PQRCError.oneTimePrekeyAlreadyConsumed
             }
-            guard let found = otpPQPrivate.removeValue(forKey: otpPQUsed) else {
-                throw PQRCError.unknownPrekey
-            }
-            consumedOTPHashes.insert(otpPQUsed)
+            guard let found = otpPQPrivate[otpPQUsed] else { throw PQRCError.unknownPrekey }
             otpPQ = found
         }
+
+        // ---- Commit. Past this point nothing can throw. ----
+        if !lrpUsed, let otpUsed {
+            otpPrivate.removeValue(forKey: otpUsed)
+            consumedOTPHashes.insert(otpUsed)
+        }
+        if let otpPQUsed {
+            otpPQPrivate.removeValue(forKey: otpPQUsed)
+            consumedOTPHashes.insert(otpPQUsed)
+        }
+
         return ConsumedPrekeys(
-            spk: spkPrivate, otp: otp, otpPQ: otpPQ, pqpk: pqpkPrivate, usedLastResort: lrpUsed
+            ikDH: ikDHPrivate, spk: spkPrivate, otp: otp, otpPQ: otpPQ,
+            pqpk: pqpkPrivate, usedLastResort: lrpUsed
         )
     }
 }

@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 import Foundation
 
-// Phase 1 (docs/ACPRouterplan.md §5): decouple ACP from stdio. The agent was already
+// Phase 1 (docs/done/2026-07-17/ACPRouterplan.md §5): decouple ACP from stdio. The agent was already
 // transport-agnostic (`OutputSink` out, `handle(line:)` in); the CLIENT half
 // (`ACPClientDriver`) was hardcoded to FileHandle pipes. `ACPTransport` is the seam that
 // lets the SAME client + agent protocol logic run over Multipeer / LAN / in-memory. The
@@ -51,12 +51,12 @@ public struct InMemoryACPTransport: ACPTransport {
     public func close() { outbound.finish() }
 }
 
-// NODE-SIDE (macOS only): `runACPAgent` and its output bridge run the AGENT half over a
-// transport, constructing `ACPAgent` (macOS-only). The phone speaks ACP as the CLIENT
+// NODE-SIDE (macOS + Linux): `runACPAgent` and its output bridge run the AGENT half over
+// a transport, constructing `ACPAgent` (node-only). The phone speaks ACP as the CLIENT
 // (`ACPClient`) and never hosts the agent, so this is guarded off iOS. The `ACPTransport`
 // protocol + `InMemoryACPTransport` above stay iOS-available (the phone implements/uses
 // them).
-#if os(macOS)
+#if os(macOS) || os(Linux)
 /// Bridges an `ACPTransport`'s outbound side to the agent's `OutputSink` (the thing
 /// `ClientConnection` writes its notifications/requests through).
 struct TransportOutputSink: OutputSink {
@@ -134,4 +134,4 @@ public func runACPAgent(
     await connection.failAll(ClientConnection.ConnectionError.cancelled)
     await agent.terminateAllTerminals()
 }
-#endif  // os(macOS) — runACPAgent + TransportOutputSink (node-side: hosts ACPAgent)
+#endif  // os(macOS) || os(Linux) — runACPAgent + TransportOutputSink (node-side: hosts ACPAgent)

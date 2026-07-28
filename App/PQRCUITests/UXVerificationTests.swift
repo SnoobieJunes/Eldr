@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 import XCTest
 
-/// Runtime verification of the findings from docs/deprecated/UX-RECOMMENDATIONS.md.
+/// Runtime verification of the findings from docs/done/2026-07-17/UX-RECOMMENDATIONS.md.
 /// These DRIVE the real app (taps, sheets, typing) and attach screenshots.
 /// Status per test:
 ///  - rec1: the review was acted on (single AI chip + Details override are the two

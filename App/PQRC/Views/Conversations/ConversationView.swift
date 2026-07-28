@@ -908,6 +908,22 @@ private struct ConversationStatusHeader: View {
             if let banner = model.activeWindowBanner(conversationID: conversationID, now: now) {
                 AIWindowBanner(name: banner.name, until: banner.until, now: now)
             }
+            // WS-G4/G5 invariant 9: a live STANDING TOWN GRANT for this peer is a
+            // standing autonomous authorization, so it gets the same always-visible
+            // treatment as an ai_window — pinned for its whole (day-scale) lifetime.
+            // 1:1 conversation ids ARE the peer identity hex, so this surfaces exactly
+            // where the granted relationship lives. Opaque tint (A7, contrast auditor).
+            if let grant = model.activeTownGrantBanner(conversationID: conversationID, now: now) {
+                Label(
+                    "Standing town grant active (\(grant.planes)) · \(townGrantRemaining(until: grant.until, now: now))",
+                    systemImage: "signpost.right.and.left")
+                    .font(.caption.weight(.medium))
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 6)
+                    .background(Color.teal.mix(with: Color(.systemBackground), by: 0.86))
+                    .accessibilityIdentifier("standing-town-grant-banner")
+                    .accessibilityLabel("Standing town grant active for this contact")
+            }
             if model.iGrantedContext(scope: scope, now: now) {
                 Label("AI context sharing is on", systemImage: "brain.head.profile")
                     .font(.caption.weight(.medium))
@@ -949,11 +965,23 @@ private struct ConversationStatusHeader: View {
             }
         }
         .onAppear { summary = model.primaryAIContextSummary(conversationID) }
+        .task { await model.refreshTownGrants() }
         .onReceive(ticker) { _ in
             now = Int64(Date().timeIntervalSince1970)
             if now % 5 == 0 { summary = model.primaryAIContextSummary(conversationID) }
         }
     }
+}
+
+/// Day-scale remaining time for a standing grant ("6d 23h left" / "45m left") — grants
+/// are day-bounded, so second-precision would be noise.
+func townGrantRemaining(until: Int64, now: Int64) -> String {
+    let seconds = max(0, until - now)
+    let days = seconds / 86_400
+    let hours = (seconds % 86_400) / 3_600
+    if days > 0 { return "\(days)d \(hours)h left" }
+    if hours > 0 { return "\(hours)h left" }
+    return "\(max(1, seconds / 60))m left"
 }
 
 /// "AI is present" reads as a distinct material (APP-SPEC §11).

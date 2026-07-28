@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-#if os(macOS)
+#if os(macOS) || os(Linux)
 import Foundation
 import Testing
 
@@ -177,4 +177,4 @@ struct StdioHarnessTransportTests {
         }
     }
 }
-#endif  // os(macOS)
+#endif  // os(macOS) || os(Linux)

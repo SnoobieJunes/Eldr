@@ -3,7 +3,7 @@ import Foundation
 
 /// The runbook `eldrctl conduit instructions` prints verbatim — the steps the user's AI on
 /// the Mac follows to stand up the iPhone-EldrChat ↔ Mac-Huginn conduit. Kept here (not only
-/// in `docs/CONDUIT-SETUP.md`) so a test can assert the doc and this stay in sync.
+/// in `docs/guide/CONDUIT-SETUP.md`) so a test can assert the doc and this stay in sync.
 public enum Runbook {
     public static let text: String = """
     ELDR CONDUIT — SETUP RUNBOOK (for the AI driving the Mac)

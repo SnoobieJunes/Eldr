@@ -70,7 +70,7 @@ Right now you get to pick one. Private messengers (Signal, iMessage) are adding 
 - **Build it and beat on it.** Quickstart below. File issues for anything that confuses you — UX confusion reports are as valuable as crashes.
 - **Device testing.** The highest-value work right now is proving flows on real hardware (pairing, tethered AI, the coding-agent conduit). File what you find as issues.
 - **Security review.** Read [docs/pqrc-SPEC-v1_1.md](docs/pqrc-SPEC-v1_1.md) and [docs/THREAT_MODEL.md](docs/THREAT_MODEL.md), then try to break the implementation. Report privately (below). We treat findings as first-class commits — the repo's audit-fix history is public.
-- **Run a relay.** Deployment runbook: [docs/RELAY-DEPLOY-CROSTINI.md](docs/RELAY-DEPLOY-CROSTINI.md).
+- **Run a relay.** Deployment runbook: [docs/guide/RELAY-DEPLOY-CROSTINI.md](docs/guide/RELAY-DEPLOY-CROSTINI.md).
 - **Protocol feedback.** The wire format ([docs/NIP-XX-pqrc.md](docs/NIP-XX-pqrc.md)) and the A2A extension ([docs/A2A-PQRC-EXTENSION.md](docs/A2A-PQRC-EXTENSION.md)) both want adversarial readers before they're submitted upstream.
 - **Contribute code.** Start with [CONTRIBUTING.md](CONTRIBUTING.md) — the hard invariants are non-negotiable (the tests enforce them), every judgment call gets a [docs/DEVIATIONS.md](docs/DEVIATIONS.md) entry, and nothing merges red.
 
@@ -118,23 +118,28 @@ Core logic lives in the packages (no UI imports) so `swift test` runs headlessly
 
 ## Documentation
 
-All docs live in [`docs/`](docs/) — retired material is quarantined in [`docs/deprecated/`](docs/deprecated/).
+All docs live in [`docs/`](docs/), indexed by [`docs/README.md`](docs/README.md).
+Every document is one of four types — **law**, **guide**, **ledger**, or **plan**.
+The first three are edited in place; a plan expires into [`docs/done/`](docs/done/)
+the moment its work lands in the ledger.
 
 | Start here | |
 |---|---|
-| [docs/USER-GUIDE.md](docs/USER-GUIDE.md) | Plain-language walkthrough of everything the app does |
+| [docs/BACKLOG.md](docs/BACKLOG.md) | **What's planned and not built** — the single list |
+| [docs/DEVIATIONS.md](docs/DEVIATIONS.md) | **Why it's like this** — every judgment call, tagged and dated |
+| [docs/README.md](docs/README.md) | The index — everything else, grouped by what you're doing |
 | [docs/pqrc-SPEC-v1_1.md](docs/pqrc-SPEC-v1_1.md) | The PQRC protocol — law |
 | [docs/NIP-XX-pqrc.md](docs/NIP-XX-pqrc.md) | The Nostr wire format — law on the wire |
 | [docs/APP-SPEC.md](docs/APP-SPEC.md) | Product + architecture spec |
 | [docs/TEST-PLAN.md](docs/TEST-PLAN.md) | The test suite as a deliverable |
 | [docs/THREAT_MODEL.md](docs/THREAT_MODEL.md) | What leaks and what doesn't — honestly |
-| [docs/DEVIATIONS.md](docs/DEVIATIONS.md) | Every judgment call, tagged and dated |
-| [docs/SETUP-GUIDE.md](docs/SETUP-GUIDE.md) | Building, running, transports |
-| [docs/DEMO.md](docs/DEMO.md) / [docs/DEMO-SYBILCLAW.md](docs/DEMO-SYBILCLAW.md) | Scripted demos |
+| [docs/guide/SETUP-GUIDE.md](docs/guide/SETUP-GUIDE.md) | Building, running, transports |
+| [docs/guide/USER-GUIDE.md](docs/guide/USER-GUIDE.md) | Plain-language walkthrough of everything the app does |
+| [docs/guide/DEMO.md](docs/guide/DEMO.md) / [docs/guide/DEMO-SYBILCLAW.md](docs/guide/DEMO-SYBILCLAW.md) | Scripted demos |
 
 ## Relay
 
-The bootstrap relay is **relay.lerants.com** — [khatru](https://github.com/fiatjaf/khatru) behind Cloudflare, NIP-42 AUTH read-gating on encrypted envelopes by recipient tag. Self-hosting is supported and documented ([docs/RELAY-DEPLOY-CROSTINI.md](docs/RELAY-DEPLOY-CROSTINI.md)).
+The bootstrap relay is **relay.lerants.com** — [khatru](https://github.com/fiatjaf/khatru) behind Cloudflare, NIP-42 AUTH read-gating on encrypted envelopes by recipient tag. Self-hosting is supported and documented ([docs/guide/RELAY-DEPLOY-CROSTINI.md](docs/guide/RELAY-DEPLOY-CROSTINI.md)).
 
 ## Security reporting
 

@@ -36,16 +36,53 @@ let package = Package(
     ],
     dependencies: [
         // Only `A2AHarness` depends on this — see the note on that target.
-        .package(path: "../SwiftA2A")
+        .package(path: "../SwiftA2A"),
+        // Linux-ONLY: swift-crypto backs AES-GCM/SHA-256 where CryptoKit is absent
+        // (ACPMetadataCrypto/ACPEvents). Linked only on Linux (see the PQRCACP target),
+        // so the "ZERO external packages" promise above still holds on Apple platforms.
+        // Deliberate, Linux-scoped exception to the zero-dep stance — recorded in
+        // DEVIATIONS AC139 (the eldr-node Linux port).
+        .package(url: "https://github.com/apple/swift-crypto.git", from: "4.3.1"),
     ],
     targets: [
-        // NO dependencies, ever — this is PQRCACP's zero-dep promise (CLAUDE.md: "The
-        // library has NO app/crypto/SwiftUI dependencies and ZERO external packages").
-        // A2A support is layered ABOVE this target (`A2AHarness`), not folded into it;
-        // `HarnessTransportFactory.swift` is the dependency-free seam that makes that
-        // possible (see that file).
+        // WS-L4: a header-only INTERNAL C target exposing the Linux pty family
+        // (`openpty`) + the real glibc `POSIX_SPAWN_SETSID` to Swift — the Glibc module
+        // exports neither, and hand-copying the ABI constants is exactly what the shim
+        // exists to avoid (glibc's SETSID value differs from Darwin's). Compiles to an
+        // EMPTY module on Apple platforms; not an external package, so the zero-dep
+        // promise below is untouched. libutil carries `openpty` on pre-2.34 glibc (on
+        // newer glibc it's merged into libc and the stub link is harmless).
+        .target(
+            name: "CEldrPTYShim",
+            linkerSettings: [
+                .linkedLibrary("util", .when(platforms: [.linux]))
+            ]
+        ),
+        // NO external dependencies, ever — this is PQRCACP's zero-dep promise (CLAUDE.md:
+        // "The library has NO app/crypto/SwiftUI dependencies and ZERO external
+        // packages"). The internal `CEldrPTYShim` target above is part of this package
+        // (empty on Apple), not a dependency in that sense. A2A support is layered ABOVE
+        // this target (`A2AHarness`), not folded into it; `HarnessTransportFactory.swift`
+        // is the dependency-free seam that makes that possible (see that file).
         .target(
             name: "PQRCACP",
+            dependencies: [
+                // UNCONDITIONAL on purpose, unlike Crypto below: a platform-conditional
+                // TARGET dependency (`.target(name:condition:)`) trips an Xcode package
+                // planning bug — the synthesized `PQRCACPdynamic-product` variant then
+                // collides with the static product ("Multiple commands produce
+                // PQRCACP.framework", seen in the Huginn build). The shim compiles to an
+                // EMPTY module on Apple (everything in it is behind `#if __linux__`), so
+                // the unconditional edge costs nothing there; PTYProcess imports it only
+                // in its Glibc branch. (The EldrChatTests undefined-symbol failure that
+                // once pointed suspicion here bisected to a PRE-existing break — AC142.)
+                "CEldrPTYShim",
+                // Linux only: CryptoKit's stand-in for AES-GCM/SHA-256. On Apple this
+                // list links no external package (AC139).
+                .product(
+                    name: "Crypto", package: "swift-crypto",
+                    condition: .when(platforms: [.linux])),
+            ],
             swiftSettings: [.swiftLanguageMode(.v6)]
         ),
         .executableTarget(
@@ -66,8 +103,16 @@ let package = Package(
             name: "A2AHarness",
             dependencies: [
                 "PQRCACP",
-                .product(name: "A2AClient", package: "SwiftA2A"),
-                .product(name: "A2ACore", package: "SwiftA2A"),
+                // A2AHarness sources are all `#if os(macOS)`, so these A2A products are
+                // only needed on Apple platforms. Excluding them on Linux keeps
+                // A2AClient's URLSession code off the Linux EldrNodeCore compile path
+                // (the relay town plane uses RelayA2ATransport, not A2AClient HTTP). AC139.
+                .product(
+                    name: "A2AClient", package: "SwiftA2A",
+                    condition: .when(platforms: [.macOS, .iOS, .macCatalyst, .tvOS, .watchOS, .visionOS])),
+                .product(
+                    name: "A2ACore", package: "SwiftA2A",
+                    condition: .when(platforms: [.macOS, .iOS, .macCatalyst, .tvOS, .watchOS, .visionOS])),
             ],
             swiftSettings: [.swiftLanguageMode(.v6)]
         ),

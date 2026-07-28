@@ -1,6 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
 import Foundation
+#if os(macOS) || os(Linux)
 import PQRCACP
+#if canImport(Glibc)
+import Glibc  // signal/SIGPIPE
+#endif
 
 // EldrChat ACP agent over stdio. An ACP client (Xcode 27) spawns this binary and
 // drives it with newline-delimited JSON-RPC on stdin; the agent writes responses
@@ -162,3 +166,15 @@ struct EldrACPMain {
         log("stdin closed; exiting")
     }
 }
+#else
+// WS-L4 made the agent host (Process/PTY tools) run on macOS AND Linux; this stub now
+// covers only platforms with neither (nothing real builds this target there).
+@main
+struct EldrACPMain {
+    static func main() {
+        FileHandle.standardError.write(Data(
+            "eldr-acp: the ACP agent host requires macOS or Linux.\n".utf8))
+        exit(1)
+    }
+}
+#endif

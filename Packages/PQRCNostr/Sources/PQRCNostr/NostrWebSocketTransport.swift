@@ -5,7 +5,12 @@
 //
 
 import Foundation
+#if canImport(FoundationNetworking)
+import FoundationNetworking  // URLSession/URLSessionWebSocketTask live here on Linux
+#endif
+#if canImport(OSLog)
 import OSLog
+#endif
 import PQRCCore
 
 /// The real-network `RelayTransport`: NIP-01 over `URLSessionWebSocketTask`.
@@ -54,6 +59,11 @@ public actor NostrWebSocketTransport: RelayTransport {
     private var pendingOKs: [String: CheckedContinuation<PublishAck, any Error>] = [:]
     /// Live subscriptions, keyed by our generated subscription id.
     private var subscriptions: [String: AsyncThrowingStream<NostrEvent, Error>.Continuation] = [:]
+    /// Parallel to `subscriptions`, for callers that need the NIP-01 EOSE
+    /// boundary surfaced (`subscribeFrames`). Kept separate rather than folded
+    /// into one map so the existing, load-bearing event path is untouched.
+    private var frameSubscriptions:
+        [String: AsyncThrowingStream<SubscriptionFrame, Error>.Continuation] = [:]
     /// NIP-42 challenge state: relays send ["AUTH", challenge] unprompted on
     /// connect; authenticate() may run before or after it arrives.
     private var authChallenge: String?
@@ -300,7 +310,48 @@ public actor NostrWebSocketTransport: RelayTransport {
         return stream
     }
 
+    /// `subscribe(_:)` with the NIP-01 EOSE boundary surfaced. Same REQ, same
+    /// CLOSE-on-termination lifecycle; the only difference is that the relay's
+    /// EOSE becomes a `.endOfStoredEvents` frame, so a caller can ask a bounded
+    /// question ("the roster, then stop") without guessing a timeout.
+    public func subscribeFrames(_ filters: [NostrFilter]) async -> AsyncThrowingStream<
+        SubscriptionFrame, Error
+    > {
+        ensureConnected()
+        nextSubscriptionNumber += 1
+        let subscriptionID = "pqrc-sub-\(nextSubscriptionNumber)"
+        let (stream, continuation) = AsyncThrowingStream<SubscriptionFrame, Error>.makeStream()
+        frameSubscriptions[subscriptionID] = continuation
+        continuation.onTermination = { [weak self] _ in
+            Task { await self?.endFrameSubscription(subscriptionID) }
+        }
+        if let socket,
+            let text = try? NostrWire.encode(.req(subscriptionID: subscriptionID, filters: filters))
+        {
+            do {
+                try await socket.send(.string(text))
+            } catch {
+                continuation.finish(throwing: error)
+            }
+        } else {
+            continuation.finish(throwing: NostrError.publishDropped)
+        }
+        return stream
+    }
+
+    /// `RelayTransport` conformance: standard NIP-42 AUTH with no extra tags.
     public func authenticate(keypair: NostrKeypair, randomSource: any RandomSource) async throws {
+        try await authenticate(keypair: keypair, randomSource: randomSource, extraTags: [])
+    }
+
+    /// Perform NIP-42 AUTH. `extraTags` are appended to the standard
+    /// `relay`/`challenge` tags — Buzz's owner-attested agent path requires the
+    /// NIP-OA `["auth", owner, conditions, sig]` tag here so the relay's
+    /// membership gate resolves the owner (see `NIPOA` and countdown-bot's
+    /// `build_auth_event`). Empty for ordinary strfry/khatru relays.
+    public func authenticate(
+        keypair: NostrKeypair, randomSource: any RandomSource, extraTags: [[String]]
+    ) async throws {
         ensureConnected()
         // The challenge may already be here (relays send it on connect) or
         // still in flight — wait for it either way.
@@ -327,7 +378,7 @@ public actor NostrWebSocketTransport: RelayTransport {
                 pubkey: keypair.publicKeyHex,
                 createdAt: Int64(Date().timeIntervalSince1970),
                 kind: 22242,
-                tags: [["relay", url.absoluteString], ["challenge", challenge]],
+                tags: [["relay", url.absoluteString], ["challenge", challenge]] + extraTags,
                 content: ""
             ), randomSource: randomSource)
         guard let socket else {
@@ -361,7 +412,9 @@ public actor NostrWebSocketTransport: RelayTransport {
         // waitsForConnectivity: on a phone the network comes and goes; let the
         // session hold the dial until a route exists instead of failing fast.
         let configuration = URLSessionConfiguration.default
-        configuration.waitsForConnectivity = true
+        #if canImport(Darwin)
+        configuration.waitsForConnectivity = true  // get-only on swift-corelibs (Linux)
+        #endif
         let task = URLSession(configuration: configuration).webSocketTask(with: url)
         socket = task
         statusState = .connecting
@@ -396,19 +449,25 @@ public actor NostrWebSocketTransport: RelayTransport {
     /// only App Nap of THIS app while it's on screen. Idempotent: holds one
     /// token at a time for the life of the socket.
     private func beginVisibilityActivity() {
+        // App Nap is an Apple-platform concept (ProcessInfo.beginActivity/isMacCatalystApp);
+        // a headless Linux node has no window to keep awake, so this is inert there.
+        #if canImport(Darwin)
         let onMac =
             ProcessInfo.processInfo.isMacCatalystApp
             || ProcessInfo.processInfo.isiOSAppOnMac
         guard onMac, visibilityActivity == nil else { return }
         visibilityActivity = ProcessInfo.processInfo.beginActivity(
             options: .userInitiated, reason: "Relay sync while window is open")
+        #endif
     }
 
     /// Releases the App Nap assertion (Mac/Catalyst). No-op when none is held.
     private func endVisibilityActivity() {
+        #if canImport(Darwin)
         guard let token = visibilityActivity else { return }
         ProcessInfo.processInfo.endActivity(token)
         visibilityActivity = nil
+        #endif
     }
 
     /// Sends a keepalive ping on the live socket; false if there's no socket to
@@ -462,19 +521,24 @@ public actor NostrWebSocketTransport: RelayTransport {
             for waiter in waiters { waiter.resume(returning: challenge) }
         case .event(let subscriptionID, let event):
             subscriptions[subscriptionID]?.yield(event)
+            frameSubscriptions[subscriptionID]?.yield(.event(event))
         case .closed(let subscriptionID, let reason):
             // Relay-initiated end of subscription. If it's a NIP-42 auth gate
             // (khatru sends ["AUTH", challenge] alongside this), surface it as a
             // typed error so the caller authenticates and re-subscribes;
             // otherwise finish cleanly so consumers fall out of their loops.
             let continuation = subscriptions.removeValue(forKey: subscriptionID)
+            let frameContinuation = frameSubscriptions.removeValue(forKey: subscriptionID)
             if reason.contains("auth-required") {
                 continuation?.finish(throwing: NostrError.authRequired)
+                frameContinuation?.finish(throwing: NostrError.authRequired)
             } else {
                 continuation?.finish()
+                frameContinuation?.finish()
             }
         case .eose(let subscriptionID):
             emit(.eose(subscriptionID: subscriptionID))
+            frameSubscriptions[subscriptionID]?.yield(.endOfStoredEvents)
         case .notice:
             break  // NOTICEs carry no state.
         }
@@ -526,6 +590,13 @@ public actor NostrWebSocketTransport: RelayTransport {
 
     private func endSubscription(_ subscriptionID: String) async {
         subscriptions[subscriptionID] = nil
+        if let socket, let text = try? NostrWire.encode(.close(subscriptionID: subscriptionID)) {
+            try? await socket.send(.string(text))
+        }
+    }
+
+    private func endFrameSubscription(_ subscriptionID: String) async {
+        frameSubscriptions[subscriptionID] = nil
         if let socket, let text = try? NostrWire.encode(.close(subscriptionID: subscriptionID)) {
             try? await socket.send(.string(text))
         }

@@ -27,7 +27,7 @@ import Synchronization
 ///
 /// This adapter is the one deliberately untested-by-unit-tests shim in the
 /// local-link stack (it needs real radios); everything above it runs against
-/// `LocalLinkSimulator`. Verify on hardware per docs/SETUP-GUIDE.md.
+/// `LocalLinkSimulator`. Verify on hardware per docs/guide/SETUP-GUIDE.md.
 public final class MultipeerNearbyLink: NSObject, NearbyLink, Sendable {
     /// Bonjour service type: 1–15 chars, lowercase/digits/hyphen per Apple's
     /// rules. Changing it is a wire-visible break for local discovery. The

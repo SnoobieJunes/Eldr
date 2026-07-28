@@ -2,18 +2,21 @@
 import Foundation
 
 // Phase 1 item 1 (the transport-agnostic driver) + the selectable-backend scaffold of
-// docs/ACPRouterplan.md: for an EXTERNAL harness the node must SPAWN the harness binary as a
+// docs/done/2026-07-17/ACPRouterplan.md: for an EXTERNAL harness the node must SPAWN the harness binary as a
 // subprocess and PROXY the phone's ACP line-stream to the harness's stdio. The phone↔node
 // transport is one `ACPTransport`; THIS is the other one — an `ACPTransport` whose peer is a
 // locally-spawned process's stdin/stdout. With both sides modeled as `ACPTransport`,
 // `runACPProxy` pipes between them without knowing either is a process or a radio.
 //
-// macOS-only: spawning uses `Process`, which is unavailable on iOS — and per the plan the
-// node (Mac/server/Pi) hosts harnesses; the phone is always the ACP *client* and never
-// spawns one. Same `#if os(macOS)` gating as `runACPAgent` and the `.spawn` path in
+// Node-only (macOS + Linux): spawning uses `Process`, which is unavailable on iOS — and
+// per the plan the node (Mac/server/Pi) hosts harnesses; the phone is always the ACP
+// *client* and never spawns one. Same gating as `runACPAgent` and the `.spawn` path in
 // `ACPClientDriver`.
 
-#if os(macOS)
+#if os(macOS) || os(Linux)
+#if canImport(Glibc)
+import Glibc  // signal/SIGPIPE
+#endif
 /// An `ACPTransport` backed by a spawned external ACP harness: the child's **stdout →
 /// `inboundLines()`** (newline-framed JSON-RPC, identical framing to the agent) and
 /// **`send(_:)` → child stdin**; `close()` terminates it. Reuses the
@@ -213,4 +216,4 @@ private final class HarnessLineSplitter: @unchecked Sendable {
         return lines
     }
 }
-#endif  // os(macOS) — StdioHarnessTransport spawns a Process (node-side only)
+#endif  // os(macOS) || os(Linux) — StdioHarnessTransport spawns a Process (node-side only)

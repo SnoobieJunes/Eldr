@@ -1,10 +1,15 @@
 // SPDX-License-Identifier: Apache-2.0
+// A2ACore/A2AClient carry URLSession-based A2A-over-HTTP and are linked on Apple
+// platforms only (see PQRCACP/Package.swift); this whole bridge is `#if os(macOS)`
+// below, so the imports are gated to match — on Linux A2AHarness compiles to nothing.
+#if os(macOS)
 import A2ACore
 import A2AClient
+#endif
 import Foundation
 import PQRCACP
 
-// The `.a2aRemote` half of the drop-in harness seam (docs/ACPRouterplan.md): an ACP CLIENT
+// The `.a2aRemote` half of the drop-in harness seam (docs/done/2026-07-17/ACPRouterplan.md): an ACP CLIENT
 // (`runHarness`/`ACPAgent.delegateToCloudAgent`, via `ACPClientDriver`) must be able to
 // drive a real Agent2Agent (A2A) v1.0 agent EXACTLY as it drives a spawned `.stdioSpawn`
 // harness — same `ACPTransport`, same `initialize → session/new → session/prompt` shape.

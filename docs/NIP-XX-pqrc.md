@@ -108,35 +108,66 @@ dedicated X25519 identity-DH key is signed by the identity key instead.
 Signatures use the `pqrc-prekey-v1` context. One-time prekeys are covered by
 the outer event signature only (Signal pattern).
 
-## 5. Handshake (PQXDH, suite `hybrid-v1`)
+## 5. Handshake (PQXDH, suite `hybrid-v2`)
 
-Initiation computes (SPEC §4.2):
+Initiation computes all four PQXDH legs, in the specification's order
+(SPEC §4.2):
 
 ```
 dh1 = X25519(ik_dh_A, spk_B)
-dh2 = X25519(ek_A,   spk_B)
-dh3 = X25519(ek_A,   otp_B)        # or lrp_B (flagged) or omitted
+dh2 = X25519(ek_A,   ik_dh_B)
+dh3 = X25519(ek_A,   spk_B)
+dh4 = X25519(ek_A,   otp_B)        # or lrp_B (flagged) or omitted
 ss  = ML-KEM-768.Encaps(otp_pq_B or pqpk_B)
-SK  = HKDF-SHA256(dh1‖dh2‖[dh3]‖ss, salt="pqrc-v1-handshake",
+SK  = HKDF-SHA256(dh1‖dh2‖dh3‖[dh4]‖ss, salt="pqrc-v1-handshake",
                   info="pqrc-root-key"‖ik_A‖ik_B, 32)
 ```
+
+`dh1` and `dh2` authenticate — each requires one side's **long-term** key —
+while `dh3` and `dh4` supply forward secrecy. `dh2` is the reason compromising
+the medium-lived `spk` private half alone is not enough to impersonate the
+responder to an initiator working from their published bundle.
+
+The initiator MUST pick `otp_B` and `otp_pq_B` **at random** from the pool the
+bundle publishes. A bundle carries the whole pool, so a deterministic choice
+(e.g. the first entry) makes any two initiators collide, and the second one's
+handshake is then rejected at prekey resolution.
 
 The handshake rumor (`type: "handshake"`) carries message #0 piggybacked (D10):
 
 ```jsonc
 {
-  "suite": "hybrid-v1",
-  "ik":     "<base64>",   // initiator identity pub
-  "ik_dh":  "<base64>",   // initiator identity-DH pub
-  "ek":     "<base64>",   // initiator ephemeral pub
-  "kem_ct": "<base64>",   // ML-KEM-768 ciphertext
-  "kem_pk": "<base64>",   // initiator's fresh ML-KEM pub (for responder rekeys)
+  "suite": "hybrid-v2",
+  "ik":         "<base64>",   // initiator identity pub
+  "ik_dh":      "<base64>",   // initiator identity-DH pub
+  "ik_dh_sig":  "<base64>",   // ik's signature over ik_dh, `pqrc-prekey-v1` context
+  "ek":         "<base64>",   // initiator ephemeral pub
+  "kem_ct":     "<base64>",   // ML-KEM-768 ciphertext
+  "kem_pk":     "<base64>",   // initiator's fresh ML-KEM pub (for responder rekeys)
   "spk_used":    "<base64 sha256 of spk>",   // D4
   "otp_used":    "<base64 sha256>" | null,
   "otp_pq_used": "<base64 sha256>" | null,
   "lrp_used":    false
 }
 ```
+
+**Identity-binding invariant.** `ik_dh_sig` is REQUIRED, and a responder MUST
+verify it against `ik` before deriving `SK`. Without it `ik` is a free-text
+field: `ik_dh` performs the arithmetic while `ik` names the peer, so anything
+that fails to tie them together lets a sender put another party's name on a
+handshake built with their own keys — the responder then derives a secret the
+sender knows in full and files the session under the wrong identity. The
+gift-wrap seal signature (§8) independently pins the sender, but a responder
+MUST NOT rely on that alone; the binding is checked at the handshake itself.
+
+`lrp_used` and `otp_used` are mutually exclusive — `dh4` has exactly one source.
+A message asserting both MUST be rejected, not silently resolved to one.
+
+**Prekey-resolution invariant.** A responder MUST resolve every prekey a
+handshake references before deleting any of them. Deleting the `otp_used`
+private half and only then resolving `otp_pq_used` lets a message pairing a real
+one-time prekey with a bogus PQ reference burn a published prekey at no cost to
+the sender.
 
 **Rekey-target invariant:** the initiator's first PQ rekey MUST target the KEM
 key actually consumed by the handshake (`otp_pq` when present, else `pqpk`).

@@ -89,9 +89,69 @@ public enum PQRCConstants {
     public static let rumorEventKind = 1420
 
     /// Handshake suite identifier (APP-SPEC §18 D2): explicit PQXDH hybrid.
-    public static let handshakeSuite = "hybrid-v1"
+    ///
+    /// Bumped v1 → v2 when the handshake gained PQXDH's dh2 leg and the
+    /// `ik_dh_sig` binding. Both change the wire format and the derived SK, and
+    /// the suite string is exactly the mechanism that turns that into a legible
+    /// `handshakeSuiteUnsupported` for a peer on the old build instead of a
+    /// handshake that "succeeds" and then silently fails to decrypt anything.
+    public static let handshakeSuite = "hybrid-v2"
 
     /// Thread agent loop guard (APP-SPEC §18 D14): pause after this many
     /// consecutive agent messages with no human message.
     public static let agentLoopGuardLimit = 6
+
+    // MARK: - Standing town grants (GOOSEWORLD §5, DEVIATIONS AC126)
+
+    /// Hard ceiling on a standing town grant's remaining life, in seconds.
+    ///
+    /// 30 days. The whole reason standing grants exist is that `ai_window`'s
+    /// hours-scale cap (`AgentEngine.maxWindowDuration`, 24h) cannot span a
+    /// multi-day two-town co-build. But "longer" must never become "unbounded":
+    /// invariant 9 survives only because every authorization eventually lapses on
+    /// its own, so a forgotten grant is self-healing. A month is long enough for
+    /// any realistic build and short enough that a grant nobody remembers issuing
+    /// dies before it can be inherited by a compromised town.
+    ///
+    /// Enforced on BOTH sides: the issuer may only pick from
+    /// ``allowedStandingGrantDurations``; the receiver rejects anything claiming
+    /// more life than this, so a hostile peer cannot mint itself a decade.
+    public static let maxStandingGrantDuration: Int64 = 30 * 24 * 60 * 60
+
+    /// The durations a human may actually choose when issuing a standing grant,
+    /// in seconds: 1, 3, 7, 14, and 30 days.
+    ///
+    /// A closed set rather than a free-form number, for the same reason
+    /// `AgentEngine.allowedWindowDurations` is one: a picker with five entries is
+    /// a decision a human can audit at a glance, and it removes the "1 second
+    /// under the cap" fiddling that turns a bound into a formality.
+    public static let allowedStandingGrantDurations: [Int64] = [1, 3, 7, 14, 30].map {
+        $0 * 24 * 60 * 60
+    }
+
+    /// Seconds per UTC day — the window standing-grant budgets are accounted in.
+    ///
+    /// Budgets roll over by comparing `floor(clock.now() / secondsPerDay)` at
+    /// call time. That is deliberately NOT a timer: CLAUDE.md invariant 1 bans
+    /// wall-clock-driven scheduling, and a `Timer`/`Task.sleep` reset would also
+    /// mean a backgrounded phone's budget silently failed to roll. Evaluating the
+    /// day index on access is exact, side-effect free, and testable by moving an
+    /// injected clock. Unix time is UTC-anchored, so this needs no calendar and no
+    /// timezone (which would otherwise be a per-device metadata leak).
+    public static let secondsPerDay: Int64 = 24 * 60 * 60
+
+    /// The most distinct LIVE standing grants a single granter may hold in the
+    /// engine at once (each grant may expand to one record per plane).
+    ///
+    /// The receive path admits a grant only from a VERIFIED contact, but "verified"
+    /// is invite-based, not "trusted with the node's memory": a paired-but-hostile
+    /// peer can sign an unbounded number of grants naming distinct `peer` hexes
+    /// (each a fresh dictionary key), and without a cap that is a memory-exhaustion
+    /// primitive fed by another person's machine — the exact unbounded-append DoS
+    /// the cross-town wall (AC129) is bounded against, so the grant store is bounded
+    /// to match. A re-issue of an existing grant id (a top-up) is always honored and
+    /// does not count against the cap; only NEW grant ids past the cap are refused,
+    /// fail-closed. 64 is far above any real co-build (you pair with a handful of
+    /// towns, not thousands) and small enough that the store can never blow up.
+    public static let maxStandingGrantsPerGranter = 64
 }
