@@ -15,6 +15,10 @@ public enum PQRCError: Error, Equatable, Sendable {
     case invalidPrekeySignature
     case handshakeSuiteUnsupported(String)
     case handshakeMalformed
+    /// The initiator's `ik_dh` is not signed by the identity key the handshake
+    /// claims in `ik`. Anyone can write an identity key into a message; this is
+    /// the check that they hold the matching agreement key.
+    case initiatorIdentityUnverified
 
     // Ratchet
     case messageKeyUnavailable

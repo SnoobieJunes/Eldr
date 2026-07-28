@@ -2,7 +2,7 @@
 import XCTest
 
 /// TEST-PLAN §10: XCUITest over the Local Universe. The demo script
-/// (docs/DEMO.md) seeds the exact scenario these tests assert.
+/// (docs/guide/DEMO.md) seeds the exact scenario these tests assert.
 final class PQRCUITests: XCTestCase {
     override func setUpWithError() throws {
         continueAfterFailure = false

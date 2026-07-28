@@ -2,7 +2,7 @@
 import Foundation
 
 // Phase 1 item 3 + the "Scaffolds that make Phases 2–4 drop-in" section of
-// docs/ACPRouterplan.md: a DATA-DRIVEN backend descriptor — "how to launch/connect each
+// docs/done/2026-07-17/ACPRouterplan.md: a DATA-DRIVEN backend descriptor — "how to launch/connect each
 // harness". The plan's whole thesis is that EldrChat is a universal ACP *router*: the node
 // owns identity/E2EE/transport, and the actual coding is delegated to interchangeable ACP
 // harnesses (built-in `eldr-acp`, Xcode ACP, OpenClaw, Claude Code, Codex, Gemini CLI,

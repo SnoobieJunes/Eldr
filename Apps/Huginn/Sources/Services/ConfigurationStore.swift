@@ -557,7 +557,7 @@ final class ConfigurationStore: ObservableObject {
     /// `ws://` is allowed ONLY when the host is loopback (127.0.0.0/8, `::1`, or
     /// `localhost` — where a local `pqrc-relay` dev/demo instance runs plaintext);
     /// every other host MUST be `wss://`.
-    static func validateRelayOverride(_ raw: String) -> Result<String?, RelayURLValidationError> {
+    nonisolated static func validateRelayOverride(_ raw: String) -> Result<String?, RelayURLValidationError> {
         let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
         if trimmed.isEmpty { return .success(nil) }
         guard let url = URL(string: trimmed), let scheme = url.scheme?.lowercased(),
@@ -576,7 +576,7 @@ final class ConfigurationStore: ObservableObject {
     /// The validated override, or nil to fall back to the default relay — for a
     /// caller that only cares "what do I actually dial", not why an invalid value was
     /// refused (mirrors `validateRelayOverride`'s success case, dropping the error).
-    static func effectiveRelayURL(_ raw: String) -> String? {
+    nonisolated static func effectiveRelayURL(_ raw: String) -> String? {
         if case .success(let value) = validateRelayOverride(raw) { return value }
         return nil
     }
@@ -584,7 +584,7 @@ final class ConfigurationStore: ObservableObject {
     /// Loopback = `localhost`, `::1`, or an IPv4 LITERAL in 127.0.0.0/8. Parsed as
     /// four numeric octets — a string-prefix check would also match DNS names like
     /// `127.evil.com`, which can resolve anywhere and must never get plaintext `ws://`.
-    private static func isLoopbackHost(_ host: String) -> Bool {
+    nonisolated private static func isLoopbackHost(_ host: String) -> Bool {
         let h = host.lowercased()
         if h == "localhost" || h == "::1" { return true }
         let octets = h.split(separator: ".", omittingEmptySubsequences: false)
@@ -681,7 +681,11 @@ final class ConfigurationStore: ObservableObject {
     /// Parse `export KEY='value'` / `KEY=value` lines into an env dict. Comments
     /// (`#…`) and blanks are skipped; surrounding single/double quotes are stripped
     /// and `'\''` unescaped.
-    static func parseEnvFile(at path: String) -> [String: String] {
+    /// `nonisolated`: a pure path-in/dictionary-out parse with no access to any
+    /// `ConfigurationStore` state, so `ConfigPaths.standard` (nonisolated, and needed
+    /// before any store exists) can reuse it instead of hand-rolling a second parser
+    /// that would drift from this one's quoting/`export` handling.
+    nonisolated static func parseEnvFile(at path: String) -> [String: String] {
         guard let text = try? String(contentsOfFile: path, encoding: .utf8) else { return [:] }
         var env: [String: String] = [:]
         for rawLine in text.split(separator: "\n", omittingEmptySubsequences: true) {
@@ -706,7 +710,8 @@ final class ConfigurationStore: ObservableObject {
         return trimmed.isEmpty ? nil : trimmed
     }
 
-    private static func unquote(_ s: String) -> String {
+    /// `nonisolated` for the same reason as ``parseEnvFile(at:)``, which calls it.
+    nonisolated private static func unquote(_ s: String) -> String {
         guard s.count >= 2 else { return s }
         if s.hasPrefix("'") && s.hasSuffix("'") {
             return String(s.dropFirst().dropLast()).replacingOccurrences(of: "'\\''", with: "'")
@@ -723,6 +728,11 @@ final class ConfigurationStore: ObservableObject {
 struct ConfigPaths: Sendable {
     let configDir: String
     let binDir: String
+    /// Explicit town-file locations, when the operator pinned them with
+    /// `ELDR_TOWN_GRANTS_FILE` / `ELDR_TOWN_PEERS_FILE`. nil = use the config-dir
+    /// defaults below. See ``townGrantsFile`` for why this indirection exists.
+    var townGrantsFileOverride: String?
+    var townPeersFileOverride: String?
 
     var envFile: String { join(configDir, "env") }
     var toolsFile: String { join(configDir, "tools") }
@@ -739,8 +749,44 @@ struct ConfigPaths: Sendable {
     /// WS-MLX: the managed MLX area (private Python venv, server log, fine-tune
     /// configs) — kept beside the agent config so it's one visible, debuggable place.
     var mlxDir: String { join(configDir, "mlx") }
+    /// WS-G5/Phase-2 gate: the standing-grant file an `eldr-node` town plane consumes
+    /// (`FileStandingGrantStore` format — removal of an entry IS revocation there), and
+    /// the peer roster beside it. Edited by Huginn's Town Grants panel.
+    ///
+    /// **These MUST resolve to the same files the node reads, and by default they did
+    /// not.** `GooseworldWiring.fromEnvironment` takes `ELDR_TOWN_GRANTS_FILE` if set,
+    /// else `<node workdir>/.eldr/town-grants.json` — never the eldr-acp config dir. So
+    /// a node started per `docs/guide/DEMO-GOOSEWORLD.md` read one file while Huginn's panel
+    /// edited another, and the panel's "the node re-reads these files on change"
+    /// promise was false: imported grants changed nothing, with no error anywhere.
+    /// Honoring the same two env vars, with the same precedence the node uses, makes
+    /// one exported pair line both sides up. When they are unset both sides still fall
+    /// back to their own defaults, which do NOT agree — `TownGrantsView` says so on
+    /// screen rather than implying a link that isn't there.
+    var townGrantsFile: String {
+        townGrantsFileOverride ?? join(configDir, "town-grants.json")
+    }
+    var townPeersFile: String {
+        townPeersFileOverride ?? join(configDir, "town-peers.json")
+    }
+    /// Whether the paths above came from the node's own env vars (so the two sides are
+    /// known to agree) or from Huginn's default, which the node does not read.
+    var townFilesArePinnedToTheNode: Bool { townGrantsFileOverride != nil }
+
+    // MARK: - WS-I7: Buzz workspace connections
+    /// The connection records the Connections tab edits and `BuzzGatewayService`
+    /// supervises (agent KEYS live in the Keychain, never here).
+    var buzzConnectionsFile: String { join(configDir, "buzz-connections.json") }
+    /// One log file per running gateway child, so the console can show exactly one
+    /// connection's traffic (`LogConsoleSource.buzzGateway`).
+    var buzzDir: String { join(configDir, "buzz") }
+    func buzzLogFile(connectionID: String) -> String {
+        join(buzzDir, "gateway-\(connectionID).log")
+    }
 
     var installedBinary: String { join(binDir, "eldr-acp") }
+    /// The Buzz gateway daemon Huginn supervises (installed beside `eldr-acp`).
+    var installedBuzzAgent: String { join(binDir, "eldr-buzz-agent") }
     var launcher: String { join(binDir, "eldr-acp-xcode") }
     /// Dedicated launcher OpenClaw (and other ACP clients) are pointed at. Same
     /// script body as the Xcode launcher — client-agnostic.
@@ -818,7 +864,25 @@ struct ConfigPaths: Sendable {
         let configDir =
             AgentConfig.defaultConfigDir(env) ?? (home as NSString).appendingPathComponent(".config/eldr-acp")
         let binDir = (home as NSString).appendingPathComponent(".local/bin")
-        return ConfigPaths(configDir: configDir, binDir: binDir)
+        // The town-file overrides are read from the config dir's `env` file FIRST and
+        // only then from the process environment. That order is deliberate and is the
+        // AC125 lesson applied: a Dock-launched app inherits no shell environment, so
+        // an env-var-only lookup would resolve for a terminal-launched Huginn and
+        // silently not for the one the owner actually double-clicks — the same
+        // invisible split that made the PCC build flags unshippable. The `env` file is
+        // the durable config both the GUI and the CLI already agree on; a process env
+        // var still wins for a one-off run.
+        let fileEnv = ConfigurationStore.parseEnvFile(
+            at: (configDir as NSString).appendingPathComponent("env"))
+        func override(_ key: String) -> String? {
+            let raw = env[key] ?? fileEnv[key]
+            let trimmed = raw?.trimmingCharacters(in: .whitespacesAndNewlines)
+            return (trimmed?.isEmpty ?? true) ? nil : trimmed
+        }
+        return ConfigPaths(
+            configDir: configDir, binDir: binDir,
+            townGrantsFileOverride: override("ELDR_TOWN_GRANTS_FILE"),
+            townPeersFileOverride: override("ELDR_TOWN_PEERS_FILE"))
     }
 
     private func join(_ a: String, _ b: String) -> String {

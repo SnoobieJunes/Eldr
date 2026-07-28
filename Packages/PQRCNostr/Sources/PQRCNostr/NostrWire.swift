@@ -135,7 +135,7 @@ public enum NostrWire {
         return try? WireJSON.decoder().decode(NostrEvent.self, from: data)
     }
 
-    /// NIP-01 filter wire names: `kinds`, `authors`, `ids`, `since`, `#p`.
+    /// NIP-01 filter wire names: `kinds`, `authors`, `ids`, `since`, `#p`, `#h`.
     private static func filterObject(_ filter: NostrFilter) -> [String: Any] {
         var object: [String: Any] = [:]
         if let kinds = filter.kinds { object["kinds"] = kinds }
@@ -143,6 +143,9 @@ public enum NostrWire {
         if let ids = filter.ids { object["ids"] = ids }
         if let since = filter.since { object["since"] = since }
         if let pTags = filter.pTags { object["#p"] = pTags }
+        if let hTags = filter.hTags { object["#h"] = hTags }
+        if let dTags = filter.dTags { object["#d"] = dTags }
+        if let limit = filter.limit { object["limit"] = limit }
         return object
     }
 
@@ -151,8 +154,11 @@ public enum NostrWire {
             kinds: object["kinds"] as? [Int],
             authors: object["authors"] as? [String],
             pTags: object["#p"] as? [String],
+            hTags: object["#h"] as? [String],
+            dTags: object["#d"] as? [String],
             ids: object["ids"] as? [String],
-            since: (object["since"] as? NSNumber)?.int64Value)
+            since: (object["since"] as? NSNumber)?.int64Value,
+            limit: (object["limit"] as? NSNumber)?.intValue)
     }
 
     private static func arrayJSON(_ array: [Any]) throws -> String {

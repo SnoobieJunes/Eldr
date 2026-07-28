@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 import Foundation
 
-// Phase 1 item 1 of docs/ACPRouterplan.md: "a transport-agnostic runACPAgent/runACPProxy
+// Phase 1 item 1 of docs/done/2026-07-17/ACPRouterplan.md: "a transport-agnostic runACPAgent/runACPProxy
 // driver." `runACPAgent` (ACPTransport.swift) drives the BUILT-IN agent. `runACPProxy` is its
 // sibling for EXTERNAL harnesses: the node, having authenticated the phone and decrypted the
 // stream, "pipes the verified, decrypted ACP stream both ways" between the phone transport

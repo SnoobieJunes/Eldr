@@ -9,6 +9,21 @@ public func sha256(_ data: Data) -> Data {
     Data(SHA256.hash(data: data))
 }
 
+extension Array where Element == Data {
+    /// Picks one element using the injected random source.
+    ///
+    /// A published bundle carries the whole one-time pool, so every initiator
+    /// chooses for itself; taking `first` made two initiators working from the
+    /// same kind-10421 event collide every single time, and the second one's
+    /// handshake died at `consume` with `oneTimePrekeyAlreadyConsumed`. Modulo
+    /// bias over a 64-bit draw is at most ~2⁻⁵⁶ for any realistic pool size.
+    func randomElement(drawingFrom source: RandomSource) -> Data? {
+        guard !isEmpty else { return nil }
+        let draw = source.bytes(8).reduce(UInt64(0)) { ($0 << 8) | UInt64($1) }
+        return self[Int(draw % UInt64(count))]
+    }
+}
+
 extension Data {
     /// Lowercase hex encoding.
     public var hexString: String {

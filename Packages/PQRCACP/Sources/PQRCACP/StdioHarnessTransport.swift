@@ -2,7 +2,7 @@
 import Foundation
 
 // Phase 1 item 1 (the transport-agnostic driver) + the selectable-backend scaffold of
-// docs/ACPRouterplan.md: for an EXTERNAL harness the node must SPAWN the harness binary as a
+// docs/done/2026-07-17/ACPRouterplan.md: for an EXTERNAL harness the node must SPAWN the harness binary as a
 // subprocess and PROXY the phone's ACP line-stream to the harness's stdio. The phone↔node
 // transport is one `ACPTransport`; THIS is the other one — an `ACPTransport` whose peer is a
 // locally-spawned process's stdin/stdout. With both sides modeled as `ACPTransport`,

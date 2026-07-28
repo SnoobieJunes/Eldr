@@ -85,6 +85,13 @@ struct HuginnApp: App {
                     if UserDefaults.standard.bool(forKey: A2AServerHost.serverEnabledKey) {
                         await a2aHost.start()
                     }
+                    // WS-I7: bring the workspace agents back up. A Buzz connection is
+                    // a standing membership — the workspace expects the agent to be
+                    // there — so an un-paused connection survives a Huginn restart
+                    // without the user reconnecting it by hand. Paused (or invalid)
+                    // connections stay down; each one re-checks its own gates first.
+                    BuzzGatewayService.shared.startEnabledConnections(
+                        llmURL: store.llmURL, llmModel: store.llmModel, llmToken: store.llmToken)
                 }
         }
         .defaultSize(width: 1000, height: 760)
@@ -131,7 +138,10 @@ struct RootView: View {
 /// harness (Configuration, Test Chat, Logs), the phone pairing/tether (Bridge (phone
 /// tether)), and the infrastructure setup (Relay).
 struct MainWindow: View {
-    enum Tab: Hashable { case configuration, testChat, mlx, inspector, logs, bridge, nearby, relay }
+    enum Tab: Hashable {
+        case configuration, testChat, mlx, inspector, logs, bridge, nearby, relay, townGrants
+        case connections
+    }
     @State private var tab: Tab = .configuration
 
     /// Cross-scene tab jump (WS-M1): the menu-bar extra and the Configuration
@@ -169,6 +179,21 @@ struct MainWindow: View {
             RelayWizardView()
                 .tabItem { Label("Relay", systemImage: "server.rack") }
                 .tag(Tab.relay)
+            // WS-I7: outbound workspace membership — this Mac's model joining a
+            // Buzz workspace as an agent (and the reverse: handing Buzz a snapshot
+            // so it manages one). A distinct capability from the phone tether, so
+            // it gets its own tab rather than hiding inside Bridge.
+            BuzzConnectionsView()
+                .tabItem {
+                    Label("Connections", systemImage: "point.3.connected.trianglepath.dotted")
+                }
+                .tag(Tab.connections)
+            // WS-G5 Phase-2 gate: the node's standing TOWN grants (view/verify/import/
+            // revoke-by-removal) — the human-visible authorization surface invariant 9
+            // requires for the cross-town planes.
+            TownGrantsView()
+                .tabItem { Label("Town Grants", systemImage: "signpost.right.and.left") }
+                .tag(Tab.townGrants)
         }
         .padding(.top, 6)
         .navigationTitle("Eldr — Mac node & AI tether")

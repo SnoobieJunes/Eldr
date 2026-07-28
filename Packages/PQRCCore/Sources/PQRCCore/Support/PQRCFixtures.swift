@@ -15,7 +15,8 @@ public enum PQRCFixtures {
         let initiation = PQXDH.InitiationResult(
             sharedSecret: SymmetricKey(data: material.bytes(32)),
             message: HandshakeMessage(
-                suite: PQRCConstants.handshakeSuite, ik: Data(), ikDH: Data(), ek: Data(),
+                suite: PQRCConstants.handshakeSuite, ik: Data(), ikDH: Data(),
+                ikDHSig: Data(), ek: Data(),
                 kemCT: Data(), kemPK: myKEM.publicKey.rawRepresentation,
                 spkUsed: Data(), otpUsed: nil, otpPQUsed: nil, lrpUsed: false),
             myKEMPrivate: myKEM,

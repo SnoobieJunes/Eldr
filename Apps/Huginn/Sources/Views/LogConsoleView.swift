@@ -57,11 +57,20 @@ struct LogConsoleView: View {
         Binding(get: { model.source }, set: { model.switchSource($0) })
     }
 
+    /// The fixed sources plus — when this console is showing one — the
+    /// per-connection Buzz gateway log, which isn't enumerable (WS-I7). Without
+    /// it the Picker's selection would have no matching row and render blank.
+    private var pickerSources: [LogConsoleSource] {
+        var sources = LogConsoleSource.allCases
+        if !sources.contains(model.source) { sources.append(model.source) }
+        return sources
+    }
+
     @ViewBuilder private var toolbar: some View {
         HStack(spacing: 8) {
             if style == .full {
                 Picker("Source", selection: sourceBinding) {
-                    ForEach(LogConsoleSource.allCases) { source in
+                    ForEach(pickerSources) { source in
                         Text(source.title).tag(source)
                     }
                 }
@@ -177,7 +186,7 @@ struct LogConsoleView: View {
     private var overflowMenu: some View {
         Menu {
             Picker("Source", selection: sourceBinding) {
-                ForEach(LogConsoleSource.allCases) { source in
+                ForEach(pickerSources) { source in
                     Text(source.title).tag(source)
                 }
             }
@@ -346,6 +355,9 @@ struct LogConsoleView: View {
         case .diagnostics:
             return
                 "No agent activity yet — send a Test Chat message or drive the agent from your phone."
+        case .buzzGateway(_, let name):
+            return
+                "Nothing from \(name) yet — the gateway logs its handshake with the workspace relay, every mention it answers, and any failure, in here."
         }
     }
 }

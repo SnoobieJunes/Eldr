@@ -172,11 +172,12 @@ struct PaddingEnvelopeTests {
         let handshakeJSON = String(
             decoding: try WireJSON.encoder().encode(
                 HandshakeMessage(
-                    suite: "hybrid-v1", ik: Data([1]), ikDH: Data([2]), ek: Data([3]),
+                    suite: PQRCConstants.handshakeSuite, ik: Data([1]), ikDH: Data([2]),
+                    ikDHSig: Data([9]), ek: Data([3]),
                     kemCT: Data([4]), kemPK: Data([5]), spkUsed: Data([6]),
                     otpUsed: Data([7]), otpPQUsed: Data([8]), lrpUsed: false)),
             as: UTF8.self)
-        for field in ["\"suite\"", "\"ik_dh\"", "\"ek\"", "\"kem_ct\"", "\"kem_pk\"", "\"spk_used\"", "\"otp_used\"", "\"otp_pq_used\"", "\"lrp_used\""] {
+        for field in ["\"suite\"", "\"ik_dh\"", "\"ik_dh_sig\"", "\"ek\"", "\"kem_ct\"", "\"kem_pk\"", "\"spk_used\"", "\"otp_used\"", "\"otp_pq_used\"", "\"lrp_used\""] {
             #expect(handshakeJSON.contains(field), "missing wire field \(field)")
         }
     }

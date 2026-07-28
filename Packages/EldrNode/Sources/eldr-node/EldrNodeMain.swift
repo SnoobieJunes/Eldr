@@ -71,12 +71,37 @@ struct EldrNodeMain {
 
         // --owner is REQUIRED. Fail closed if absent: a node with no pinned owner has no
         // C-3 gate target, so it must not serve anyone.
+        // Canonical lowercase, once, at the entry point. Every downstream comparison —
+        // the C-3 gate's `senderIdentityHex == ownerIdentityHex`, the grant store's
+        // granter pin, the admission predicate — is a case-SENSITIVE `==` against a hex
+        // string derived from key bytes, which is always lowercase. An uppercase
+        // `--owner` therefore matched nothing anywhere: the node started, connected to
+        // the relay, and silently ignored its own owner's phone with no error printed.
+        // Normalizing here (rather than in each comparison) keeps one notion of "same
+        // identity" and matches what the downstream types already do to their copies.
         guard let ownerIdentityHex = arguments["owner"]?
-            .trimmingCharacters(in: .whitespacesAndNewlines), !ownerIdentityHex.isEmpty
+            .trimmingCharacters(in: .whitespacesAndNewlines).lowercased(),
+            !ownerIdentityHex.isEmpty
         else {
             FileHandle.standardError.write(Data(
                 ("eldr-node: --owner <phone-identity-hex> is REQUIRED "
                     + "(the C-3 gate target). Refusing to serve with no owner.\n").utf8))
+            exit(2)
+        }
+        // Shape-check it too. A PQRC identity is a 32-byte key in hex; anything else
+        // (an npub, a truncated paste, a node id) can never equal a verified sender, so
+        // the node would fail closed on every frame — correct, but indistinguishable
+        // from "the relay is down" while you are standing in front of a demo. Say it
+        // now, loudly, instead of serving nobody in silence.
+        let isCanonicalHex =
+            ownerIdentityHex.count == 64
+            && ownerIdentityHex.allSatisfy { $0.isHexDigit && !$0.isUppercase }
+        guard isCanonicalHex else {
+            FileHandle.standardError.write(Data(
+                ("eldr-node: --owner must be the phone's 64-character hex PQRC identity "
+                    + "(got \(ownerIdentityHex.count) characters). An npub or a truncated "
+                    + "paste can never match a verified sender, so the node would accept "
+                    + "nothing. Refusing to start.\n").utf8))
             exit(2)
         }
 

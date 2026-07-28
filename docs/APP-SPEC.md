@@ -10,7 +10,7 @@ What to build. This document is subordinate to `pqrc-SPEC-v1_1.md` (protocol) an
 2. **Transparency of AI is a privacy property.** No one is ever unknowingly talking to an AI. Agent authorship is always visible, always verifiable.
 3. **iMessage-grade feel.** Native, fluid, instant. The cryptography is invisible; the trust signals are not.
 4. **Honest limitations.** What PQRC does not protect (IP metadata, recipient `p`-tag against a global observer, no *message* deniability, single device) is stated plainly in-app, not hidden. Account deniability protects each account's **contents** and the passphrase→data mapping against a live coercer (duress/decoy, §19) — it does **not** hide the *count* of accounts from a forensic disk image, because each account now carries its own Secure-Enclave-wrapped key blob (an accepted limit per DEVIATIONS AC31, not a pending TODO; see §3, §19 and THREAT_MODEL §2.3a/§2.12).
-5. **Router, not a coding agent.** EldrChat owns identity, E2EE, secure transport, session history, consent, and the **router** that targets a backend; the actual development work is delegated to interchangeable, swappable ACP harnesses (Xcode ACP, OpenClaw, Claude Code, Codex, Gemini CLI, …). ACP is to agents what HTTP is to the web; EldrChat speaks it to everything (§24a, `docs/deprecated/ACPRouterplan.md`).
+5. **Router, not a coding agent.** EldrChat owns identity, E2EE, secure transport, session history, consent, and the **router** that targets a backend; the actual development work is delegated to interchangeable, swappable ACP harnesses (Xcode ACP, OpenClaw, Claude Code, Codex, Gemini CLI, …). ACP is to agents what HTTP is to the web; EldrChat speaks it to everything (§24a, `docs/done/2026-07-17/ACPRouterplan.md`).
 
 ## 1. Scope
 
@@ -243,7 +243,7 @@ No third-party SDKs, no analytics, no ads. OSLog `privacy: .private` on payload-
 
 ## 15. Local Universe (demo mode, Debug)
 
-Seeded personas Alice & Bob (+ derived agents) over an in-process simulator with a persona switcher, plus a scripted demo: greeting exchange → AI-drafted reply → 30-min ai_window with banner → shared AI thread where both agents exchange two context messages and hit the loop guard → large paste (now via the relay-chunking path, §6.3) → group of 4 fan-out. Document in `docs/DEMO.md`; UI tests replay this script. (The Local Universe predates silos: it boots a fixed test silo with the bare empty-siloID keys, so the demo and existing suite are unaffected by the multi-account work.)
+Seeded personas Alice & Bob (+ derived agents) over an in-process simulator with a persona switcher, plus a scripted demo: greeting exchange → AI-drafted reply → 30-min ai_window with banner → shared AI thread where both agents exchange two context messages and hit the loop guard → large paste (now via the relay-chunking path, §6.3) → group of 4 fan-out. Document in `docs/guide/DEMO.md`; UI tests replay this script. (The Local Universe predates silos: it boots a fixed test silo with the bare empty-siloID keys, so the demo and existing suite are unaffected by the multi-account work.)
 
 ## 16–17. (reserved)
 
@@ -417,7 +417,7 @@ pinned-skill lists and the per-account context domain live in (per-silo) UserDef
 Two **standalone SPM packages** (no app/crypto/SwiftUI deps; `swift test` headless,
 network-free) that adopt existing open protocols rather than inventing one.
 
-> **MCP status (June 2026):** the ACP-router plan (`docs/deprecated/ACPRouterplan.md` step 6)
+> **MCP status (June 2026):** the ACP-router plan (`docs/done/2026-07-17/ACPRouterplan.md` step 6)
 > proposes *removing* MCP once ACP supersedes it. As of this writing **MCP is still
 > shipped and green** — `PQRCMCP` (15/15 tests), the in-app `LocalMCPServer` /
 > `RuntimeSecureChatBridge`, the "Local agent access (MCP)" Settings toggle, and the
@@ -458,7 +458,7 @@ network-free) that adopt existing open protocols rather than inventing one.
   the agent now also compiles into the iOS app as the phone-side ACP **client** (§24a);
   the standalone `eldr-acp`-in-Xcode case remains the dual.
 
-## 24a. EldrChat as a secure, universal ACP router  [AC33, AC34, AC35; plan in `docs/deprecated/ACPRouterplan.md`]
+## 24a. EldrChat as a secure, universal ACP router  [AC33, AC34, AC35; plan in `docs/done/2026-07-17/ACPRouterplan.md`]
 
 The product's biggest June-2026 addition. **EldrChat is a secure ACP _router_:** the phone
 is an ACP **client**; the actual coding work is delegated to swappable ACP harnesses
@@ -493,7 +493,7 @@ harness owns the model and the tools.
    `run_shell`) are permission-gated, **deny-on-timeout / deny-on-error**; the node never
    sets `allowUngatedTools`. **C-2** — file tools jailed to the session working dir
    (symlinks resolved before the prefix check). Remote dev-control consent is **OFF by
-   default**, per-node, per-silo. *(Known gaps as of this writing — see `docs/deprecated/statusreport.md`:
+   default**, per-node, per-silo. *(Known gaps as of this writing — see `docs/done/2026-07-17/statusreport.md`:
    the in-app `acp` provider auto-grants tool permission; the cancel-vs-permission
    ordering has an intermittent fail-open; the G4 credential scrub is not on the
    PQRCACP→LLM path; the standalone daemon does not yet bootstrap the owner contact.)*

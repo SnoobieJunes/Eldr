@@ -28,6 +28,10 @@ let package = Package(
         .library(name: "EldrNodeGooseworld", targets: ["EldrNodeGooseworld"]),
         // The daemon: load/create identity, dial the relay, park, and serve the owner.
         .executable(name: "eldr-node", targets: ["eldr-node"]),
+        // WS-I5: the Eldr↔Buzz gateway — join a Buzz workspace as an agent member,
+        // run turns against the LOCAL model, emit NIP-AM/NIP-AO. Library + daemon.
+        .library(name: "EldrBuzzGateway", targets: ["EldrBuzzGateway"]),
+        .executable(name: "eldr-buzz-agent", targets: ["eldr-buzz-agent"]),
     ],
     dependencies: [
         .package(path: "../PQRCCore"),
@@ -86,6 +90,27 @@ let package = Package(
             ],
             swiftSettings: [.swiftLanguageMode(.v6)]
         ),
+        // WS-I5: the Eldr↔Buzz gateway library — reuses PQRCNostr's Buzz codecs
+        // (NIP-OA/NIP-44/NIP-AM/NIP-AO builders) and PQRCACP's LLM client.
+        .target(
+            name: "EldrBuzzGateway",
+            dependencies: [
+                "PQRCCore",
+                "PQRCNostr",
+                .product(name: "PQRCACP", package: "PQRCACP"),
+            ],
+            swiftSettings: [.swiftLanguageMode(.v6)]
+        ),
+        .executableTarget(
+            name: "eldr-buzz-agent",
+            dependencies: [
+                "EldrBuzzGateway",
+                "PQRCCore",
+                "PQRCNostr",
+                .product(name: "PQRCACP", package: "PQRCACP"),
+            ],
+            swiftSettings: [.swiftLanguageMode(.v6)]
+        ),
         .testTarget(
             name: "EldrNodeCoreTests",
             dependencies: [
@@ -94,6 +119,7 @@ let package = Package(
                 // The daemon target, so `SybilclawGatewayFramingTests` can `@testable import` it
                 // and pin the node's gateway connect handshake against silent protocol re-drift.
                 "eldr-node",
+                "EldrBuzzGateway",
                 "PQRCCore",
                 "PQRCNostr",
                 .product(name: "PQRCACP", package: "PQRCACP"),

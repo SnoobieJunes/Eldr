@@ -7,7 +7,7 @@
 - **Status:** Draft
 - **Protocol version covered:** PQRC v1.1
 - **Implementation:** Eldr (Swift) — `StandingGrant` / `StandingGrantRevocation` in [`PQRCCore`](../Packages/PQRCCore), enforced by `AgentEngine` in [`PQRCAgent`](../Packages/PQRCAgent)
-- **Companion:** the transport that carries the traffic a grant authorizes is [`A2A-PQRC-EXTENSION.md`](A2A-PQRC-EXTENSION.md); the product framing is `private/GOOSEWORLD.md` §5.
+- **Companion:** the transport that carries the traffic a grant authorizes is [`A2A-PQRC-EXTENSION.md`](A2A-PQRC-EXTENSION.md); the product framing is [`GOOSEWORLD.md`](pitch/GOOSEWORLD.md) §5.
 
 ## 0. Status of this document
 

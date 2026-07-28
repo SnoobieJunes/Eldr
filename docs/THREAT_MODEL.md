@@ -448,6 +448,35 @@ grant. No public gooseworld artifact should ship before the Phase-2 hardening in
 is exercised on-device — connecting shells across a network without it is the one unforgivable
 version of this product (GOOSEWORLD §7, Phase 2).
 
+## 4b. Eldr↔Buzz gateway — E2EE termination at the bridge
+
+When Eldr hosts the local model as a member of a Block/Buzz workspace
+(`eldr-buzz-agent`, DEVIATIONS AC144, `docs/guide/ELDR-BUZZ-INTEROP.md`), a deliberate
+crypto-boundary change occurs and MUST be understood, not discovered.
+
+A Buzz channel is **signed-not-E2EE plaintext**: every kind:9 message is a
+signed Nostr event whose content the Buzz relay operator can read. Eldr's own
+value proposition is the opposite — the relay is hostile and sees only
+ciphertext (§2.1–2.2). Bridging the two regimes necessarily terminates E2EE at
+the gateway: to post a reply into a Buzz channel the gateway MUST emit plaintext
+to the Buzz relay.
+
+| Threat | Mitigation | Status |
+|---|---|---|
+| **Silent E2EE downgrade** (a user assumes Buzz traffic has Eldr's confidentiality) | The gateway prints an explicit disclosure at startup (`BuzzGatewayConfig.disclosureBanner`): "messages this gateway posts are readable by that relay's operator." The boundary is a documented, deliberate decision, mirroring the transparency of the `ai_window` banner. Huginn's Connections wizard raises the same statement to a **required acknowledgement** before a connection may exist, and the supervisor refuses to start an unacknowledged one (fail closed); the banner is also pinned to the tab, so it cannot be acknowledged once and forgotten. | **Shipped** (AC144, GUI gate AC146) |
+| **Third-party bridge operator** (someone other than the owner running the gateway sees the plaintext) | The gateway MUST be run by the workspace owner only; it holds the owner-attested agent key and the local-model endpoint. Documented as a hard operating rule. | **Policy** (AC144) |
+| **Uncontrolled egress of chat context toward the bridge** | The gateway now runs every outbound reply through `CredentialRedactor` before it is published (`GatewayLogic.outboundText`, `ELDR_BUZZ_REDACT`, ON by default, per-connection toggle in Huginn ▸ Connections) — the same redactor the watch-along fan-out uses, applied at the exact hop where E2EE terminates. It fails toward redacting: a false positive costs a marker, a false negative leaks a live credential. It scrubs SHAPES (keys, tokens, connection strings, PEM blocks), not semantics — a model can still be prompted into paraphrasing something private, which is what the mentions-only default, the per-connection persona, and the workspace-trust rule above are for. | **Shipped + tested** (AC146) |
+| **NIP-AM / NIP-AO telemetry leakage** | Turn metrics (44200) and observer frames (24200) are NIP-44-encrypted to the OWNER; only `p`/`agent`/`created_at` are cleartext. Turn rate is already observable from channel messages, so no new metadata class is exposed. Matches Buzz's own NIP-AM/AO security analysis. | **Shipped + tested** (AC144) |
+| **A compromised workspace correlating the owner across workspaces** | Each connection mints its OWN agent key (`buzzagent.<id>`, data-protection Keychain, `WhenUnlockedThisDeviceOnly`, never synced) — never the owner's identity key and never shared between workspaces — so two Buzz workspaces see two unrelated pubkeys. A **Rotate key** action re-mints and re-attests on demand. The owner's link to the agent is still public *within* one workspace: NIP-OA attestation names the owner pubkey by design (the alternative Eldr proposes upstream is `docs/nips-contrib/NIP-OA-amendment-unsigned-carriers.md` — attestation carried inside a NIP-59 gift wrap, verified post-unwrap; it supersedes the withdrawn NIP-AS "Sealed Attestation" draft and is not something a Buzz relay accepts today). | **Shipped** (AC146) |
+| **Owner key exposure while attesting from the GUI** | The workspace owner's key is pasted once, used in memory to sign the NIP-OA tag, and never written to disk or passed to the child process (`ELDR_BUZZ_OWNER_PRIVATE_KEY` is explicitly scrubbed from the spawn environment). Only the resulting signature and the owner's PUBLIC key persist. A test asserts neither the owner key nor the agent private key appears in the connections file. | **Shipped + tested** (AC146) |
+| **An agent that keeps speaking after the owner removes it** | Remove publishes an agent-signed retirement (kind:0 tombstone + NIP-09 kind:5 deletion request for its own profile events) and then destroys the Keychain key, so nothing on this Mac can sign as that agent again. A relay MAY refuse the retirement events — the UI reports which part landed, and key destruction is the part that always holds. | **Shipped** (AC146) |
+
+**Eldr↔Eldr traffic is unaffected** — it stays PQ-ratcheted gift-wrapped E2EE.
+Only the Buzz-channel boundary is plaintext, and only by Buzz's design. The
+honest one-line summary the product must surface: *messages crossing into a Buzz
+channel are readable by that channel's relay operator; everything on the Eldr
+side of the bridge is not.*
+
 ## 5. Cryptographic assumptions
 
 X25519, Ed25519, ML-KEM-768 (FIPS 203), AES-256-GCM, ChaCha20-Poly1305,

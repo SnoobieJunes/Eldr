@@ -14,7 +14,7 @@ import PQRCNostr
 ///
 /// Dev/demo tooling only — events live in memory, nothing persists across
 /// restarts. Production = AUTH-gated strfry/khatru (SPEC §9.1, §15); see
-/// docs/SETUP-GUIDE.md for both paths.
+/// docs/guide/SETUP-GUIDE.md for both paths.
 @main
 struct PQRCRelayMain {
     static func main() async throws {

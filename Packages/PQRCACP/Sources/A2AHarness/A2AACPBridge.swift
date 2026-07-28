@@ -9,7 +9,7 @@ import A2AClient
 import Foundation
 import PQRCACP
 
-// The `.a2aRemote` half of the drop-in harness seam (docs/ACPRouterplan.md): an ACP CLIENT
+// The `.a2aRemote` half of the drop-in harness seam (docs/done/2026-07-17/ACPRouterplan.md): an ACP CLIENT
 // (`runHarness`/`ACPAgent.delegateToCloudAgent`, via `ACPClientDriver`) must be able to
 // drive a real Agent2Agent (A2A) v1.0 agent EXACTLY as it drives a spawned `.stdioSpawn`
 // harness — same `ACPTransport`, same `initialize → session/new → session/prompt` shape.

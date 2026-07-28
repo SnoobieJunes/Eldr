@@ -8,24 +8,43 @@ public struct NostrFilter: Sendable, Equatable, Codable {
     public var kinds: [Int]?
     public var authors: [String]?
     public var pTags: [String]?
+    /// `#h` tag filter — the NIP-29 group/channel tag Buzz uses to scope a
+    /// subscription to one workspace channel. Additive: nil means "no `#h`
+    /// constraint" so every existing PQRC filter is unchanged.
+    public var hTags: [String]?
+    /// `#d` tag filter — the NIP-29 addressable-event key. Buzz's group
+    /// discovery events (39000 metadata / 39001 admins / 39002 members) all
+    /// carry `d = <channel uuid>`, so this is how one channel's state is
+    /// fetched. Additive: nil means "no `#d` constraint".
+    public var dTags: [String]?
     public var ids: [String]?
     public var since: Int64?
+    /// NIP-01 `limit` — cap on stored events returned before EOSE. Needed for
+    /// bounded backfill (a workspace channel can hold years of history; a phone
+    /// must not pull all of it to render one screen).
+    public var limit: Int?
 
     enum CodingKeys: String, CodingKey {
         case kinds, authors
         case pTags = "p_tags"
-        case ids, since
+        case hTags = "h_tags"
+        case dTags = "d_tags"
+        case ids, since, limit
     }
 
     public init(
         kinds: [Int]? = nil, authors: [String]? = nil, pTags: [String]? = nil,
-        ids: [String]? = nil, since: Int64? = nil
+        hTags: [String]? = nil, dTags: [String]? = nil, ids: [String]? = nil,
+        since: Int64? = nil, limit: Int? = nil
     ) {
         self.kinds = kinds
         self.authors = authors
         self.pTags = pTags
+        self.hTags = hTags
+        self.dTags = dTags
         self.ids = ids
         self.since = since
+        self.limit = limit
     }
 
     public func matches(_ event: NostrEvent) -> Bool {
@@ -37,6 +56,16 @@ public struct NostrFilter: Sendable, Equatable, Codable {
             let eventPTags = event.tags.filter { $0.count >= 2 && $0[0] == "p" }.map { $0[1] }
             if !pTags.contains(where: eventPTags.contains) { return false }
         }
+        if let hTags {
+            let eventHTags = event.tags.filter { $0.count >= 2 && $0[0] == "h" }.map { $0[1] }
+            if !hTags.contains(where: eventHTags.contains) { return false }
+        }
+        if let dTags {
+            let eventDTags = event.tags.filter { $0.count >= 2 && $0[0] == "d" }.map { $0[1] }
+            if !dTags.contains(where: eventDTags.contains) { return false }
+        }
+        // `limit` is a relay-side cap on the stored-event replay, not a
+        // per-event predicate — matching never consults it.
         return true
     }
 }
@@ -78,6 +107,18 @@ public enum RelayTransportEvent: Sendable, Equatable {
     case error(String)
 }
 
+/// One frame of a subscription that makes the NIP-01 stored/live boundary
+/// explicit. `subscribe(_:)` deliberately hides that boundary — for PQRC's own
+/// traffic "stored first, then live" is all a caller needs. A *workspace* client
+/// needs more: fetching a channel roster or one screen of history is a bounded
+/// question ("everything you have, then stop"), and without the boundary the
+/// only way to answer it is a timeout.
+public enum SubscriptionFrame: Sendable, Equatable {
+    case event(NostrEvent)
+    /// The relay has finished replaying stored events; everything after this is live.
+    case endOfStoredEvents
+}
+
 public struct PublishAck: Sendable, Equatable {
     public let eventID: String
     public let accepted: Bool
@@ -99,6 +140,13 @@ public protocol RelayTransport: Sendable {
     func publish(_ event: NostrEvent) async throws -> PublishAck
     /// Subscribe: stored matching events first (EOSE semantics), then live ones.
     func subscribe(_ filters: [NostrFilter]) async -> AsyncThrowingStream<NostrEvent, Error>
+    /// Subscribe with the stored/live boundary surfaced as `.endOfStoredEvents`.
+    /// Optional: the default forwards `subscribe(_:)` and never emits the
+    /// boundary, so every existing conformer is unchanged and callers that need
+    /// a bound must also carry their own deadline.
+    func subscribeFrames(_ filters: [NostrFilter]) async -> AsyncThrowingStream<
+        SubscriptionFrame, Error
+    >
     /// NIP-42 AUTH: sign the relay's challenge to unlock gated reads (kind 1059).
     func authenticate(keypair: NostrKeypair, randomSource: any RandomSource) async throws
     /// Last-known connection health, for the Settings indicator.
@@ -128,6 +176,26 @@ extension RelayTransport {
     /// In-process/simulator transports have no socket lifecycle to report.
     public func transportEvents() async -> AsyncStream<RelayTransportEvent> {
         AsyncStream { $0.finish() }
+    }
+
+    /// Default: forward events, never claim to know where stored history ended.
+    /// A conformer that *does* know (the WebSocket transport sees NIP-01 EOSE;
+    /// the in-process simulator can split its own backlog) overrides this.
+    public func subscribeFrames(_ filters: [NostrFilter]) async -> AsyncThrowingStream<
+        SubscriptionFrame, Error
+    > {
+        let upstream = await subscribe(filters)
+        return AsyncThrowingStream { continuation in
+            let task = Task {
+                do {
+                    for try await event in upstream { continuation.yield(.event(event)) }
+                    continuation.finish()
+                } catch {
+                    continuation.finish(throwing: error)
+                }
+            }
+            continuation.onTermination = { _ in task.cancel() }
+        }
     }
 }
 

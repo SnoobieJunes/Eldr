@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 import Foundation
 
-// Phase 1 (docs/ACPRouterplan.md §5): decouple ACP from stdio. The agent was already
+// Phase 1 (docs/done/2026-07-17/ACPRouterplan.md §5): decouple ACP from stdio. The agent was already
 // transport-agnostic (`OutputSink` out, `handle(line:)` in); the CLIENT half
 // (`ACPClientDriver`) was hardcoded to FileHandle pipes. `ACPTransport` is the seam that
 // lets the SAME client + agent protocol logic run over Multipeer / LAN / in-memory. The

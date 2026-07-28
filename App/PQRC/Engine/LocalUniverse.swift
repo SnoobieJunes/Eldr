@@ -132,7 +132,7 @@ final class LocalUniverse {
         }
     }
 
-    // MARK: - Scripted demo (docs/DEMO.md)
+    // MARK: - Scripted demo (docs/guide/DEMO.md)
 
     func runDemoScript() async throws {
         func log(_ line: String) { demoLog.append(line) }

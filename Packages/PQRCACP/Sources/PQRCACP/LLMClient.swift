@@ -107,6 +107,25 @@ public enum LLMError: Error, Sendable, Equatable {
     case badResponse(String)
 }
 
+/// Token usage as reported by an OpenAI-compatible endpoint's `usage` object
+/// (the MLX/LM Studio/vLLM servers all include it). All fields optional — a
+/// server that omits `usage` yields all-nil, which callers MUST NOT record as
+/// zero (NIP-AM §Numeric validity). Surfaced via `usageObserver` so callers
+/// like the Buzz gateway can emit honest NIP-AM turn metrics with REAL counts.
+public struct LLMUsage: Sendable, Equatable {
+    public var promptTokens: Int?
+    public var completionTokens: Int?
+    public var totalTokens: Int?
+    public init(promptTokens: Int? = nil, completionTokens: Int? = nil, totalTokens: Int? = nil) {
+        self.promptTokens = promptTokens
+        self.completionTokens = completionTokens
+        self.totalTokens = totalTokens
+    }
+    public var hasAnyCount: Bool {
+        promptTokens != nil || completionTokens != nil || totalTokens != nil
+    }
+}
+
 /// The seam the agent talks to. Production: `OpenAICompatibleLLMClient`. Tests:
 /// `MockLLMClient`. Executable smoke test: `EchoLLMClient`.
 public protocol LLMClient: Sendable {
@@ -216,14 +235,20 @@ public struct OpenAICompatibleLLMClient: LLMClient {
     /// host, the node, the CLI): the stripped `LLMResponse`/`onDelta` path is identical.
     /// Must be `@Sendable` (the SSE read runs off the caller's actor).
     private let rawObserver: (@Sendable (String) -> Void)?
+    /// Optional tap on the response `usage` object (token counts). Called once
+    /// per non-streamed `complete` when the endpoint reports usage. Default nil
+    /// ⇒ no observation and zero behavior change for every existing caller.
+    private let usageObserver: (@Sendable (LLMUsage) -> Void)?
 
     public init(
         config: LLMConfig, session: URLSession? = nil,
-        rawObserver: (@Sendable (String) -> Void)? = nil
+        rawObserver: (@Sendable (String) -> Void)? = nil,
+        usageObserver: (@Sendable (LLMUsage) -> Void)? = nil
     ) {
         self.config = config
         self.session = session ?? Self.makeSession(timeout: config.requestTimeoutSeconds)
         self.rawObserver = rawObserver
+        self.usageObserver = usageObserver
     }
 
     /// An ephemeral session whose request/resource timeouts match the configured
@@ -298,6 +323,15 @@ public struct OpenAICompatibleLLMClient: LLMClient {
             !raw.isEmpty
         {
             rawObserver(raw)
+        }
+        // Usage tap: surface the endpoint's token counts (NIP-AM honesty). Only
+        // fires when a `usage` object is present with at least one count.
+        if let usageObserver, let usage = json["usage"] {
+            let parsed = LLMUsage(
+                promptTokens: usage["prompt_tokens"]?.intValue,
+                completionTokens: usage["completion_tokens"]?.intValue,
+                totalTokens: usage["total_tokens"]?.intValue)
+            if parsed.hasAnyCount { usageObserver(parsed) }
         }
         return try Self.decode(json)
     }
@@ -378,7 +412,8 @@ public struct OpenAICompatibleLLMClient: LLMClient {
         // `complete`/`stream` on the model's RESPONSE, so it is unaffected; the request
         // body is what we harden here. `toolCalls`/`tool_call_id`/role are control
         // plane, not free text, and are left as-is.
-        let outgoing = isLoopbackEndpoint() ? messages : messages.map(Self.scrubbed)
+        let outgoing = Self.coalescingLeadingSystem(
+            isLoopbackEndpoint() ? messages : messages.map(Self.scrubbed))
         var payload: [String: JSONValue] = [
             "model": .string(config.model),
             // Coding agents loop tool calls; give reasoning models room before the
@@ -396,12 +431,54 @@ public struct OpenAICompatibleLLMClient: LLMClient {
         return request
     }
 
-    /// Pull `error.message` out of an OpenAI-shaped error body, else a generic note.
+    /// Join the LEADING run of `system` messages into a single one.
+    ///
+    /// `ACPAgent` deliberately builds that run as separate messages — project
+    /// context, then the operating prompt, then the read-only note, then any
+    /// contextgraph assembly — because `ContextBudget.trim` anchors on them
+    /// individually. That is fine for OpenAI itself, but `mlx_lm.server` (the
+    /// on-device MLX backend) accepts exactly ONE system message and rejects a
+    /// second one with **HTTP 404 `"System message must be at the beginning."`** —
+    /// a status that reads like a bad URL or a missing model and sent a real
+    /// debugging session chasing both. Several other OpenAI-compatible servers
+    /// (llama.cpp, some vLLM builds) have the same one-system-message rule.
+    ///
+    /// Joining here, at the encode boundary, keeps the agent's message model and
+    /// `trim`'s anchoring untouched while putting exactly one system message on the
+    /// wire. Blank sections are dropped so the join never emits stray separators,
+    /// and only the LEADING run is touched — a later system message (none today)
+    /// would be left alone rather than silently reordered into the preamble.
+    static func coalescingLeadingSystem(_ messages: [LLMMessage]) -> [LLMMessage] {
+        let run = messages.prefix { $0.role == .system }
+        guard run.count > 1 else { return messages }
+        let joined =
+            run
+            .map { $0.content.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+            .joined(separator: "\n\n")
+        let rest = Array(messages.dropFirst(run.count))
+        // An all-blank run carries nothing; emitting one empty system message instead
+        // would just hand the server a second thing to have an opinion about.
+        guard !joined.isEmpty else { return rest }
+        return [LLMMessage(role: .system, content: joined)] + rest
+    }
+
+    /// Pull the server's explanation out of an error body, else a generic note.
+    ///
+    /// Two shapes, because the on-device servers disagree with OpenAI: the OpenAI
+    /// shape nests it (`{"error":{"message":…}}`), while `mlx_lm.server` puts a bare
+    /// string there (`{"error":"System message must be at the beginning."}`). Only
+    /// the nested form was read, so every MLX-side rejection surfaced as the useless
+    /// "HTTP 404: request rejected" — the server had said exactly what was wrong and
+    /// we threw it away. Read both.
     static func apiErrorMessage(_ data: Data) -> String {
+        let object = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
+        let error = object?["error"]
         let message =
-            ((try? JSONSerialization.jsonObject(with: data)) as? [String: Any])
-            .flatMap { ($0["error"] as? [String: Any])?["message"] as? String }
-        return message ?? "request rejected"
+            (error as? [String: Any])?["message"] as? String
+            ?? error as? String
+        let trimmed = message?.trimmingCharacters(in: .whitespacesAndNewlines)
+        return (trimmed?.isEmpty ?? true) ? "request rejected" : trimmed!
     }
 
     // MARK: Encoding (OpenAI request shape)

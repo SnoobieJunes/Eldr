@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: AGPL-3.0-only
+import PQRCAgent  // AgentEngine.StandingGrantStatus (the WS-G4 town-grant rows)
 import PQRCCore
 import SwiftUI
+import UIKit  // UIPasteboard for the grant-export copy affordance
 
 /// Per-AI context inspection (SPEC §0 transparency), embedded in a tethered AI's
 /// detail screen (Settings ▸ AI ▸ tap an AI). For the chosen conversation it shows
@@ -288,6 +290,12 @@ struct ConversationAIContextSection: View {
         } footer: {
             Text("Overrides every AI's own setting, just here. \"Off\" silences all AIs in this chat. Each chat is separate — your AI never carries context from one into another.")
         }
+        // WS-G4 Phase-2 gate: standing TOWN grants for this 1:1 peer, inside the C6
+        // surface (edit-where-you-inspect — no new chrome). Groups have no single
+        // peer identity, so the section only renders for 1:1s.
+        if model.conversations.first(where: { $0.id == conversationID })?.isGroup != true {
+            TownGrantSection(model: model, conversationID: conversationID)
+        }
         // The inspection sections render as siblings (AIInspectionView emits
         // Form sections; nesting them inside the DisclosureGroup row would
         // collapse their layout), gated on the disclosure being open.
@@ -302,5 +310,82 @@ struct ConversationAIContextSection: View {
         summary = model.primaryAIContextSummary(conversationID)
         myAIs = model.tetheredAIList().filter(\.isEnabled).map { ($0.id, $0.name) }
         if inspectedAI == nil { inspectedAI = myAIs.first?.id }
+    }
+}
+
+/// WS-G4 → the Phase-2 UI gate (invariant 9): standing TOWN grants for this 1:1 peer —
+/// the human-signed, day-bounded, revocable authorization for the cross-town wall /
+/// delegate planes. Minting happens HERE because the human identity key lives on the
+/// phone; the export JSON is how the authorization reaches a headless node's
+/// `town-grants.json` (paste into Huginn ▸ Town Grants). Revoking kills the engine-side
+/// authorization immediately; the footer says the file entry must go too (that store's
+/// removal-is-revocation contract, DEVIATIONS AC143).
+struct TownGrantSection: View {
+    @Bindable var model: AppModel
+    let conversationID: String
+    @State private var now = Int64(Date().timeIntervalSince1970)
+    @State private var copied = false
+
+    private var grantsHere: [AgentEngine.StandingGrantStatus] {
+        model.myTownGrants.filter { $0.peerIdentityHex == conversationID && $0.activeUntil > now }
+    }
+
+    var body: some View {
+        Section {
+            ForEach(grantsHere, id: \.grantID) { grant in
+                HStack {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("\(grant.plane.rawValue) plane · \(townGrantRemaining(until: grant.activeUntil, now: now))")
+                            .font(.callout)
+                        Text("\(grant.messagesRemaining) msgs · \(grant.bytesRemaining / 1024) KB left today")
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                    }
+                    Spacer()
+                    Button("Revoke", role: .destructive) {
+                        Task { await model.revokeTownGrant(grantID: grant.grantID) }
+                    }
+                    .font(.caption.weight(.medium))
+                    .accessibilityIdentifier("revoke-town-grant-\(grant.grantID)")
+                }
+            }
+            Menu {
+                Button("Wall only · 7 days") { mint(planes: [.wall]) }
+                Button("Wall + delegate · 7 days") { mint(planes: [.wall, .delegate]) }
+            } label: {
+                Label("Grant town access…", systemImage: "signpost.right.and.left")
+            }
+            .accessibilityIdentifier("mint-town-grant")
+            if let json = model.lastMintedGrantJSON {
+                Button {
+                    UIPasteboard.general.string = json
+                    copied = true
+                } label: {
+                    Label(
+                        copied ? "Copied — paste into Huginn ▸ Town Grants" : "Copy grant for the node",
+                        systemImage: copied ? "checkmark" : "doc.on.doc")
+                }
+                .font(.caption)
+                .accessibilityIdentifier("copy-town-grant")
+            }
+        } header: {
+            Text("Standing town grants")
+        } footer: {
+            Text(
+                "Signed by you, day-bounded, revocable. A live grant shows a banner in this chat for its whole lifetime. Revoking ends it everywhere your engine gates — ALSO remove it from the node's town-grants.json (removing the entry is that file's revocation)."
+            )
+        }
+        .task {
+            await model.refreshTownGrants()
+            now = Int64(Date().timeIntervalSince1970)
+        }
+    }
+
+    private func mint(planes: [StandingGrant.Plane]) {
+        Task {
+            _ = await model.startTownGrant(
+                peerIdentityHex: conversationID, planes: planes, days: 7)
+            copied = false
+        }
     }
 }

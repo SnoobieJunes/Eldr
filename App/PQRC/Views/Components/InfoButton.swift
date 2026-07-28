@@ -18,7 +18,7 @@ import SwiftUI
 ///   ballooning into a sheet.
 ///
 /// It uses SF Symbols + system styling, so it adapts to Dynamic Type, light &
-/// dark, and is fully VoiceOver-labelled. Tone matches `docs/USER-GUIDE.md`:
+/// dark, and is fully VoiceOver-labelled. Tone matches `docs/guide/USER-GUIDE.md`:
 /// clear, friendly, privacy-forward, honest — a sentence or two each.
 ///
 /// Use judiciously (the "do not clutter" rule): prefer ONE per section header.
