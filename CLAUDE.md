@@ -154,6 +154,19 @@ xcodebuild test -project App/EldrChat.xcodeproj -scheme EldrChat \
 # and DEVELOPMENT_TEAM is deliberately blank in the pbxproj): pass a team id on the
 # command line — any free personal team works; this machine keeps one in the
 # gitignored private/dev-team.txt. Building only? CODE_SIGNING_ALLOWED=NO instead.
+#
+# A TEAM ID IS NOT SUFFICIENT ON ITS OWN, and the failure reads like a missing
+# certificate when it isn't (verified 2026-07-28). Xcode must also have that team's
+# Apple ID signed in under Settings ▸ Accounts, or it cannot reach the portal to mint
+# a `chat.eldr.huginn` profile — even with -allowProvisioningUpdates and a valid
+# "Apple Development" cert already in the keychain. The tell is
+#   error: No Account for Team "…". Add a new account in Accounts settings.
+# printed ALONGSIDE a "No signing certificate Mac Development found" line; the second
+# is a consequence of the first, so chasing the certificate is a dead end. Signing in
+# is interactive and cannot be scripted. Until it is done, the ~16 Keychain-backed
+# tests (KeychainIsolation, LLMTokenAtRest, BuzzConnection, A2AServerHostToken) fail
+# with errSecMissingEntitlement (-34018) under CODE_SIGNING_ALLOWED=NO and CANNOT be
+# run any other way — report them as BLOCKED, never as passing or as broken code.
 xcodebuild test -project Apps/Huginn/Huginn.xcodeproj -scheme Huginn \
   -destination 'platform=macOS' -skipPackagePluginValidation \
   DEVELOPMENT_TEAM="$(cat private/dev-team.txt 2>/dev/null || echo YOUR_TEAM_ID)"
@@ -163,6 +176,19 @@ xcodebuild test -project Apps/Huginn/Huginn.xcodeproj -scheme Huginn \
 - **`-skipPackagePluginValidation` is required.** swift-secp256k1 ships a build plugin; without the flag the build fails.
 - **Pin `OS=26.5` and use a device name that exists.** This Mac has both the iOS 26.5 and iOS 27.0 runtimes, and an unpinned/ambiguous name silently flips between them. There is **no plain "iPhone 17" simulator** — run `-showdestinations` and pick a real one (`iPhone 17 Pro Max` works on 26.5).
 - **NEVER pass `CODE_SIGNING_ALLOWED=NO` to `xcodebuild test` if any test touches the Keychain.** It strips entitlements, so every `SecItem*` call returns `errSecMissingEntitlement` (-34018) and the keychain/Secure-Enclave tests all fail in a way that looks like a code bug but isn't. Simulator builds sign ad-hoc and keep entitlements — just drop the flag.
+
+**The team id belongs on the command line, never in a pbxproj.** This repo is
+public, and `DEVELOPMENT_TEAM` has leaked into it three times by the same route:
+open the project in Xcode with a team selected, Xcode silently rewrites the
+pbxproj, and the change rides along in the next `git commit -a`. `scripts/check-no-team-id.sh`
+refuses it at commit time — install it once per clone (hooks are not tracked):
+
+```bash
+ln -sf ../../scripts/check-no-team-id.sh .git/hooks/pre-commit
+```
+
+If a diff on `*.pbxproj` shows only a `DEVELOPMENT_TEAM` line, that is Xcode, not
+your work — `git restore` it.
 
 ## Hard invariants — MUSTs the tests enforce
 
