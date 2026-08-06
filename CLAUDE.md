@@ -155,18 +155,24 @@ xcodebuild test -project App/EldrChat.xcodeproj -scheme EldrChat \
 # command line — any free personal team works; this machine keeps one in the
 # gitignored private/dev-team.txt. Building only? CODE_SIGNING_ALLOWED=NO instead.
 #
-# A TEAM ID IS NOT SUFFICIENT ON ITS OWN, and the failure reads like a missing
-# certificate when it isn't (verified 2026-07-28). Xcode must also have that team's
-# Apple ID signed in under Settings ▸ Accounts, or it cannot reach the portal to mint
-# a `chat.eldr.huginn` profile — even with -allowProvisioningUpdates and a valid
-# "Apple Development" cert already in the keychain. The tell is
+# NOT ANY TEAM ID — the RIGHT one. A team whose Apple ID is not signed in under
+# Xcode ▸ Settings ▸ Accounts fails in a way that reads like a missing certificate:
 #   error: No Account for Team "…". Add a new account in Accounts settings.
-# printed ALONGSIDE a "No signing certificate Mac Development found" line; the second
-# is a consequence of the first, so chasing the certificate is a dead end. Signing in
-# is interactive and cannot be scripted. Until it is done, the ~16 Keychain-backed
-# tests (KeychainIsolation, LLMTokenAtRest, BuzzConnection, A2AServerHostToken) fail
-# with errSecMissingEntitlement (-34018) under CODE_SIGNING_ALLOWED=NO and CANNOT be
-# run any other way — report them as BLOCKED, never as passing or as broken code.
+#   error: No signing certificate "Mac Development" found: … matching team ID "…"
+# The second line is a CONSEQUENCE of the first, so chasing the certificate — or
+# adding -allowProvisioningUpdates, which does not help — is a dead end. This Mac
+# has certs for two teams and only one is signed in; if private/dev-team.txt holds
+# the other, the whole suite dies at the build step. Confirm what you actually have:
+#   security find-identity -v -p codesigning
+# With the signed-in team, the suite is green and needs NO interactive step — 256
+# test cases including all the Keychain-backed ones (KeychainIsolation,
+# LLMTokenAtRest, BuzzConnection, A2AServerHostToken). Verified 2026-08-06.
+#
+# [Correction, 2026-08-06 — 2026-07-28's note said signing in was interactive and
+# unscriptable and that the ~16 Keychain tests must be reported BLOCKED. Wrong
+# diagnosis: the machine was already signed in for team 49CQA5YX6U; dev-team.txt
+# just held a different team (8Q3SY67M7C). Following that note would have parked a
+# passing suite as permanently blocked. Fix the team id, don't report BLOCKED.]
 xcodebuild test -project Apps/Huginn/Huginn.xcodeproj -scheme Huginn \
   -destination 'platform=macOS' -skipPackagePluginValidation \
   DEVELOPMENT_TEAM="$(cat private/dev-team.txt 2>/dev/null || echo YOUR_TEAM_ID)"
