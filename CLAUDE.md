@@ -150,32 +150,11 @@ xcodebuild test -project App/EldrChat.xcodeproj -scheme EldrChat \
 
 # The macOS companion app (Huginn) has its own project + suite — it is NOT covered by
 # the iOS scheme and NOT in CI. Run it whenever you touch Apps/Huginn or the gateway.
-# Huginn tests need REAL signing (the data-protection keychain group is team-scoped
-# and DEVELOPMENT_TEAM is deliberately blank in the pbxproj): pass a team id on the
-# command line — any free personal team works; this machine keeps one in the
-# gitignored private/dev-team.txt. Building only? CODE_SIGNING_ALLOWED=NO instead.
-#
-# NOT ANY TEAM ID — the RIGHT one. A team whose Apple ID is not signed in under
-# Xcode ▸ Settings ▸ Accounts fails in a way that reads like a missing certificate:
-#   error: No Account for Team "…". Add a new account in Accounts settings.
-#   error: No signing certificate "Mac Development" found: … matching team ID "…"
-# The second line is a CONSEQUENCE of the first, so chasing the certificate — or
-# adding -allowProvisioningUpdates, which does not help — is a dead end. This Mac
-# has certs for two teams and only one is signed in; if private/dev-team.txt holds
-# the other, the whole suite dies at the build step. Confirm what you actually have:
-#   security find-identity -v -p codesigning
-# With the signed-in team, the suite is green and needs NO interactive step — 256
-# test cases including all the Keychain-backed ones (KeychainIsolation,
-# LLMTokenAtRest, BuzzConnection, A2AServerHostToken). Verified 2026-08-06.
-#
-# [Correction, 2026-08-06 — 2026-07-28's note said signing in was interactive and
-# unscriptable and that the ~16 Keychain tests must be reported BLOCKED. Wrong
-# diagnosis: the machine was already signed in for team 49CQA5YX6U; dev-team.txt
-# just held a different team (8Q3SY67M7C). Following that note would have parked a
-# passing suite as permanently blocked. Fix the team id, don't report BLOCKED.]
+# Huginn tests need REAL signing (the data-protection keychain group is team-scoped).
+# NO team argument is needed — see § Code signing below; run `scripts/setup-signing.sh`
+# once per clone and both projects sign themselves from then on.
 xcodebuild test -project Apps/Huginn/Huginn.xcodeproj -scheme Huginn \
-  -destination 'platform=macOS' -skipPackagePluginValidation \
-  DEVELOPMENT_TEAM="$(cat private/dev-team.txt 2>/dev/null || echo YOUR_TEAM_ID)"
+  -destination 'platform=macOS' -skipPackagePluginValidation
 ```
 
 **Three xcodebuild rules that have each cost real hours — do not rediscover them:**
@@ -183,15 +162,59 @@ xcodebuild test -project Apps/Huginn/Huginn.xcodeproj -scheme Huginn \
 - **Pin `OS=26.5` and use a device name that exists.** This Mac has both the iOS 26.5 and iOS 27.0 runtimes, and an unpinned/ambiguous name silently flips between them. There is **no plain "iPhone 17" simulator** — run `-showdestinations` and pick a real one (`iPhone 17 Pro Max` works on 26.5).
 - **NEVER pass `CODE_SIGNING_ALLOWED=NO` to `xcodebuild test` if any test touches the Keychain.** It strips entitlements, so every `SecItem*` call returns `errSecMissingEntitlement` (-34018) and the keychain/Secure-Enclave tests all fail in a way that looks like a code bug but isn't. Simulator builds sign ad-hoc and keep entitlements — just drop the flag.
 
-**The team id belongs on the command line, never in a pbxproj.** This repo is
-public, and `DEVELOPMENT_TEAM` has leaked into it three times by the same route:
-open the project in Xcode with a team selected, Xcode silently rewrites the
-pbxproj, and the change rides along in the next `git commit -a`. `scripts/check-no-team-id.sh`
-refuses it at commit time — install it once per clone (hooks are not tracked):
+### Code signing — one command per clone, zero personal data in git
+
+An Apple Team ID identifies a real person in Apple's developer directory, and this
+repo is public, so it must never appear in a tracked file. It leaked three times
+anyway, always the same way: you open the project in Xcode with a team selected,
+Xcode rewrites the pbxproj, and the line rides along in the next `git commit -a`.
+
+The fix is the standard Xcode one — an **xcconfig with an optional include**:
+
+| File | Tracked? | Holds |
+|---|---|---|
+| `Signing.xcconfig` | yes | `#include? "Signing.local.xcconfig"` + `DEVELOPMENT_TEAM = $(ELDR_DEV_TEAM)` |
+| `Signing.local.xcconfig` | **no** (gitignored) | `ELDR_DEV_TEAM = <your team>` |
+
+Both projects reference `Signing.xcconfig` as the **project-level**
+`baseConfigurationReference`. Run this once per clone and never think about it again:
 
 ```bash
-ln -sf ../../scripts/check-no-team-id.sh .git/hooks/pre-commit
+./scripts/setup-signing.sh          # detects your team, writes the gitignored file
+ln -sf ../../scripts/check-no-team-id.sh .git/hooks/pre-commit   # blocks re-leaks
 ```
+
+After that the Xcode GUI, `xcodebuild`, and every test command here sign with no
+flags. **Do not pass `DEVELOPMENT_TEAM=` on the command line** — it is unnecessary
+and it is how the wrong team got used for a whole debugging session.
+
+Three things that make this work and are easy to break:
+
+- **`#include?` is the optional form.** A fresh clone or CI runner has no local
+  file, the include is skipped, `DEVELOPMENT_TEAM` resolves empty, and simulator
+  builds sign ad-hoc exactly as before. Nothing to edit, no placeholder, no error.
+- **An empty `DEVELOPMENT_TEAM = ""` in `buildSettings` BEATS the xcconfig.** Those
+  were removed from both projects; do not let them come back. That mismatch — app
+  target signed, test target pinned empty — is what produced the misleading
+  "No signing certificate Mac Development found".
+- **Not an environment variable.** Xcode launched from the Dock does not inherit
+  your shell. This repo already paid for that lesson (DEVIATIONS AC125, where an
+  env-var opt-in silently disabled PCC in the app the owner actually ran).
+
+Detection reads **provisioning profiles**, not certificates. A certificate proves
+you hold a key; a profile proves Xcode has an *account* for that team. They come
+apart, and on this machine they name **different teams**: every "Apple Development"
+cert in the keychain belongs to one team, while all 25 provisioning profiles — and
+the only team that actually builds — belong to another. A cert-based guess picks
+the team that cannot build, and the failure reads as a missing certificate:
+
+```
+error: No Account for Team "…". Add a new account in Accounts settings.
+error: No signing certificate "Mac Development" found: … matching team ID "…"
+```
+
+The second line is a consequence of the first. Chasing the certificate, or adding
+`-allowProvisioningUpdates`, is a dead end.
 
 If a diff on `*.pbxproj` shows only a `DEVELOPMENT_TEAM` line, that is Xcode, not
 your work — `git restore` it.

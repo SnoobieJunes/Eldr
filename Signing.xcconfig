@@ -1,0 +1,38 @@
+// Signing.xcconfig — how this repo gets a code-signing team WITHOUT publishing one.
+//
+// This repository is public. An Apple Team ID is personal identifying information
+// (it resolves to a named individual or company in Apple's developer directory),
+// so it must never appear in a tracked file. But signing still has to Just Work
+// in the Xcode GUI, in `xcodebuild`, and in CI — with no manual step per clone.
+//
+// The split:
+//
+//   Signing.xcconfig        (this file, TRACKED)   — the plumbing, no secrets
+//   Signing.local.xcconfig  (GITIGNORED)           — your actual team id
+//
+// The `#include?` below is the OPTIONAL form: if the local file is absent — a
+// fresh clone, a contributor's machine, a CI runner — the include is skipped,
+// ELDR_DEV_TEAM stays empty, DEVELOPMENT_TEAM resolves to empty, and the project
+// behaves exactly as it did before (unsigned / ad-hoc simulator builds, which is
+// what CI wants). No error, no placeholder to edit, nothing to remember.
+//
+// Create your local file once:
+//
+//   ./scripts/setup-signing.sh
+//
+// Why an xcconfig and not an environment variable: Xcode launched from the Dock
+// does not inherit your shell environment. This repo already paid for that lesson
+// once — see DEVIATIONS AC125, where an env-var opt-in silently disabled Private
+// Cloud Compute in the app the owner actually ran. An xcconfig is read identically
+// by the Xcode GUI, `xcodebuild`, `swift build`, and CI. There is nothing to
+// export, inherit, or forget.
+//
+// Precedence note: a build setting written directly into a target's buildSettings
+// BEATS this file. That is exactly how the team id kept leaking — Xcode writes
+// DEVELOPMENT_TEAM into the target when you touch the team dropdown in
+// Signing & Capabilities. If you see that hunk in `git diff`, restore it; the
+// pre-commit hook (scripts/check-no-team-id.sh) will refuse it anyway.
+
+#include? "Signing.local.xcconfig"
+
+DEVELOPMENT_TEAM = $(ELDR_DEV_TEAM)
