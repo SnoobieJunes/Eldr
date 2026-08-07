@@ -40,6 +40,7 @@
 		BB0000000000000000000702 /* HuginnTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = HuginnTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		BB0000000000000000000F01 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
 		BB0000000000000000000F02 /* Huginn.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = Huginn.entitlements; sourceTree = "<group>"; };
+		BB0000000000000000000F03 /* Signing.xcconfig */ = {isa = PBXFileReference; lastKnownFileType = text.xcconfig; name = Signing.xcconfig; path = ../../Signing.xcconfig; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFileSystemSynchronizedRootGroup section */
@@ -102,6 +103,7 @@
 				BB0000000000000000000402 /* Resources */,
 				BB0000000000000000000F01 /* Info.plist */,
 				BB0000000000000000000F02 /* Huginn.entitlements */,
+				BB0000000000000000000F03 /* Signing.xcconfig */,
 				BB0000000000000000000602 /* Products */,
 			);
 			sourceTree = "<group>";
@@ -306,6 +308,7 @@
 /* Begin XCBuildConfiguration section */
 		BB0000000000000000000D01 /* Debug */ = {
 			isa = XCBuildConfiguration;
+			baseConfigurationReference = BB0000000000000000000F03 /* Signing.xcconfig */;
 			buildSettings = {
 				ALWAYS_SEARCH_USER_PATHS = NO;
 				CLANG_ENABLE_MODULES = YES;
@@ -346,6 +349,7 @@
 		};
 		BB0000000000000000000D02 /* Release */ = {
 			isa = XCBuildConfiguration;
+			baseConfigurationReference = BB0000000000000000000F03 /* Signing.xcconfig */;
 			buildSettings = {
 				ALWAYS_SEARCH_USER_PATHS = NO;
 				CLANG_ENABLE_MODULES = YES;
@@ -386,7 +390,6 @@
 				CODE_SIGN_STYLE = Automatic;
 				COMBINE_HIDPI_IMAGES = YES;
 				CURRENT_PROJECT_VERSION = 1;
-				DEVELOPMENT_TEAM = 49CQA5YX6U;
 				ENABLE_HARDENED_RUNTIME = YES;
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = NO;
@@ -412,7 +415,6 @@
 				CODE_SIGN_STYLE = Automatic;
 				COMBINE_HIDPI_IMAGES = YES;
 				CURRENT_PROJECT_VERSION = 1;
-				DEVELOPMENT_TEAM = 49CQA5YX6U;
 				ENABLE_HARDENED_RUNTIME = YES;
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = NO;
@@ -434,7 +436,6 @@
 				BUNDLE_LOADER = "$(TEST_HOST)";
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
-				DEVELOPMENT_TEAM = "";
 				GENERATE_INFOPLIST_FILE = YES;
 				MACOSX_DEPLOYMENT_TARGET = 26.0;
 				MARKETING_VERSION = 0.1.0;
@@ -453,7 +454,6 @@
 				BUNDLE_LOADER = "$(TEST_HOST)";
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
-				DEVELOPMENT_TEAM = "";
 				GENERATE_INFOPLIST_FILE = YES;
 				MACOSX_DEPLOYMENT_TARGET = 26.0;
 				MARKETING_VERSION = 0.1.0;

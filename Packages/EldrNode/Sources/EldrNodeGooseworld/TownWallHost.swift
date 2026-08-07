@@ -270,6 +270,42 @@ public actor TownWallHost {
         return out
     }
 
+    /// WS-D1n — the DASHBOARD read model (metadata only; see `TownStatusSnapshot`).
+    ///
+    /// Deliberately mirrors `towns()` and reuses the SAME grant predicate (`grantCovers`),
+    /// so the human view and the agent view can never disagree about who is authorized —
+    /// a divergence there would be the "Huginn says it's fine, the plane still won't talk"
+    /// confusion the grants panel already exists to prevent.
+    public func statusSnapshot() async -> TownStatusSnapshot {
+        let grants = await liveGrants()
+        let cutoff = now()
+        var out: [TownStatusSnapshot.Town] = []
+        for peer in config.peers {
+            let hex = peer.identityHex
+            // When this peer's authorization fully lapses: the latest expiry among the
+            // live, OWNER-signed grants naming it. Filtered on the same three conditions
+            // admission uses (peer, granter, not-expired) so a grant the authorizer would
+            // refuse can never surface here as a horizon.
+            let horizon =
+                grants
+                .filter {
+                    $0.peer == hex && $0.enabledBy.hexString == ownerHex
+                        && $0.activeUntil > cutoff
+                }
+                .map(\.activeUntil).max()
+            out.append(
+                .init(
+                    townID: peer.townID, label: peer.label,
+                    wallGranted: await grantCovers(hex, .wall),
+                    delegateGranted: await grantCovers(hex, .delegate),
+                    lastSeen: lastSeen[hex] ?? 0,
+                    grantExpiry: horizon))
+        }
+        return TownStatusSnapshot(
+            nodeTownID: config.localTownID, localAgentID: localAgentID(),
+            towns: out, droppedInboundCount: droppedInboundCount, generatedAt: cutoff)
+    }
+
     public func post(text: String, priorityForHuman: Bool, targets: [String]) async -> MCPWriteResult {
         // Local wall FIRST: its bounds (size, identifiers, target count) are the
         // refusal point, and the local stamp is what the reader sees.

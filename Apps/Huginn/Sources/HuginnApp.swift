@@ -139,8 +139,11 @@ struct RootView: View {
 /// tether)), and the infrastructure setup (Relay).
 struct MainWindow: View {
     enum Tab: Hashable {
-        case configuration, testChat, mlx, inspector, logs, bridge, nearby, relay, townGrants
-        case connections
+        case configuration, testChat, mlx, inspector, logs, bridge, nearby, relay
+        // WS-D2h: `world` replaced the separate `townGrants` and `connections` tabs.
+        // Both VIEWS still exist and are reached from inside it; only the tab cases are
+        // gone, and nothing outside this file ever posted them to `openTab`.
+        case world
     }
     @State private var tab: Tab = .configuration
 
@@ -179,21 +182,17 @@ struct MainWindow: View {
             RelayWizardView()
                 .tabItem { Label("Relay", systemImage: "server.rack") }
                 .tag(Tab.relay)
-            // WS-I7: outbound workspace membership — this Mac's model joining a
-            // Buzz workspace as an agent (and the reverse: handing Buzz a snapshot
-            // so it manages one). A distinct capability from the phone tether, so
-            // it gets its own tab rather than hiding inside Bridge.
-            BuzzConnectionsView()
+            // WS-D2h: the single "who am I connected to?" surface — towns (live, read
+            // from the running node via `world/status`), Buzz workspaces (WS-I7), and the
+            // phone tether. It CONSOLIDATES the former Connections and Town Grants tabs:
+            // both of those views are reached from inside it, so every import/edit/
+            // revoke path is unchanged, and the Phase-2 invariant-9 authorization surface
+            // is still one click from here.
+            WorldView()
                 .tabItem {
-                    Label("Connections", systemImage: "point.3.connected.trianglepath.dotted")
+                    Label("World", systemImage: "point.3.connected.trianglepath.dotted")
                 }
-                .tag(Tab.connections)
-            // WS-G5 Phase-2 gate: the node's standing TOWN grants (view/verify/import/
-            // revoke-by-removal) — the human-visible authorization surface invariant 9
-            // requires for the cross-town planes.
-            TownGrantsView()
-                .tabItem { Label("Town Grants", systemImage: "signpost.right.and.left") }
-                .tag(Tab.townGrants)
+                .tag(Tab.world)
         }
         .padding(.top, 6)
         .navigationTitle("Eldr — Mac node & AI tether")

@@ -100,7 +100,11 @@ public enum GooseworldWiring {
                 let endpoint: GooseworldSocketHost.Endpoint =
                     socketPath.map { .unix(path: $0) } ?? .loopbackTCP(port: port ?? 0)
                 let mcp = GooseworldMCPServer(bridge: TownWallHostBridge(host: host))
-                let sockHost = GooseworldSocketHost(endpoint: endpoint, token: token, server: mcp)
+                // WS-D1n: the same socket also answers the dashboard's `world/status`.
+                // Not an MCP tool — see `GooseworldSocketHost.statusResponse`.
+                let sockHost = GooseworldSocketHost(
+                    endpoint: endpoint, token: token, server: mcp,
+                    statusProvider: { await host.statusSnapshot() })
                 do {
                     try sockHost.start()
                     socketHost = sockHost

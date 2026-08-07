@@ -40,6 +40,7 @@
 		AA0000000000000000000702 /* EldrChatTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = EldrChatTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		AA0000000000000000000703 /* EldrChatUITests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = EldrChatUITests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		B9C4C4802FF08EEE0005B92A /* EldrChat.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = EldrChat.entitlements; sourceTree = "<group>"; };
+		AA0000000000000000000704 /* Signing.xcconfig */ = {isa = PBXFileReference; lastKnownFileType = text.xcconfig; name = Signing.xcconfig; path = ../Signing.xcconfig; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFileSystemSynchronizedRootGroup section */
@@ -97,6 +98,7 @@
 		AA0000000000000000000601 = {
 			isa = PBXGroup;
 			children = (
+				AA0000000000000000000704 /* Signing.xcconfig */,
 				B9C4C4802FF08EEE0005B92A /* EldrChat.entitlements */,
 				AA0000000000000000000401 /* PQRC */,
 				AA0000000000000000000402 /* PQRCTests */,
@@ -283,6 +285,7 @@
 /* Begin XCBuildConfiguration section */
 		AA0000000000000000000D01 /* Debug */ = {
 			isa = XCBuildConfiguration;
+			baseConfigurationReference = AA0000000000000000000704 /* Signing.xcconfig */;
 			buildSettings = {
 				ALWAYS_SEARCH_USER_PATHS = NO;
 				ASSETCATALOG_COMPILER_GENERATE_SWIFT_ASSET_SYMBOL_EXTENSIONS = YES;
@@ -308,7 +311,6 @@
 				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
 				COPY_PHASE_STRIP = NO;
 				DEBUG_INFORMATION_FORMAT = dwarf;
-				DEVELOPMENT_TEAM = "";
 				ENABLE_STRICT_OBJC_MSGSEND = YES;
 				ENABLE_TESTABILITY = YES;
 				ENABLE_USER_SCRIPT_SANDBOXING = YES;
@@ -340,6 +342,7 @@
 		};
 		AA0000000000000000000D02 /* Release */ = {
 			isa = XCBuildConfiguration;
+			baseConfigurationReference = AA0000000000000000000704 /* Signing.xcconfig */;
 			buildSettings = {
 				ALWAYS_SEARCH_USER_PATHS = NO;
 				ASSETCATALOG_COMPILER_GENERATE_SWIFT_ASSET_SYMBOL_EXTENSIONS = YES;
@@ -365,7 +368,6 @@
 				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
 				COPY_PHASE_STRIP = NO;
 				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
-				DEVELOPMENT_TEAM = "";
 				ENABLE_NS_ASSERTIONS = NO;
 				ENABLE_STRICT_OBJC_MSGSEND = YES;
 				ENABLE_USER_SCRIPT_SANDBOXING = YES;

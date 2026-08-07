@@ -50,13 +50,17 @@ suite is now `hybrid-v2` and why **all peers must update together**.
 
 [`WHY-ELDR.md`](pitch/WHY-ELDR.md) (vs Block's Buzz, honest about limits) ·
 [`ENTERPRISE-PITCH.md`](pitch/ENTERPRISE-PITCH.md) (the funder narrative) ·
-[`GOOSEWORLD.md`](pitch/GOOSEWORLD.md) (why cross-town transport exists)
+[`GOOSEWORLD.md`](pitch/GOOSEWORLD.md) (why cross-town transport exists) ·
+[`eldr-promo.html`](pitch/eldr-promo.html) (the promotional webpage — one self-contained file, fonts inlined)
 
 ## [`plan/`](plan/) — designs for unbuilt work
 
-**1 file.** If this folder is empty, nothing is designed-but-unstarted. See
+**2 files.** If this folder is empty, nothing is designed-but-unstarted. See
 [`BACKLOG.md`](BACKLOG.md) for the full picture — a plan is *how*, the backlog is
 *what and whether*.
+
+[`TWO-APP-PAIR-PROOF.md`](plan/TWO-APP-PAIR-PROOF.md) (`WS-P`) ·
+[`ELDR-BUZZ-MOBILE-RELAY.md`](plan/ELDR-BUZZ-MOBILE-RELAY.md) (`WS-BM`)
 
 ## [`nips-contrib/`](nips-contrib/) — outbound
 

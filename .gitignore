@@ -31,3 +31,6 @@ private/
 
 # Xcode distribution / export logs (build artifacts)
 *.xcdistributionlogs/
+
+# Local code-signing team id (personal info — see Signing.xcconfig)
+Signing.local.xcconfig

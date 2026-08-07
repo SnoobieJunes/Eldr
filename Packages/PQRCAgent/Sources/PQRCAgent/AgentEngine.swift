@@ -396,6 +396,30 @@ public actor AgentEngine {
         public let tasksInFlight: Int
         public let maxConcurrentTasks: Int
         public let toolCeiling: [String]?
+
+        /// Public memberwise init. A synthesized one is `internal`, which made this
+        /// public read-only DTO unconstructible outside the package — so app-layer code
+        /// (the World screen's row derivation, WS-D1a) could not table-test against the
+        /// REAL type and would have had to mirror it. Constructing a status object
+        /// authorizes nothing on its own; the engine remains the only thing that can
+        /// mint or honor a grant.
+        public init(
+            grantID: String, granterIdentityHex: String, peerIdentityHex: String,
+            plane: StandingGrant.Plane, activeUntil: Int64, messagesRemaining: Int,
+            bytesRemaining: Int, tasksInFlight: Int, maxConcurrentTasks: Int,
+            toolCeiling: [String]?
+        ) {
+            self.grantID = grantID
+            self.granterIdentityHex = granterIdentityHex
+            self.peerIdentityHex = peerIdentityHex
+            self.plane = plane
+            self.activeUntil = activeUntil
+            self.messagesRemaining = messagesRemaining
+            self.bytesRemaining = bytesRemaining
+            self.tasksInFlight = tasksInFlight
+            self.maxConcurrentTasks = maxConcurrentTasks
+            self.toolCeiling = toolCeiling
+        }
     }
 
     /// The UTC day a timestamp falls in. Floor division (not truncation), so the

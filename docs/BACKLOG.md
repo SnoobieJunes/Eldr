@@ -67,6 +67,7 @@ These are eyeball passes. The code is written and the tests are green; no one ha
 - **iPad / Mac landscape pass** on every primary screen — conversation list, ConversationView, ThreadView, Settings, Onboarding. Built iPhone-portrait-first. (`CLAUDE.md` § Platform expansion — *"a verification pass, not new layout work"*.)
 - **The Huginn MLX overhaul**, WS-M3/M4/M5 — download progress, detail popover, loss chart, dataset assistant, the Advanced disclosure. Six separate `NEEDS OWNER` entries in `private/LOOP-STATE.md`.
 - **The Buzz Connections tab** — banner, section, tab look, paste flow (DEVIATIONS AC146).
+- ~~**The World dashboard maps**~~ — rendered and accepted by the owner 2026-07-28. Still worth a second look when a real second town exists: the radial layout has only ever been seen at one town, never at the 8-town fan-out cap, and a live (pulsing) edge has never been observed because no peer has yet sent traffic. Also unconfirmed: that the consolidated Huginn tab lost nothing — Town Grants and Buzz Connections now live one level down.
 - **Per-chat egress firewall with a real cloud AI** — confirm ON redacts and bounds, OFF sends raw.
 - **Encrypted Mac-AI memory + unpair shred**, **interactive terminal kill**, **MCP codename passthrough**, **node-side image input** — the remaining `private/meatsuittasks.md` device checks.
 
@@ -83,6 +84,45 @@ Each has a written plan. Estimates are the plans' own, solo-developer days.
 | **Push the 8 OSS repos.** Built, tested, committed, **zero remotes**. Publication order matters for exactly one pair (`swift-a2a` before `eldr-acp`). | ~1 day | [`guide/OSS-RELEASE-RUNBOOK.md`](guide/OSS-RELEASE-RUNBOOK.md) |
 | **Submit the 3 NIP PRs** to `block/buzz`. Bodies pre-written, every command given. | ~20 min | [`nips-contrib/PR-SUBMISSION-RUNBOOK.md`](nips-contrib/PR-SUBMISSION-RUNBOOK.md) |
 | **Relay-side work for ephemeral receiving keys** (kind 10422). The app toggle **must not** be flipped until the relay passes the §6 gate — today it breaks inbound delivery. | — | [`guide/RELAY-EPHEMERAL-KEYS-SETUP.md`](guide/RELAY-EPHEMERAL-KEYS-SETUP.md) |
+| **The node-served web dashboard (WS-D2/D3-web).** Deliberately deferred when AC155 shipped native-first, so a **Linux town has no dashboard at all** — `world/status` exists and is transport-agnostic, but only the two Apple apps can read it. Needs the specced loopback HTTP+SSE server: token-gated, `Origin`/`Host`-validated against DNS rebinding, no write path, no-CDN vendored frontend. | ~2–3 days | DEVIATIONS AC155; original spec in the retired gooseworld-v2 plan |
+| **Streaming dashboard updates.** AC155 refreshes on demand and labels every row with when it was confirmed. Live updates need WS-D1n's observer hooked *after* the authorizer in `routeInboundA2A` and delivered **non-blocking** to a bounded `AsyncStream` — an awaited observer would head-of-line-block all three planes (an availability DoS). Would also let the Mac map pulse per actual message instead of per live-state. | ~1 day | DEVIATIONS AC155 |
+| **A deterministic "universe seeded" signal for `--uitest`.** `EldrChatUITests` fails intermittently and *a different test loses the race each run* — observed 2026-08-06: `PerformanceUITests.test_scroll10kMessages` ("no matches for ScrollView"), then `UXVerificationTests.test_rec1_aiControlsOverlap`, then `test_rec4_largePasteChip` (both "conversation Bob missing"). Each passes in isolation; `simctl shutdown all` does not help, so it is not accumulated simulator state. The mitigations in place — a 150 s wait and `UXVerificationTests.launchUniverse`'s single relaunch — treat the symptom. The fix is for `bootUniverse` to publish a **seeded** state the tests can await (accessibility element, or a springboard-visible marker) instead of every test polling for its own row. `PQRCApp.swift:1304` already carries the `TODO(AC111)`. **The failure message always names a missing UI element, so it reads like a layout regression when it is a boot race** — that mis-read costs a debugging session each time. | ~0.5 day | `App/PQRC/PQRCApp.swift:1304`; DEVIATIONS AC111 |
+
+### B1a · Both apps, one machine, actually talking ⭐
+
+**Plan:** [`plan/TWO-APP-PAIR-PROOF.md`](plan/TWO-APP-PAIR-PROOF.md) (`WS-P`).
+
+Every "phone ↔ Mac" proof today has a **simulated** phone. `RelayACPHostTests`
+(Huginn) runs the shipping `ACPRelayHost` against an in-process `ACPClient` over a
+`LocalRelaySimulator`; `LocalUniverse` is one process pretending to be several
+people. Neither has ever had the real EldrChat binary on one end. So the app pair
+this product *is* has never been exercised as two processes.
+
+It does not need a second machine. Two facts make it work today:
+
+- **EldrChat already builds for the Mac** — `SUPPORTS_MACCATALYST = YES` on the app
+  target, so it runs natively beside Huginn.
+- **`pqrc-relay` is a real relay**, not a simulator: `NostrRelayServer` over a real
+  WebSocket at `ws://127.0.0.1:7777`. Huginn's `RelayWizardView` already has a
+  button pointing at it, and `BuzzGatewayTests` already drives it over a real
+  socket. (The iOS Simulator also shares the host network stack, so `127.0.0.1`
+  inside the sim is the Mac's loopback — the same relay serves either shape.)
+
+Three tiers, cheapest first. They stack; none invalidates the one below.
+
+| Tier | What it proves | Effort |
+|---|---|---|
+| **1 — real wire, one process.** Swap `LocalRelaySimulator` → `NostrRelayServer` in the existing `RelayACPHostTests`. Same assertions, real sockets, real framing, real backpressure. Catches everything the simulator's in-memory shortcut hides. | The wire, not the app | ~0.5 day |
+| **2 — two real processes.** Boot `pqrc-relay`, launch Huginn.app and Catalyst EldrChat, drive **both** from one macOS XCUITest via `XCUIApplication(bundleIdentifier:)`. This is the "two apps talking" test. Needs a launch-arg seam so EldrChat can take a relay URL + peer npub without a human pasting a pairing link (today that arrives via `onOpenURL`, `PQRCApp.swift:81`). | The product | ~1–2 days |
+| **3 — iOS runtime.** EldrChat in the Simulator, Huginn native, same loopback relay. Closest to the shipping shape. **One XCUITest bundle cannot drive a simulator app and a Mac app**, so this is a script plus assertions on both sides' logs, not one test. | The real target | ~1 day |
+
+Do Tier 1 first regardless: it is small, it is CI-able, and it is the only one that
+runs unattended. Tier 2 is the one worth having before any demo.
+
+Worth stating plainly: this replaces the **solo** test written before the Mac app
+existed. That test is not wrong, it just cannot fail for the reasons that matter
+now — a serialization mismatch, a pairing regression, or a gate that only fires
+across a process boundary all pass a single-process simulation.
 
 ### B2 · The Buzz mobile plan — Phase 1 done, 2 and 3 not started
 
