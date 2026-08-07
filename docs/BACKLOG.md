@@ -90,6 +90,8 @@ Each has a written plan. Estimates are the plans' own, solo-developer days.
 
 ### B1a · Both apps, one machine, actually talking ⭐
 
+**Plan:** [`plan/TWO-APP-PAIR-PROOF.md`](plan/TWO-APP-PAIR-PROOF.md) (`WS-P`).
+
 Every "phone ↔ Mac" proof today has a **simulated** phone. `RelayACPHostTests`
 (Huginn) runs the shipping `ACPRelayHost` against an in-process `ACPClient` over a
 `LocalRelaySimulator`; `LocalUniverse` is one process pretending to be several

@@ -55,9 +55,12 @@ suite is now `hybrid-v2` and why **all peers must update together**.
 
 ## [`plan/`](plan/) — designs for unbuilt work
 
-**1 file.** If this folder is empty, nothing is designed-but-unstarted. See
+**2 files.** If this folder is empty, nothing is designed-but-unstarted. See
 [`BACKLOG.md`](BACKLOG.md) for the full picture — a plan is *how*, the backlog is
 *what and whether*.
+
+[`TWO-APP-PAIR-PROOF.md`](plan/TWO-APP-PAIR-PROOF.md) (`WS-P`) ·
+[`ELDR-BUZZ-MOBILE-RELAY.md`](plan/ELDR-BUZZ-MOBILE-RELAY.md) (`WS-BM`)
 
 ## [`nips-contrib/`](nips-contrib/) — outbound
 
