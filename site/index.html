@@ -1,4 +1,16 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Eldr — the private network for you and your AI</title>
+<meta name="description" content="Eldr is a post-quantum, end-to-end encrypted messenger over Nostr, built for conversations between people and their AI.">
+<meta name="color-scheme" content="dark">
+<meta property="og:title" content="Eldr — the private network for you and your AI">
+<meta property="og:description" content="Post-quantum, end-to-end encrypted messaging over Nostr, built for conversations between people and their AI.">
+<meta property="og:type" content="website">
+<meta property="og:url" content="https://snoobiejunes.github.io/Eldr/">
+<meta name="twitter:card" content="summary_large_image">
 <style>
   /* ============ fonts (inlined, latin subsets) ============ */
   @font-face { font-family:'Bricolage Grotesque'; font-style:normal; font-weight:800; font-display:swap;
@@ -161,7 +173,7 @@
     margin-top:.45em; color:rgba(29,15,6,.72); text-align:right; }
   .bubble.agent{ background:#1B140D; border:1px solid rgba(240,160,68,.4);
     color:#DDD1C2; align-self:flex-start; border-bottom-left-radius:6px; }
-  .agent-chip{ display:inline-flex; align-items:center; gap:.4em; font-family:var(--font-mono);
+  .agent-chip{ display:flex; align-items:center; gap:.4em; font-family:var(--font-mono);
     font-size:.58rem; letter-spacing:.09em; text-transform:uppercase; color:#F0A044; margin-bottom:.45em; }
   .phone figcaption{ font-size:.78rem; color:#96887A; line-height:1.55; padding:.9rem .2rem 0; }
 
@@ -347,6 +359,8 @@
     .topnav{ display:none; }
   }
 </style>
+</head>
+<body>
 
 <!-- ================= HERO ================= -->
 <header class="hero">
@@ -710,3 +724,6 @@
   window.addEventListener('resize', function(){ clearTimeout(rt); rt = setTimeout(build, 160); });
 })();
 </script>
+
+</body>
+</html>
