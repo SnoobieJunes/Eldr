@@ -446,6 +446,16 @@ final class AppModel {
         await send(message.text, conversationID: message.conversationID, threadID: message.threadID)
     }
 
+    /// AC166: approve a contact's reconnect request (their row's Reconnect button).
+    func acceptReconnect(_ message: StoredMessage) async {
+        guard await runtime.acceptReconnect(peerIdentityHex: message.senderIdentity) else { return }
+        if var list = messagesByConversation[message.conversationID] {
+            list.removeAll { $0.id == message.id }
+            messagesByConversation[message.conversationID] = list
+        }
+        await runtime.deleteMessage(message.id)
+    }
+
     func sendAsAI(_ text: String, conversationID: String) async {
         try? await runtime.sendAsMyAI(text, conversationID: conversationID)
     }

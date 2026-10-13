@@ -70,6 +70,12 @@ public struct PQRCNodeMessenger: NodeMessenger {
 
     /// Decline a pending message-request: `PQRCMessenger.declineRequest` drops the
     /// sender's held envelopes without establishing a session (and does not block them).
+    public func acceptReconnect(peerIdentityHex: String) async -> Bool {
+        let ok = await messenger.acceptReconnect(peerIdentityHex: peerIdentityHex)
+        if ok { await sessionStore?.persist() }
+        return ok
+    }
+
     public func declineRequest(senderNostrPubkeyHex: String) async {
         await messenger.declineRequest(senderNostrPubkeyHex: senderNostrPubkeyHex)
     }

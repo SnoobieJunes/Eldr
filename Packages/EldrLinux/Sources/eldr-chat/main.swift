@@ -36,6 +36,8 @@ let usage = """
       sponsor <contact> [--days 1|7|30] [--label NAME]
                                     sponsor a contact's AI account (human only)
       revoke <sponsorship-id|contact> [--notify c1,c2]
+      reconnect <contact> [--decline]  approve (or refuse) ONE new session from a
+                                    contact that reset after its one-time prekeys ran out
       sponsorships                  this account's sponsorship + ones you issued
 
     <contact> = name, identity-hex prefix (≥6), npub, or nostr-hex prefix.
@@ -152,6 +154,11 @@ func eventObject(_ ev: ClientEvent) -> ([String: Any], String) {
                 + "Keeping the old one. Verify with them out-of-band before trusting anything new.")
     case .saveFailed(let e):
         return (["type": "error", "error": "save failed: \(e)"], "⚠ SAVE FAILED: \(e)")
+    case .reconnectRequest(let c, let auto):
+        let who = c.name ?? short(c.identityHex)
+        return (["type": "reconnect", "contact": who, "identity": c.identityHex, "autoAccepted": auto],
+            auto ? "🔄 \(who) reset; reconnected (you approved it)."
+                : "🔄 \(who) reset their app and wants to reconnect. Verify their safety code, then `eldr-chat reconnect \(who)`.")
     case .sponsorship(let note):
         return (["type": "sponsorship", "note": note], "🛡 \(note)")
     }
@@ -388,6 +395,21 @@ case "revoke":
     do {
         let ids = try await client.revokeSponsorship(target, alsoNotify: notify)
         emit(["type": "revoked", "ids": ids], human: "Revoked \(ids.map { String($0.prefix(8)) }.joined(separator: ", ")).")
+    } catch { fail("\(error)") }
+
+case "reconnect":
+    let decline = takeFlag("--decline")
+    guard let target = args.first else { fail("reconnect <contact> [--decline]") }
+    let client = await openClient(openStore())
+    do {
+        if decline {
+            try await client.declineReconnect(target)
+            emit(["type": "reconnect", "declined": true], human: "Reconnect refused; the old session stays.")
+        } else {
+            let now = try await client.approveReconnect(target)
+            emit(["type": "reconnect", "applied": now],
+                 human: now ? "Reconnected." : "Approved. Their pending request is applied on the next `listen`/`chat`.")
+        }
     } catch { fail("\(error)") }
 
 case "sponsorships":

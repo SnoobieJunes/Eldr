@@ -45,6 +45,8 @@ struct MessageBubble: View {
     var onFullScreen: ((String) -> Void)? = nil
     /// Re-sends a message that failed to publish ("Not sent"). nil hides retry.
     var onRetry: (() -> Void)? = nil
+    /// Approves a held reconnect (AC166) on a "reconnect" system row. nil hides it.
+    var onReconnect: (() -> Void)? = nil
     /// Asks the owner's AI to draft a reply to THIS specific message (guest messages
     /// only) → a preview / "Send as my AI" sheet. nil hides the action.
     var onAnswerWithAI: (() -> Void)? = nil
@@ -93,6 +95,16 @@ struct MessageBubble: View {
     var body: some View {
         if message.localStatus == "violation" {
             violationRow
+        } else if message.localStatus == "reconnect" {
+            VStack(spacing: 6) {
+                SystemRow(text: "\(senderName) \(message.text)")
+                if let onReconnect {
+                    Button("Reconnect", action: onReconnect)
+                        .buttonStyle(.borderedProminent)
+                        .accessibilityHint("Replaces the old encrypted session with their new one")
+                }
+            }
+            .id(message.id)
         } else if message.localStatus == "system" {
             // Window starts, group/thread creation, roster changes (APP-SPEC
             // §6.2): neutral centered rows, never message bubbles.

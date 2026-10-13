@@ -290,3 +290,18 @@ struct ReHandshakeTests {
         #expect(await b2Ev.waitTexts(1) == ["welcome back"])
     }
 }
+
+@Suite("Reconnect approval (AC166)")
+struct ReconnectApprovalTests {
+    @Test func approveBeforeArrival_isRemembered_andDeclineClearsIt() async throws {
+        let relay = LocalRelaySimulator()
+        let (_, alice) = try await Peer.make(relay)
+        let (_, bob) = try await Peer.make(relay)
+        try await alice.addContact(bob.pairingLink.uri, name: "bob")
+        #expect(try await alice.approveReconnect("bob") == false)
+        #expect(await alice.state.approvedReconnects == [bob.identityHex])
+        try await alice.declineReconnect("bob")
+        #expect(await alice.state.approvedReconnects == [])
+        await #expect(throws: EldrClientError.self) { try await alice.approveReconnect("nobody") }
+    }
+}

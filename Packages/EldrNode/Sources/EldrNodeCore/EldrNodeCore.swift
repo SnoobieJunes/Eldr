@@ -69,6 +69,9 @@ public protocol NodeMessenger: Sendable {
     /// frames are discarded rather than left pending — no contact was added in that case.
     /// No-op by default.
     func declineRequest(senderNostrPubkeyHex: String) async
+
+    /// AC166: apply a held last-resort re-handshake from this peer. Default: no-op.
+    func acceptReconnect(peerIdentityHex: String) async -> Bool
 }
 
 extension NodeMessenger {
@@ -82,6 +85,8 @@ extension NodeMessenger {
 
     /// Default: nothing to decline (no request inbox in this double).
     public func declineRequest(senderNostrPubkeyHex: String) async {}
+
+    public func acceptReconnect(peerIdentityHex: String) async -> Bool { false }
 }
 
 /// Errors the `NodeMessenger` seam can raise.
@@ -313,6 +318,13 @@ public actor EldrNodeCore {
                     senderNostrPubkeyHex: senderNostrPubkeyHex,
                     ownerIdentityHex: ownerIdentityHex,
                     messenger: messenger)
+            case .reconnectRequest(let sender) where sender == ownerIdentityHex:
+                // AC166: a headless node has no one to ask, so it accepts a last-resort
+                // re-handshake from its PINNED owner only (the owner reinstalled after
+                // the node's one-time prekeys ran out). Anyone else stays held/ignored.
+                // Worst case (a relay replaying an old owner handshake) is a session
+                // reset the owner repairs by sending again — never a new contact.
+                await messenger.acceptReconnect(peerIdentityHex: sender)
             default:
                 continue  // protocolViolation / quarantined / nearbyContact — not served
             }

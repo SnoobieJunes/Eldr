@@ -520,6 +520,7 @@ struct ConversationView: View {
                 },
             onFullScreen: selecting ? nil : { fullScreenContent = FullScreenContent(text: $0) },
             onRetry: selecting ? nil : { Task { await model.retry(message) } },
+            onReconnect: selecting ? nil : { Task { await model.acceptReconnect(message) } },
             // Guest messages only: have my AI draft a reply to THIS message → a preview
             // sheet (Send as my AI / Edit & send as me). User-initiated, so no ai_window
             // is needed (the §13 gate stops UNBIDDEN agent sends; this is bidden).

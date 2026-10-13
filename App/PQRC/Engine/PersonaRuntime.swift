@@ -3309,12 +3309,34 @@ actor PersonaRuntime {
                 nearbyContactNames[identityHex] = "Nearby · \(String(identityHex.prefix(8)))"
                 eventContinuation?.yield(.nearbyDiscovered(identityHex: identityHex))
             }
+        case .reconnectRequest(let sender):
+            // AC166: a contact we have a session with reset (reinstall) after our
+            // one-time prekeys ran out. The engine holds their handshake; nothing
+            // changes until the user taps Reconnect on this row.
+            let row = StoredMessage(
+                id: UUID().uuidString, conversationID: sender,
+                senderIdentity: sender, participantType: .human,
+                text: "reset their Eldr app and asked to reconnect. Check their safety code, then tap Reconnect.",
+                sentAt: clock.now(), localStatus: "reconnect")
+            try? await store.save(row)
+            eventContinuation?.yield(.messageAdded(row))
         case .relayReconnected:
             // C3: the socket came back — give every "Not sent" message one
             // automatic re-publish (same stable id inside, so a half-acked
             // original dedups receiver-side).
             await retryFailedSends()
         }
+    }
+
+    /// AC166: the user approved a held reconnect from this contact. Replaces the
+    /// stale session with their new one and persists it. False if nothing was held.
+    func acceptReconnect(peerIdentityHex: String) async -> Bool {
+        let ok = await messenger.acceptReconnect(peerIdentityHex: peerIdentityHex)
+        if ok {
+            await persistSession(peerIdentityHex)
+            await persistPrekeyState()
+        }
+        return ok
     }
 
     /// Buffers one chunk of a chunked message. Returns the fully reassembled

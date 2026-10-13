@@ -65,6 +65,9 @@ public enum ClientEvent: Sendable {
     case bindingIdentityChanged(ContactRecord, newIdentityHex: String)
     /// Sponsorship lifecycle notices (received / refused / revoked), human-readable.
     case sponsorship(String)
+    /// This contact reset and wants a new session; it needs the user's OK (AC166).
+    /// `autoAccepted` is true when `approveReconnect` was given beforehand.
+    case reconnectRequest(ContactRecord, autoAccepted: Bool)
 }
 
 public typealias TransportFactory = @Sendable () async throws -> any RelayTransport
@@ -366,6 +369,34 @@ public actor EldrClient {
         return try await messenger.sendBatch(bodies, to: c.identityHex, participantType: participant)
     }
 
+    // MARK: - Reconnect (AC166)
+
+    /// Approves ONE reconnect from this contact: applied now if a request is
+    /// pending in this process, otherwise remembered (encrypted) and applied to the
+    /// next request that arrives. Returns true if a session was replaced now.
+    @discardableResult
+    public func approveReconnect(_ q: String) async throws -> Bool {
+        let c = try contact(matching: q)
+        if await messenger.acceptReconnect(peerIdentityHex: c.identityHex) {
+            try await persist()
+            return true
+        }
+        var a = state.approvedReconnects ?? []
+        if !a.contains(c.identityHex) { a.append(c.identityHex) }
+        state.approvedReconnects = a
+        try await persist()
+        return false
+    }
+
+    public func declineReconnect(_ q: String) async throws {
+        let c = try contact(matching: q)
+        await messenger.declineReconnect(peerIdentityHex: c.identityHex)
+        state.approvedReconnects?.removeAll { $0 == c.identityHex }
+        try await persist()
+    }
+
+    public func pendingReconnects() async -> [String] { await messenger.pendingReconnectPeers() }
+
     // MARK: - Receive
 
     /// Starts the receive pump. Messages are surfaced ONLY for verified contacts (the
@@ -476,6 +507,17 @@ public actor EldrClient {
         case .protocolViolation(let s, let r, _): out.append(.protocolViolation(senderIdentityHex: s, reason: r))
         case .relayReconnected: out.append(.relayReconnected)
         case .nearbyContact: break
+        case .reconnectRequest(let sender):
+            if let c = state.contacts.first(where: { $0.identityHex == sender }) {
+                var approved = state.approvedReconnects ?? []
+                var auto = false
+                if approved.contains(sender) {
+                    auto = await messenger.acceptReconnect(peerIdentityHex: sender)
+                    if auto { approved.removeAll { $0 == sender } }
+                    state.approvedReconnects = approved
+                }
+                out.append(.reconnectRequest(c, autoAccepted: auto))
+            }
         }
         do { try await persist() } catch { out.append(.saveFailed("\(error)")) }
         return out

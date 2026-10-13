@@ -42,6 +42,8 @@ public struct ClientState: Codable, Sendable {
     public var relays: [String] = []
     /// Milestone 2 (sponsorship + history). Optional so older state still decodes.
     public var agent: AgentState?
+    /// Contacts the user pre-approved for ONE reconnect (AC166). Optional for old state.
+    public var approvedReconnects: [String]?
 
     public static let maxSeen = 5000
 }
