@@ -18,6 +18,16 @@ public struct VerifiedContact: Sendable, Equatable {
         self.binding = binding
         self.raw = raw
     }
+
+    /// Re-verifies a STORED kind-10420 binding event offline (outer BIP-340
+    /// signature + inner cross-signature, both directions) and rebuilds the
+    /// contact — so an app can restore contacts at launch with no relay round
+    /// trip. Trust still flows only through `BindingVerifier` (invariant 7); a
+    /// tampered or wrong-kind event throws.
+    public init(storedBindingEvent event: NostrEvent) throws {
+        let (verified, raw) = try PQRCEvents.verifyBindingEventWithRaw(event)
+        self.init(binding: verified, raw: raw)
+    }
 }
 
 /// A decrypted, verified, displayable message.
@@ -142,6 +152,9 @@ public actor PQRCMessenger {
     /// the outbound `p` tag, falling back to the identity npub when absent.
     private var peerReceivingPTag: [String: String] = [:]
     private var pumpStarted = false
+    /// The raw kind-10420 event each relay-fetched contact was verified from,
+    /// kept so the app can persist it and re-verify offline on restore.
+    private var verifiedBindingEvents: [String: NostrEvent] = [:]
 
     // Output
     private var eventContinuation: AsyncStream<MessengerEvent>.Continuation?
@@ -227,6 +240,7 @@ public actor PQRCMessenger {
                 bundleEvent, verifiedBinding: verified)
             let contact = VerifiedContact(binding: verified, raw: raw)
             contactsByNostrPub[contact.nostrPubkeyHex] = contact
+            verifiedBindingEvents[contact.nostrPubkeyHex] = bindingEvent
             return (contact, bundle)
         }
         // Nothing came back from any relay. Be honest about why.
@@ -294,6 +308,94 @@ public actor PQRCMessenger {
             return true
         }
         return false
+    }
+
+    /// The kind-10420 event the contact for `nostrPubkeyHex` was verified from
+    /// by `fetchVerifiedPeer`/`acceptRequest` (nil for contacts added any other
+    /// way). Persist it and rebuild with `VerifiedContact(storedBindingEvent:)`.
+    public func verifiedBindingEvent(nostrPubkeyHex: String) -> NostrEvent? {
+        verifiedBindingEvents[nostrPubkeyHex]
+    }
+
+    /// Outcome of re-checking a contact's binding against the relay.
+    public enum BindingRefresh: Sendable, Equatable {
+        /// The relay's binding is the same event, or OLDER than / as old as ours — keep ours
+        /// (an older replayed binding must never roll a contact back).
+        case unchanged
+        /// A strictly newer, validly signed binding for the SAME identity: adopted.
+        case updated(NostrEvent)
+        /// Validly signed, but binds a DIFFERENT identity key. NOT adopted — the caller must
+        /// warn the user (safety-code change); trust never silently moves.
+        case identityChanged(newIdentityHex: String)
+        /// The relay served something that does not verify (forged/garbled). Ignored.
+        case invalid
+        /// No binding came back (relay down / timeout). Nothing changed.
+        case unavailable
+    }
+
+    /// Pure decision for a candidate binding vs the stored one (exposed for tests).
+    /// Never trusts the candidate unless it fully verifies AND binds the same identity
+    /// AND is strictly newer.
+    public static func evaluateBindingRefresh(
+        stored: NostrEvent, candidate: NostrEvent
+    ) -> BindingRefresh {
+        guard let old = try? PQRCEvents.verifyBindingEventWithRaw(stored) else { return .invalid }
+        guard candidate.pubkey == stored.pubkey,
+            let new = try? PQRCEvents.verifyBindingEventWithRaw(candidate)
+        else { return .invalid }
+        guard new.verified.identityPubkey == old.verified.identityPubkey else {
+            return .identityChanged(newIdentityHex: new.verified.identityPubkey.hexString)
+        }
+        guard candidate.createdAt > stored.createdAt, candidate.id != stored.id else {
+            return .unchanged
+        }
+        return .updated(candidate)
+    }
+
+    /// Background re-check of a STORED contact binding (after the offline re-verify at
+    /// launch). Adopts the relay's binding only per `evaluateBindingRefresh`; on
+    /// `.updated` the in-memory contact + stored event are replaced. Read-only otherwise.
+    public func refreshContactBinding(
+        stored: NostrEvent, timeout: Duration = .seconds(8)
+    ) async -> BindingRefresh {
+        for transport in transports {
+            guard let candidate = try? await collectBindingEvent(
+                from: transport, author: stored.pubkey, timeout: timeout)
+            else { continue }
+            let result = Self.evaluateBindingRefresh(stored: stored, candidate: candidate)
+            if case .updated(let event) = result,
+                let (verified, raw) = try? PQRCEvents.verifyBindingEventWithRaw(event)
+            {
+                let contact = VerifiedContact(binding: verified, raw: raw)
+                contactsByNostrPub[contact.nostrPubkeyHex] = contact
+                verifiedBindingEvents[contact.nostrPubkeyHex] = event
+            }
+            return result
+        }
+        return .unavailable
+    }
+
+    private func collectBindingEvent(
+        from transport: any RelayTransport, author: String, timeout: Duration
+    ) async throws -> NostrEvent {
+        try await withThrowingTaskGroup(of: NostrEvent.self) { group in
+            group.addTask {
+                let stream = await transport.subscribe([
+                    NostrFilter(kinds: [PQRCConstants.bindingEventKind], authors: [author])
+                ])
+                for try await event in stream where event.kind == PQRCConstants.bindingEventKind {
+                    return event
+                }
+                throw NostrError.invalidEvent
+            }
+            group.addTask {
+                try await Task.sleep(for: timeout)
+                throw NostrError.publishDropped
+            }
+            defer { group.cancelAll() }
+            guard let result = try await group.next() else { throw NostrError.invalidEvent }
+            return result
+        }
     }
 
     public func addContact(_ contact: VerifiedContact) {
