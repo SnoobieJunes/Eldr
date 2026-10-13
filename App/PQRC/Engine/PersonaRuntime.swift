@@ -947,7 +947,14 @@ actor PersonaRuntime {
                 identity: identity, randomSource: randomSource, oneTimeCount: 16)
         }
         _ = try await prekeyManager.replenish(to: 16)
-        try keychain.save(
+        // Sealed like every other per-silo secret (it holds private prekey halves).
+        // Earlier builds saved this one unsealed, so in silo mode `loadSecret` could
+        // never open it: a legacy plaintext blob reads as absent (fresh prekeys —
+        // exactly what every launch of those builds already did) and is overwritten
+        // sealed right here. No plaintext fallback read: accepting an unsealed blob
+        // would let anyone with Keychain write access but no passphrase plant our
+        // prekeys. (`persistPrekeyState` already used `saveSecret`.)
+        try saveSecret(
             JSONEncoder().encode(await prekeyManager.snapshot()), account: "prekey-state")
         sponsorshipLedger = loadSecret("sponsorship-ledger")
             .flatMap { try? JSONDecoder().decode(SponsorshipLedger.self, from: $0) } ?? SponsorshipLedger()

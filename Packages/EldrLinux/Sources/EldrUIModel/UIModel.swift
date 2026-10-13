@@ -217,14 +217,16 @@ public enum UIFormat {
         return result
     }
 
-    private static let rules: [(NSRegularExpression, String)] = [
-        (try! NSRegularExpression(pattern: #"\[([^\]\n<>]+)\]\(([^)\s<>]+)\)"#), "$1 <span foreground=\"#3584e4\">($2)</span>"),
-        (try! NSRegularExpression(pattern: #"\*\*([^*\n<>]+)\*\*"#), "<b>$1</b>"),
-        (try! NSRegularExpression(pattern: #"__([^_\n<>]+)__"#), "<b>$1</b>"),
-        (try! NSRegularExpression(pattern: #"(?<![\w*])\*([^*\s<>][^*\n<>]*?)\*(?![\w*])"#), "<i>$1</i>"),
-        (try! NSRegularExpression(pattern: #"(?<![\w_])_([^_\s<>][^_\n<>]*?)_(?![\w_])"#), "<i>$1</i>"),
-        (try! NSRegularExpression(pattern: #"~~([^~\n<>]+)~~"#), "<s>$1</s>"),
-    ]
+    /// Patterns are literals; `try?` + compactMap instead of `try!` (no force-try rule).
+    /// `markdownRulesCompiled` in the tests pins that none is silently dropped.
+    static let rules: [(NSRegularExpression, String)] = ([
+        (#"\[([^\]\n<>]+)\]\(([^)\s<>]+)\)"#, "$1 <span foreground=\"#3584e4\">($2)</span>"),
+        (#"\*\*([^*\n<>]+)\*\*"#, "<b>$1</b>"),
+        (#"__([^_\n<>]+)__"#, "<b>$1</b>"),
+        (#"(?<![\w*])\*([^*\s<>][^*\n<>]*?)\*(?![\w*])"#, "<i>$1</i>"),
+        (#"(?<![\w_])_([^_\s<>][^_\n<>]*?)_(?![\w_])"#, "<i>$1</i>"),
+        (#"~~([^~\n<>]+)~~"#, "<s>$1</s>"),
+    ] as [(String, String)]).compactMap { p, t in (try? NSRegularExpression(pattern: p)).map { ($0, t) } }
 
     /// Applied to ALREADY-ESCAPED text. Groups exclude '<' and '>' so a span can never
     /// straddle a tag emitted by an earlier rule (no interleaved, malformed markup).

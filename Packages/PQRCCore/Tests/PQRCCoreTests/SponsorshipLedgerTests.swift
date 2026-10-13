@@ -7,9 +7,14 @@ import Testing
 /// The shared sponsor-side ledger used by iOS (and the evaluate() Linux delegates to).
 @Suite("Sponsorship ledger (shared, iOS)")
 struct SponsorshipLedgerTests {
-    let owner = try! PQRCIdentity(seed: Data(repeating: 0xA1, count: 32))
-    let agent = try! PQRCIdentity(seed: Data(repeating: 0xB2, count: 32))
-    let other = try! PQRCIdentity(seed: Data(repeating: 0xC3, count: 32))
+    let owner: PQRCIdentity
+    let agent: PQRCIdentity
+    let other: PQRCIdentity
+    init() throws {
+        owner = try PQRCIdentity(seed: Data(repeating: 0xA1, count: 32))
+        agent = try PQRCIdentity(seed: Data(repeating: 0xB2, count: 32))
+        other = try PQRCIdentity(seed: Data(repeating: 0xC3, count: 32))
+    }
     let now: Int64 = 1_790_000_000
     var agentHex: String { agent.publicKeyData.hexString }
 

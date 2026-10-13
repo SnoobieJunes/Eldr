@@ -45,6 +45,8 @@ let store: FileIdentityStore
 do { store = try makeClientKeystore(directory: stateDir, environment: env).0 } catch { die("\(error)") }
 
 /// All UI state. Touched ONLY on the GTK main thread (callbacks and `onMain`).
+// @unchecked Sendable: GTK is single-threaded; every access is on the main loop
+// (callbacks + `onMain`), never from a background task.
 final class AppUI: @unchecked Sendable {
     var client: EldrClient?
     var snap: UISnapshot?

@@ -119,4 +119,6 @@ struct UIModelTests {
         #expect(!UIFormat.shouldFollow(value: 200, pageSize: 100, upper: 1000))
         #expect(UIFormat.shouldFollow(value: 0, pageSize: 500, upper: 400), "short history always follows")
     }
+
+    @Test func markdownRulesCompiled() { #expect(UIFormat.rules.count == 6) }
 }

@@ -87,6 +87,8 @@ public func defaultTransportFactory(url: String) -> TransportFactory {
 
 /// Exclusive per-directory lock so two processes never advance the same ratchet
 /// (a stale snapshot written by one would desync the session).
+// @unchecked Sendable: `fd` is written only by init and by release(), which the owning
+// EldrClient actor calls once from stop(); flock state itself lives in the kernel.
 final class DirectoryLock: @unchecked Sendable {
     private var fd: Int32
     init(directory: URL) throws {
