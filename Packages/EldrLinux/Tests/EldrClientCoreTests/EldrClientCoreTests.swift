@@ -250,3 +250,43 @@ struct ClientBindingRefreshTests {
         #expect(try await alice.contact(matching: "bob").bindingEvent.id != swapped.id)
     }
 }
+
+@Suite("Peer lost its state (AC165)")
+struct ReHandshakeTests {
+    /// Bob reinstalls: same identity keys, no sessions/prekeys. His new handshake must
+    /// replace Alice's stale session (it used to be silently dropped, cutting the
+    /// contact off in both directions), and both directions work afterwards.
+    @Test func peerWithLostState_reHandshakes_andBothDirectionsRecover() async throws {
+        let relay = LocalRelaySimulator()
+        let (_, alice) = try await Peer.make(relay)
+        let (bobP, bob) = try await Peer.make(relay)
+        let aEv = Collector(), bEv = Collector()
+        await aEv.attach(try await alice.start())
+        await bEv.attach(try await bob.start())
+        try await alice.addContact(bob.pairingLink.uri, name: "bob")
+        try await alice.send("one", to: "bob")
+        for _ in 0..<200 where await bob.requests.isEmpty { try await Task.sleep(for: .milliseconds(20)) }
+        try await bob.accept(String(alice.nostrPubkeyHex.prefix(10)), name: "alice")
+        #expect(await bEv.waitTexts(1) == ["one"])
+        try await bob.send("two", to: "alice")
+        #expect(await aEv.waitTexts(1) == ["two"])
+        await bob.stop()
+
+        // Reinstall: copy ONLY the keys into a fresh directory.
+        let fresh = Peer(dir: FileManager.default.temporaryDirectory.appendingPathComponent("eldr-reinstall-\(UUID().uuidString)"), key: bobP.key)
+        try FileManager.default.createDirectory(at: fresh.dir, withIntermediateDirectories: true)
+        try fresh.store.save(bobP.store.load(account: "keys")!, account: "keys")
+        let bob2 = try await fresh.open(relay)
+        #expect(bob2.identityHex == bob.identityHex)
+        #expect(await bob2.contacts.isEmpty)
+        try await bob2.announce(maxAttempts: 2)
+        let b2Ev = Collector()
+        await b2Ev.attach(try await bob2.start())
+        try await bob2.addContact(alice.pairingLink.uri, name: "alice")
+        try await bob2.send("I reinstalled", to: "alice")
+        try await bob2.send("and again", to: "alice")
+        #expect(await aEv.waitTexts(3) == ["two", "I reinstalled", "and again"])
+        try await alice.send("welcome back", to: "bob")
+        #expect(await b2Ev.waitTexts(1) == ["welcome back"])
+    }
+}

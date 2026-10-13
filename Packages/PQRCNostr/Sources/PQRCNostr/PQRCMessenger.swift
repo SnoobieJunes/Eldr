@@ -1099,7 +1099,23 @@ public actor PQRCMessenger {
         // too, so the guard lives here at the single rebuild point. (A genuine
         // same-identity re-handshake is out of scope for v1 — it would need an
         // explicit, separately-gated re-establish, not an implicit side effect.)
-        guard sessions[contact.identityHex] == nil else { return }
+        //
+        // Re-establish (DEVIATIONS AC165): a peer that lost its state (reinstall,
+        // restore, new device for the same identity) can only reach us with a NEW
+        // handshake. Ignoring it made that contact silently unreachable in BOTH
+        // directions. We now rebuild only when the handshake proves freshness: it
+        // must spend a one-time prekey we still hold (`consume` refuses a consumed
+        // or unknown OTP, so a replay of ANY earlier handshake — including the one
+        // that built the current session — fails) and must not use the last-resort
+        // prekey (which is reusable, so it proves nothing). Simultaneous-initiation
+        // tie-break: if our session has never received from the peer, only the side
+        // whose peer has the lower identity rebuilds, so exactly one side yields.
+        let hadSession = sessions[contact.identityHex] != nil
+        if let existing = sessions[contact.identityHex] {
+            guard let hs = unwrapped.rumor.handshake, hs.otpUsed != nil, !hs.lrpUsed else { return }
+            let heardFromPeer = await existing.snapshot().ckr != nil
+            if !heardFromPeer, !(contact.identityHex < identity.publicKeyData.hexString) { return }
+        }
         guard let handshake = unwrapped.rumor.handshake,
             handshake.ik == contact.binding.identityPubkey
         else {
@@ -1140,6 +1156,9 @@ public actor PQRCMessenger {
             // Message #0 piggybacks on the handshake (D10).
             await decryptAndEmit(unwrapped, from: contact, isRetry: false)
         } catch {
+            // A refused re-handshake (spent/unknown OTP = a replay) leaves the live
+            // session untouched and stays silent, exactly as before AC165.
+            if hadSession { return }
             eventContinuation?.yield(
                 .quarantined(wrapEventID: unwrapped.wrapEventID, reason: "handshake failed"))
         }
