@@ -68,6 +68,9 @@ struct ConversationView: View {
     @State private var mentionSuggestions: [MentionSuggestionList.MentionSuggestion] = []
     /// My tethered AIs (id, name) for the per-AI context submenu (feature 7).
     @State private var myAIList: [(id: String, name: String)] = []
+    /// AC168: the sponsorship duration awaiting confirmation (nil = no dialog).
+    @State private var pendingSponsorDays: Int?
+    @State private var confirmRevoke = false
 
     private var conversationScope: AIContextGrant.Scope { .conversation(conversationID) }
 
@@ -98,6 +101,28 @@ struct ConversationView: View {
     }
     private var currentContactName: String {
         model.contactNames[conversationID] ?? "Conversation"
+    }
+
+    /// AC168: sponsor this contact as an AI account I answer for (1/7/30 days), or
+    /// revoke. Every choice goes through a confirmation dialog: signing a sponsorship
+    /// is a statement made with my identity key.
+    @ViewBuilder private var sponsorshipMenu: some View {
+        Menu {
+            if let until = model.sponsoredUntil[conversationID] {
+                Text("Sponsored until \(Date(timeIntervalSince1970: TimeInterval(until)).formatted(date: .abbreviated, time: .shortened))")
+            }
+            ForEach(SponsorshipLedger.dayChoices, id: \.self) { days in
+                Button("\(model.sponsoredUntil[conversationID] == nil ? "Sponsor" : "Renew") for \(days) day\(days == 1 ? "" : "s")") {
+                    pendingSponsorDays = days
+                }
+            }
+            if model.sponsoredUntil[conversationID] != nil {
+                Button("Revoke sponsorship", role: .destructive) { confirmRevoke = true }
+            }
+        } label: {
+            Label("AI-account sponsorship", systemImage: "checkmark.shield")
+        }
+        .accessibilityIdentifier("sponsorship-menu")
     }
 
     var body: some View {
@@ -298,6 +323,9 @@ struct ConversationView: View {
                             Label("Conversation details", systemImage: "info.circle")
                         }
                         .accessibilityIdentifier("conversation-details-item")
+                        if !isGroup, !isCodingAgent {
+                            sponsorshipMenu
+                        }
                     } label: {
                         Image(systemName: "ellipsis.circle")
                     }
@@ -305,6 +333,42 @@ struct ConversationView: View {
                     .accessibilityIdentifier("conversation-more-menu")
                 }
             }
+        }
+        .task(id: conversationID) { await model.refreshSponsorship(conversationID) }
+        .confirmationDialog(
+            "Sponsor \(currentContactName) as an AI account for \(pendingSponsorDays ?? 0) day\(pendingSponsorDays == 1 ? "" : "s")?",
+            isPresented: Binding(
+                get: { pendingSponsorDays != nil }, set: { if !$0 { pendingSponsorDays = nil } }),
+            titleVisibility: .visible
+        ) {
+            Button("Sign & send sponsorship") {
+                let days = pendingSponsorDays ?? 1
+                pendingSponsorDays = nil
+                Task { await model.sponsorAIAccount(conversationID, days: days) }
+            }
+            Button("Cancel", role: .cancel) { pendingSponsorDays = nil }
+        } message: {
+            Text("You vouch, with your identity key, that \(currentContactName) is an AI you answer for. Their AI messages will show “sponsored by you” to everyone they talk to until it expires or you revoke it.")
+        }
+        .confirmationDialog(
+            "Revoke your sponsorship of \(currentContactName)?", isPresented: $confirmRevoke,
+            titleVisibility: .visible
+        ) {
+            Button("Revoke", role: .destructive) {
+                Task { await model.revokeSponsorship(conversationID) }
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("Effective immediately here; their AI stops being able to send as sponsored once it receives the notice.")
+        }
+        .alert(
+            "Sponsorship",
+            isPresented: Binding(
+                get: { model.sponsorshipError != nil }, set: { if !$0 { model.sponsorshipError = nil } })
+        ) {
+            Button("OK", role: .cancel) {}
+        } message: {
+            Text(model.sponsorshipError ?? "")
         }
         .sheet(isPresented: $showThreadSheet) {
             ThreadCreateSheet(
@@ -521,6 +585,7 @@ struct ConversationView: View {
             onFullScreen: selecting ? nil : { fullScreenContent = FullScreenContent(text: $0) },
             onRetry: selecting ? nil : { Task { await model.retry(message) } },
             onReconnect: selecting ? nil : { Task { await model.acceptReconnect(message) } },
+            sponsorshipBadge: isMine ? nil : model.sponsorshipBadge(message),
             // Guest messages only: have my AI draft a reply to THIS message → a preview
             // sheet (Send as my AI / Edit & send as me). User-initiated, so no ai_window
             // is needed (the §13 gate stops UNBIDDEN agent sends; this is bidden).

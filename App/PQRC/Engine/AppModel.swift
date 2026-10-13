@@ -446,6 +446,43 @@ final class AppModel {
         await send(message.text, conversationID: message.conversationID, threadID: message.threadID)
     }
 
+    // MARK: AI-account sponsorship (AC168)
+
+    /// Live sponsorship I issued per contact (expiry), for the menu + header.
+    var sponsoredUntil: [String: Int64] = [:]
+    var sponsorshipError: String?
+
+    func refreshSponsorship(_ conversationID: String) async {
+        sponsoredUntil[conversationID] = await runtime.liveSponsorship(of: conversationID)?.activeUntil
+    }
+
+    func sponsorAIAccount(_ conversationID: String, days: Int) async {
+        do {
+            try await runtime.sponsorAIAccount(conversationID, days: days, label: nil)
+        } catch {
+            sponsorshipError = "Sponsorship not sent: \(error.localizedDescription)"
+        }
+        await refreshSponsorship(conversationID)
+    }
+
+    func revokeSponsorship(_ conversationID: String) async {
+        do {
+            try await runtime.revokeSponsorship(conversationID)
+        } catch {
+            sponsorshipError = "Revoked on this device, but the notice wasn't delivered yet: \(error.localizedDescription)"
+        }
+        await refreshSponsorship(conversationID)
+    }
+
+    /// Badge text + warn flag for a received AI message (nil when there's nothing to show).
+    func sponsorshipBadge(_ message: StoredMessage) -> (text: String, warn: Bool)? {
+        guard let st = message.sponsorship, st != .human else { return nil }
+        let text = st.badge(
+            nameOf: { [contactNames] hex in contactNames[hex] },
+            date: { Date(timeIntervalSince1970: TimeInterval($0)).formatted(date: .abbreviated, time: .shortened) })
+        return (text, st.isWarning)
+    }
+
     /// AC166: approve a contact's reconnect request (their row's Reconnect button).
     func acceptReconnect(_ message: StoredMessage) async {
         guard await runtime.acceptReconnect(peerIdentityHex: message.senderIdentity) else { return }

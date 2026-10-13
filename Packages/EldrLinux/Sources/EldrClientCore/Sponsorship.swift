@@ -77,8 +77,9 @@ extension EldrClient {
         }
         let c = try contact(matching: q)
         let now = Self.nowSeconds
+        // Only an explicit label goes on the wire: the contact's local name is mine and
+        // must not ride along to the agent and every third party it talks to (SPEC §0).
         let label = label.flatMap { $0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? nil : $0 }
-            ?? c.name
         let sp = try AgentSponsorship.make(
             sponsorshipID: UUID().uuidString.lowercased(), agent: c.identityHex, label: label,
             issuedAt: now, activeUntil: now + Int64(days) * 86_400, identity: identity)
@@ -185,14 +186,9 @@ extension EldrClient {
 
     /// Per-message sponsorship check for anything agent-labeled.
     public func sponsorshipStatus(of m: ReceivedMessage, now: Int64 = EldrClient.nowSeconds) -> SponsorshipStatus {
-        guard m.participantType == .agent else { return .human }
-        guard let sp = m.body.agentSponsorship else { return .unsponsored }
-        guard sp.agent == m.senderIdentityHex else { return .invalid(reason: "names a different agent") }
-        do { try sp.verify(presentedBy: m.senderIdentityHex, now: now) } catch {
-            return .invalid(reason: "\(error)")
-        }
-        if isRevoked(sp) { return .invalid(reason: "revoked") }
-        return .sponsored(sponsorIdentityHex: sp.enabledBy.hexString, label: sp.label, activeUntil: sp.activeUntil)
+        SponsorshipStatus.evaluate(
+            participantType: m.participantType, body: m.body, senderIdentityHex: m.senderIdentityHex,
+            now: now, isRevoked: isRevoked)
     }
 
     func appendHistory(_ e: HistoryEntry) {

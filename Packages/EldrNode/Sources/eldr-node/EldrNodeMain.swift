@@ -250,7 +250,8 @@ struct EldrNodeMain {
                 ownerIdentityHex: ownerIdentityHex,
                 load: { keychain.load(account: "node-session-state") },
                 save: { try keychain.save($0, account: "node-session-state") },
-                savePrekeys: { try keychain.save($0, account: "node-prekey-state") })
+                savePrekeys: { try keychain.save($0, account: "node-prekey-state") },
+                republishRelayURLs: [relayURL])
             let restored = await sessionStore.restore()
             print("  sessions: \(restored.isEmpty ? "none saved yet" : "owner session restored")")
             Task {

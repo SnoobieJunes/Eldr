@@ -197,6 +197,7 @@ Recorded so they aren't rediscovered as surprises. None is scheduled.
 | The delegation path injects **no vendor key**; `withVendorKey` is only on top-level responders | DEVIATIONS (deferred) |
 | The nested permission proxy is not e2e-tested against a real permission-issuing harness | DEVIATIONS (deferred) |
 | `ConduitProvisioner`'s env heredoc is unquoted — an embedded `'` breaks it. Not currently reachable. | DEVIATIONS (deferred, LOW) |
+| In silo mode, per-AI API keys (`AISettingsView.saveKey`) and Buzz workspace Nostr keys (`BuzzWorkspaceRegistry.mintKeypair`) are written to the silo's Keychain service **unsealed**, bypassing `saveSecret`. The fix needs the silo KEK plumbed into both, plus a migration for keys already saved. | DEVIATIONS AC170 |
 
 ### C2 · Accepted limits
 

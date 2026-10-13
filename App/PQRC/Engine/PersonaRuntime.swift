@@ -101,6 +101,9 @@ actor PersonaRuntime {
     private let siloID: String
 
     private(set) var identity: PQRCIdentity!
+    /// Sponsorships I issued to AI accounts + every revocation I know of (AC168).
+    /// Persisted encrypted (`saveSecret`) under "sponsorship-ledger".
+    private(set) var sponsorshipLedger = SponsorshipLedger()
     private(set) var nostrKeypair: NostrKeypair!
     private var messenger: PQRCMessenger!
     private var engine: AgentEngine!
@@ -944,8 +947,17 @@ actor PersonaRuntime {
                 identity: identity, randomSource: randomSource, oneTimeCount: 16)
         }
         _ = try await prekeyManager.replenish(to: 16)
-        try keychain.save(
+        // Sealed like every other per-silo secret (it holds private prekey halves).
+        // Earlier builds saved this one unsealed, so in silo mode `loadSecret` could
+        // never open it: a legacy plaintext blob reads as absent (fresh prekeys —
+        // exactly what every launch of those builds already did) and is overwritten
+        // sealed right here. No plaintext fallback read: accepting an unsealed blob
+        // would let anyone with Keychain write access but no passphrase plant our
+        // prekeys. (`persistPrekeyState` already used `saveSecret`.)
+        try saveSecret(
             JSONEncoder().encode(await prekeyManager.snapshot()), account: "prekey-state")
+        sponsorshipLedger = loadSecret("sponsorship-ledger")
+            .flatMap { try? JSONDecoder().decode(SponsorshipLedger.self, from: $0) } ?? SponsorshipLedger()
 
         messenger = try PQRCMessenger(
             identity: identity, nostrKeypair: nostrKeypair, prekeyManager: prekeyManager,
@@ -3328,6 +3340,78 @@ actor PersonaRuntime {
         }
     }
 
+    // MARK: - AI-account sponsorship (Milestone 2 on iOS, DEVIATIONS AC168)
+
+    enum SponsorshipActionError: Error, LocalizedError {
+        case notAContact
+        var errorDescription: String? { "Only a verified 1:1 contact can be sponsored." }
+    }
+
+    private func persistSponsorshipLedger() {
+        if let blob = try? JSONEncoder().encode(sponsorshipLedger) {
+            try? saveSecret(blob, account: "sponsorship-ledger")
+        }
+    }
+
+    /// Live sponsorship I issued to this contact, if any: (expiry, label).
+    func liveSponsorship(of contactHex: String) -> (activeUntil: Int64, label: String?)? {
+        sponsorshipLedger.live(to: contactHex, now: clock.now()).last.map {
+            ($0.sponsorship.activeUntil, $0.sponsorship.label)
+        }
+    }
+
+    /// Signs a sponsorship (1–30 days) vouching for this contact as an AI account I
+    /// answer for, and sends it to them over our session. Nothing is recorded if the
+    /// send fails. Agents (my tethered AIs) never call this: only the human UI does.
+    func sponsorAIAccount(_ contactHex: String, days: Int, label: String?) async throws {
+        guard verifiedContacts[contactHex] != nil, contactHex != identityHex else {
+            throw SponsorshipActionError.notAContact
+        }
+        // Issue into the LIVE ledger and roll back on failure, rather than send from a
+        // copy and assign it back: the send suspends this actor, and a revocation
+        // received meanwhile must not be overwritten by a stale copy.
+        let body = try sponsorshipLedger.issue(
+            to: contactHex, days: days, label: label,
+            identity: identity, now: clock.now())
+        do {
+            try await messenger.send(body, to: contactHex, participantType: .human)
+        } catch {
+            if let id = body.agentSponsorship?.sponsorshipID { sponsorshipLedger.forget(sponsorshipID: id) }
+            throw error
+        }
+        await persistSession(contactHex)
+        persistSponsorshipLedger()
+        await saveOutgoingSponsorshipRow(body, to: contactHex)
+    }
+
+    /// Revokes every live sponsorship I issued to this contact. Effective locally at
+    /// once (their AI messages show "revoked" from now on) even if the notice can't be
+    /// delivered right now; delivery errors are rethrown after the ledger is saved.
+    func revokeSponsorship(_ contactHex: String) async throws {
+        let bodies = try sponsorshipLedger.revokeAll(to: contactHex, identity: identity, now: clock.now())
+        persistSponsorshipLedger()
+        var firstError: Error?
+        for body in bodies {
+            do {
+                try await messenger.send(body, to: contactHex, participantType: .human)
+                await saveOutgoingSponsorshipRow(body, to: contactHex)
+            } catch {
+                firstError = firstError ?? error
+            }
+        }
+        await persistSession(contactHex)
+        if let firstError { throw firstError }
+    }
+
+    private func saveOutgoingSponsorshipRow(_ body: MessageBody, to contactHex: String) async {
+        let row = StoredMessage(
+            id: body.messageID ?? UUID().uuidString, conversationID: contactHex,
+            senderIdentity: identityHex, participantType: .human, text: body.text,
+            sentAt: body.sentAt, localStatus: "sent")
+        try? await store.save(row)
+        eventContinuation?.yield(.messageAdded(row))
+    }
+
     /// AC166: the user approved a held reconnect from this contact. Replaces the
     /// stale session with their new one and persists it. False if nothing was held.
     func acceptReconnect(peerIdentityHex: String) async -> Bool {
@@ -3612,6 +3696,20 @@ actor PersonaRuntime {
             return
         }
 
+        // Sponsorship (AC168): a verified revocation from its signer is effective at
+        // once for every later message; each agent message is checked PER MESSAGE.
+        if let revocation = body.agentSponsorshipRevocation,
+            sponsorshipLedger.receive(revocation: revocation, from: senderHex)
+        {
+            persistSponsorshipLedger()
+        }
+        let sponsorship: SponsorshipStatus? =
+            received.participantType == .agent && senderHex != identityHex
+            ? sponsorshipLedger.status(
+                participantType: received.participantType, body: body,
+                senderIdentityHex: senderHex, now: clock.now())
+            : nil
+
         // Control messages render as neutral system rows, not bubbles.
         let isSystemRow =
             received.aiWindow != nil || received.aiContextGrant != nil
@@ -3625,7 +3723,7 @@ actor PersonaRuntime {
             text: text, sentAt: body.sentAt, threadID: body.thread?.id,
             isContext: body.isContext ?? false, aiContext: body.aiContext ?? false,
             localStatus: isSystemRow ? "system" : "received",
-            coauthored: body.coauthored ?? false)
+            coauthored: body.coauthored ?? false, sponsorship: sponsorship)
         try? await store.save(message)
         eventContinuation?.yield(.messageAdded(message))
 

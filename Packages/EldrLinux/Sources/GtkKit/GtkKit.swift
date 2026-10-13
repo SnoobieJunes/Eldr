@@ -119,6 +119,16 @@ public func label(_ text: String, wrap: Bool = false, selectable: Bool = false, 
 
 public func setLabel(_ w: Widget, _ text: String) { gtk_label_set_text(cast(w), text) }
 
+/// Sets Pango markup, falling back to plain `fallback` if Pango rejects it (a label
+/// given invalid markup renders EMPTY, which would hide the message).
+public func setMarkup(_ w: Widget, _ markup: String, fallback: String) {
+    if pango_parse_markup(markup, -1, 0, nil, nil, nil, nil) != 0 {
+        gtk_label_set_markup(cast(w), markup)
+    } else {
+        gtk_label_set_text(cast(w), fallback)
+    }
+}
+
 public func button(_ text: String, _ f: @escaping () -> Void) -> Widget {
     let b = gtk_button_new_with_label(text)!
     on(b, "clicked", f)

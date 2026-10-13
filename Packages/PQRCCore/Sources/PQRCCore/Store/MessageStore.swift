@@ -51,6 +51,10 @@ public struct StoredMessage: Codable, Equatable, Sendable, Identifiable {
     /// enforcement-by-construction for the per-AI isolation gate (feature 1). nil for
     /// human messages and legacy records.
     public var sealedAgentContent: Data?
+    /// For a RECEIVED agent message: how its sponsorship checked out at receipt
+    /// (Milestone 2, DEVIATIONS AC162/AC168). PURELY LOCAL. nil for human messages,
+    /// my own sends and legacy records.
+    public var sponsorship: SponsorshipStatus?
 
     public init(
         id: String, conversationID: String, senderIdentity: String,
@@ -59,7 +63,7 @@ public struct StoredMessage: Codable, Equatable, Sendable, Identifiable {
         aiContext: Bool = false, localStatus: String = "queued",
         agentName: String? = nil, coauthored: Bool = false,
         agentAIID: String? = nil, aiMarks: [String]? = nil,
-        sealedAgentContent: Data? = nil
+        sealedAgentContent: Data? = nil, sponsorship: SponsorshipStatus? = nil
     ) {
         self.id = id
         self.conversationID = conversationID
@@ -76,12 +80,13 @@ public struct StoredMessage: Codable, Equatable, Sendable, Identifiable {
         self.agentAIID = agentAIID
         self.aiMarks = aiMarks
         self.sealedAgentContent = sealedAgentContent
+        self.sponsorship = sponsorship
     }
 
     enum CodingKeys: String, CodingKey {
         case id, conversationID, senderIdentity, participantType, text, sentAt
         case threadID, isContext, aiContext, localStatus, agentName, coauthored
-        case agentAIID, aiMarks, sealedAgentContent
+        case agentAIID, aiMarks, sealedAgentContent, sponsorship
     }
 
     /// Tolerant decode: `aiContext` was added after first ship, so payloads
@@ -107,6 +112,8 @@ public struct StoredMessage: Codable, Equatable, Sendable, Identifiable {
         agentAIID = try c.decodeIfPresent(String.self, forKey: .agentAIID)
         aiMarks = try c.decodeIfPresent([String].self, forKey: .aiMarks)
         sealedAgentContent = try c.decodeIfPresent(Data.self, forKey: .sealedAgentContent)
+        // A status from a newer build that this one can't decode is dropped, not fatal.
+        sponsorship = (try? c.decodeIfPresent(SponsorshipStatus.self, forKey: .sponsorship)) ?? nil
     }
 
     /// Record id used to seal/open THIS agent message's content under its AUTHOR

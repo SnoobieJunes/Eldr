@@ -47,6 +47,8 @@ struct MessageBubble: View {
     var onRetry: (() -> Void)? = nil
     /// Approves a held reconnect (AC166) on a "reconnect" system row. nil hides it.
     var onReconnect: (() -> Void)? = nil
+    /// AC168: sponsorship badge for a RECEIVED AI message (text, warn).
+    var sponsorshipBadge: (text: String, warn: Bool)? = nil
     /// Asks the owner's AI to draft a reply to THIS specific message (guest messages
     /// only) → a preview / "Send as my AI" sheet. nil hides the action.
     var onAnswerWithAI: (() -> Void)? = nil
@@ -510,6 +512,14 @@ struct MessageBubble: View {
                         symbol: typeSymbol, glyph: typeGlyph, size: 11, tint: agentLabelColor)
                         .accessibilityHidden(true)
                     expandButton
+                }
+                if let sponsorshipBadge {
+                    Label(
+                        sponsorshipBadge.text,
+                        systemImage: sponsorshipBadge.warn ? "exclamationmark.shield" : "checkmark.shield")
+                        .font(.caption2)
+                        .foregroundStyle(sponsorshipBadge.warn ? AnyShapeStyle(.orange) : AnyShapeStyle(.secondary))
+                        .accessibilityIdentifier("sponsorship-badge")
                 }
                 HStack(alignment: .top, spacing: 6) {
                     if message.isContext {
