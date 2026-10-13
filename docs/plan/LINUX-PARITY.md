@@ -23,15 +23,15 @@ Linux surfaces: `eldr-chat` (CLI), `eldr-gtk` (GTK 4 via C, AC164), `eldr-node`
 | Stale-session recovery / explicit reconnect | **done** (AC165–AC167, AC169; *proven* live) | — |
 | Markdown rendering + paste of any size | **done**: GTK (AC169, *proven* by unit tests and a screenshot) | — |
 | AI-account sponsorship issue/revoke/badge | **done** (AC162, AC168; *proven*) | — |
-| **Group chats** (`createGroup`/`reviseRoster`, D1) | **done (WS-N1, AC173)**: CLI `group …`/`groups`, GTK sidebar + group conversations. *proven*: `GroupTests` and a live 3-identity run on relay.lerants.com | Linux has no member-leave and no rename yet → WS-N1b |
-| Threads (`ThreadCreate`, D7) | **missing** | WS-N2: thread create/route in EldrClient, then CLI/GTK |
-| AI windows 1/8/24 h, `ai_invite`, loop guard (SPEC §13) | **missing** (the AgentEngine library builds on Linux, AC172) | WS-N2: wire `AgentEngine` into EldrClient (sink = `deliver`), with CLI `ai-window` and a GTK "My AI responds" bar |
-| Standing grants / context grants / revocation | **missing** | WS-N2 (shares the AgentEngine wiring) |
-| LLM providers: OpenAI-compatible / Anthropic / Gemini / Groq / OpenRouter | **partial**: providers *compile-checked* on Linux (AC172); nothing calls them from a Linux UI | WS-N3: keys from env or the encrypted state (never argv), and `eldr-chat ai-config` |
+| **Group chats** (`createGroup`/`reviseRoster`, D1) | **done (WS-N1, AC173)**: CLI `group …`/`groups`, GTK sidebar + group conversations. *proven*: `GroupTests` and a live 3-identity run on relay.lerants.com | rename/leave done (AC176, *proven* by GroupTests) |
+| Threads (`ThreadCreate`, D7) | **done (WS-N2, AC174)**: CLI `thread create|send|history`/`threads`, GTK thread rows. *proven*: AITests + live relay run, GTK sidebar screenshot | — |
+| AI windows 1/8/24 h, `ai_invite`, loop guard (SPEC §13) | **done (WS-N2, AC174)**: AgentEngine wired into EldrClient; CLI `ai-window`/`ai-invite`/`ai-status`, GTK AI bar. *proven*: AITests; live relay window reply and in-thread invite reply with mock LLM | — |
+| Standing grants / context grants / revocation | **partial (WS-N2)**: town grants issue/revoke/list (*proven* by unit test only); context grants not exposed | follow-up |
+| LLM providers: OpenAI-compatible / Anthropic / Gemini / Groq / OpenRouter | **partial (WS-N3, AC176)**: OpenAI-compatible wired (`ai-config`, GTK Settings; key in keystore "ai-key"); *proven* live against a mock. Anthropic/Gemini native not wired (use OpenAI-compatible gateways) | follow-up for native providers |
 | On-device Foundation Models / PCC | **n/a**: Apple-only | declined: not available on Linux |
-| Pairing link / QR | **partial**: link copy + paste (*proven*); no QR | WS-N4: a QR encoder with no deps, rendered in GTK |
-| Contacts management (rename, remove, safety code) | **partial**: add/list only | WS-N4 |
-| Settings (relay list, display name, loop-guard limit) | **missing**: flags/env only | WS-N5: a GTK settings dialog over `ClientState` |
+| Pairing link / QR | **done (WS-N4, AC175)**: in-repo QR encoder; `eldr-chat qr`, GTK "Show QR". *proven*: QRTests, OpenCV decode of the GTK window screenshot | — |
+| Contacts management (rename, remove, safety code) | **partial**: add/list only | WS-N4b (not started) |
+| Settings (relay list, display name, loop-guard limit) | **done (WS-N5, AC176)**: `eldr-chat settings`, GTK Settings window. *proven*: validation tests, GTK screenshot | — |
 | Attachments (`ContentPointer`) | **missing**: the receive path only flags them | WS-N6 |
 | Buzz workspaces / channels | **missing** | WS-N7: after the WS-BM Phase 2 decision |
 | World map / town view | **missing** (AC155: no Linux dashboard) | covered by the existing BACKLOG B1 dashboard item; not duplicated |

@@ -154,7 +154,7 @@ func messageObject(_ c: ContactRecord, _ m: ReceivedMessage) -> [String: Any] {
     if let id = m.body.messageID { o["messageID"] = id }
     if m.body.isContext == true { o["isContext"] = true }
     if let g = m.body.group { o["group"] = "\(g)" }
-    if let t = m.body.thread { o["thread"] = "\(t)" }
+    if let t = m.body.thread { o["thread"] = t.id }
     if let ch = m.body.chunk { o["chunk"] = "\(ch)" }
     if m.contentPointer != nil { o["hasAttachment"] = true }
     if m.aiWindow != nil { o["aiWindow"] = true }

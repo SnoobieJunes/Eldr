@@ -232,4 +232,6 @@ entry and move the plan to `done/`. Three steps, one sitting:
 
 If an item can't be written as a line in this file, it isn't a backlog item yet —
 it's a thought, and thoughts go in `private/`.
-- [x] WS-N2–N5 Linux parity (threads/AI/providers/QR/settings, group rename/leave) — PR #28; follow-up: live in-thread agent reply not yet observed over relay
+- [x] WS-N2–N5 Linux parity (threads/AI/providers/QR/settings, group rename/leave) — PR #28; live in-thread reply proven 2026-10-13
+- [ ] Forward-compat: an older eldr-chat/eldr-gtk build that loads newer state drops unknown fields (threads, AI state, HistoryEntry.threadID) on save. Seen live when the launcher ran a stale binary. See AC177.
+- [ ] Linux: native Anthropic/Gemini providers, context grants UI, contact rename/remove/safety code.
