@@ -289,4 +289,45 @@ struct ReHandshakeTests {
         try await alice.send("welcome back", to: "bob")
         #expect(await b2Ev.waitTexts(1) == ["welcome back"])
     }
+
+    /// AC167: a consumed one-time prekey must leave the PUBLISHED bundle. Otherwise a
+    /// contact that reinstalls can draw the spent OTP and is refused as a replay.
+    @Test func consumedOTP_isRepublishedAway() async throws {
+        let relay = LocalRelaySimulator()
+        let (_, alice) = try await Peer.make(relay)
+        let (_, bob) = try await Peer.make(relay)
+        let aEv = Collector()
+        await aEv.attach(try await alice.start())
+        _ = try await bob.start()
+        try await bob.addContact(alice.pairingLink.uri, name: "alice")
+        try await bob.send("hi", to: "alice")  // spends one of alice's OTPs
+        for _ in 0..<200 where await alice.requests.isEmpty { try await Task.sleep(for: .milliseconds(20)) }
+        try await alice.accept(String(bob.nostrPubkeyHex.prefix(10)), name: "bob")
+        #expect(await aEv.waitTexts(1) == ["hi"])
+        let held = Set(try await alice.prekeyManager.publicBundle().otp)
+        var published: Set<Data> = []
+        for _ in 0..<100 {
+            published = Set(try await bob.messenger.fetchVerifiedPeer(nostrPubkeyHex: alice.nostrPubkeyHex).bundle.otp)
+            if published == held { break }
+            try await Task.sleep(for: .milliseconds(30))
+        }
+        #expect(published == held)
+        #expect(held.count == EldrClient.otpTarget)
+        #expect(await alice.state.publishedBundleStale == false)
+    }
+}
+
+@Suite("Reconnect approval (AC166)")
+struct ReconnectApprovalTests {
+    @Test func approveBeforeArrival_isRemembered_andDeclineClearsIt() async throws {
+        let relay = LocalRelaySimulator()
+        let (_, alice) = try await Peer.make(relay)
+        let (_, bob) = try await Peer.make(relay)
+        try await alice.addContact(bob.pairingLink.uri, name: "bob")
+        #expect(try await alice.approveReconnect("bob") == false)
+        #expect(await alice.state.approvedReconnects == [bob.identityHex])
+        try await alice.declineReconnect("bob")
+        #expect(await alice.state.approvedReconnects == [])
+        await #expect(throws: EldrClientError.self) { try await alice.approveReconnect("nobody") }
+    }
 }

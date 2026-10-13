@@ -349,6 +349,9 @@ final class AppUI: @unchecked Sendable {
                     case .saveFailed(let e): note = "⚠ Save failed: \(e)"
                     case .protocolViolation(_, let r): note = "⚠ Protocol violation: \(r)"
                     case .relayReconnected: note = "Relay reconnected."
+                    case .reconnectRequest(let rec, let auto):
+                        note = auto ? "🔄 \(rec.name ?? "A contact") reset; reconnected."
+                            : "🔄 \(rec.name ?? "A contact") reset their app and wants to reconnect. Check their safety code, then use Reconnect in their conversation."
                     case .message, .quarantined: note = nil
                     }
                     onMain { [self] in if let note { self.status(note) }; self.refresh() }

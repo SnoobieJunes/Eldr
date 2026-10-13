@@ -36,6 +36,9 @@ let usage = """
       sponsor <contact> [--days 1|7|30] [--label NAME]
                                     sponsor a contact's AI account (human only)
       revoke <sponsorship-id|contact> [--notify c1,c2]
+      reconnect <contact> [--decline]  approve (or refuse) ONE new session from a
+                                    contact that reset after its one-time prekeys ran out
+      history <contact> [--last N]  recent messages with sponsorship status
       sponsorships                  this account's sponsorship + ones you issued
 
     <contact> = name, identity-hex prefix (≥6), npub, or nostr-hex prefix.
@@ -152,6 +155,11 @@ func eventObject(_ ev: ClientEvent) -> ([String: Any], String) {
                 + "Keeping the old one. Verify with them out-of-band before trusting anything new.")
     case .saveFailed(let e):
         return (["type": "error", "error": "save failed: \(e)"], "⚠ SAVE FAILED: \(e)")
+    case .reconnectRequest(let c, let auto):
+        let who = c.name ?? short(c.identityHex)
+        return (["type": "reconnect", "contact": who, "identity": c.identityHex, "autoAccepted": auto],
+            auto ? "🔄 \(who) reset; reconnected (you approved it)."
+                : "🔄 \(who) reset their app and wants to reconnect. Verify their safety code, then `eldr-chat reconnect \(who)`.")
     case .sponsorship(let note):
         return (["type": "sponsorship", "note": note], "🛡 \(note)")
     }
@@ -388,6 +396,42 @@ case "revoke":
     do {
         let ids = try await client.revokeSponsorship(target, alsoNotify: notify)
         emit(["type": "revoked", "ids": ids], human: "Revoked \(ids.map { String($0.prefix(8)) }.joined(separator: ", ")).")
+    } catch { fail("\(error)") }
+
+case "history":
+    let limit = takeOption("--last").flatMap(Int.init) ?? 20
+    guard let target = args.first else { fail("history <contact> [--last N]") }
+    let client = await openClient(openStore())
+    let c: ContactRecord
+    do { c = try await client.contact(matching: target) } catch { fail("\(error)") }
+    let entries = await client.history(with: c.identityHex).suffix(limit)
+    func status(_ s: SponsorshipStatus) -> String {
+        switch s {
+        case .human: return "human"
+        case .unsponsored: return "agent-unsponsored"
+        case .sponsored(let by, _, let until): return "agent-sponsored-by-\(by.prefix(12))-until-\(until)"
+        case .invalid(let r): return "agent-invalid(\(r))"
+        }
+    }
+    for e in entries {
+        emit(["type": "history", "outgoing": e.outgoing, "sentAt": e.sentAt, "chars": e.text.count,
+              "sponsorship": status(e.sponsorship), "text": e.text.count > 200 ? String(e.text.prefix(200)) + "…" : e.text],
+             human: "\(e.outgoing ? "→" : "←") [\(status(e.sponsorship))] \(e.text.count > 120 ? String(e.text.prefix(120)) + "… (\(e.text.count) chars)" : e.text)")
+    }
+
+case "reconnect":
+    let decline = takeFlag("--decline")
+    guard let target = args.first else { fail("reconnect <contact> [--decline]") }
+    let client = await openClient(openStore())
+    do {
+        if decline {
+            try await client.declineReconnect(target)
+            emit(["type": "reconnect", "declined": true], human: "Reconnect refused; the old session stays.")
+        } else {
+            let now = try await client.approveReconnect(target)
+            emit(["type": "reconnect", "applied": now],
+                 human: now ? "Reconnected." : "Approved. Their pending request is applied on the next `listen`/`chat`.")
+        }
     } catch { fail("\(error)") }
 
 case "sponsorships":

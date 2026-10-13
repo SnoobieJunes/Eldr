@@ -65,6 +65,9 @@ public enum ClientEvent: Sendable {
     case bindingIdentityChanged(ContactRecord, newIdentityHex: String)
     /// Sponsorship lifecycle notices (received / refused / revoked), human-readable.
     case sponsorship(String)
+    /// This contact reset and wants a new session; it needs the user's OK (AC166).
+    /// `autoAccepted` is true when `approveReconnect` was given beforehand.
+    case reconnectRequest(ContactRecord, autoAccepted: Bool)
 }
 
 public typealias TransportFactory = @Sendable () async throws -> any RelayTransport
@@ -113,7 +116,7 @@ public actor EldrClient {
     /// Chunk reassembly buffers, keyed "<sender>:<chunk id>" (memory only, bounded).
     var chunkBuffers: [String: (template: MessageBody, total: Int, parts: [Int: String], order: Int)] = [:]
     var chunkCounter = 0
-    private let prekeyManager: PrekeyManager
+    let prekeyManager: PrekeyManager
     private let lock: DirectoryLock
     /// Requests from THIS Nostr key are accepted automatically (e.g. the owner), and only
     /// if its binding verifies (and matches `autoAcceptIdentityHex` when pinned).
@@ -168,7 +171,7 @@ public actor EldrClient {
         let pm = try st.prekeys.map {
             try PrekeyManager(identity: identity, randomSource: SystemRandomSource(), state: $0)
         } ?? PrekeyManager(identity: identity, randomSource: SystemRandomSource(), oneTimeCount: 16)
-        _ = try await pm.replenish(to: 16)
+        if try await pm.replenish(to: 16) { st.publishedBundleStale = true }
         let m = try PQRCMessenger(
             identity: identity, nostrKeypair: kp, prekeyManager: pm,
             identityDH: try Curve25519.KeyAgreement.PrivateKey(rawRepresentation: keys.identityDH),
@@ -210,7 +213,30 @@ public actor EldrClient {
     /// Publishes kind 10420 (binding), 10421 (prekey bundle), 10050 (relay list).
     public func announce(maxAttempts: Int = 10) async throws {
         try await messenger.announce(relayURLs: state.relays, maxAttempts: maxAttempts)
+        state.publishedBundleStale = false
+        try await persist()
     }
+
+    /// Spent one-time prekeys must leave the PUBLISHED bundle promptly: a contact that
+    /// reinstalls fetches it and picks an OTP at random, and a spent one is refused as a
+    /// replay (AC165), so the reset contact stays silently unreachable. Refill and
+    /// republish whenever a receive consumed one (best-effort, off the receive path).
+    private func refreshBundleIfNeeded() async {
+        if await prekeyManager.oneTimePrekeyCount < Self.otpTarget,
+            (try? await prekeyManager.replenish(to: Self.otpTarget)) == true
+        {
+            state.publishedBundleStale = true
+        }
+        guard state.publishedBundleStale != false, !republishing else { return }
+        republishing = true
+        Task { [weak self] in
+            try? await self?.announce(maxAttempts: 3)
+            await self?.republishDone()
+        }
+    }
+    private func republishDone() { republishing = false }
+    private var republishing = false
+    static let otpTarget = 16
 
     // MARK: - Persistence
 
@@ -366,6 +392,34 @@ public actor EldrClient {
         return try await messenger.sendBatch(bodies, to: c.identityHex, participantType: participant)
     }
 
+    // MARK: - Reconnect (AC166)
+
+    /// Approves ONE reconnect from this contact: applied now if a request is
+    /// pending in this process, otherwise remembered (encrypted) and applied to the
+    /// next request that arrives. Returns true if a session was replaced now.
+    @discardableResult
+    public func approveReconnect(_ q: String) async throws -> Bool {
+        let c = try contact(matching: q)
+        if await messenger.acceptReconnect(peerIdentityHex: c.identityHex) {
+            try await persist()
+            return true
+        }
+        var a = state.approvedReconnects ?? []
+        if !a.contains(c.identityHex) { a.append(c.identityHex) }
+        state.approvedReconnects = a
+        try await persist()
+        return false
+    }
+
+    public func declineReconnect(_ q: String) async throws {
+        let c = try contact(matching: q)
+        await messenger.declineReconnect(peerIdentityHex: c.identityHex)
+        state.approvedReconnects?.removeAll { $0 == c.identityHex }
+        try await persist()
+    }
+
+    public func pendingReconnects() async -> [String] { await messenger.pendingReconnectPeers() }
+
     // MARK: - Receive
 
     /// Starts the receive pump. Messages are surfaced ONLY for verified contacts (the
@@ -375,6 +429,7 @@ public actor EldrClient {
         precondition(!started, "start() once per client")
         started = true
         let raw = try await messenger.start()
+        await refreshBundleIfNeeded()
         let (stream, cont) = AsyncStream.makeStream(of: ClientEvent.self)
         pumpTask = Task { [weak self] in
             for await ev in raw {
@@ -476,7 +531,19 @@ public actor EldrClient {
         case .protocolViolation(let s, let r, _): out.append(.protocolViolation(senderIdentityHex: s, reason: r))
         case .relayReconnected: out.append(.relayReconnected)
         case .nearbyContact: break
+        case .reconnectRequest(let sender):
+            if let c = state.contacts.first(where: { $0.identityHex == sender }) {
+                var approved = state.approvedReconnects ?? []
+                var auto = false
+                if approved.contains(sender) {
+                    auto = await messenger.acceptReconnect(peerIdentityHex: sender)
+                    if auto { approved.removeAll { $0 == sender } }
+                    state.approvedReconnects = approved
+                }
+                out.append(.reconnectRequest(c, autoAccepted: auto))
+            }
         }
+        await refreshBundleIfNeeded()
         do { try await persist() } catch { out.append(.saveFailed("\(error)")) }
         return out
     }
