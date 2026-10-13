@@ -56,7 +56,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        package: [PQRCCore, PQRCNostr, PQRCAgent, PQRCACP, PQRCMCP, EldrNode, Eldrctl, SwiftA2A]
+        package: [PQRCCore, PQRCNostr, PQRCAgent, PQRCACP, PQRCMCP, EldrNode, Eldrctl, SwiftA2A, EldrKeystore, EldrLinux]
     steps:
       - uses: actions/checkout@v4
       - name: Select Xcode 26
@@ -109,6 +109,12 @@ jobs:
           # runner E2E). Live goose/hermes/cloud-CLI handshakes self-skip when the
           # binaries aren't installed — absent tools skip, they never pass vacuously.
           swift test --package-path Packages/PQRCACP
+          # Linux client (AC156–AC161): shared keystore, client engine, node session
+          # persistence, and the snapshot-aliasing regression that only bites on Linux.
+          swift test --package-path Packages/EldrKeystore
+          swift test --package-path Packages/EldrLinux
+          swift test --package-path Packages/EldrNode --filter NodeSessionStore
+          swift test --package-path Packages/PQRCCore --filter SnapshotAliasing
 
   app-build:
     name: xcodebuild build (iOS + Mac Catalyst — fast gate)
