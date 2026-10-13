@@ -67,4 +67,56 @@ struct UIModelTests {
         #expect(snap.header(for: b).contains("sponsored by you"))
         #expect(snap.messages(with: a).count == 1)
     }
+
+    /// Tags must nest properly and no raw '<' may come from message text.
+    private func wellFormed(_ m: String) -> Bool {
+        var stack: [String] = []
+        var i = m.startIndex
+        while let lt = m[i...].firstIndex(of: "<") {
+            guard let gt = m[lt...].firstIndex(of: ">") else { return false }
+            let tag = m[m.index(after: lt)..<gt]
+            let name = String(tag.split(separator: " ").first ?? "")
+            if name.hasPrefix("/") {
+                guard stack.popLast() == String(name.dropFirst()) else { return false }
+            } else {
+                guard ["b", "i", "s", "tt", "span"].contains(name) else { return false }
+                stack.append(name)
+            }
+            i = m.index(after: gt)
+        }
+        return stack.isEmpty
+    }
+
+    @Test func markdown_rendersCommonSyntax() {
+        let md = "# Title\n**bold** and *it* and `x < y`\n- item\n> quote\n```\n<b>raw</b>\n```\n[site](https://e.x)"
+        let m = UIFormat.markdownToPango(md)
+        #expect(m.contains("<span size=\"x-large\" weight=\"bold\">Title</span>"))
+        #expect(m.contains("<b>bold</b> and <i>it</i> and <tt>x &lt; y</tt>"))
+        #expect(m.contains("  • item"))
+        #expect(m.contains("<tt>&lt;b&gt;raw&lt;/b&gt;</tt>"))
+        #expect(m.contains("site <span foreground=\"#3584e4\">(https://e.x)</span>"))
+        #expect(!m.contains("<a "), "links are never clickable")
+        #expect(wellFormed(m))
+    }
+
+    @Test func markdown_cannotInjectMarkup_andIsAlwaysWellFormed() {
+        let hostile = "<span foreground='red'>x</span> &amp; <b>**a _b** c_ *d `e* f` [g**](h)**"
+        #expect(wellFormed(UIFormat.markdownToPango(hostile)))
+        #expect(UIFormat.markdownToPango("<b>hi</b>") == "&lt;b&gt;hi&lt;/b&gt;")
+        var rng = SystemRandomNumberGenerator()
+        let alphabet = Array("*_`~[]()<>&#-> \nab\"'")
+        for _ in 0..<3000 {
+            let n = Int.random(in: 0..<40, using: &rng)
+            let s = String((0..<n).map { _ in alphabet.randomElement(using: &rng)! })
+            let m = UIFormat.markdownToPango(s)
+            #expect(wellFormed(m), "\(s.debugDescription) -> \(m.debugDescription)")
+        }
+    }
+
+    @Test func follow_onlyNearBottom() {
+        #expect(UIFormat.shouldFollow(value: 900, pageSize: 100, upper: 1000))
+        #expect(UIFormat.shouldFollow(value: 850, pageSize: 100, upper: 1000))
+        #expect(!UIFormat.shouldFollow(value: 200, pageSize: 100, upper: 1000))
+        #expect(UIFormat.shouldFollow(value: 0, pageSize: 500, upper: 400), "short history always follows")
+    }
 }

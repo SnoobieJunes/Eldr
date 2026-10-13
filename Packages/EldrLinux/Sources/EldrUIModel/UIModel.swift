@@ -24,6 +24,8 @@ public struct UISnapshot: Sendable {
     public var requests: [RequestRecord]
     public var history: [HistoryEntry]
     public var issued: [IssuedSponsorship]
+    /// Contacts whose reset (last-resort re-handshake) is waiting for my OK (AC166).
+    public var pendingReconnects: Set<String> = []
 
     public static func capture(_ c: EldrClient) async -> UISnapshot {
         let isAgent = await c.isAgent
@@ -39,7 +41,8 @@ public struct UISnapshot: Sendable {
         return UISnapshot(
             me: c.identityHex, npub: await c.npub, link: await c.pairingLink.uri, isAgent: isAgent,
             agentBanner: banner, contacts: await c.contacts, requests: await c.requests,
-            history: await c.history, issued: await c.issuedSponsorships)
+            history: await c.history, issued: await c.issuedSponsorships,
+            pendingReconnects: Set(await c.pendingReconnects()))
     }
 
     public func name(of identityHex: String) -> String? {
@@ -139,4 +142,97 @@ public enum UIFormat {
 
     /// Composer: Enter inserts a newline (Markdown); Ctrl+Enter sends.
     public static func composerShouldSend(isEnter: Bool, ctrl: Bool) -> Bool { isEnter && ctrl }
+
+    /// Follow new messages only if the reader is already (near) the bottom; someone
+    /// scrolled up reading history keeps their place.
+    public static func shouldFollow(value: Double, pageSize: Double, upper: Double, slack: Double = 80) -> Bool {
+        value + pageSize >= upper - slack
+    }
+
+    /// Escapes text for Pango markup.
+    public static func pangoEscape(_ s: some StringProtocol) -> String {
+        var o = ""
+        o.reserveCapacity(s.count)
+        for ch in s {
+            switch ch {
+            case "&": o += "&amp;"
+            case "<": o += "&lt;"
+            case ">": o += "&gt;"
+            case "\"": o += "&quot;"
+            case "'": o += "&#39;"
+            default: o.append(ch)
+            }
+        }
+        return o
+    }
+
+    /// Renders a (sanitized) Markdown body as Pango markup. Everything from the message
+    /// is escaped FIRST, so message text can never inject markup; only the tags emitted
+    /// here exist, each opened and closed on the same line, so the result is always
+    /// well-formed. Supported: # headings, **bold**, *italic* / _italic_, `code`,
+    /// ``` fenced blocks, - / * / + bullets, > quotes, [text](url) shown as "text (url)"
+    /// (never clickable: links from strangers are not one click away).
+    public static func markdownToPango(_ md: String) -> String {
+        var out: [String] = []
+        var inFence = false
+        for raw in md.split(separator: "\n", omittingEmptySubsequences: false) {
+            let line = String(raw)
+            if line.trimmingCharacters(in: .whitespaces).hasPrefix("```") {
+                inFence.toggle()
+                continue
+            }
+            if inFence { out.append("<tt>" + pangoEscape(line) + "</tt>"); continue }
+            var body = Substring(line)
+            var prefix = "", suffix = ""
+            let hashes = body.prefix(while: { $0 == "#" }).count
+            if (1...6).contains(hashes), body.dropFirst(hashes).first == " " {
+                body = body.dropFirst(hashes + 1)
+                let size = hashes == 1 ? "x-large" : hashes == 2 ? "large" : "medium"
+                prefix = "<span size=\"\(size)\" weight=\"bold\">"; suffix = "</span>"
+            } else if let f = body.first, "-*+".contains(f), body.dropFirst().first == " " {
+                body = body.dropFirst(2); prefix = "  • "
+            } else if body.hasPrefix("> ") || body == ">" {
+                body = body.dropFirst(body == ">" ? 1 : 2)
+                prefix = "<span foreground=\"#888888\">▎ "; suffix = "</span>"
+            }
+            out.append(prefix + inline(String(body)) + suffix)
+        }
+        return out.joined(separator: "\n")
+    }
+
+    /// Inline spans on one line. Code spans are split out first (no formatting inside).
+    static func inline(_ s: String) -> String {
+        var result = ""
+        let parts = s.split(separator: "`", omittingEmptySubsequences: false)
+        // An odd count of parts means every backtick is paired.
+        let paired = parts.count % 2 == 1
+        for (i, p) in parts.enumerated() {
+            if paired && i % 2 == 1 {
+                result += "<tt>" + pangoEscape(p) + "</tt>"
+            } else {
+                let piece = paired || i == 0 ? String(p) : "`" + p
+                result += emphasis(pangoEscape(piece))
+            }
+        }
+        return result
+    }
+
+    private static let rules: [(NSRegularExpression, String)] = [
+        (try! NSRegularExpression(pattern: #"\[([^\]\n<>]+)\]\(([^)\s<>]+)\)"#), "$1 <span foreground=\"#3584e4\">($2)</span>"),
+        (try! NSRegularExpression(pattern: #"\*\*([^*\n<>]+)\*\*"#), "<b>$1</b>"),
+        (try! NSRegularExpression(pattern: #"__([^_\n<>]+)__"#), "<b>$1</b>"),
+        (try! NSRegularExpression(pattern: #"(?<![\w*])\*([^*\s<>][^*\n<>]*?)\*(?![\w*])"#), "<i>$1</i>"),
+        (try! NSRegularExpression(pattern: #"(?<![\w_])_([^_\s<>][^_\n<>]*?)_(?![\w_])"#), "<i>$1</i>"),
+        (try! NSRegularExpression(pattern: #"~~([^~\n<>]+)~~"#), "<s>$1</s>"),
+    ]
+
+    /// Applied to ALREADY-ESCAPED text. Groups exclude '<' and '>' so a span can never
+    /// straddle a tag emitted by an earlier rule (no interleaved, malformed markup).
+    static func emphasis(_ escaped: String) -> String {
+        var s = escaped
+        for (re, tpl) in rules {
+            s = re.stringByReplacingMatches(in: s, range: NSRange(s.startIndex..., in: s), withTemplate: tpl)
+        }
+        return s
+    }
 }

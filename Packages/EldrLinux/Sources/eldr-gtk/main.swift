@@ -63,6 +63,7 @@ final class AppUI: @unchecked Sendable {
     var statusLabel: Widget!
     var headerLabel: Widget!
     var sponsorBar: Widget!
+    var reconnectBar: Widget!
     var msgList: Widget!
     var msgScroll: Widget!
     var composer: Widget!
@@ -112,8 +113,9 @@ final class AppUI: @unchecked Sendable {
             guard !self.rebuilding, let row else { return }
             let i = Int(gtk_list_box_row_get_index(cast(row)))
             guard self.convIDs.indices.contains(i) else { return }
+            let changed = self.selected != self.convIDs[i]
             self.selected = self.convIDs[i]
-            self.renderConversation(scrollToEnd: true)
+            self.renderConversation(scrollToEnd: changed)
         }
         let cs = scrolled(convList); expand(cs, v: true); append(side, cs)
         reqTitle = label("Requests"); addClass(reqTitle, "meta"); append(side, reqTitle)
@@ -135,6 +137,13 @@ final class AppUI: @unchecked Sendable {
         append(sponsorBar, button("Revoke") { [unowned self] in self.revoke() })
         gtk_widget_set_visible(sponsorBar, 0)
         append(main, sponsorBar)
+        reconnectBar = hbox(6)
+        let rl = label("This contact reset their app and wants to reconnect. Check their safety code first.", wrap: true)
+        addClass(rl, "banner"); expand(rl, h: true); append(reconnectBar, rl)
+        append(reconnectBar, button("Reconnect") { [unowned self] in self.reconnect(accept: true) })
+        append(reconnectBar, button("Decline") { [unowned self] in self.reconnect(accept: false) })
+        gtk_widget_set_visible(reconnectBar, 0)
+        append(main, reconnectBar)
         msgList = gtk_list_box_new(); gtk_list_box_set_selection_mode(cast(msgList), GTK_SELECTION_NONE)
         msgScroll = scrolled(msgList); expand(msgScroll, h: true, v: true); append(main, msgScroll)
 
@@ -208,13 +217,22 @@ final class AppUI: @unchecked Sendable {
             append(row, button("Decline") { [unowned self] in self.act("Declined.") { try await $0.decline(n) } })
             gtk_list_box_append(cast(reqList), row)
         }
-        renderConversation(scrollToEnd: true)
+        renderConversation(scrollToEnd: false)
     }
 
+    /// `scrollToEnd`: jump to the newest message (a different conversation was picked).
+    /// Otherwise follow new messages only if the reader was already near the bottom,
+    /// and keep their place if they had scrolled up.
     func renderConversation(scrollToEnd: Bool) {
         guard let s = snap, let id = selected else { return }
         setLabel(headerLabel, s.header(for: id))
         gtk_widget_set_visible(sponsorBar, s.isAgent ? 0 : 1)
+        gtk_widget_set_visible(reconnectBar, s.pendingReconnects.contains(id) ? 1 : 0)
+        let adj = gtk_scrolled_window_get_vadjustment(cast(msgScroll))
+        let follow = scrollToEnd || UIFormat.shouldFollow(
+            value: gtk_adjustment_get_value(adj), pageSize: gtk_adjustment_get_page_size(adj),
+            upper: gtk_adjustment_get_upper(adj))
+        let keep = gtk_adjustment_get_value(adj)
         clearList(msgList)
         let peerName = s.name(of: id) ?? "them"
         for m in s.messages(with: id).suffix(300) {
@@ -228,7 +246,8 @@ final class AppUI: @unchecked Sendable {
             if m.agent, case .unsponsored = m.sponsorship { addClass(ml, "warn") }
             append(col, ml)
             let (text, truncated) = UIFormat.renderBody(m.text)
-            let body = label(text, wrap: true, selectable: true)
+            let body = label("", wrap: true, selectable: true)
+            setMarkup(body, UIFormat.markdownToPango(text), fallback: text)
             addClass(body, m.outgoing ? "bubble-out" : "bubble-in")
             if m.agent { addClass(body, "bubble-ai") }
             append(col, body)
@@ -242,13 +261,27 @@ final class AppUI: @unchecked Sendable {
             gtk_widget_set_size_request(col, -1, -1)
             gtk_list_box_append(cast(msgList), col)
         }
-        if scrollToEnd {
-            let sc = msgScroll!
-            _ = g_timeout_add_full(G_PRIORITY_DEFAULT, 300, { d in
-                let adj = gtk_scrolled_window_get_vadjustment(cast(d))
-                gtk_adjustment_set_value(adj, gtk_adjustment_get_upper(adj))
-                return 0
-            }, UnsafeMutableRawPointer(sc), nil)
+        // The list relayouts asynchronously; apply the position once it has settled.
+        let box = ScrollTarget(adj: adj, toEnd: follow, value: keep)
+        _ = g_timeout_add_full(G_PRIORITY_DEFAULT, 150, { d in
+            let t = Unmanaged<ScrollTarget>.fromOpaque(d!).takeRetainedValue()
+            gtk_adjustment_set_value(t.adj, t.toEnd ? gtk_adjustment_get_upper(t.adj) : t.value)
+            return 0
+        }, Unmanaged.passRetained(box).toOpaque(), nil)
+    }
+
+    func reconnect(accept: Bool) {
+        guard let id = selected else { return }
+        let who = snap?.name(of: id) ?? "contact"
+        if accept {
+            act(nil) { c in
+                let ok = try await c.approveReconnect(id)
+                onMain { [self] in
+                    self.status(ok ? "🔄 Reconnected with \(who)." : "Approved: the next reconnect from \(who) will be accepted.")
+                }
+            }
+        } else {
+            act("Declined; the existing session with \(who) is kept.") { c in try await c.declineReconnect(id) }
         }
     }
 
@@ -368,6 +401,13 @@ final class AppUI: @unchecked Sendable {
         Task.detached { await c.stop(); sem.signal() }
         _ = sem.wait(timeout: .now() + 4)
     }
+}
+
+final class ScrollTarget {
+    let adj: UnsafeMutablePointer<GtkAdjustment>?
+    let toEnd: Bool
+    let value: Double
+    init(adj: UnsafeMutablePointer<GtkAdjustment>?, toEnd: Bool, value: Double) { self.adj = adj; self.toEnd = toEnd; self.value = value }
 }
 
 let ui = AppUI()
