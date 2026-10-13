@@ -1,5 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 import Foundation
+#if canImport(FoundationNetworking)
+import FoundationNetworking
+#endif
 
 /// Remote inference via ANY OpenAI-compatible Chat Completions endpoint — most
 /// importantly a SELF-HOSTED model on a machine you control (Ollama / LM Studio /

@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=EldrChat
+GenericName=Post-quantum messenger
+Comment=End-to-end post-quantum encrypted chat
+Exec=eldr-gtk
+Icon=eldr-chat
+Terminal=false
+Categories=Network;InstantMessaging;
+StartupWMClass=eldr-gtk

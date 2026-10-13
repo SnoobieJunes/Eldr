@@ -5,6 +5,9 @@ import A2ACore
 import A2AHTTPServer
 import A2AServer
 import Foundation
+#if canImport(FoundationNetworking)
+import FoundationNetworking
+#endif
 import Testing
 
 // Loopback smoke tests: a real `A2AHTTPServer` on an ephemeral port, driven with

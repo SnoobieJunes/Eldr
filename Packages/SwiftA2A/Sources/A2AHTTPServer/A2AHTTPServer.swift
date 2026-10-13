@@ -4,6 +4,9 @@
 import A2ACore
 import A2AServer
 import Foundation
+#if canImport(FoundationNetworking)
+import FoundationNetworking
+#endif
 import Network
 
 /// Typed failures `A2AHTTPServer` itself raises (distinct from `NWError`s the

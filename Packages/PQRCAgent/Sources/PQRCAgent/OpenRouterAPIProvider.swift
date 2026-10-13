@@ -1,5 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 import Foundation
+#if canImport(FoundationNetworking)
+import FoundationNetworking
+#endif
 
 /// Remote inference via OpenRouter (APP-SPEC §9, D3) — one API key, many models
 /// (OpenAI, Anthropic, Google, Llama, …) behind an OpenAI-compatible endpoint.

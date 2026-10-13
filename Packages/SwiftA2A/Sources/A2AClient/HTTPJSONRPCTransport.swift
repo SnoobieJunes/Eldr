@@ -1,6 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
 import A2ACore
 import Foundation
+#if canImport(FoundationNetworking)
+import FoundationNetworking
+#endif
 
 /// The standard A2A HTTP(S) JSON-RPC 1.0 binding (docs/specification.md §9): a POST
 /// of the JSON-RPC envelope to a single endpoint URL, unary responses as
@@ -136,7 +139,7 @@ public struct HTTPJSONRPCTransport: A2AClientTransport {
     /// JSON-RPC error envelope from the (bounded) body, else surface the raw
     /// HTTP status.
     private static func throwStreamOpenError(
-        status: Int, bytes: URLSession.AsyncBytes
+        status: Int, bytes: StreamBytes
     ) async throws {
         var sample: [UInt8] = []
         sample.reserveCapacity(min(errorBodySampleLimit, 4096))

@@ -331,3 +331,44 @@ struct ReconnectApprovalTests {
         await #expect(throws: EldrClientError.self) { try await alice.approveReconnect("nobody") }
     }
 }
+
+/// Invariant 12 canary on Linux: a full add / request / accept / reply / restart cycle
+/// writes the message plaintext neither to stderr (the Linux log sink) nor to any
+/// file in either state directory.
+@Suite("Linux log + at-rest canary", .serialized)
+struct LinuxCanaryTests {
+    @Test func plaintextNeverReachesStderrOrDisk() async throws {
+        let canary = "CANARY-\(UUID().uuidString)"
+        let capture = FileManager.default.temporaryDirectory.appendingPathComponent("eldr-stderr-\(UUID().uuidString)")
+        let fd = open(capture.path, O_CREAT | O_RDWR | O_TRUNC, 0o600)
+        try #require(fd >= 0)
+        let saved = dup(2)
+        dup2(fd, 2)
+        let relay = LocalRelaySimulator()
+        let (aliceP, alice) = try await Peer.make(relay)
+        let (bobP, bob) = try await Peer.make(relay)
+        let bobEv = Collector(), aliceEv = Collector()
+        await bobEv.attach(try await bob.start())
+        await aliceEv.attach(try await alice.start())
+        try await alice.addContact(bob.pairingLink.uri, name: "bob")
+        try await alice.send("\(canary) one", to: "bob")
+        for _ in 0..<200 where await bob.requests.isEmpty { try await Task.sleep(for: .milliseconds(20)) }
+        try await bob.accept(String(alice.nostrPubkeyHex.prefix(10)), name: "alice")
+        _ = await bobEv.waitTexts(1)
+        try await bob.send("\(canary) two", to: "alice")
+        _ = await aliceEv.waitTexts(1)
+        await alice.stop(); await bob.stop()
+        dup2(saved, 2); close(saved); close(fd)
+        #expect(await bobEv.texts.first?.contains(canary) == true, "the canary must actually have flowed")
+        let logged = (try? Data(contentsOf: capture)) ?? Data()
+        #expect(!String(decoding: logged, as: UTF8.self).contains(canary), "plaintext reached stderr")
+        for dir in [aliceP.dir, bobP.dir] {
+            let files = FileManager.default.enumerator(at: dir, includingPropertiesForKeys: nil)?
+                .compactMap { $0 as? URL } ?? []
+            #expect(!files.isEmpty)
+            for f in files {
+                if let d = try? Data(contentsOf: f) { #expect(d.range(of: Data(canary.utf8)) == nil, "plaintext at rest in \(f.lastPathComponent)") }
+            }
+        }
+    }
+}

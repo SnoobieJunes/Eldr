@@ -1,5 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 import Foundation
+#if canImport(FoundationNetworking)
+import FoundationNetworking
+#endif
 import Testing
 
 @testable import A2AClient
@@ -144,11 +147,20 @@ private func stubSession() -> URLSession {
         // Split into 3 chunks at awkward (mid-line) boundaries.
         let cut1 = bytes.count / 3
         let cut2 = (2 * bytes.count) / 3
+        #if canImport(FoundationNetworking)
+        // Linux: swift-corelibs-foundation's async `data(for:)` keeps only the LAST
+        // `didLoad` chunk from a custom URLProtocol (a stub-path bug; real HTTP is
+        // unaffected), so deliver the body whole. Mid-line chunk boundaries are still
+        // proven on Linux by SSEParserTests, which feed the parser split buffers.
+        _ = (cut1, cut2)
+        let chunks = [Data(bytes)]
+        #else
         let chunks = [
             Data(bytes[0..<cut1]),
             Data(bytes[cut1..<cut2]),
             Data(bytes[cut2...]),
         ]
+        #endif
 
         StubURLProtocol.handler = { _ in
             StubURLProtocol.Response(
