@@ -31,6 +31,12 @@ let usage = """
       listen [--inbox FILE.jsonl] [--outbox DIR] [--auto-accept <npub|link>]
              [--auto-accept-identity HEX] [--for SECONDS]
                                     receive (and send outbox files) until stopped
+      agent-mode on --owner HEX | off   mark this identity as an AI account that
+                                    needs its owner's sponsorship to send
+      sponsor <contact> [--days 1|7|30] [--label NAME]
+                                    sponsor a contact's AI account (human only)
+      revoke <sponsorship-id|contact> [--notify c1,c2]
+      sponsorships                  this account's sponsorship + ones you issued
 
     <contact> = name, identity-hex prefix (≥6), npub, or nostr-hex prefix.
     Outbox: *.json {"to": "<contact>", "text": "..."} files are sent then moved to
@@ -146,6 +152,8 @@ func eventObject(_ ev: ClientEvent) -> ([String: Any], String) {
                 + "Keeping the old one. Verify with them out-of-band before trusting anything new.")
     case .saveFailed(let e):
         return (["type": "error", "error": "save failed: \(e)"], "⚠ SAVE FAILED: \(e)")
+    case .sponsorship(let note):
+        return (["type": "sponsorship", "note": note], "🛡 \(note)")
     }
 }
 
@@ -349,6 +357,54 @@ case "listen":
             try? FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: inbox.path)
             if let fh = try? FileHandle(forWritingTo: inbox) { fh.seekToEndOfFile(); fh.write(d); try? fh.close() }
             else { FileManager.default.createFile(atPath: inbox.path, contents: d, attributes: [.posixPermissions: 0o600]) }
+        }
+    }
+
+case "agent-mode":
+    let owner = takeOption("--owner")
+    guard let mode = args.first, mode == "on" || mode == "off" else { fail("agent-mode on --owner HEX | off") }
+    let client = await openClient(openStore())
+    do {
+        try await client.setAgentMode(mode == "on", ownerIdentityHex: owner)
+        emit(["type": "agentMode", "on": mode == "on", "owner": owner as Any],
+             human: mode == "on" ? "Agent mode ON. Owner \(short(owner ?? "")). Sends need a live sponsorship." : "Agent mode OFF.")
+    } catch { fail("\(error)") }
+
+case "sponsor":
+    let days = takeOption("--days").flatMap(Int.init) ?? 7
+    let label = takeOption("--label")
+    guard let target = args.first else { fail("sponsor <contact> [--days N] [--label NAME]") }
+    let client = await openClient(openStore())
+    do {
+        let sp = try await client.sponsor(target, days: days, label: label)
+        emit(["type": "sponsored", "id": sp.sponsorshipID, "agent": sp.agent, "activeUntil": sp.activeUntil],
+             human: "Sponsored \(short(sp.agent)) until \(iso(Date(timeIntervalSince1970: TimeInterval(sp.activeUntil)))) (id \(sp.sponsorshipID.prefix(8)))")
+    } catch { fail("\(error)") }
+
+case "revoke":
+    let notify = takeOption("--notify")?.split(separator: ",").map(String.init) ?? []
+    guard let target = args.first else { fail("revoke <sponsorship-id|contact>") }
+    let client = await openClient(openStore())
+    do {
+        let ids = try await client.revokeSponsorship(target, alsoNotify: notify)
+        emit(["type": "revoked", "ids": ids], human: "Revoked \(ids.map { String($0.prefix(8)) }.joined(separator: ", ")).")
+    } catch { fail("\(error)") }
+
+case "sponsorships":
+    let client = await openClient(openStore())
+    let mine = await client.mySponsorship
+    let issued = await client.issuedSponsorships
+    let live = (try? await client.liveSponsorship()) != nil
+    if json {
+        emit(["type": "sponsorships", "agentMode": await client.isAgent, "owner": await client.ownerIdentityHex as Any,
+              "mine": mine.map { ["id": $0.sponsorshipID, "sponsor": $0.enabledBy.hexString, "activeUntil": $0.activeUntil, "live": live] } as Any,
+              "issued": issued.map { ["id": $0.sponsorship.sponsorshipID, "agent": $0.sponsorship.agent,
+                                      "activeUntil": $0.sponsorship.activeUntil, "revokedAt": $0.revokedAt as Any] }], human: "")
+    } else {
+        print("agent mode: \(await client.isAgent ? "on (owner \(short(await client.ownerIdentityHex ?? "")))" : "off")")
+        if let m = mine { print("my sponsorship: \(m.sponsorshipID.prefix(8)) by \(short(m.enabledBy.hexString)) until \(iso(Date(timeIntervalSince1970: TimeInterval(m.activeUntil)))) \(live ? "LIVE" : "NOT LIVE")") }
+        for i in issued {
+            print("issued \(i.sponsorship.sponsorshipID.prefix(8)) → \(short(i.sponsorship.agent)) until \(iso(Date(timeIntervalSince1970: TimeInterval(i.sponsorship.activeUntil))))\(i.revokedAt != nil ? " REVOKED" : "")")
         }
     }
 

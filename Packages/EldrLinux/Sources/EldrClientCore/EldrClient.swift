@@ -21,6 +21,10 @@ public enum EldrClientError: Error, CustomStringConvertible {
     case notARequest(String)
     case identityMismatch(expected: String, got: String)
     case stateUnreadable
+    case notSponsored(String)
+    case agentCannotSponsor
+    case unknownSponsorship(String)
+    case messageTooLarge
 
     public var description: String {
         switch self {
@@ -32,6 +36,12 @@ public enum EldrClientError: Error, CustomStringConvertible {
         case .unknownContact(let s): return "no contact matches '\(s)'"
         case .ambiguousContact(let s): return "'\(s)' matches more than one contact; be more specific"
         case .notARequest(let s): return "no pending request matches '\(s)'"
+        case .notSponsored(let why):
+            return "this is an AI account and has no live sponsorship from its owner (\(why)) — "
+                + "ask the owner to sponsor it; nothing was sent"
+        case .agentCannotSponsor: return "an AI account cannot sponsor another identity (agents cannot self-grant)"
+        case .unknownSponsorship(let s): return "no sponsorship issued by you matches '\(s)'"
+        case .messageTooLarge: return "message is too large to send (over the chunk limit)"
         case .stateUnreadable:
             return "state.enc exists but cannot be decrypted/decoded — refusing to start (and "
                 + "refusing to overwrite it). Restore it from a backup or move it aside."
@@ -53,6 +63,8 @@ public enum ClientEvent: Sendable {
     /// binds a DIFFERENT identity. The stored (old) identity stays trusted; the user must
     /// verify out-of-band before re-adding. Never adopted automatically.
     case bindingIdentityChanged(ContactRecord, newIdentityHex: String)
+    /// Sponsorship lifecycle notices (received / refused / revoked), human-readable.
+    case sponsorship(String)
 }
 
 public typealias TransportFactory = @Sendable () async throws -> any RelayTransport
@@ -96,7 +108,11 @@ public actor EldrClient {
     public let messenger: PQRCMessenger
     public nonisolated let identityHex: String
     public nonisolated let nostrPubkeyHex: String
-    public private(set) var state: ClientState
+    public internal(set) var state: ClientState
+    let identity: PQRCIdentity
+    /// Chunk reassembly buffers, keyed "<sender>:<chunk id>" (memory only, bounded).
+    var chunkBuffers: [String: (template: MessageBody, total: Int, parts: [Int: String], order: Int)] = [:]
+    var chunkCounter = 0
     private let prekeyManager: PrekeyManager
     private let lock: DirectoryLock
     /// Requests from THIS Nostr key are accepted automatically (e.g. the owner), and only
@@ -174,6 +190,7 @@ public actor EldrClient {
         self.store = store
         self.messenger = m
         self.prekeyManager = pm
+        self.identity = identity
         self.identityHex = identity.publicKeyData.hexString
         self.nostrPubkeyHex = kp.publicKeyHex
         self.state = st
@@ -289,25 +306,64 @@ public actor EldrClient {
 
     // MARK: - Send
 
-    /// Sends text to a contact, opening a PQXDH session first if none exists.
+    /// Sends text to a contact, opening a PQXDH session first if none exists. Text over
+    /// the relay's per-envelope budget is split into ordered chunks (inside the
+    /// ciphertext) exactly like the iOS app does. In agent mode the message is labeled
+    /// `agent` and carries this account's sponsorship; with no live sponsorship nothing
+    /// is sent (checked on every send).
     @discardableResult
     public func send(_ text: String, to q: String) async throws -> DeliveryRoute {
         let c = try contact(matching: q)
-        let body = MessageBody(
+        var body = MessageBody(
             text: text, sentAt: Int64(Date().timeIntervalSince1970), messageID: UUID().uuidString)
-        let route: DeliveryRoute
-        if await messenger.hasSession(peerIdentityHex: c.identityHex) {
-            route = try await messenger.send(body, to: c.identityHex)
-        } else {
+        let participant: ParticipantType = isAgent ? .agent : .human
+        if isAgent { body.agentSponsorship = try liveSponsorship() }
+        let route = try await deliver(body, to: c, participant: participant)
+        appendHistory(HistoryEntry(
+            id: body.messageID ?? UUID().uuidString, peerIdentityHex: c.identityHex, outgoing: true,
+            text: text, sentAt: body.sentAt, agent: isAgent,
+            sponsorship: isAgent ? .sponsored(
+                sponsorIdentityHex: body.agentSponsorship!.enabledBy.hexString,
+                label: body.agentSponsorship!.label, activeUntil: body.agentSponsorship!.activeUntil) : .human))
+        try await persist()
+        return route
+    }
+
+    /// Low-level delivery of one logical body (chunked if needed).
+    func deliver(_ body: MessageBody, to c: ContactRecord, participant: ParticipantType) async throws -> DeliveryRoute {
+        if !(await messenger.hasSession(peerIdentityHex: c.identityHex)) {
             let (vc, bundle) = try await messenger.fetchVerifiedPeer(
                 nostrPubkeyHex: c.nostrPubkeyHex, timeout: .seconds(15))
             guard vc.identityHex == c.identityHex else {
                 throw EldrClientError.identityMismatch(expected: c.identityHex, got: vc.identityHex)
             }
-            route = try await messenger.establishSession(with: vc, bundle: bundle, firstMessage: body)
+            // The PQXDH handshake carries its first body human-labeled. A human,
+            // single-envelope message rides it directly; an agent or chunked message
+            // first opens the session with an empty opener (never rendered by this
+            // client) so its label and chunks travel on ordinary ratchet messages.
+            if participant == .human,
+                MessageChunker.split(body.text, budgetBytes: await messenger.chunkTextBudget()).count == 1
+            {
+                let r = try await messenger.establishSession(with: vc, bundle: bundle, firstMessage: body)
+                try await persist()
+                return r
+            }
+            let opener = MessageBody(text: "", sentAt: body.sentAt, messageID: UUID().uuidString)
+            _ = try await messenger.establishSession(with: vc, bundle: bundle, firstMessage: opener)
         }
-        try await persist()
-        return route
+        let parts = MessageChunker.split(body.text, budgetBytes: await messenger.chunkTextBudget())
+        guard parts.count <= PQRCConstants.maxChunksPerMessage else { throw EldrClientError.messageTooLarge }
+        if parts.count == 1 {
+            return try await messenger.send(body, to: c.identityHex, participantType: participant)
+        }
+        let id = UUID().uuidString
+        let bodies = parts.enumerated().map { i, part -> MessageBody in
+            var b = body
+            b.text = part
+            b.chunk = MessageChunk(id: id, index: i, total: parts.count)
+            return b
+        }
+        return try await messenger.sendBatch(bodies, to: c.identityHex, participantType: participant)
     }
 
     // MARK: - Receive
@@ -377,7 +433,22 @@ public actor EldrClient {
                 let vc = await messenger.verifiedContact(identityHex: msg.senderIdentityHex) {
                 c = try? await record(vc, name: nil)
             }
-            if let c { out.append(.message(c, msg)) }
+            if let c, let whole = reassemble(msg) {
+                let full = ReceivedMessage(
+                    senderIdentityHex: msg.senderIdentityHex, participantType: msg.participantType,
+                    body: whole, contentPointer: msg.contentPointer, aiWindow: msg.aiWindow,
+                    aiContextGrant: msg.aiContextGrant, wrapEventID: msg.wrapEventID)
+                out.append(contentsOf: processControl(full))
+                let status = sponsorshipStatus(of: full)
+                let isControlOnly = full.body.text.isEmpty
+                if !isControlOnly {
+                    appendHistory(HistoryEntry(
+                        id: whole.messageID ?? msg.wrapEventID, peerIdentityHex: c.identityHex,
+                        outgoing: false, text: whole.text, sentAt: whole.sentAt,
+                        agent: msg.participantType == .agent, sponsorship: status))
+                    out.append(.message(c, full))
+                }
+            }
         case .messageRequest(let sender, _):
             let now = Date()
             if let i = state.requests.firstIndex(where: { $0.nostrPubkeyHex == sender }) {

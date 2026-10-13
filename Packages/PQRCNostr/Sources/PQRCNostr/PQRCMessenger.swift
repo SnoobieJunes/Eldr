@@ -42,6 +42,21 @@ public struct ReceivedMessage: Sendable {
     /// doctrine as `aiWindow` (review M-1).
     public let aiContextGrant: AIContextGrant?
     public let wrapEventID: String
+
+    /// Public so app layers can hand on a reassembled (chunk-joined) body.
+    public init(
+        senderIdentityHex: String, participantType: ParticipantType, body: MessageBody,
+        contentPointer: ContentPointer?, aiWindow: AIWindowAnnouncement?,
+        aiContextGrant: AIContextGrant?, wrapEventID: String
+    ) {
+        self.senderIdentityHex = senderIdentityHex
+        self.participantType = participantType
+        self.body = body
+        self.contentPointer = contentPointer
+        self.aiWindow = aiWindow
+        self.aiContextGrant = aiContextGrant
+        self.wrapEventID = wrapEventID
+    }
 }
 
 /// How an outbound message actually left the device (C3 honest send states):
