@@ -51,21 +51,8 @@ public struct ClientState: Codable, Sendable {
     public static let maxSeen = 5000
 }
 
-/// How a received message's agent sponsorship checked out, evaluated PER MESSAGE at
-/// receipt (never cached as a contact-level flag).
-public enum SponsorshipStatus: Codable, Sendable, Equatable {
-    /// Human-labeled message: sponsorship does not apply.
-    case human
-    /// Agent-labeled message with no sponsorship attached.
-    case unsponsored
-    /// Agent-labeled, carrying a valid, unexpired, unrevoked sponsorship.
-    case sponsored(sponsorIdentityHex: String, label: String?, activeUntil: Int64)
-    /// Agent-labeled, carrying a sponsorship that failed (bad signature, wrong agent,
-    /// expired, revoked, over 30 days…). Shown as a warning, never as sponsored.
-    case invalid(reason: String)
-
-    public var isSponsored: Bool { if case .sponsored = self { return true } else { return false } }
-}
+// `SponsorshipStatus` and `IssuedSponsorship` live in PQRCCore (SponsorshipLedger.swift),
+// shared with iOS.
 
 /// One rendered line of a conversation (kept encrypted at rest with the state).
 public struct HistoryEntry: Codable, Sendable, Equatable, Identifiable {
@@ -76,12 +63,6 @@ public struct HistoryEntry: Codable, Sendable, Equatable, Identifiable {
     public var sentAt: Int64
     public var agent: Bool
     public var sponsorship: SponsorshipStatus
-}
-
-/// A sponsorship THIS identity issued to an agent (sponsor side).
-public struct IssuedSponsorship: Codable, Sendable, Equatable {
-    public var sponsorship: AgentSponsorship
-    public var revokedAt: Int64?
 }
 
 /// Sponsorship / history state. Every field is optional on the wire so a state file
