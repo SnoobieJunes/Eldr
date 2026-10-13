@@ -40,6 +40,60 @@ public struct ClientState: Codable, Sendable {
     /// deliberately not recorded, so the relay re-delivers them after a restart.
     public var seenWrapIDs: [String] = []
     public var relays: [String] = []
+    /// Milestone 2 (sponsorship + history). Optional so older state still decodes.
+    public var agent: AgentState?
 
     public static let maxSeen = 5000
+}
+
+/// How a received message's agent sponsorship checked out, evaluated PER MESSAGE at
+/// receipt (never cached as a contact-level flag).
+public enum SponsorshipStatus: Codable, Sendable, Equatable {
+    /// Human-labeled message: sponsorship does not apply.
+    case human
+    /// Agent-labeled message with no sponsorship attached.
+    case unsponsored
+    /// Agent-labeled, carrying a valid, unexpired, unrevoked sponsorship.
+    case sponsored(sponsorIdentityHex: String, label: String?, activeUntil: Int64)
+    /// Agent-labeled, carrying a sponsorship that failed (bad signature, wrong agent,
+    /// expired, revoked, over 30 days…). Shown as a warning, never as sponsored.
+    case invalid(reason: String)
+
+    public var isSponsored: Bool { if case .sponsored = self { return true } else { return false } }
+}
+
+/// One rendered line of a conversation (kept encrypted at rest with the state).
+public struct HistoryEntry: Codable, Sendable, Equatable, Identifiable {
+    public var id: String
+    public var peerIdentityHex: String
+    public var outgoing: Bool
+    public var text: String
+    public var sentAt: Int64
+    public var agent: Bool
+    public var sponsorship: SponsorshipStatus
+}
+
+/// A sponsorship THIS identity issued to an agent (sponsor side).
+public struct IssuedSponsorship: Codable, Sendable, Equatable {
+    public var sponsorship: AgentSponsorship
+    public var revokedAt: Int64?
+}
+
+/// Sponsorship / history state. Every field is optional on the wire so a state file
+/// written by Milestone 1 still decodes (fail-closed decode would otherwise refuse it).
+public struct AgentState: Codable, Sendable {
+    /// This persona is an AI account: sends are labeled `agent` and REQUIRE a live
+    /// sponsorship from `ownerIdentityHex`.
+    public var agentMode: Bool?
+    /// The only identity whose sponsorship this agent accepts.
+    public var ownerIdentityHex: String?
+    public var mySponsorship: AgentSponsorship?
+    public var issued: [IssuedSponsorship]?
+    /// "<sponsorHex>:<sponsorshipID>" of every revocation seen.
+    public var revoked: [String]?
+    public var history: [HistoryEntry]?
+
+    public static let maxHistory = 5000
+    public static let maxRevoked = 2000
+    public static let maxHistoryBytes = 32 * 1024 * 1024
 }

@@ -61,3 +61,17 @@ re-verified offline from their stored binding events.
   the same identity. A different identity raises a safety warning and is never adopted
   (DEVIATIONS AC158).
 - If `state.enc` can't be read, the client refuses to start rather than starting empty.
+
+## Milestone 2: sponsored agent identities
+
+An AI account (e.g. ELDR) only sends once its owner has signed a sponsorship (1, 7 or 30 days).
+The owner can revoke it at any time; every message is checked. Spec: `docs/pqrc-ext-agent-sponsorship.md`.
+
+```sh
+# on the AI account
+eldr-chat agent-mode on --owner <owner identity hex>
+# on the owner's (human) account
+eldr-chat sponsor eldr --days 7 --label ELDR
+eldr-chat revoke eldr
+eldr-chat sponsorships
+```
