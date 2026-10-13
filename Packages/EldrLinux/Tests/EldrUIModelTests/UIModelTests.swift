@@ -86,6 +86,28 @@ struct UIModelTests {
         #expect(snap.header(for: "group:G1").contains("roster asserted by alice (rev 3)"))
     }
 
+    @Test func threads_aiIndicator_andRowBadges() {
+        let ev = NostrEvent(pubkey: "", createdAt: 0, kind: 10420, tags: [], content: "")
+        let a = String(repeating: "aa", count: 32), me = String(repeating: "cc", count: 32)
+        let cs = [ContactRecord(name: "alice", nostrPubkeyHex: a, identityHex: a, bindingEvent: ev, session: nil, addedAt: Date(timeIntervalSince1970: 1))]
+        var t1 = HistoryEntry(id: "t1", peerIdentityHex: a, outgoing: false, text: "in thread", sentAt: 50, agent: true, sponsorship: .unsponsored)
+        t1.threadID = "T"; t1.aiAuthorizedUntil = 9_999_999_999
+        let dm = HistoryEntry(id: "d", peerIdentityHex: a, outgoing: false, text: "dm", sentAt: 10, agent: true, sponsorship: .unsponsored)
+        var snap = UISnapshot(me: me, npub: "", link: "", isAgent: false, agentBanner: nil, contacts: cs, requests: [], history: [dm, t1], issued: [])
+        snap.threads = [ThreadRecord(threadID: "T", conversationID: a, title: "plan", createdBy: a)]
+        snap.aiActive = ["thread:T": [a: 9_999_999_999, me: 9_999_999_999]]
+        snap.loopGuarded = ["thread:T"]
+        #expect(snap.conversations().first?.identityHex == "thread:T")
+        #expect(snap.messages(with: a).map(\.text) == ["dm"])
+        #expect(snap.messages(with: "thread:T").map(\.text) == ["in thread"])
+        let h = snap.header(for: "thread:T", now: 100)
+        #expect(h.contains("alice's AI on until") && h.contains("your AI on until") && h.contains("loop guard"))
+        #expect(!UIFormat.rowBadge(t1, names: snap.name(of:)).warn)
+        #expect(UIFormat.rowBadge(dm, names: snap.name(of:)).warn, "an agent row with no authorization is flagged")
+        var mine = dm; mine.mine = true; mine.outgoing = true
+        #expect(UIFormat.rowBadge(mine, names: snap.name(of:)).text == "🤖 your AI")
+    }
+
     /// Tags must nest properly and no raw '<' may come from message text.
     private func wellFormed(_ m: String) -> Bool {
         var stack: [String] = []

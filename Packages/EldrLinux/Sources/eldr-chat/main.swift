@@ -6,6 +6,7 @@ import EldrClientCore
 import Foundation
 import PQRCCore
 import PQRCNostr
+import PQRCAgent
 
 #if canImport(Glibc)
 import Glibc
@@ -44,7 +45,27 @@ let usage = """
       group add|remove <group> <contact…>   new roster revision to old+new members
       group send <group> <text…>    send to every member you have as a contact
       group history <group> [--last N]
+      group rename <group> <name…>  |  group leave <group>
       groups                        list groups (rosters are "asserted by" someone)
+      thread create <conv> <title…> start a thread in a contact or group conversation
+      thread send <thread> <text…>  |  thread history <thread>  |  threads
+      ai-window <conv> 1h|8h|24h|off  my AI answers humans in <conv> for that long
+                                    (one conversation at a time; off = signed close)
+      ai-invite <thread> 1h|8h|24h|off  invite / withdraw my AI in a thread
+      ai-status [<conv>|--thread T]  live windows/invites (every AI shown, SPEC §13)
+      ai-config --base-url URL --model M [--key-stdin] [--instructions TEXT]
+                [--timeout S] | --show | --clear
+                                    OpenAI-compatible endpoint (LM Studio, Ollama,
+                                    vLLM, OpenAI, OpenRouter…); the key is read from
+                                    stdin into the encrypted keystore, or from
+                                    $ELDR_AI_API_KEY at run time — never from argv
+      ai-test                       one test completion (nothing is sent to anyone)
+      ai-draft <conv> [--thread T]  a private draft from my AI (nothing is sent)
+      town-grant issue <contact> --planes wall,delegate --days 1|3|7|14|30
+                 [--messages N --bytes N --tasks N]  |  revoke <grant-id>  |  list
+      settings [--name N] [--loop-guard N] [--relays URL,URL]   (no flags = show)
+      qr                            show my pairing link as a QR code
+      <conv> = contact, group name/id, or group:<id>.  listen runs my AI when enabled.
 
     <contact> = name, identity-hex prefix (≥6), npub, or nostr-hex prefix.
     Outbox: *.json {"to": "<contact>", "text": "..."} (or {"group": "<group>", ...}) files are sent then moved to
@@ -173,6 +194,18 @@ func eventObject(_ ev: ClientEvent) -> ([String: Any], String) {
                 : "🔄 \(who) reset their app and wants to reconnect. Verify their safety code, then `eldr-chat reconnect \(who)`.")
     case .sponsorship(let note):
         return (["type": "sponsorship", "note": note], "🛡 \(note)")
+    case .aiWindow(let who, let conv, let until):
+        return (["type": "aiWindow", "identity": who, "conversation": conv, "until": until as Any],
+            "🤖 \(short(who))'s AI \(until.map { "is ON here until \(iso(Date(timeIntervalSince1970: TimeInterval($0))))" } ?? "is off")")
+    case .aiInvite(let who, let t, let until):
+        return (["type": "aiInvite", "identity": who, "thread": t, "until": until as Any],
+            "🤖 \(short(who))'s AI \(until.map { "joined thread \(t.prefix(8)) until \(iso(Date(timeIntervalSince1970: TimeInterval($0))))" } ?? "left thread \(t.prefix(8))")")
+    case .threadCreated(let t):
+        return (["type": "thread", "threadID": t.threadID, "conversation": t.conversationID, "title": t.title],
+            "🧵 new thread \"\(t.title)\" (\(t.threadID.prefix(8)))")
+    case .myAI(let conv, let t, let err):
+        return (["type": "myAI", "conversation": conv, "thread": t as Any, "error": err as Any],
+            err.map { "⚠ my AI failed: \($0)" } ?? "🤖 my AI posted\(t.map { " in thread \($0.prefix(8))" } ?? "")")
     }
 }
 
@@ -429,10 +462,15 @@ case "history":
         case .invalid(let r): return "agent-invalid(\(r))"
         }
     }
+    func label(_ e: HistoryEntry) -> String {
+        if e.mine == true { return "my-ai" }
+        if let u = e.aiAuthorizedUntil { return "their-ai-window-until-\(u)" }
+        return status(e.sponsorship)
+    }
     for e in entries {
         emit(["type": "history", "outgoing": e.outgoing, "sentAt": e.sentAt, "chars": e.text.count,
-              "sponsorship": status(e.sponsorship), "text": e.text.count > 200 ? String(e.text.prefix(200)) + "…" : e.text],
-             human: "\(e.outgoing ? "→" : "←") [\(status(e.sponsorship))] \(e.text.count > 120 ? String(e.text.prefix(120)) + "… (\(e.text.count) chars)" : e.text)")
+              "sponsorship": label(e), "text": e.text.count > 200 ? String(e.text.prefix(200)) + "…" : e.text],
+             human: "\(e.outgoing ? "→" : "←") [\(label(e))] \(e.text.count > 120 ? String(e.text.prefix(120)) + "… (\(e.text.count) chars)" : e.text)")
     }
 
 case "reconnect":
@@ -491,6 +529,14 @@ case "group":
             let (g, n) = try await client.createGroup(name: args[0], members: Array(args.dropFirst()))
             emit(["type": "group", "groupID": g.groupID, "name": g.name, "members": g.members, "reached": n],
                  human: "Created group \"\(g.name)\" \(g.groupID) (\(g.members.count) members, announced to \(n)).")
+        case "rename":
+            guard args.count >= 2 else { fail("group rename <group> <name…>") }
+            let g = try await client.reviseGroup(args[0], rename: args.dropFirst().joined(separator: " "))
+            emit(["type": "group", "groupID": g.groupID, "name": g.name, "revision": g.revision], human: "Renamed to \"\(g.name)\".")
+        case "leave":
+            guard let q = args.first else { fail("group leave <group>") }
+            try await client.leaveGroup(q)
+            emit(["type": "left"], human: "Left the group (history kept).")
         case "add", "remove":
             guard args.count >= 2 else { fail("group \(sub) <group> <contact…>") }
             let g = try await client.reviseGroup(args[0], add: sub == "add" ? Array(args.dropFirst()) : [],
@@ -517,6 +563,172 @@ case "group":
         default: fail("group create|add|remove|send|history …")
         }
     } catch { fail("\(error)") }
+
+case "threads":
+    let client = await openClient(openStore())
+    for t in await client.threads {
+        emit(["type": "thread", "threadID": t.threadID, "conversation": t.conversationID, "title": t.title],
+             human: sanitizeForTerminal("\(t.threadID.prefix(8))\t\(t.title)\tin \(t.conversationID.prefix(20))"))
+    }
+
+case "thread":
+    guard let sub = args.first else { fail("thread create|send|history …") }
+    args.removeFirst()
+    let limit = takeOption("--last").flatMap(Int.init) ?? 20
+    let client = await openClient(openStore())
+    do {
+        switch sub {
+        case "create":
+            guard args.count >= 2 else { fail("thread create <conv> <title…>") }
+            let t = try await client.createThread(in: args[0], title: args.dropFirst().joined(separator: " "))
+            emit(["type": "thread", "threadID": t.threadID, "title": t.title], human: "Started thread \"\(t.title)\" \(t.threadID)")
+        case "send":
+            guard args.count >= 2 else { fail("thread send <thread> <text…>") }
+            var text = args.dropFirst().joined(separator: " ")
+            if text == "-" { text = String(data: FileHandle.standardInput.readDataToEndOfFile(), encoding: .utf8) ?? "" }
+            let r = try await client.say(text, in: "", thread: args[0])
+            emit(["type": "sent", "reached": r.reached, "skipped": r.skipped], human: "Sent to \(r.reached).")
+        case "history":
+            guard let q = args.first else { fail("thread history <thread>") }
+            let t = try await client.thread(matching: q)
+            let names = Dictionary(await client.contacts.map { ($0.identityHex, $0.name ?? short($0.identityHex)) }, uniquingKeysWith: { a, _ in a })
+            for e in await client.threadHistory(t.threadID).suffix(limit) {
+                let who = e.outgoing ? (e.mine == true ? "my AI" : "me") : ((names[e.peerIdentityHex] ?? short(e.peerIdentityHex)) + (e.agent ? "'s AI" : ""))
+                emit(["type": "history", "from": who, "agent": e.agent, "text": e.text], human: "\(who): \(e.text)")
+            }
+        default: fail("thread create|send|history …")
+        }
+    } catch { fail("\(error)") }
+
+case "ai-window", "ai-invite":
+    guard args.count >= 2 else { fail("\(command) <\(command == "ai-window" ? "conv" : "thread")> 1h|8h|24h|off") }
+    let client = await openClient(openStore())
+    let dur: [String: Int64] = ["1h": 3600, "8h": 8 * 3600, "24h": 24 * 3600]
+    do {
+        if args[1] == "off" {
+            if command == "ai-window" { try await client.endAIWindow() } else { try await client.withdrawMyAI(thread: args[0]) }
+            emit(["type": command, "on": false], human: "My AI is off there (peers were told).")
+        } else {
+            guard let secs = dur[args[1]] else { fail("duration must be 1h, 8h or 24h") }
+            let until = command == "ai-window"
+                ? try await client.startAIWindow(in: args[0], seconds: secs)
+                : try await client.inviteMyAI(thread: args[0], seconds: secs)
+            await client.settleAI()
+            emit(["type": command, "on": true, "until": until],
+                 human: "My AI is ON until \(iso(Date(timeIntervalSince1970: TimeInterval(until)))). Everyone there sees it. Keep `eldr-chat listen` running so it can reply.")
+        }
+    } catch { fail("\(error)") }
+
+case "ai-status":
+    let thread = takeOption("--thread")
+    let client = await openClient(openStore())
+    do {
+        let map: [String: Int64]
+        if let thread { map = await client.activeInvites(thread: try await client.thread(matching: thread).threadID) }
+        else if let q = args.first { map = await client.activeWindows(in: try await client.resolveConversation(q)) }
+        else { map = [:] }
+        if let w = await client.myWindowConversation { print("my AI window: \(w.prefix(24))") }
+        if let thread, await client.loopGuardActive(thread: try await client.thread(matching: thread).threadID) {
+            print("⏸ loop guard: AIs in this thread are paused until a human posts")
+        }
+        for (who, until) in map.sorted(by: { $0.key < $1.key }) {
+            emit(["identity": who, "until": until], human: "🤖 \(who == client.identityHex ? "my AI" : short(who) + "'s AI") until \(iso(Date(timeIntervalSince1970: TimeInterval(until))))")
+        }
+    } catch { fail("\(error)") }
+
+case "ai-config":
+    let client = await openClient(openStore())
+    do {
+        if takeFlag("--clear") {
+            try await client.configureProvider(nil, apiKey: nil)
+            emit(["type": "ai-config", "cleared": true], human: "AI provider and key removed.")
+        } else if takeFlag("--show") || args.isEmpty {
+            let c = await client.providerConfig
+            emit(["type": "ai-config", "baseURL": c?.baseURL as Any, "model": c?.model as Any,
+                  "keyStored": await client.hasStoredAPIKey, "keyFromEnv": env["ELDR_AI_API_KEY"] != nil],
+                 human: c.map { "endpoint \($0.baseURL) model \($0.model)\(env["ELDR_AI_API_KEY"] != nil ? " · key from $ELDR_AI_API_KEY" : "")" } ?? "(no AI provider configured)")
+            if let c, !json { print("key stored in keystore: \(await client.hasStoredAPIKey ? "yes" : "no")\(c.instructions.map { "\ninstructions: \($0)" } ?? "")") }
+        } else {
+            let keyStdin = takeFlag("--key-stdin")
+            guard let base = takeOption("--base-url") else { fail("ai-config needs --base-url") }
+            let model = takeOption("--model") ?? ""
+            let instr = takeOption("--instructions")
+            let timeout = takeOption("--timeout").flatMap(Double.init)
+            var key: String?
+            if keyStdin {
+                key = String(data: FileHandle.standardInput.readDataToEndOfFile(), encoding: .utf8)?
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+            }
+            try await client.configureProvider(
+                AIProviderConfig(baseURL: base, model: model, instructions: instr, timeoutSeconds: timeout), apiKey: key)
+            emit(["type": "ai-config", "baseURL": base, "model": model, "keyStored": key != nil],
+                 human: "AI provider set: \(base)\(key != nil ? " (key saved encrypted)" : "")")
+        }
+    } catch { fail("\(error)") }
+
+case "ai-test":
+    let client = await openClient(openStore())
+    do { let r = try await client.testProvider(); emit(["type": "ai-test", "reply": r], human: "AI says: \(r)") }
+    catch { fail("\(error)") }
+
+case "ai-draft":
+    let thread = takeOption("--thread")
+    let client = await openClient(openStore())
+    do {
+        let d = try await client.draftWithMyAI(in: args.first ?? "", thread: thread)
+        emit(["type": "draft", "text": d], human: "Draft (not sent):\n\(d)")
+    } catch { fail("\(error)") }
+
+case "town-grant":
+    guard let sub = args.first else { fail("town-grant issue|revoke|list") }
+    args.removeFirst()
+    let planes = (takeOption("--planes") ?? "wall").split(separator: ",").compactMap { StandingGrant.Plane(rawValue: String($0)) }
+    let days = takeOption("--days").flatMap(Int.init) ?? 7
+    let msgs = takeOption("--messages").flatMap(Int.init) ?? 200
+    let bytes = takeOption("--bytes").flatMap(Int.init) ?? 2_000_000
+    let tasks = takeOption("--tasks").flatMap(Int.init) ?? 2
+    let client = await openClient(openStore())
+    do {
+        switch sub {
+        case "issue":
+            guard let to = args.first, !planes.isEmpty else { fail("town-grant issue <contact> --planes wall,delegate --days N") }
+            let (g, exportJSON) = try await client.issueTownGrant(to: to, planes: planes, days: days, messagesPerDay: msgs, bytesPerDay: bytes, maxConcurrentTasks: tasks)
+            if json { emit(["type": "town-grant", "grantID": g.grantID, "export": exportJSON], human: "") }
+            else { print("Issued \(g.grantID). Paste this into the peer node's town-grants.json:\n\(exportJSON)") }
+        case "revoke":
+            guard let id = args.first else { fail("town-grant revoke <grant-id>") }
+            _ = try await client.revokeTownGrant(id)
+            emit(["type": "town-grant", "revoked": id], human: "Revoked \(id). Also remove it from any town-grants.json you pasted it into (AC143).")
+        case "list":
+            for s in await client.townGrants() {
+                emit(["grantID": s.grantID, "peer": s.peerIdentityHex, "plane": s.plane.rawValue, "until": s.activeUntil, "mine": s.granterIdentityHex == client.identityHex],
+                     human: "\(s.grantID)\t\(s.plane.rawValue)\t\(s.granterIdentityHex == client.identityHex ? "→ " + short(s.peerIdentityHex) : "← " + short(s.granterIdentityHex))\tuntil \(iso(Date(timeIntervalSince1970: TimeInterval(s.activeUntil))))")
+            }
+        default: fail("town-grant issue|revoke|list")
+        }
+    } catch { fail("\(error)") }
+
+case "settings":
+    let name = takeOption("--name")
+    let lg = takeOption("--loop-guard").flatMap(Int.init)
+    let relays = takeOption("--relays")
+    let client = await openClient(openStore())
+    do {
+        var s = await client.settings
+        if let name { s.displayName = name }
+        if let lg { s.loopGuardLimit = lg }
+        if name != nil || lg != nil { try await client.updateSettings(s) }
+        if let relays { try await client.setRelays(relays.split(separator: ",").map(String.init)) }
+        let st = await client.state
+        emit(["type": "settings", "displayName": s.displayName as Any, "loopGuard": s.loopGuardLimit ?? PQRCConstants.agentLoopGuardLimit,
+              "relays": st.relays],
+             human: "name: \(s.displayName ?? "(none)")\nloop guard: \(s.loopGuardLimit ?? PQRCConstants.agentLoopGuardLimit) consecutive AI messages (0 = off)\nrelays: \(st.relays.joined(separator: ", "))")
+    } catch { fail("\(error)") }
+
+case "qr":
+    let client = await openClient(openStore())
+    let link = await client.pairingLink.uri
+    do { let q = try QRCode.encode(link); out(q.terminalString()); out(link) } catch { fail("\(error)") }
 
 default:
     fail("unknown command '\(command)' — see `eldr-chat help`")

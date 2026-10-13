@@ -232,3 +232,4 @@ entry and move the plan to `done/`. Three steps, one sitting:
 
 If an item can't be written as a line in this file, it isn't a backlog item yet —
 it's a thought, and thoughts go in `private/`.
+- [x] WS-N2–N5 Linux parity (threads/AI/providers/QR/settings, group rename/leave) — PR #28; follow-up: live in-thread agent reply not yet observed over relay

@@ -44,6 +44,7 @@ let package = Package(
     dependencies: [
         .package(path: "../PQRCCore"),
         .package(path: "../PQRCNostr"),
+        .package(path: "../PQRCAgent"),
         .package(path: "../EldrKeystore"),
         .package(url: "https://github.com/apple/swift-crypto.git", from: "4.3.1"),
     ],
@@ -53,6 +54,7 @@ let package = Package(
             dependencies: [
                 "PQRCCore",
                 "PQRCNostr",
+                .product(name: "PQRCAgent", package: "PQRCAgent"),
                 .product(name: "EldrKeystore", package: "EldrKeystore"),
                 .product(name: "Crypto", package: "swift-crypto"),
             ],
@@ -60,13 +62,14 @@ let package = Package(
         ),
         .executableTarget(
             name: "eldr-chat",
-            dependencies: ["EldrClientCore", "PQRCCore", "PQRCNostr"],
+            dependencies: ["EldrClientCore", "PQRCCore", "PQRCNostr", .product(name: "PQRCAgent", package: "PQRCAgent")],
             swiftSettings: [.swiftLanguageMode(.v6)]
         ),
         .testTarget(
             name: "EldrClientCoreTests",
             dependencies: [
                 "EldrClientCore", "PQRCCore", "PQRCNostr",
+                .product(name: "PQRCAgent", package: "PQRCAgent"),
                 .product(name: "EldrKeystore", package: "EldrKeystore"),
             ],
             swiftSettings: [.swiftLanguageMode(.v6)]

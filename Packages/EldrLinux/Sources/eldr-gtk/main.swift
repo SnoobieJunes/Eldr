@@ -71,6 +71,12 @@ final class AppUI: @unchecked Sendable {
     var msgScroll: Widget!
     var composer: Widget!
     var sendButton: Widget!
+    var aiBar: Widget!
+    var aiLabel: Widget!
+    var threadEntry: Widget!
+    var threadButton: Widget!
+    var groupBar: Widget!
+    var renameEntry: Widget!
 
     func status(_ s: String) { setLabel(statusLabel, UIFormat.sanitizeLine(s)) }
 
@@ -100,6 +106,10 @@ final class AppUI: @unchecked Sendable {
         append(side, button("Copy my pairing link") { [unowned self] in
             if let l = self.snap?.link { copyToClipboard(self.window, l); self.status("Pairing link copied.") }
         })
+        let toolRow = hbox(4)
+        append(toolRow, button("Show QR") { [unowned self] in self.showQR() })
+        append(toolRow, button("Settings") { [unowned self] in self.showSettings() })
+        append(side, toolRow)
         bannerLabel = label("", wrap: true); addClass(bannerLabel, "banner"); gtk_widget_set_visible(bannerLabel, 0)
         append(side, bannerLabel)
         let addRow = hbox(4)
@@ -148,6 +158,32 @@ final class AppUI: @unchecked Sendable {
         append(sponsorBar, button("Revoke") { [unowned self] in self.revoke() })
         gtk_widget_set_visible(sponsorBar, 0)
         append(main, sponsorBar)
+        // My AI (SPEC §13): a window in a conversation, an invite in a thread. Every
+        // live AI is shown in the header for its whole duration (invariant 9).
+        aiBar = hbox(6)
+        aiLabel = label("My AI here:"); append(aiBar, aiLabel)
+        for (t, secs) in [("1h", Int64(3600)), ("8h", Int64(8 * 3600)), ("24h", Int64(24 * 3600))] {
+            append(aiBar, button(t) { [unowned self] in self.myAI(seconds: secs) })
+        }
+        append(aiBar, button("Off") { [unowned self] in self.myAI(seconds: 0) })
+        append(aiBar, button("Draft privately") { [unowned self] in self.draft() })
+        threadEntry = gtk_entry_new()
+        gtk_entry_set_placeholder_text(cast(threadEntry), "New thread title")
+        expand(threadEntry, h: true)
+        on(threadEntry, "activate") { [unowned self] in self.startThread() }
+        append(aiBar, threadEntry)
+        threadButton = button("Start thread") { [unowned self] in self.startThread() }
+        append(aiBar, threadButton)
+        append(main, aiBar)
+        groupBar = hbox(6)
+        renameEntry = gtk_entry_new()
+        gtk_entry_set_placeholder_text(cast(renameEntry), "Rename group to…")
+        expand(renameEntry, h: true)
+        append(groupBar, renameEntry)
+        append(groupBar, button("Rename") { [unowned self] in self.renameGroup() })
+        append(groupBar, button("Leave group") { [unowned self] in self.leaveGroup() })
+        gtk_widget_set_visible(groupBar, 0)
+        append(main, groupBar)
         reconnectBar = hbox(6)
         let rl = label("This contact reset their app and wants to reconnect. Check their safety code first.", wrap: true)
         addClass(rl, "banner"); expand(rl, h: true); append(reconnectBar, rl)
@@ -238,7 +274,13 @@ final class AppUI: @unchecked Sendable {
         guard let s = snap, let id = selected else { return }
         setLabel(headerLabel, s.header(for: id))
         let isGroup = UISnapshot.groupID(id) != nil
-        gtk_widget_set_visible(sponsorBar, s.isAgent || isGroup ? 0 : 1)
+        let isThread = UISnapshot.threadID(id) != nil
+        gtk_widget_set_visible(sponsorBar, s.isAgent || isGroup || isThread ? 0 : 1)
+        gtk_widget_set_visible(groupBar, isGroup ? 1 : 0)
+        gtk_widget_set_visible(aiBar, s.isAgent ? 0 : 1)
+        gtk_widget_set_visible(threadEntry, isThread ? 0 : 1)
+        gtk_widget_set_visible(threadButton, isThread ? 0 : 1)
+        setLabel(aiLabel, s.provider == nil ? "My AI (set it up in Settings):" : (isThread ? "Invite my AI:" : "My AI answers here for:"))
         gtk_widget_set_visible(reconnectBar, s.pendingReconnects.contains(id) ? 1 : 0)
         let adj = gtk_scrolled_window_get_vadjustment(cast(msgScroll))
         let follow = scrollToEnd || UIFormat.shouldFollow(
@@ -249,13 +291,12 @@ final class AppUI: @unchecked Sendable {
         let peerName = s.name(of: id) ?? "them"
         for m in s.messages(with: id).suffix(300) {
             let col = vbox(2); margins(col, 4)
-            let who = m.outgoing ? "You" : (isGroup ? (s.name(of: m.peerIdentityHex) ?? String(m.peerIdentityHex.prefix(8)) + "…") : peerName)
+            let who = m.outgoing ? "You" : ((isGroup || isThread) ? (s.name(of: m.peerIdentityHex) ?? String(m.peerIdentityHex.prefix(8)) + "…") : peerName)
             var meta = "\(who) · \(UIFormat.date(m.sentAt))"
-            let badge = m.agent ? UIFormat.badge(m.sponsorship, names: s.name(of:)) : ""
-            if !badge.isEmpty { meta += " · " + badge }
+            let badge = UIFormat.rowBadge(m, names: s.name(of:))
+            if !badge.text.isEmpty { meta += " · " + badge.text }
             let ml = label(meta, wrap: true); addClass(ml, "meta")
-            if case .invalid = m.sponsorship { addClass(ml, "warn") }
-            if m.agent, case .unsponsored = m.sponsorship { addClass(ml, "warn") }
+            if badge.warn { addClass(ml, "warn") }
             append(col, ml)
             let (text, truncated) = UIFormat.renderBody(m.text)
             let body = label("", wrap: true, selectable: true)
@@ -338,7 +379,10 @@ final class AppUI: @unchecked Sendable {
         Task { [self] in
             do {
                 let r: String
-                if let gid = UISnapshot.groupID(id) {
+                if let tid = UISnapshot.threadID(id) {
+                    let n = try await client.say(text, in: "", thread: tid)
+                    r = "to \(n.reached) member(s)"
+                } else if let gid = UISnapshot.groupID(id) {
                     let n = try await client.sendToGroup(text, group: gid)
                     r = "to \(n.reached) member(s)" + (n.skipped > 0 ? ", \(n.skipped) not in your contacts" : "")
                 } else { r = "\(try await client.send(text, to: id))" }
@@ -354,6 +398,138 @@ final class AppUI: @unchecked Sendable {
                 onMain { [self] in gtk_widget_set_sensitive(self.sendButton, 1); self.status("⚠ Not sent: \(error)") }
             }
         }
+    }
+
+    func conversationForAI(_ id: String) -> String {
+        if let g = UISnapshot.groupID(id) { return UIConversation.group(g) }
+        return id
+    }
+
+    /// 1h/8h/24h opens my window (conversation) or invite (thread); 0 turns it off.
+    func myAI(seconds: Int64) {
+        guard let id = selected else { status("Pick a conversation first."); return }
+        if snap?.provider == nil && seconds > 0 { status("Set up an AI endpoint in Settings first."); return }
+        if let tid = UISnapshot.threadID(id) {
+            act(seconds == 0 ? "Your AI left the thread (everyone was told)." : "Your AI joined the thread; everyone there sees it.") { c in
+                if seconds == 0 { try await c.withdrawMyAI(thread: tid) } else { _ = try await c.inviteMyAI(thread: tid, seconds: seconds) }
+            }
+        } else {
+            let conv = conversationForAI(id)
+            act(seconds == 0 ? "Your AI is off (everyone was told)." : "Your AI answers here for \(seconds / 3600)h; everyone here sees it.") { c in
+                if seconds == 0 { try await c.endAIWindow() } else { _ = try await c.startAIWindow(in: conv, seconds: seconds) }
+            }
+        }
+    }
+
+    /// A private draft from my AI goes into the composer, and nothing is sent.
+    func draft() {
+        guard let id = selected else { return }
+        status("Asking your AI for a private draft…")
+        let tid = UISnapshot.threadID(id), conv = conversationForAI(id)
+        act(nil) { c in
+            let d = try await c.draftWithMyAI(in: conv, thread: tid)
+            onMain { [self] in setTextViewText(self.composer, d); self.status("Draft ready — edit it, then Ctrl+Enter to send.") }
+        }
+    }
+
+    func startThread() {
+        guard let id = selected, UISnapshot.threadID(id) == nil else { return }
+        let title = entryText(threadEntry).trimmingCharacters(in: .whitespaces)
+        guard !title.isEmpty else { status("Type a thread title first."); return }
+        let conv = conversationForAI(id)
+        act(nil) { c in
+            let t = try await c.createThread(in: conv, title: title)
+            onMain { [self] in
+                setEntryText(self.threadEntry, ""); self.selected = UISnapshot.threadPrefix + t.threadID
+                self.status("Started thread “\(UIFormat.sanitizeLine(t.title))”.")
+            }
+        }
+    }
+
+    func renameGroup() {
+        guard let id = selected, let gid = UISnapshot.groupID(id) else { return }
+        let name = entryText(renameEntry)
+        act("Group renamed.") { c in _ = try await c.reviseGroup(gid, rename: name) }
+        setEntryText(renameEntry, "")
+    }
+
+    func leaveGroup() {
+        guard let id = selected, let gid = UISnapshot.groupID(id) else { return }
+        selected = nil
+        act("You left the group (history kept on this device).") { c in try await c.leaveGroup(gid) }
+    }
+
+    // MARK: QR + Settings windows
+
+    func showQR() {
+        guard let link = snap?.link, let q = try? QRCode.encode(link) else { status("No pairing link yet."); return }
+        let (w, px) = q.rgba(scale: 6)
+        let win = gtk_window_new()!
+        gtk_window_set_title(cast(win), "Scan to add me")
+        gtk_window_set_transient_for(cast(win), cast(window))
+        let box = vbox(8); margins(box, 12)
+        let bytes = px.withUnsafeBytes { g_bytes_new($0.baseAddress, gsize($0.count)) }
+        let tex = gdk_memory_texture_new(Int32(w), Int32(w), GDK_MEMORY_R8G8B8A8, bytes, gsize(w * 4))
+        g_bytes_unref(bytes)
+        let pic = gtk_picture_new_for_paintable(tex)!
+        g_object_unref(UnsafeMutableRawPointer(tex))  // the picture holds its own ref
+        gtk_widget_set_size_request(pic, Int32(w), Int32(w))
+        append(box, pic)
+        append(box, label(link, wrap: true, selectable: true))
+        append(box, button("Copy link") { [unowned self] in copyToClipboard(self.window, link); self.status("Pairing link copied.") })
+        gtk_window_set_child(cast(win), box)
+        gtk_window_present(cast(win))
+    }
+
+    func showSettings() {
+        guard let s = snap else { return }
+        let win = gtk_window_new()!
+        gtk_window_set_title(cast(win), "Settings")
+        gtk_window_set_transient_for(cast(win), cast(window))
+        gtk_window_set_default_size(cast(win), 520, -1)
+        let box = vbox(6); margins(box, 12)
+        func field(_ title: String, _ value: String, password: Bool = false) -> Widget {
+            append(box, label(title))
+            let e = password ? gtk_password_entry_new()! : gtk_entry_new()!
+            setEntryText(e, value)
+            append(box, e)
+            return e
+        }
+        let name = field("Display name (shown to your AI)", s.settings.displayName ?? "")
+        let guardE = field("Loop guard: consecutive AI messages before AIs pause (0 = off)",
+                           String(s.settings.loopGuardLimit ?? PQRCConstants.agentLoopGuardLimit))
+        let relays = field("Relays (comma-separated; used from the next launch)", relayURL)
+        append(box, label("AI endpoint (OpenAI-compatible: LM Studio, Ollama, vLLM, OpenAI, OpenRouter…)"))
+        let base = field("Base URL, e.g. http://127.0.0.1:11434/v1", s.provider?.baseURL ?? "")
+        let model = field("Model", s.provider?.model ?? "")
+        let instr = field("Instructions (optional system prompt)", s.provider?.instructions ?? "")
+        let key = field("API key (blank keeps the stored one; saved encrypted)", "", password: true)
+        let row = hbox(6)
+        let note = label("", wrap: true); addClass(note, "meta")
+        append(row, button("Save") { [unowned self] in
+            let st = ClientSettings(displayName: entryText(name).isEmpty ? nil : entryText(name),
+                                    loopGuardLimit: Int(entryText(guardE)))
+            let relayList = entryText(relays).split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces) }
+            let b = entryText(base).trimmingCharacters(in: .whitespaces), m = entryText(model), i = entryText(instr), k = entryText(key)
+            self.act("Settings saved.") { c in
+                try await c.updateSettings(st)
+                try await c.setRelays(relayList)
+                if b.isEmpty { try await c.configureProvider(nil, apiKey: nil) }
+                else { try await c.configureProvider(AIProviderConfig(baseURL: b, model: m, instructions: i.isEmpty ? nil : i), apiKey: k.isEmpty ? nil : k) }
+            }
+            setEntryText(key, "")
+        })
+        append(row, button("Test AI") { [unowned self] in
+            setLabel(note, "Testing…")
+            self.act(nil) { c in
+                do { let r = try await c.testProvider(); onMain { setLabel(note, "AI says: " + UIFormat.sanitizeLine(r)) } }
+                catch { onMain { setLabel(note, "⚠ \(error)") } }
+            }
+        })
+        append(box, row)
+        append(box, note)
+        gtk_window_set_child(cast(win), box)
+        gtk_window_present(cast(win))
     }
 
     /// "Name: contact, contact" → a new group announced to those contacts.
@@ -421,6 +597,8 @@ final class AppUI: @unchecked Sendable {
                             : "🔄 \(rec.name ?? "A contact") reset their app and wants to reconnect. Check their safety code, then use Reconnect in their conversation."
                     case .groupChanged(let g):
                         note = "👥 Group “\(UIFormat.sanitizeLine(g.name))” roster updated (\(g.members.count) members)."
+                    case .aiWindow, .aiInvite, .threadCreated: note = nil
+                    case .myAI(_, _, let err): note = err.map { "⚠ My AI failed: " + $0 }
                     case .message, .quarantined: note = nil
                     }
                     onMain { [self] in if let note { self.status(note) }; self.refresh() }

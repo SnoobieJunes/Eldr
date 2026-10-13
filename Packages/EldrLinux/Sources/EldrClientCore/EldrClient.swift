@@ -4,6 +4,7 @@ import EldrKeystore
 import Foundation
 import PQRCCore
 import PQRCNostr
+import PQRCAgent
 
 #if canImport(Glibc)
 import Glibc
@@ -26,6 +27,10 @@ public enum EldrClientError: Error, CustomStringConvertible {
     case unknownSponsorship(String)
     case messageTooLarge
     case unknownGroup(String)
+    case unknownThread(String)
+    case badDuration
+    case badProviderURL(String)
+    case badSetting(String)
 
     public var description: String {
         switch self {
@@ -40,9 +45,13 @@ public enum EldrClientError: Error, CustomStringConvertible {
         case .notSponsored(let why):
             return "this is an AI account and has no live sponsorship from its owner (\(why)) — "
                 + "ask the owner to sponsor it; nothing was sent"
-        case .agentCannotSponsor: return "an AI account cannot sponsor another identity (agents cannot self-grant)"
+        case .agentCannotSponsor: return "an AI account cannot sponsor, open AI windows or invites, or issue grants (agents cannot self-grant)"
         case .unknownSponsorship(let s): return "no sponsorship issued by you matches '\(s)'"
         case .unknownGroup(let s): return "no group matches '\(s)'"
+        case .unknownThread(let s): return "no thread matches '\(s)'"
+        case .badDuration: return "AI windows and invites last 1h, 8h or 24h"
+        case .badProviderURL(let u): return "not an http(s) endpoint: \(u)"
+        case .badSetting(let why): return why
         case .messageTooLarge: return "message is too large to send (over the chunk limit)"
         case .stateUnreadable:
             return "state.enc exists but cannot be decrypted/decoded — refusing to start (and "
@@ -72,6 +81,12 @@ public enum ClientEvent: Sendable {
     case reconnectRequest(ContactRecord, autoAccepted: Bool)
     /// A group roster was created or changed (asserted by its sender).
     case groupChanged(GroupRecord)
+    /// A window (conversation scope) or invite (thread scope) changed. `until` nil = ended.
+    case aiWindow(identityHex: String, conversationID: String, until: Int64?)
+    case aiInvite(identityHex: String, threadID: String, until: Int64?)
+    case threadCreated(ThreadRecord)
+    /// My AI posted (or failed: `error` set).
+    case myAI(conversationID: String, threadID: String?, error: String?)
 }
 
 public typealias TransportFactory = @Sendable () async throws -> any RelayTransport
@@ -132,6 +147,16 @@ public actor EldrClient {
     /// Identities refused by the auto-accept pin; their replayed messages never surface.
     private var rejectedIdentities: Set<String> = []
     private var pumpTask: Task<Void, Never>?
+    /// SPEC §13 enforcement (windows, invites, loop guard, standing grants). Its only
+    /// output path is `ClientAgentSink` → `post` (the recording guarantee).
+    public let engine: AgentEngine
+    let clock: any Clock
+    let sinkRef: ClientRef
+    /// In-flight AI turns (so `stop()` and tests can wait for them).
+    var aiTasks: [Task<Void, Never>] = []
+    /// Test seam: overrides the configured OpenAI-compatible provider.
+    var providerOverride: (any AgentProvider)?
+    var eventSink: AsyncStream<ClientEvent>.Continuation?
 
     static let keysAccount = "keys"
     static let stateAccount = "state"
@@ -158,7 +183,9 @@ public actor EldrClient {
     /// Opens an existing identity: takes the directory lock, re-verifies every stored
     /// contact binding OFFLINE, restores sessions + seen IDs. Does not touch the network
     /// beyond dialing the transport.
-    public init(store: FileIdentityStore, transport: TransportFactory) async throws {
+    public init(
+        store: FileIdentityStore, transport: TransportFactory, clock: any Clock = SystemClock()
+    ) async throws {
         lock = try DirectoryLock(directory: store.directory)
         guard let kd = store.load(account: Self.keysAccount) else { throw EldrClientError.notInitialized }
         let keys = try JSONDecoder().decode(ClientKeys.self, from: kd)
@@ -181,7 +208,7 @@ public actor EldrClient {
         let m = try PQRCMessenger(
             identity: identity, nostrKeypair: kp, prekeyManager: pm,
             identityDH: try Curve25519.KeyAgreement.PrivateKey(rawRepresentation: keys.identityDH),
-            transports: [try await transport()], clock: SystemClock(),
+            transports: [try await transport()], clock: clock,
             randomSource: SystemRandomSource(), nonceSource: SystemNonceSource())
         // Offline restore: a contact whose stored binding no longer verifies is DROPPED
         // (fail-closed), never trusted.
@@ -203,6 +230,12 @@ public actor EldrClient {
         self.identityHex = identity.publicKeyData.hexString
         self.nostrPubkeyHex = kp.publicKeyHex
         self.state = st
+        self.clock = clock
+        let ref = ClientRef()
+        self.sinkRef = ref
+        self.engine = AgentEngine(
+            myIdentity: identity, clock: clock, sink: ClientAgentSink(ref: ref),
+            loopGuardLimit: st.settings?.loopGuardLimit ?? PQRCConstants.agentLoopGuardLimit)
         try await persist()
     }
 
@@ -362,7 +395,10 @@ public actor EldrClient {
     }
 
     /// Low-level delivery of one logical body (chunked if needed).
-    func deliver(_ body: MessageBody, to c: ContactRecord, participant: ParticipantType) async throws -> DeliveryRoute {
+    func deliver(
+        _ body: MessageBody, to c: ContactRecord, participant: ParticipantType,
+        aiWindow: AIWindowAnnouncement? = nil
+    ) async throws -> DeliveryRoute {
         if !(await messenger.hasSession(peerIdentityHex: c.identityHex)) {
             let (vc, bundle) = try await messenger.fetchVerifiedPeer(
                 nostrPubkeyHex: c.nostrPubkeyHex, timeout: .seconds(15))
@@ -373,7 +409,7 @@ public actor EldrClient {
             // single-envelope message rides it directly; an agent or chunked message
             // first opens the session with an empty opener (never rendered by this
             // client) so its label and chunks travel on ordinary ratchet messages.
-            if participant == .human,
+            if participant == .human, aiWindow == nil,
                 MessageChunker.split(body.text, budgetBytes: await messenger.chunkTextBudget()).count == 1
             {
                 let r = try await messenger.establishSession(with: vc, bundle: bundle, firstMessage: body)
@@ -386,7 +422,7 @@ public actor EldrClient {
         let parts = MessageChunker.split(body.text, budgetBytes: await messenger.chunkTextBudget())
         guard parts.count <= PQRCConstants.maxChunksPerMessage else { throw EldrClientError.messageTooLarge }
         if parts.count == 1 {
-            return try await messenger.send(body, to: c.identityHex, participantType: participant)
+            return try await messenger.send(body, to: c.identityHex, participantType: participant, aiWindow: aiWindow)
         }
         let id = UUID().uuidString
         let bodies = parts.enumerated().map { i, part -> MessageBody in
@@ -395,7 +431,7 @@ public actor EldrClient {
             b.chunk = MessageChunk(id: id, index: i, total: parts.count)
             return b
         }
-        return try await messenger.sendBatch(bodies, to: c.identityHex, participantType: participant)
+        return try await messenger.sendBatch(bodies, to: c.identityHex, participantType: participant, aiWindow: aiWindow)
     }
 
     // MARK: - Reconnect (AC166)
@@ -434,9 +470,12 @@ public actor EldrClient {
     public func start() async throws -> AsyncStream<ClientEvent> {
         precondition(!started, "start() once per client")
         started = true
+        await sinkRef.set(self)
+        await replayAIState()
         let raw = try await messenger.start()
         await refreshBundleIfNeeded()
         let (stream, cont) = AsyncStream.makeStream(of: ClientEvent.self)
+        eventSink = cont
         pumpTask = Task { [weak self] in
             for await ev in raw {
                 guard let self else { break }
@@ -474,6 +513,7 @@ public actor EldrClient {
 
     /// Stops receiving, saves, and releases the state-directory lock.
     public func stop() async {
+        for t in aiTasks { await t.value }
         await messenger.stop()
         pumpTask?.cancel()
         try? await persist()
@@ -504,14 +544,20 @@ public actor EldrClient {
                 let isControlOnly = full.body.text.isEmpty
                 let routed = routeGroup(full)
                 if let g = routed.changed { out.append(.groupChanged(g)) }
+                let conv = routed.groupID.map { UIConversation.group($0) } ?? c.identityHex
+                let ai = await receiveAI(full, conversationID: conv)
+                out.append(contentsOf: ai.events)
                 if !isControlOnly {
                     var e = HistoryEntry(
                         id: whole.messageID ?? msg.wrapEventID, peerIdentityHex: c.identityHex,
                         outgoing: false, text: whole.text, sentAt: whole.sentAt,
                         agent: msg.participantType == .agent, sponsorship: status)
                     e.groupID = routed.groupID
+                    e.threadID = ai.threadID
+                    e.aiAuthorizedUntil = ai.authorizedUntil
                     appendHistory(e)
                     out.append(.message(c, full, groupID: routed.groupID))
+                    scheduleMyAI(after: full, conversationID: conv, threadID: ai.threadID)
                 }
             }
         case .messageRequest(let sender, _):

@@ -26,8 +26,10 @@ extension EldrClient {
     public var mySponsorship: AgentSponsorship? { agentState.mySponsorship }
     public var issuedSponsorships: [IssuedSponsorship] { agentState.issued ?? [] }
     public var history: [HistoryEntry] { agentState.history ?? [] }
+    /// The seq the next history entry will get.
+    var nextHistorySeq: Int { agentState.nextSeq ?? 1 }
     public func history(with peerIdentityHex: String) -> [HistoryEntry] {
-        history.filter { $0.peerIdentityHex == peerIdentityHex && $0.groupID == nil }
+        history.filter { $0.peerIdentityHex == peerIdentityHex && $0.groupID == nil && $0.threadID == nil }
     }
 
     public static var nowSeconds: Int64 { Int64(Date().timeIntervalSince1970) }
@@ -194,6 +196,10 @@ extension EldrClient {
     func appendHistory(_ e: HistoryEntry) {
         var a = agentState
         var h = a.history ?? []
+        var e = e
+        let seq = a.nextSeq ?? 1
+        e.seq = seq
+        a.nextSeq = seq + 1
         h.append(e)
         if h.count > AgentState.maxHistory { h.removeFirst(h.count - AgentState.maxHistory) }
         // Byte cap too: the whole state is re-encrypted on every save.

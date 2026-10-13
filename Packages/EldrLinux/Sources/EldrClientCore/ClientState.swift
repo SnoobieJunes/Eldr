@@ -2,6 +2,7 @@
 import Foundation
 import PQRCCore
 import PQRCNostr
+import PQRCAgent
 
 /// Long-term secrets. Stored as its own encrypted account ("keys").
 public struct ClientKeys: Codable, Sendable {
@@ -49,6 +50,10 @@ public struct ClientState: Codable, Sendable {
     public var publishedBundleStale: Bool?
     /// Group rosters (APP-SPEC §7 D1, WS-N1). Optional so older state still decodes.
     public var groups: [GroupRecord]?
+    /// Threads (D7, WS-N2) and AI-participation state (SPEC §13). Optional for old state.
+    public var threads: [ThreadRecord]?
+    public var ai: AIState?
+    public var settings: ClientSettings?
 
     public static let maxSeen = 5000
 }
@@ -67,6 +72,68 @@ public struct HistoryEntry: Codable, Sendable, Equatable, Identifiable {
     public var sponsorship: SponsorshipStatus
     /// Set for group messages (the group id); nil for 1:1. Optional for old state.
     public var groupID: String? = nil
+    /// Set for thread messages. Optional for old state.
+    public var threadID: String? = nil
+    /// For agent-labeled messages authorized by a human's own window/invite (not an AI
+    /// account sponsorship): until when that authorization ran, as checked on receipt.
+    public var aiAuthorizedUntil: Int64? = nil
+    /// Local-only: posted by MY AI (window reply / thread turn).
+    public var mine: Bool? = nil
+    /// Local, monotonic order of arrival. The AI-context cutoff uses it instead of
+    /// the sender-chosen `sentAt`, which a peer could set to anything.
+    public var seq: Int? = nil
+}
+
+public struct ThreadRecord: Codable, Sendable, Equatable {
+    public var threadID: String
+    /// A contact's identity hex, or `group:<groupID>`.
+    public var conversationID: String
+    public var title: String
+    public var createdBy: String
+}
+
+/// A signed window/invite we hold (ours or a peer's), replayed into the AgentEngine at
+/// launch so a separate CLI invocation still sees it. Signatures are re-verified then.
+public struct StoredWindow: Codable, Sendable, Equatable {
+    public var conversationID: String
+    public var announcement: AIWindowAnnouncement
+}
+public struct StoredInvite: Codable, Sendable, Equatable {
+    public var invite: AIInvite
+}
+
+/// OpenAI-compatible endpoint (LM Studio, Ollama, vLLM, llama.cpp, OpenAI, OpenRouter…).
+/// The API key is NOT here: it lives in its own keystore account ("ai-key").
+public struct AIProviderConfig: Codable, Sendable, Equatable {
+    public var baseURL: String
+    public var model: String
+    public var instructions: String?
+    public var timeoutSeconds: Double?
+    public init(baseURL: String, model: String, instructions: String? = nil, timeoutSeconds: Double? = nil) {
+        self.baseURL = baseURL; self.model = model; self.instructions = instructions; self.timeoutSeconds = timeoutSeconds
+    }
+}
+
+public struct AIState: Codable, Sendable {
+    public var windows: [StoredWindow]?
+    public var invites: [StoredInvite]?
+    /// The single conversation my (global) window is for (iOS `myWindowConversationID`).
+    public var myWindowConversation: String?
+    public var provider: AIProviderConfig?
+    public var grants: [StandingGrant]?
+    /// conversation/thread id → the history `seq` at which my AI was turned on there.
+    /// The AI only sees messages after it, never earlier history.
+    public var activeSince: [String: Int64]?
+}
+
+/// User settings (WS-N5). Every field optional; nil = default.
+public struct ClientSettings: Codable, Sendable, Equatable {
+    public var displayName: String?
+    /// Consecutive agent messages per thread before agents pause. 0 = off.
+    public var loopGuardLimit: Int?
+    public init(displayName: String? = nil, loopGuardLimit: Int? = nil) {
+        self.displayName = displayName; self.loopGuardLimit = loopGuardLimit
+    }
 }
 
 /// Persisted form of `GroupRoster` (which isn't Codable). Every roster is shown as
@@ -102,6 +169,7 @@ public struct AgentState: Codable, Sendable {
     /// "<sponsorHex>:<sponsorshipID>" of every revocation seen.
     public var revoked: [String]?
     public var history: [HistoryEntry]?
+    public var nextSeq: Int?
 
     public static let maxHistory = 5000
     public static let maxRevoked = 2000

@@ -26,7 +26,7 @@ extension EldrClient {
     }
 
     public func groupHistory(_ groupID: String) -> [HistoryEntry] {
-        history.filter { $0.groupID == groupID }
+        history.filter { $0.groupID == groupID && $0.threadID == nil }
     }
 
     /// Creates a group with me plus the given contacts and announces it to each of them.
@@ -46,21 +46,37 @@ extension EldrClient {
     }
 
     /// Adds/removes members (a new roster revision sent to the union of old and new).
-    public func reviseGroup(_ q: String, add: [String] = [], remove: [String] = []) async throws -> GroupRecord {
+    public func reviseGroup(_ q: String, add: [String] = [], remove: [String] = [], rename: String? = nil) async throws -> GroupRecord {
         let g = try group(matching: q)
         let addHex = try add.map { try contact(matching: $0).identityHex }
         let removeHex = Set(try remove.map { try contact(matching: $0).identityHex })
         var members = g.members.filter { !removeHex.contains($0) || $0 == identityHex }
         for h in addHex where !members.contains(h) { members.append(h) }
-        let create = GroupCreate(groupID: g.groupID, name: g.name, members: members, revision: g.revision + 1)
+        let newName = rename?.trimmingCharacters(in: .whitespacesAndNewlines) ?? g.name
+        guard !newName.isEmpty, newName.count <= 100 else { throw EldrClientError.badSetting("group names are 1–100 characters") }
+        let create = GroupCreate(groupID: g.groupID, name: newName, members: members, revision: g.revision + 1)
         var roster = g.roster
         _ = roster.apply(create, assertedBy: identityHex)
         let rec = GroupRecord(roster)
         upsert(rec)
         let union = Set(g.members + members).subtracting([identityHex])
         let targets = state.contacts.filter { union.contains($0.identityHex) }
-        _ = try await fanOut(text: "updated the group", group: rec, groupCreate: create, to: targets, record: true)
+        let note = rename != nil && newName != g.name ? "renamed the group to \"\(newName)\"" : "updated the group"
+        _ = try await fanOut(text: note, group: rec, groupCreate: create, to: targets, record: true)
         return rec
+    }
+
+    /// Leaves a group: tells the other members (a roster revision without me), then
+    /// forgets the roster locally. History is kept.
+    public func leaveGroup(_ q: String) async throws {
+        let g = try group(matching: q)
+        let members = g.members.filter { $0 != identityHex }
+        let create = GroupCreate(groupID: g.groupID, name: g.name, members: members, revision: g.revision + 1)
+        let targets = state.contacts.filter { members.contains($0.identityHex) }
+        _ = try? await fanOut(text: "left the group", group: g, groupCreate: create, to: targets, record: true)
+        state.groups = groups.filter { $0.groupID != g.groupID }
+        if myWindowConversation == UIConversation.group(g.groupID) { try? await endAIWindow() }
+        try await persist()
     }
 
     /// Sends text to every group member who is also my verified contact. Returns how
@@ -126,7 +142,11 @@ extension EldrClient {
                     g.members.contains(sender)
                 {
                     var r = g.roster
-                    if r.apply(create, assertedBy: sender) { let rec = GroupRecord(r); upsert(rec); return (nil, rec) }
+                    if r.apply(create, assertedBy: sender) {
+                        let rec = GroupRecord(r)
+                        upsert(rec)
+                        return (create.members.contains(identityHex) ? create.groupID : nil, rec)
+                    }
                 }
                 return (nil, nil)
             }
