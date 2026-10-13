@@ -35,13 +35,40 @@ public actor NodeSessionStore {
 
     /// Only this identity is ever persisted as a contact (the node serves its owner only).
     private let ownerIdentityHex: String
+    /// AC167: after a handshake spends a one-time prekey, refill and republish so the
+    /// relay never advertises a spent OTP (a reinstalled owner drawing one is refused as
+    /// a replay). Empty = never republish (tests / offline).
+    private let republishRelayURLs: [String]
+    private let oneTimePrekeyTarget: Int
+    private var republishing = false
+
+    private func refillIfConsumed() async -> Bool {
+        guard !republishRelayURLs.isEmpty,
+            await prekeyManager.oneTimePrekeyCount < oneTimePrekeyTarget
+        else { return false }
+        return (try? await prekeyManager.replenish(to: oneTimePrekeyTarget)) == true
+    }
+
+    private func republish() {
+        guard !republishing else { return }
+        republishing = true
+        let m = messenger, urls = republishRelayURLs
+        Task { [weak self] in
+            try? await m.announce(relayURLs: urls, maxAttempts: 3)
+            await self?.republishDone()
+        }
+    }
+    private func republishDone() { republishing = false }
 
     public init(
         messenger: PQRCMessenger, prekeyManager: PrekeyManager, ownerIdentityHex: String,
         load: @escaping @Sendable () -> Data?,
         save: @escaping @Sendable (Data) throws -> Void,
-        savePrekeys: @escaping @Sendable (Data) throws -> Void
+        savePrekeys: @escaping @Sendable (Data) throws -> Void,
+        republishRelayURLs: [String] = [], oneTimePrekeyTarget: Int = 16
     ) {
+        self.republishRelayURLs = republishRelayURLs
+        self.oneTimePrekeyTarget = oneTimePrekeyTarget
         self.messenger = messenger
         self.prekeyManager = prekeyManager
         self.ownerIdentityHex = ownerIdentityHex.lowercased()
@@ -117,6 +144,8 @@ public actor NodeSessionStore {
     /// Saves ratchet snapshots, prekey state and seen IDs (encrypted by the injected store).
     public func persist() async {
         guard !readOnly else { return }
+        // Refill BEFORE the save so the new OTPs are on disk before they are published.
+        let refilled = await refillIfConsumed()
         do {
             for i in saved.contacts.indices {
                 guard let vc = try? VerifiedContact(storedBindingEvent: saved.contacts[i].bindingEvent)
@@ -130,6 +159,7 @@ public actor NodeSessionStore {
             try savePrekeys(JSONEncoder().encode(pk))
             try save(JSONEncoder().encode(saved))
             lastSaveError = nil
+            if refilled { republish() }
         } catch {
             // Never log the bytes; the error type is enough to diagnose.
             if lastSaveError == nil {
