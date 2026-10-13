@@ -47,6 +47,8 @@ public struct ClientState: Codable, Sendable {
     /// True when the prekey bundle on the relay lists one-time prekeys we no longer
     /// hold (consumed, or new ones not yet published). Cleared by a successful announce.
     public var publishedBundleStale: Bool?
+    /// Group rosters (APP-SPEC §7 D1, WS-N1). Optional so older state still decodes.
+    public var groups: [GroupRecord]?
 
     public static let maxSeen = 5000
 }
@@ -63,6 +65,28 @@ public struct HistoryEntry: Codable, Sendable, Equatable, Identifiable {
     public var sentAt: Int64
     public var agent: Bool
     public var sponsorship: SponsorshipStatus
+    /// Set for group messages (the group id); nil for 1:1. Optional for old state.
+    public var groupID: String? = nil
+}
+
+/// Persisted form of `GroupRoster` (which isn't Codable). Every roster is shown as
+/// "asserted by X", never as ground truth (APP-SPEC §7: no membership agreement).
+public struct GroupRecord: Codable, Sendable, Equatable {
+    public var groupID: String
+    public var name: String
+    public var members: [String]
+    public var assertedBy: String
+    public var revision: Int
+
+    public init(_ r: GroupRoster) {
+        groupID = r.groupID; name = r.name; members = r.members
+        assertedBy = r.assertedBy; revision = r.revision
+    }
+    var roster: GroupRoster {
+        GroupRoster(
+            create: GroupCreate(groupID: groupID, name: name, members: members, revision: revision),
+            assertedBy: assertedBy)
+    }
 }
 
 /// Sponsorship / history state. Every field is optional on the wire so a state file

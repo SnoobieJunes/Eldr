@@ -26,6 +26,13 @@ public struct UISnapshot: Sendable {
     public var issued: [IssuedSponsorship]
     /// Contacts whose reset (last-resort re-handshake) is waiting for my OK (AC166).
     public var pendingReconnects: Set<String> = []
+    public var groups: [GroupRecord] = []
+
+    /// Conversation ids: a contact's identity hex, or `group:<groupID>`.
+    public static let groupPrefix = "group:"
+    public static func groupID(_ conversationID: String) -> String? {
+        conversationID.hasPrefix(groupPrefix) ? String(conversationID.dropFirst(groupPrefix.count)) : nil
+    }
 
     public static func capture(_ c: EldrClient) async -> UISnapshot {
         let isAgent = await c.isAgent
@@ -42,7 +49,7 @@ public struct UISnapshot: Sendable {
             me: c.identityHex, npub: await c.npub, link: await c.pairingLink.uri, isAgent: isAgent,
             agentBanner: banner, contacts: await c.contacts, requests: await c.requests,
             history: await c.history, issued: await c.issuedSponsorships,
-            pendingReconnects: Set(await c.pendingReconnects()))
+            pendingReconnects: Set(await c.pendingReconnects()), groups: await c.groups)
     }
 
     public func name(of identityHex: String) -> String? {
@@ -52,19 +59,31 @@ public struct UISnapshot: Sendable {
 
     public func conversations() -> [ConversationSummary] {
         var last: [String: HistoryEntry] = [:]
-        for h in history { last[h.peerIdentityHex] = h }
-        return contacts.map { c in
+        var lastGroup: [String: HistoryEntry] = [:]
+        for h in history {
+            if let g = h.groupID { lastGroup[g] = h } else { last[h.peerIdentityHex] = h }
+        }
+        let groupRows = groups.map { g -> ConversationSummary in
+            let l = lastGroup[g.groupID]
+            return ConversationSummary(
+                identityHex: Self.groupPrefix + g.groupID, title: "👥 " + UIFormat.sanitizeLine(g.name),
+                preview: l.map { UIFormat.preview(($0.outgoing ? "You: " : "\(name(of: $0.peerIdentityHex) ?? "?"): ") + $0.text) }
+                    ?? "\(g.members.count) members",
+                lastAt: l?.sentAt ?? 0, isAgent: false)
+        }
+        return (groupRows + contacts.map { c in
             let l = last[c.identityHex]
             return ConversationSummary(
                 identityHex: c.identityHex, title: UIFormat.title(c),
                 preview: l.map { UIFormat.preview(($0.outgoing ? "You: " : "") + $0.text) } ?? "No messages yet",
                 lastAt: l?.sentAt ?? Int64(c.addedAt.timeIntervalSince1970),
-                isAgent: history.last { $0.peerIdentityHex == c.identityHex && !$0.outgoing }?.agent ?? false)
-        }.sorted { $0.lastAt != $1.lastAt ? $0.lastAt > $1.lastAt : $0.title < $1.title }
+                isAgent: history.last { $0.peerIdentityHex == c.identityHex && !$0.outgoing && $0.groupID == nil }?.agent ?? false)
+        }).sorted { $0.lastAt != $1.lastAt ? $0.lastAt > $1.lastAt : $0.title < $1.title }
     }
 
     public func messages(with identityHex: String) -> [HistoryEntry] {
-        history.filter { $0.peerIdentityHex == identityHex }
+        if let g = Self.groupID(identityHex) { return history.filter { $0.groupID == g } }
+        return history.filter { $0.peerIdentityHex == identityHex && $0.groupID == nil }
     }
 
     /// Live (unrevoked, unexpired) sponsorships I issued to this contact.
@@ -74,6 +93,11 @@ public struct UISnapshot: Sendable {
 
     /// The header line for a conversation.
     public func header(for identityHex: String, now: Int64 = EldrClient.nowSeconds) -> String {
+        if let gid = Self.groupID(identityHex) {
+            guard let g = groups.first(where: { $0.groupID == gid }) else { return "" }
+            let names = g.members.map { name(of: $0) ?? String($0.prefix(8)) + "…" }
+            return "👥 \(UIFormat.sanitizeLine(g.name)) · \(names.joined(separator: ", ")) · roster asserted by \(name(of: g.assertedBy) ?? String(g.assertedBy.prefix(8))) (rev \(g.revision))"
+        }
         guard let c = contacts.first(where: { $0.identityHex == identityHex }) else { return "" }
         var parts = [UIFormat.title(c), "id \(identityHex.prefix(12))…"]
         if let lastIn = history.last(where: { $0.peerIdentityHex == identityHex && !$0.outgoing }), lastIn.agent {

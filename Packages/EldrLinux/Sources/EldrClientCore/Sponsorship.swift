@@ -27,7 +27,7 @@ extension EldrClient {
     public var issuedSponsorships: [IssuedSponsorship] { agentState.issued ?? [] }
     public var history: [HistoryEntry] { agentState.history ?? [] }
     public func history(with peerIdentityHex: String) -> [HistoryEntry] {
-        history.filter { $0.peerIdentityHex == peerIdentityHex }
+        history.filter { $0.peerIdentityHex == peerIdentityHex && $0.groupID == nil }
     }
 
     public static var nowSeconds: Int64 { Int64(Date().timeIntervalSince1970) }

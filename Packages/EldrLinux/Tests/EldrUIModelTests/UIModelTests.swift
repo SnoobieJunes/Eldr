@@ -68,6 +68,24 @@ struct UIModelTests {
         #expect(snap.messages(with: a).count == 1)
     }
 
+    @Test func groups_areOwnConversations_andStayOutOf1to1() {
+        let ev = NostrEvent(pubkey: "", createdAt: 0, kind: 10420, tags: [], content: "")
+        let a = String(repeating: "aa", count: 32), me = String(repeating: "cc", count: 32)
+        let cs = [ContactRecord(name: "alice", nostrPubkeyHex: a, identityHex: a, bindingEvent: ev, session: nil, addedAt: Date(timeIntervalSince1970: 1))]
+        let g = GroupRecord(GroupRoster(create: GroupCreate(groupID: "G1", name: "team<b>", members: [me, a], revision: 3), assertedBy: a))
+        var gm = HistoryEntry(id: "2", peerIdentityHex: a, outgoing: false, text: "group hi", sentAt: 30, agent: false, sponsorship: .human)
+        gm.groupID = "G1"
+        let h = [HistoryEntry(id: "1", peerIdentityHex: a, outgoing: false, text: "dm", sentAt: 10, agent: false, sponsorship: .human), gm]
+        var snap = UISnapshot(me: me, npub: "", link: "", isAgent: false, agentBanner: nil, contacts: cs, requests: [], history: h, issued: [])
+        snap.groups = [g]
+        let conv = snap.conversations()
+        #expect(conv.map(\.identityHex) == ["group:G1", a])
+        #expect(conv[0].preview == "alice: group hi" && conv[1].preview == "dm")
+        #expect(snap.messages(with: a).map(\.text) == ["dm"])
+        #expect(snap.messages(with: "group:G1").map(\.text) == ["group hi"])
+        #expect(snap.header(for: "group:G1").contains("roster asserted by alice (rev 3)"))
+    }
+
     /// Tags must nest properly and no raw '<' may come from message text.
     private func wellFormed(_ m: String) -> Bool {
         var stack: [String] = []

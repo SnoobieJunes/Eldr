@@ -40,9 +40,14 @@ let usage = """
                                     contact that reset after its one-time prekeys ran out
       history <contact> [--last N]  recent messages with sponsorship status
       sponsorships                  this account's sponsorship + ones you issued
+      group create <name> <contact…> create a group (pairwise fan-out, APP-SPEC §7)
+      group add|remove <group> <contact…>   new roster revision to old+new members
+      group send <group> <text…>    send to every member you have as a contact
+      group history <group> [--last N]
+      groups                        list groups (rosters are "asserted by" someone)
 
     <contact> = name, identity-hex prefix (≥6), npub, or nostr-hex prefix.
-    Outbox: *.json {"to": "<contact>", "text": "..."} files are sent then moved to
+    Outbox: *.json {"to": "<contact>", "text": "..."} (or {"group": "<group>", ...}) files are sent then moved to
     DIR/sent (or DIR/failed). Inbox: one JSON object per received message.
 
     Keystore: AES-256-GCM files under --state (default $ELDR_CHAT_DIR or
@@ -136,8 +141,14 @@ func messageObject(_ c: ContactRecord, _ m: ReceivedMessage) -> [String: Any] {
 }
 func eventObject(_ ev: ClientEvent) -> ([String: Any], String) {
     switch ev {
-    case .message(let c, let m):
-        return (messageObject(c, m), "[\(c.name ?? short(c.identityHex))] \(m.body.text)")
+    case .message(let c, let m, let gid):
+        var o = messageObject(c, m)
+        if let gid { o["groupID"] = gid }
+        return (o, "[\(gid.map { "#\($0.prefix(8)) " } ?? "")\(c.name ?? short(c.identityHex))] \(m.body.text)")
+    case .groupChanged(let g):
+        return (["type": "group", "groupID": g.groupID, "name": g.name, "members": g.members,
+                 "assertedBy": g.assertedBy, "revision": g.revision],
+            "👥 group \"\(g.name)\" (\(g.groupID.prefix(8))) now \(g.members.count) members, asserted by \(short(g.assertedBy)) rev \(g.revision)")
     case .request(let n, let auto):
         return (["type": "request", "npub": Bech32.npub(n), "autoAccepted": auto],
             auto ? "✓ auto-accepted request from \(Bech32.npub(n))"
@@ -276,7 +287,7 @@ case "chat":
     if !json { print("Chatting with \(peer.name ?? short(peer.identityHex)). /quit to exit.") }
     Task {
         for await ev in events {
-            if case .message(let c, _) = ev, c.identityHex != peer.identityHex { continue }
+            if case .message(let c, _, let gid) = ev, c.identityHex != peer.identityHex || gid != nil { continue }
             let (o, h) = eventObject(ev)
             emit(o, human: h)
         }
@@ -326,14 +337,19 @@ case "listen":
                     let stamp = "\(Int(Date().timeIntervalSince1970))-\(f.lastPathComponent)"
                     guard let d = try? Data(contentsOf: f),
                         let o = try? JSONSerialization.jsonObject(with: d) as? [String: Any],
-                        let to = o["to"] as? String, let text = o["text"] as? String, !text.isEmpty
+                        let to = (o["to"] as? String) ?? (o["group"] as? String).map { "group:" + $0 },
+                        let text = o["text"] as? String, !text.isEmpty
                     else {
                         try? FileManager.default.moveItem(at: f, to: failed.appendingPathComponent(stamp))
                         emit(["type": "error", "error": "bad outbox file \(f.lastPathComponent)"], human: "⚠ bad outbox file \(f.lastPathComponent)")
                         continue
                     }
                     do {
-                        let r = try await client.send(text, to: to)
+                        let r: String
+                        if to.hasPrefix("group:") {
+                            let n = try await client.sendToGroup(text, group: String(to.dropFirst(6)))
+                            r = "group(\(n.reached) reached, \(n.skipped) skipped)"
+                        } else { r = "\(try await client.send(text, to: to))" }
                         try? FileManager.default.moveItem(at: f, to: sent.appendingPathComponent(stamp))
                         emit(["type": "sent", "to": to, "route": "\(r)", "file": f.lastPathComponent], human: "→ sent \(f.lastPathComponent) to \(to)")
                     } catch {
@@ -451,6 +467,56 @@ case "sponsorships":
             print("issued \(i.sponsorship.sponsorshipID.prefix(8)) → \(short(i.sponsorship.agent)) until \(iso(Date(timeIntervalSince1970: TimeInterval(i.sponsorship.activeUntil))))\(i.revokedAt != nil ? " REVOKED" : "")")
         }
     }
+
+case "groups":
+    let client = await openClient(openStore())
+    let gs = await client.groups
+    if json {
+        emit(["type": "groups", "groups": gs.map { ["groupID": $0.groupID, "name": $0.name, "members": $0.members,
+                                                     "assertedBy": $0.assertedBy, "revision": $0.revision] }], human: "")
+    } else {
+        if gs.isEmpty { print("(no groups)") }
+        for g in gs { print(sanitizeForTerminal("\(g.groupID.prefix(8))\t\(g.name)\t\(g.members.count) members\tasserted by \(short(g.assertedBy)) rev \(g.revision)")) }
+    }
+
+case "group":
+    guard let sub = args.first else { fail("group create|add|remove|send|history …") }
+    args.removeFirst()
+    let limit = takeOption("--last").flatMap(Int.init) ?? 20
+    let client = await openClient(openStore())
+    do {
+        switch sub {
+        case "create":
+            guard args.count >= 2 else { fail("group create <name> <contact…>") }
+            let (g, n) = try await client.createGroup(name: args[0], members: Array(args.dropFirst()))
+            emit(["type": "group", "groupID": g.groupID, "name": g.name, "members": g.members, "reached": n],
+                 human: "Created group \"\(g.name)\" \(g.groupID) (\(g.members.count) members, announced to \(n)).")
+        case "add", "remove":
+            guard args.count >= 2 else { fail("group \(sub) <group> <contact…>") }
+            let g = try await client.reviseGroup(args[0], add: sub == "add" ? Array(args.dropFirst()) : [],
+                                                 remove: sub == "remove" ? Array(args.dropFirst()) : [])
+            emit(["type": "group", "groupID": g.groupID, "members": g.members, "revision": g.revision],
+                 human: "Group \"\(g.name)\" is now \(g.members.count) members (rev \(g.revision)).")
+        case "send":
+            guard args.count >= 2 else { fail("group send <group> <text…>") }
+            var text = args.dropFirst().joined(separator: " ")
+            if text == "-" { text = String(data: FileHandle.standardInput.readDataToEndOfFile(), encoding: .utf8) ?? "" }
+            guard !text.isEmpty else { fail("empty message") }
+            let n = try await client.sendToGroup(text, group: args[0])
+            emit(["type": "sent", "group": args[0], "reached": n.reached, "skipped": n.skipped],
+                 human: "Sent to \(n.reached) member(s)\(n.skipped > 0 ? "; \(n.skipped) member(s) aren't your contacts and were skipped" : "").")
+        case "history":
+            guard let q = args.first else { fail("group history <group>") }
+            let g = try await client.group(matching: q)
+            let names = Dictionary(await client.contacts.map { ($0.identityHex, $0.name ?? short($0.identityHex)) }, uniquingKeysWith: { a, _ in a })
+            for e in await client.groupHistory(g.groupID).suffix(limit) {
+                let who = e.outgoing ? "me" : (names[e.peerIdentityHex] ?? short(e.peerIdentityHex))
+                emit(["type": "history", "groupID": g.groupID, "from": who, "outgoing": e.outgoing, "sentAt": e.sentAt, "text": e.text],
+                     human: "\(who): \(e.text.count > 120 ? String(e.text.prefix(120)) + "…" : e.text)")
+            }
+        default: fail("group create|add|remove|send|history …")
+        }
+    } catch { fail("\(error)") }
 
 default:
     fail("unknown command '\(command)' — see `eldr-chat help`")

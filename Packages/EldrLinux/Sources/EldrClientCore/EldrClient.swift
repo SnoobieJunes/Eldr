@@ -25,6 +25,7 @@ public enum EldrClientError: Error, CustomStringConvertible {
     case agentCannotSponsor
     case unknownSponsorship(String)
     case messageTooLarge
+    case unknownGroup(String)
 
     public var description: String {
         switch self {
@@ -41,6 +42,7 @@ public enum EldrClientError: Error, CustomStringConvertible {
                 + "ask the owner to sponsor it; nothing was sent"
         case .agentCannotSponsor: return "an AI account cannot sponsor another identity (agents cannot self-grant)"
         case .unknownSponsorship(let s): return "no sponsorship issued by you matches '\(s)'"
+        case .unknownGroup(let s): return "no group matches '\(s)'"
         case .messageTooLarge: return "message is too large to send (over the chunk limit)"
         case .stateUnreadable:
             return "state.enc exists but cannot be decrypted/decoded — refusing to start (and "
@@ -53,7 +55,7 @@ public enum EldrClientError: Error, CustomStringConvertible {
 
 /// What the client surfaces to a front end (CLI, GTK, agent).
 public enum ClientEvent: Sendable {
-    case message(ContactRecord, ReceivedMessage)
+    case message(ContactRecord, ReceivedMessage, groupID: String? = nil)
     case request(nostrPubkeyHex: String, autoAccepted: Bool)
     case quarantined(wrapID: String, reason: String)
     case protocolViolation(senderIdentityHex: String, reason: String)
@@ -68,6 +70,8 @@ public enum ClientEvent: Sendable {
     /// This contact reset and wants a new session; it needs the user's OK (AC166).
     /// `autoAccepted` is true when `approveReconnect` was given beforehand.
     case reconnectRequest(ContactRecord, autoAccepted: Bool)
+    /// A group roster was created or changed (asserted by its sender).
+    case groupChanged(GroupRecord)
 }
 
 public typealias TransportFactory = @Sendable () async throws -> any RelayTransport
@@ -498,12 +502,16 @@ public actor EldrClient {
                 out.append(contentsOf: processControl(full))
                 let status = sponsorshipStatus(of: full)
                 let isControlOnly = full.body.text.isEmpty
+                let routed = routeGroup(full)
+                if let g = routed.changed { out.append(.groupChanged(g)) }
                 if !isControlOnly {
-                    appendHistory(HistoryEntry(
+                    var e = HistoryEntry(
                         id: whole.messageID ?? msg.wrapEventID, peerIdentityHex: c.identityHex,
                         outgoing: false, text: whole.text, sentAt: whole.sentAt,
-                        agent: msg.participantType == .agent, sponsorship: status))
-                    out.append(.message(c, full))
+                        agent: msg.participantType == .agent, sponsorship: status)
+                    e.groupID = routed.groupID
+                    appendHistory(e)
+                    out.append(.message(c, full, groupID: routed.groupID))
                 }
             }
         case .messageRequest(let sender, _):

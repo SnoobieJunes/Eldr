@@ -24,7 +24,7 @@ private actor Collector {
     func attach(_ s: AsyncStream<ClientEvent>) { Task { for await e in s { self.add(e) } } }
     func add(_ e: ClientEvent) { events.append(e) }
     var texts: [String] {
-        events.compactMap { if case .message(_, let m) = $0 { return m.body.text } else { return nil } }
+        events.compactMap { if case .message(_, let m, _) = $0 { return m.body.text } else { return nil } }
     }
     var requests: [(String, Bool)] {
         events.compactMap { if case .request(let n, let a) = $0 { return (n, a) } else { return nil } }

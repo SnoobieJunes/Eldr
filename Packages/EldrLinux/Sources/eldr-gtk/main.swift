@@ -59,6 +59,7 @@ final class AppUI: @unchecked Sendable {
     var meLabel: Widget!
     var bannerLabel: Widget!
     var addEntry: Widget!
+    var groupEntry: Widget!
     var convList: Widget!
     var reqList: Widget!
     var reqTitle: Widget!
@@ -109,6 +110,14 @@ final class AppUI: @unchecked Sendable {
         append(addRow, addEntry)
         append(addRow, button("Add") { [unowned self] in self.addContact() })
         append(side, addRow)
+        let groupRow = hbox(4)
+        groupEntry = gtk_entry_new()
+        gtk_entry_set_placeholder_text(cast(groupEntry), "Group name: contact, contact…")
+        expand(groupEntry, h: true)
+        on(groupEntry, "activate") { [unowned self] in self.createGroup() }
+        append(groupRow, groupEntry)
+        append(groupRow, button("New group") { [unowned self] in self.createGroup() })
+        append(side, groupRow)
         let ct = label("Conversations"); addClass(ct, "meta"); append(side, ct)
         convList = gtk_list_box_new()
         on(convList, "row-selected") { [unowned self] (row: UnsafeMutableRawPointer?) in
@@ -228,7 +237,8 @@ final class AppUI: @unchecked Sendable {
     func renderConversation(scrollToEnd: Bool) {
         guard let s = snap, let id = selected else { return }
         setLabel(headerLabel, s.header(for: id))
-        gtk_widget_set_visible(sponsorBar, s.isAgent ? 0 : 1)
+        let isGroup = UISnapshot.groupID(id) != nil
+        gtk_widget_set_visible(sponsorBar, s.isAgent || isGroup ? 0 : 1)
         gtk_widget_set_visible(reconnectBar, s.pendingReconnects.contains(id) ? 1 : 0)
         let adj = gtk_scrolled_window_get_vadjustment(cast(msgScroll))
         let follow = scrollToEnd || UIFormat.shouldFollow(
@@ -239,7 +249,7 @@ final class AppUI: @unchecked Sendable {
         let peerName = s.name(of: id) ?? "them"
         for m in s.messages(with: id).suffix(300) {
             let col = vbox(2); margins(col, 4)
-            let who = m.outgoing ? "You" : peerName
+            let who = m.outgoing ? "You" : (isGroup ? (s.name(of: m.peerIdentityHex) ?? String(m.peerIdentityHex.prefix(8)) + "…") : peerName)
             var meta = "\(who) · \(UIFormat.date(m.sentAt))"
             let badge = m.agent ? UIFormat.badge(m.sponsorship, names: s.name(of:)) : ""
             if !badge.isEmpty { meta += " · " + badge }
@@ -327,7 +337,11 @@ final class AppUI: @unchecked Sendable {
         status(text.utf8.count > 16_000 ? "Sending large message in parts…" : "Sending…")
         Task { [self] in
             do {
-                let r = try await client.send(text, to: id)
+                let r: String
+                if let gid = UISnapshot.groupID(id) {
+                    let n = try await client.sendToGroup(text, group: gid)
+                    r = "to \(n.reached) member(s)" + (n.skipped > 0 ? ", \(n.skipped) not in your contacts" : "")
+                } else { r = "\(try await client.send(text, to: id))" }
                 onMain { [self] in
                     // Only clear if the user hasn't typed something new meanwhile.
                     if textViewText(self.composer) == text { setTextViewText(self.composer, "") }
@@ -338,6 +352,24 @@ final class AppUI: @unchecked Sendable {
             } catch {
                 // Keep the text so a large paste is never lost.
                 onMain { [self] in gtk_widget_set_sensitive(self.sendButton, 1); self.status("⚠ Not sent: \(error)") }
+            }
+        }
+    }
+
+    /// "Name: contact, contact" → a new group announced to those contacts.
+    func createGroup() {
+        let raw = entryText(groupEntry)
+        guard let colon = raw.firstIndex(of: ":") else { status("Type: Group name: contact, contact…"); return }
+        let name = raw[..<colon].trimmingCharacters(in: .whitespaces)
+        let members = raw[raw.index(after: colon)...].split(separator: ",")
+            .map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
+        guard !name.isEmpty, !members.isEmpty else { status("A group needs a name and at least one contact."); return }
+        act(nil) { c in
+            let (g, n) = try await c.createGroup(name: name, members: members)
+            onMain { [self] in
+                setEntryText(self.groupEntry, "")
+                self.selected = UISnapshot.groupPrefix + g.groupID
+                self.status("Created \"\(g.name)\"; announced to \(n) member(s).")
             }
         }
     }
@@ -387,6 +419,8 @@ final class AppUI: @unchecked Sendable {
                     case .reconnectRequest(let rec, let auto):
                         note = auto ? "🔄 \(rec.name ?? "A contact") reset; reconnected."
                             : "🔄 \(rec.name ?? "A contact") reset their app and wants to reconnect. Check their safety code, then use Reconnect in their conversation."
+                    case .groupChanged(let g):
+                        note = "👥 Group “\(UIFormat.sanitizeLine(g.name))” roster updated (\(g.members.count) members)."
                     case .message, .quarantined: note = nil
                     }
                     onMain { [self] in if let note { self.status(note) }; self.refresh() }
