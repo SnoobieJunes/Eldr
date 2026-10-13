@@ -87,6 +87,8 @@ jobs:
     container: swift:6.2-jammy
     steps:
       - uses: actions/checkout@v4
+      - name: GTK 4 headers for eldr-gtk (AC164)
+        run: apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq libgtk-4-dev pkg-config
       - name: Build the Linux-portable packages
         run: |
           set -e
@@ -113,6 +115,7 @@ jobs:
           # persistence, and the snapshot-aliasing regression that only bites on Linux.
           swift test --package-path Packages/EldrKeystore
           swift test --package-path Packages/EldrLinux
+          swift build --package-path Packages/EldrLinux --product eldr-gtk
           swift test --package-path Packages/EldrNode --filter NodeSessionStore
           swift test --package-path Packages/PQRCCore --filter SnapshotAliasing
 

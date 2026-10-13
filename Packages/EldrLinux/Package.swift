@@ -12,13 +12,35 @@ import PackageDescription
 // eldr-node) and Apple's swift-crypto. The relay socket on Linux comes from PQRCNostr's
 // NIONostrTransport (Apple swift-nio), since URLSessionWebSocketTask is unsupported on
 // Linux FoundationNetworking.
+var products: [Product] = [
+    .library(name: "EldrClientCore", targets: ["EldrClientCore"]),
+    .executable(name: "eldr-chat", targets: ["eldr-chat"]),
+]
+var extraTargets: [Target] = [
+    // GTK-free presentation logic (tested everywhere).
+    .target(name: "EldrUIModel", dependencies: ["EldrClientCore", "PQRCCore", "PQRCNostr"],
+            swiftSettings: [.swiftLanguageMode(.v6)]),
+    .testTarget(name: "EldrUIModelTests",
+                dependencies: ["EldrUIModel", "EldrClientCore", "PQRCCore", "PQRCNostr"],
+                swiftSettings: [.swiftLanguageMode(.v6)]),
+]
+#if os(Linux)
+// Milestone 3: the native GTK 4 desktop app. GTK's C API is imported directly through a
+// system-library module (no third-party bindings); `GtkKit` is our own thin wrapper.
+products.append(.executable(name: "eldr-gtk", targets: ["eldr-gtk"]))
+extraTargets += [
+    .systemLibrary(name: "CGtk4", pkgConfig: "gtk4", providers: [.apt(["libgtk-4-dev"])]),
+    .target(name: "GtkKit", dependencies: ["CGtk4"], swiftSettings: [.swiftLanguageMode(.v5)]),
+    .executableTarget(name: "eldr-gtk",
+                      dependencies: ["GtkKit", "EldrUIModel", "EldrClientCore", "PQRCCore", "PQRCNostr"],
+                      swiftSettings: [.swiftLanguageMode(.v5)]),
+]
+#endif
+
 let package = Package(
     name: "EldrLinux",
     platforms: [.macOS(.v26)],
-    products: [
-        .library(name: "EldrClientCore", targets: ["EldrClientCore"]),
-        .executable(name: "eldr-chat", targets: ["eldr-chat"]),
-    ],
+    products: products,
     dependencies: [
         .package(path: "../PQRCCore"),
         .package(path: "../PQRCNostr"),
@@ -49,5 +71,5 @@ let package = Package(
             ],
             swiftSettings: [.swiftLanguageMode(.v6)]
         ),
-    ]
+    ] + extraTargets
 )
