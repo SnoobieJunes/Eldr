@@ -2,6 +2,7 @@
 import Crypto
 import EldrNodeCore
 import EldrNodeGooseworld
+import EldrKeystore
 import Foundation
 import PQRCACP
 import PQRCCore

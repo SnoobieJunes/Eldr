@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 #if canImport(Security)
+import EldrKeystore
 import Foundation
 import Security
 
