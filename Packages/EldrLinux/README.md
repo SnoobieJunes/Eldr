@@ -75,3 +75,16 @@ eldr-chat sponsor eldr --days 7 --label ELDR
 eldr-chat revoke eldr
 eldr-chat sponsorships
 ```
+
+## Milestone 3: eldr-gtk (native GTK 4 desktop app)
+
+```sh
+sudo apt-get install -y libgtk-4-dev pkg-config     # once
+cd Packages/EldrLinux && swift build --product eldr-gtk
+ELDR_CHAT_PASSPHRASE_FILE=~/.eldr-pass .build/debug/eldr-gtk [--state DIR] [--relay wss://…]
+```
+
+Conversation list, message view (Markdown shown as text, large messages sent in parts), a composer
+(Enter = new line, Ctrl+Enter = send), add-contact by npub or `pqrc:add` link, message requests, and
+sponsor (1/7/30 days, click twice to confirm) / revoke for AI accounts. An AI account in agent mode
+shows whether it's sponsored. Uses the same state as `eldr-chat`; close one before opening the other.
