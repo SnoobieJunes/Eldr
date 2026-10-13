@@ -116,7 +116,7 @@ public actor EldrClient {
     /// Chunk reassembly buffers, keyed "<sender>:<chunk id>" (memory only, bounded).
     var chunkBuffers: [String: (template: MessageBody, total: Int, parts: [Int: String], order: Int)] = [:]
     var chunkCounter = 0
-    private let prekeyManager: PrekeyManager
+    let prekeyManager: PrekeyManager
     private let lock: DirectoryLock
     /// Requests from THIS Nostr key are accepted automatically (e.g. the owner), and only
     /// if its binding verifies (and matches `autoAcceptIdentityHex` when pinned).
@@ -171,7 +171,7 @@ public actor EldrClient {
         let pm = try st.prekeys.map {
             try PrekeyManager(identity: identity, randomSource: SystemRandomSource(), state: $0)
         } ?? PrekeyManager(identity: identity, randomSource: SystemRandomSource(), oneTimeCount: 16)
-        _ = try await pm.replenish(to: 16)
+        if try await pm.replenish(to: 16) { st.publishedBundleStale = true }
         let m = try PQRCMessenger(
             identity: identity, nostrKeypair: kp, prekeyManager: pm,
             identityDH: try Curve25519.KeyAgreement.PrivateKey(rawRepresentation: keys.identityDH),
@@ -213,7 +213,30 @@ public actor EldrClient {
     /// Publishes kind 10420 (binding), 10421 (prekey bundle), 10050 (relay list).
     public func announce(maxAttempts: Int = 10) async throws {
         try await messenger.announce(relayURLs: state.relays, maxAttempts: maxAttempts)
+        state.publishedBundleStale = false
+        try await persist()
     }
+
+    /// Spent one-time prekeys must leave the PUBLISHED bundle promptly: a contact that
+    /// reinstalls fetches it and picks an OTP at random, and a spent one is refused as a
+    /// replay (AC165), so the reset contact stays silently unreachable. Refill and
+    /// republish whenever a receive consumed one (best-effort, off the receive path).
+    private func refreshBundleIfNeeded() async {
+        if await prekeyManager.oneTimePrekeyCount < Self.otpTarget,
+            (try? await prekeyManager.replenish(to: Self.otpTarget)) == true
+        {
+            state.publishedBundleStale = true
+        }
+        guard state.publishedBundleStale != false, !republishing else { return }
+        republishing = true
+        Task { [weak self] in
+            try? await self?.announce(maxAttempts: 3)
+            await self?.republishDone()
+        }
+    }
+    private func republishDone() { republishing = false }
+    private var republishing = false
+    static let otpTarget = 16
 
     // MARK: - Persistence
 
@@ -406,6 +429,7 @@ public actor EldrClient {
         precondition(!started, "start() once per client")
         started = true
         let raw = try await messenger.start()
+        await refreshBundleIfNeeded()
         let (stream, cont) = AsyncStream.makeStream(of: ClientEvent.self)
         pumpTask = Task { [weak self] in
             for await ev in raw {
@@ -519,6 +543,7 @@ public actor EldrClient {
                 out.append(.reconnectRequest(c, autoAccepted: auto))
             }
         }
+        await refreshBundleIfNeeded()
         do { try await persist() } catch { out.append(.saveFailed("\(error)")) }
         return out
     }

@@ -222,10 +222,8 @@ actor PersonaRuntime {
     /// to poll liveness (that would make publishing an online-presence beacon —
     /// SPEC §0); ongoing status uses the cheap connection check instead.
     private(set) var keyPublish: KeyPublishStatus = .pending
-    /// Below this many unused one-time prekeys, replenish + republish so peers
-    /// don't fall back to the last-resort key (invariant 11). This is a
-    /// need-based trigger, never a timer.
-    private let prekeyLowWaterMark = 3
+    /// Target count of unused one-time prekeys; any consume triggers a refill and
+    /// republish (AC167) so the published bundle never lists a spent OTP.
     private let prekeyReplenishTarget = 10
     private var localSentAtBase: Int64 { clock.now() }
 
@@ -1573,13 +1571,15 @@ actor PersonaRuntime {
         eventContinuation?.yield(.keyPublishChanged(status))
     }
 
-    /// Need-based republish: when unused one-time prekeys run low, replenish and
-    /// republish so incoming handshakes don't fall back to the last-resort key
-    /// (invariant 11). Called after the receive path consumes a prekey — driven
-    /// by message activity, never by a timer.
+    /// Need-based republish: after the receive path consumes a one-time prekey,
+    /// replenish and republish so the published bundle never advertises a spent
+    /// OTP. A contact that reinstalls picks an OTP from that bundle at random and
+    /// a spent one is refused as a replay (AC165), so a stale bundle left reset
+    /// contacts silently unreachable (DEVIATIONS AC167). Driven by message
+    /// activity, never by a timer.
     private func republishIfPrekeysLow() async {
         let remaining = await messenger.prekeyManager.oneTimePrekeyCount
-        guard remaining <= prekeyLowWaterMark else { return }
+        guard remaining < prekeyReplenishTarget else { return }
         let generated = (try? await messenger.prekeyManager.replenish(to: prekeyReplenishTarget)) ?? false
         guard generated else { return }
         await persistPrekeyState()

@@ -38,6 +38,7 @@ let usage = """
       revoke <sponsorship-id|contact> [--notify c1,c2]
       reconnect <contact> [--decline]  approve (or refuse) ONE new session from a
                                     contact that reset after its one-time prekeys ran out
+      history <contact> [--last N]  recent messages with sponsorship status
       sponsorships                  this account's sponsorship + ones you issued
 
     <contact> = name, identity-hex prefix (≥6), npub, or nostr-hex prefix.
@@ -396,6 +397,27 @@ case "revoke":
         let ids = try await client.revokeSponsorship(target, alsoNotify: notify)
         emit(["type": "revoked", "ids": ids], human: "Revoked \(ids.map { String($0.prefix(8)) }.joined(separator: ", ")).")
     } catch { fail("\(error)") }
+
+case "history":
+    let limit = takeOption("--last").flatMap(Int.init) ?? 20
+    guard let target = args.first else { fail("history <contact> [--last N]") }
+    let client = await openClient(openStore())
+    let c: ContactRecord
+    do { c = try await client.contact(matching: target) } catch { fail("\(error)") }
+    let entries = await client.history(with: c.identityHex).suffix(limit)
+    func status(_ s: SponsorshipStatus) -> String {
+        switch s {
+        case .human: return "human"
+        case .unsponsored: return "agent-unsponsored"
+        case .sponsored(let by, _, let until): return "agent-sponsored-by-\(by.prefix(12))-until-\(until)"
+        case .invalid(let r): return "agent-invalid(\(r))"
+        }
+    }
+    for e in entries {
+        emit(["type": "history", "outgoing": e.outgoing, "sentAt": e.sentAt, "chars": e.text.count,
+              "sponsorship": status(e.sponsorship), "text": e.text.count > 200 ? String(e.text.prefix(200)) + "…" : e.text],
+             human: "\(e.outgoing ? "→" : "←") [\(status(e.sponsorship))] \(e.text.count > 120 ? String(e.text.prefix(120)) + "… (\(e.text.count) chars)" : e.text)")
+    }
 
 case "reconnect":
     let decline = takeFlag("--decline")
