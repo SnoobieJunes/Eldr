@@ -111,6 +111,14 @@ extension Data {
     /// secrets out of swappable memory; it only shortens the window a copy
     /// lingers in the heap. No-op on an empty buffer.
     @inlinable
+    /// A copy that owns FRESH storage. swift-crypto's Curve25519 `rawRepresentation` on
+    /// Linux (BoringSSL backend) can return a `Data` aliasing the live key's buffer, so
+    /// zeroizing a persisted snapshot built from it wiped the LIVE key (every later
+    /// handshake failed to decrypt). Snapshot builders copy through this.
+    public var detachedCopy: Data {
+        withUnsafeBytes { Data(bytes: $0.baseAddress ?? UnsafeRawPointer(bitPattern: 1)!, count: $0.count) }
+    }
+
     public mutating func zeroize() {
         guard !isEmpty else { return }
         resetBytes(in: startIndex..<endIndex)

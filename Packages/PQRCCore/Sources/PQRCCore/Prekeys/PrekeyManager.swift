@@ -129,12 +129,12 @@ public actor PrekeyManager {
     /// the at-rest canary test enforces no plaintext leakage.
     public func snapshot() -> PrekeyState {
         PrekeyState(
-            ikDH: ikDHPrivate.rawRepresentation,
-            spk: spkPrivate.rawRepresentation,
-            pqpkSeed: pqpkPrivate.seedRepresentation,
-            otps: otpPrivate.mapValues(\.rawRepresentation),
-            otpPQSeeds: otpPQPrivate.mapValues(\.seedRepresentation),
-            lrp: lrpPrivate.rawRepresentation,
+            ikDH: ikDHPrivate.rawRepresentation.detachedCopy,
+            spk: spkPrivate.rawRepresentation.detachedCopy,
+            pqpkSeed: pqpkPrivate.seedRepresentation.detachedCopy,
+            otps: otpPrivate.mapValues { $0.rawRepresentation.detachedCopy },
+            otpPQSeeds: otpPQPrivate.mapValues { $0.seedRepresentation.detachedCopy },
+            lrp: lrpPrivate.rawRepresentation.detachedCopy,
             consumed: consumedOTPHashes
         )
     }

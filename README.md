@@ -79,8 +79,8 @@ Right now you get to pick one. Private messengers (Signal, iMessage) are adding 
 **Toolchain:** stable Xcode 26.x builds everything (CI runs 26.5; 26.6 also verified). You need the **iOS 26.5 simulator runtime** installed for the app tests. The Xcode 27 beta is needed **only** for the experimental Private Cloud Compute tier, and there is **nothing to configure** — PCC detects the SDK itself (`canImport(FoundationModels, _version: 2.0)`), so building with Xcode 27 includes it and building with 26.x cleanly omits it.
 
 ```bash
-# All eight packages, headless — no simulator needed.
-for p in PQRCCore PQRCNostr PQRCAgent PQRCACP PQRCMCP EldrNode Eldrctl SwiftA2A; do
+# All packages, headless — no simulator needed.
+for p in PQRCCore PQRCNostr PQRCAgent PQRCACP PQRCMCP EldrNode Eldrctl SwiftA2A EldrKeystore EldrLinux; do
   swift test --package-path "Packages/$p" || break
 done
 

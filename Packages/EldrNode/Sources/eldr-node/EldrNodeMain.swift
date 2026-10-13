@@ -2,6 +2,7 @@
 import Crypto
 import EldrNodeCore
 import EldrNodeGooseworld
+import EldrKeystore
 import Foundation
 import PQRCACP
 import PQRCCore
@@ -242,7 +243,26 @@ struct EldrNodeMain {
             // its limit is used automatically, and an unknown limit falls back to the
             // same strict-65535-safe 16 KiB budget the proven e2e used.
             let frameBudget = await messenger.chunkTextBudget()
-            let nodeMessenger = PQRCNodeMessenger(messenger: messenger)
+            // Session persistence: restore the owner's contact (binding re-verified offline)
+            // + ratchet session + dedupe set, then save after every send/receive/accept.
+            let sessionStore = NodeSessionStore(
+                messenger: messenger, prekeyManager: prekeyManager,
+                ownerIdentityHex: ownerIdentityHex,
+                load: { keychain.load(account: "node-session-state") },
+                save: { try keychain.save($0, account: "node-session-state") },
+                savePrekeys: { try keychain.save($0, account: "node-prekey-state") })
+            let restored = await sessionStore.restore()
+            print("  sessions: \(restored.isEmpty ? "none saved yet" : "owner session restored")")
+            Task {
+                for result in await sessionStore.refreshBindings() {
+                    if case .identityChanged = result {
+                        FileHandle.standardError.write(Data(
+                            ("eldr-node: ⚠ the owner's npub now publishes a binding for a DIFFERENT identity. "
+                                + "Keeping the pinned owner; not adopted.\n").utf8))
+                    }
+                }
+            }
+            let nodeMessenger = PQRCNodeMessenger(messenger: messenger, sessionStore: sessionStore)
 
             // WS-G5: the town plane (wall host + eldr-gooseworld socket + grant-backed
             // admission), enabled iff ELDR_TOWN_ID is set. nil keeps the exact pre-WS-G5

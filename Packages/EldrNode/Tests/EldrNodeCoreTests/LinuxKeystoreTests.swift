@@ -3,6 +3,8 @@ import Crypto
 import Foundation
 import Testing
 
+import EldrKeystore
+
 @testable import eldr_node
 
 // WS-L3 — adversarial coverage for the Linux keystore ladder. FileIdentityStore + the ladder
@@ -35,7 +37,7 @@ struct LinuxKeystoreTests {
 
     @Test func fileStoreRoundTripsAndDeletes() throws {
         let dir = tempDir(); defer { try? FileManager.default.removeItem(at: dir) }
-        let store = FileIdentityStore(directory: dir, masterKey: SymmetricKey(size: .bits256))
+        let store = FileIdentityStore(directory: dir, masterKey: SymmetricKey(size: .bits256), profile: .eldrNode)
         #expect(store.load(account: "node-nostr-key") == nil)  // absent → nil
         let secret = Data("a-nostr-private-key".utf8)
         try store.save(secret, account: "node-nostr-key")
@@ -47,7 +49,7 @@ struct LinuxKeystoreTests {
     /// A stolen disk image must not contain the plaintext: the per-account file is AES-GCM.
     @Test func fileStoreWritesNoPlaintextAndIs0600() throws {
         let dir = tempDir(); defer { try? FileManager.default.removeItem(at: dir) }
-        let store = FileIdentityStore(directory: dir, masterKey: SymmetricKey(size: .bits256))
+        let store = FileIdentityStore(directory: dir, masterKey: SymmetricKey(size: .bits256), profile: .eldrNode)
         let canary = Data("SUPER-SECRET-CANARY-9d3f".utf8)
         try store.save(canary, account: "node-pqrc-identity-seed")
         let onDisk = try Data(contentsOf: dir.appendingPathComponent("node-pqrc-identity-seed.enc"))
