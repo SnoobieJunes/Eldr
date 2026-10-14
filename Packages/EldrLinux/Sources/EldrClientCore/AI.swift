@@ -328,6 +328,9 @@ extension EldrClient {
             // Conversation scope answers humans only, and only in MY window's conversation.
             guard m.participantType == .human, myWindowConversation == conv else { return }
         }
+        // participant_type is sender-asserted: a peer's bot labelled "human" resets the
+        // loop guard on every message. Cap autonomous turns per scope regardless of labels.
+        guard autoTurnLimiter.allow(scope: threadID ?? conv, now: clock.now()) else { return }
         spawnAI(conversationID: conv, threadID: threadID)
     }
 
@@ -594,5 +597,24 @@ extension EldrClient {
         for g in a.contextGrants ?? [] { try? await engine.receiveContextGrant(g, fromSenderIdentityHex: g.enabledBy.hexString) }
         await engine.setLoopGuardLimit(settings.loopGuardLimit ?? EldrClient.defaultLoopGuardLimit)
         for t in threads { if let l = t.loopGuardLimit { await engine.setThreadLoopGuardLimit(l, threadID: t.threadID) } }
+    }
+}
+
+
+/// Audit-2 L1: at most `limit` autonomous AI turns per scope in any `window` seconds, counted
+/// on MY side, so a peer cannot drive unbounded replies (cost / spam) by mislabelling its
+/// agent's messages as human. Explicit user actions (@-mention, solo chat) are not counted.
+public struct AutoTurnLimiter: Sendable {
+    public var limit = 20
+    public var window: Int64 = 600
+    private var times: [String: [Int64]] = [:]
+    public init() {}
+    public mutating func allow(scope: String, now: Int64) -> Bool {
+        var t = (times[scope] ?? []).filter { now - $0 < window }
+        guard t.count < limit else { times[scope] = t; return false }
+        t.append(now)
+        times[scope] = t
+        if times.count > 512 { times = times.filter { !$0.value.isEmpty && now - ($0.value.last ?? 0) < window } }
+        return true
     }
 }
