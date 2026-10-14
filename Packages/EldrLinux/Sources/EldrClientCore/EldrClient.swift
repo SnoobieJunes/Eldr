@@ -32,6 +32,7 @@ public enum EldrClientError: Error, CustomStringConvertible {
     case badProviderURL(String)
     case badSetting(String)
     case notAgentAccount
+    case stateFromNewerBuild(found: Int, supported: Int)
     case bridgeGated(String)
 
     public var description: String {
@@ -54,6 +55,8 @@ public enum EldrClientError: Error, CustomStringConvertible {
         case .badDuration: return "AI windows and invites last 1h, 8h or 24h"
         case .badProviderURL(let u): return "not an http(s) endpoint: \(u)"
         case .badSetting(let why): return why
+        case .stateFromNewerBuild(let f, let sup):
+            return "this state was written by a newer Eldr build (schema \(f); this build reads up to \(sup)). Refusing to open it so nothing is lost — run the newer build"
         case .notAgentAccount: return "the agent bridge only runs on an AI account (`eldr-chat agent-mode on --owner HEX`)"
         case .bridgeGated(let why): return "agent reply refused: \(why)"
         case .messageTooLarge: return "message is too large to send (over the chunk limit)"
@@ -91,6 +94,7 @@ public enum ClientEvent: Sendable {
     case threadCreated(ThreadRecord)
     /// My AI posted (or failed: `error` set).
     case myAI(conversationID: String, threadID: String?, error: String?)
+    case aiContextGrant(identityHex: String, conversationID: String, threadID: String?, axis: String, until: Int64?)
 }
 
 public typealias TransportFactory = @Sendable () async throws -> any RelayTransport
@@ -181,6 +185,7 @@ public actor EldrClient {
         try store.save(JSONEncoder().encode(keys), account: keysAccount)
         var st = ClientState()
         st.relays = relays
+        st.schema = ClientState.currentSchema
         try store.save(JSONEncoder().encode(st), account: stateAccount)
     }
 
@@ -201,6 +206,10 @@ public actor EldrClient {
             guard let d = store.load(account: Self.stateAccount),
                 let decoded = try? JSONDecoder().decode(ClientState.self, from: d)
             else { throw EldrClientError.stateUnreadable }
+            let found = decoded.schema ?? 1
+            guard found <= ClientState.currentSchema else {
+                throw EldrClientError.stateFromNewerBuild(found: found, supported: ClientState.currentSchema)
+            }
             st = decoded
         }
         let kp = try NostrKeypair(privateKey: keys.nostrPrivateKey)
@@ -279,12 +288,16 @@ public actor EldrClient {
     }
     private func republishDone() { republishing = false }
     private var republishing = false
+    private var stopped = false
+    private var bindingTask: Task<Void, Never>?
     static let otpTarget = 16
 
     // MARK: - Persistence
 
     /// Encrypted save of sessions, prekeys, contacts, requests and seen IDs.
     public func persist() async throws {
+        // After stop() the lock is released; a late background task must not write.
+        guard !stopped else { return }
         state.prekeys = await prekeyManager.snapshot()
         for i in state.contacts.indices {
             if let snap = await messenger.sessionSnapshot(peerIdentityHex: state.contacts[i].identityHex) {
@@ -294,6 +307,7 @@ public actor EldrClient {
         if state.seenWrapIDs.count > ClientState.maxSeen {
             state.seenWrapIDs.removeFirst(state.seenWrapIDs.count - ClientState.maxSeen)
         }
+        state.schema = ClientState.currentSchema
         try store.save(JSONEncoder().encode(state), account: Self.stateAccount)
     }
 
@@ -476,6 +490,7 @@ public actor EldrClient {
         started = true
         await sinkRef.set(self)
         await replayAIState()
+        await reapplyBlocks()
         let raw = try await messenger.start()
         await refreshBundleIfNeeded()
         let (stream, cont) = AsyncStream.makeStream(of: ClientEvent.self)
@@ -488,7 +503,7 @@ public actor EldrClient {
             cont.finish()
         }
         // Background binding refresh (after the offline re-verify done at launch).
-        Task { [weak self] in
+        bindingTask = Task { [weak self] in
             for ev in await self?.refreshBindings() ?? [] { cont.yield(ev) }
         }
         return stream
@@ -518,9 +533,11 @@ public actor EldrClient {
     /// Stops receiving, saves, and releases the state-directory lock.
     public func stop() async {
         for t in aiTasks { await t.value }
+        bindingTask?.cancel()
         await messenger.stop()
         pumpTask?.cancel()
         try? await persist()
+        stopped = true
         lock.release()
     }
 
@@ -546,6 +563,7 @@ public actor EldrClient {
                 out.append(contentsOf: processControl(full))
                 let status = sponsorshipStatus(of: full)
                 let isControlOnly = full.body.text.isEmpty
+                if let mark = full.body.aiContextMark { applyContextMark(mark, from: msg.senderIdentityHex) }
                 let routed = routeGroup(full)
                 if let g = routed.changed { out.append(.groupChanged(g)) }
                 let conv = routed.groupID.map { UIConversation.group($0) } ?? c.identityHex
@@ -559,6 +577,8 @@ public actor EldrClient {
                     e.groupID = routed.groupID
                     e.threadID = ai.threadID
                     e.aiAuthorizedUntil = ai.authorizedUntil
+                    e.aiContext = whole.aiContext == true ? true : nil
+                    e.coauthored = whole.coauthored == true && msg.participantType == .agent ? true : nil
                     appendHistory(e)
                     out.append(.message(c, full, groupID: routed.groupID))
                     scheduleMyAI(after: full, conversationID: conv, threadID: ai.threadID)

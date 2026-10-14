@@ -49,12 +49,20 @@ let usage = """
       group rename <group> <name…>  |  group leave <group>
       groups                        list groups (rosters are "asserted by" someone)
       thread create <conv> <title…> start a thread in a contact or group conversation
-      thread send <thread> <text…>  |  thread history <thread>  |  threads
+      thread send <thread> <text…>  |  thread history <thread>  |  thread guard <t> N|default  |  threads
       ai-window <conv> 1h|8h|24h|off  my AI answers humans in <conv> for that long
                                     (one conversation at a time; off = signed close)
       ai-invite <thread> 1h|8h|24h|off  invite / withdraw my AI in a thread
+      ai-mark <conv>|--thread T <msg-id|last> on|off   "Add to AI Context"
+      send-as-ai <conv>|--thread T <text…>  co-authored AI message
+      ai-sees <conv>|--thread T     exactly what your AI would read here (read-only)
+      ai-context <conv>|--thread T [--axis human|ai] 1h|8h|24h|off
+                                    bilateral AI context sharing (both humans must opt in)
+      world                         towns you authorized, Buzz workspaces, your AI
+      buzz join|list|forget|channels|read|send …   Buzz workspaces (NOT end-to-end encrypted)
+      contact rename|safety|verify|unverify|block|unblock|pin|unpin|delete-history <contact> [name]
       ai-status [<conv>|--thread T]  live windows/invites (every AI shown, SPEC §13)
-      ai-config --base-url URL --model M [--key-stdin] [--instructions TEXT]
+      ai-config [--kind custom|claude|openai|gemini|openrouter|groq] [--base-url URL] --model M [--key-stdin] [--instructions TEXT]
                 [--timeout S] | --show | --clear
                                     OpenAI-compatible endpoint (LM Studio, Ollama,
                                     vLLM, OpenAI, OpenRouter…); the key is read from
@@ -213,6 +221,9 @@ func eventObject(_ ev: ClientEvent) -> ([String: Any], String) {
     case .myAI(let conv, let t, let err):
         return (["type": "myAI", "conversation": conv, "thread": t as Any, "error": err as Any],
             err.map { "⚠ my AI failed: \($0)" } ?? "🤖 my AI posted\(t.map { " in thread \($0.prefix(8))" } ?? "")")
+    case .aiContextGrant(let who, let conv, let t, let axis, let until):
+        return (["type": "aiContextGrant", "identity": who, "conversation": conv, "thread": t as Any, "axis": axis, "until": until as Any],
+            "🔗 \(short(who)) \(until == nil ? "stopped" : "enabled") AI context sharing (\(axis) axis)\(t.map { " in thread \($0.prefix(8))" } ?? "")")
     }
 }
 
@@ -268,12 +279,14 @@ case "contacts":
     if json {
         emit(["type": "contacts", "contacts": cs.map {
             ["name": $0.name as Any, "identity": $0.identityHex, "npub": Bech32.npub($0.nostrPubkeyHex),
-             "session": $0.session != nil]
+             "session": $0.session != nil,
+             "verified": $0.verified == true, "blocked": $0.blocked == true, "pinned": $0.pinned == true]
         }], human: "")
     } else {
         if cs.isEmpty { print("(no contacts)") }
         for c in cs {
-            print("\(c.name ?? "-")\t\(c.identityHex)\t\(Bech32.npub(c.nostrPubkeyHex))\t\(c.session != nil ? "session" : "no session")")
+            let flags = [c.pinned == true ? "pinned" : nil, c.verified == true ? "verified" : nil, c.blocked == true ? "BLOCKED" : nil].compactMap { $0 }
+            print("\(c.name ?? "-")\t\(c.identityHex)\t\(Bech32.npub(c.nostrPubkeyHex))\t\(c.session != nil ? "session" : "no session")\(flags.isEmpty ? "" : "\t" + flags.joined(separator: ","))")
         }
     }
 
@@ -490,6 +503,7 @@ case "history":
         }
     }
     func label(_ e: HistoryEntry) -> String {
+        if e.coauthored == true { return e.outgoing ? "made-with-me-and-my-ai" : "made-with-them-and-their-ai" }
         if e.mine == true { return "my-ai" }
         if let u = e.aiAuthorizedUntil { return "their-ai-window-until-\(u)" }
         return status(e.sponsorship)
@@ -497,7 +511,7 @@ case "history":
     for e in entries {
         emit(["type": "history", "outgoing": e.outgoing, "sentAt": e.sentAt, "chars": e.text.count,
               "sponsorship": label(e), "text": e.text.count > 200 ? String(e.text.prefix(200)) + "…" : e.text],
-             human: "\(e.outgoing ? "→" : "←") [\(label(e))] \(e.text.count > 120 ? String(e.text.prefix(120)) + "… (\(e.text.count) chars)" : e.text)")
+             human: "\(e.outgoing ? "→" : "←") [\(label(e))]\(e.aiContext == true ? " [in AI context]" : "") \(e.text.count > 120 ? String(e.text.prefix(120)) + "… (\(e.text.count) chars)" : e.text)")
     }
 
 case "reconnect":
@@ -615,6 +629,10 @@ case "thread":
             if text == "-" { text = String(data: FileHandle.standardInput.readDataToEndOfFile(), encoding: .utf8) ?? "" }
             let r = try await client.say(text, in: "", thread: args[0])
             emit(["type": "sent", "reached": r.reached, "skipped": r.skipped], human: "Sent to \(r.reached).")
+        case "guard":
+            guard args.count == 2 else { fail("thread guard <thread> <N>|default") }
+            try await client.setThreadLoopGuard(args[0], limit: args[1] == "default" ? nil : Int(args[1]) ?? -1)
+            emit(["type": "threadGuard", "limit": args[1]], human: "Loop guard for this thread: \(args[1]).")
         case "history":
             guard let q = args.first else { fail("thread history <thread>") }
             let t = try await client.thread(matching: q)
@@ -625,6 +643,145 @@ case "thread":
             }
         default: fail("thread create|send|history …")
         }
+    } catch { fail("\(error)") }
+
+case "world":
+    // iOS World: towns I authorized, Buzz workspaces I joined, my AI. Never "connected".
+    let client = await openClient(openStore())
+    let rows = WorldTownRowsCLI.rows(await client.townGrants())
+    print("Towns you've authorized (whether one is connected is visible only on the node):")
+    if rows.isEmpty { print("  (none)") }
+    for r in rows { print("  \(r.0)\t\(r.1)\t\(r.2)") }
+    print("Buzz workspaces (readable by their operators):")
+    let ws = await client.buzzWorkspaces
+    if ws.isEmpty { print("  (none)") }
+    for w in ws { print("  \(w.name)\t\(w.host)\t\(w.role)") }
+    let p = await client.providerConfig
+    print("Your AI: \(p.map { "\($0.effectiveKind) \($0.model.isEmpty ? "(default model)" : $0.model)" } ?? "not set up")")
+
+case "buzz":
+    // Buzz workspaces (WS-N7). Signed, NOT end-to-end encrypted.
+    guard let sub = args.first else { fail("buzz join <invite> [--name N] [--age-confirmed] | list | forget <ws> | channels <ws> | read <ws> <channel> [--last N] | send <ws> <channel> <text…>") }
+    let name = takeOption("--name"), age = takeFlag("--age-confirmed")
+    let last = takeOption("--last").flatMap(Int.init) ?? 30
+    let rest = Array(args.dropFirst())
+    let client = await openClient(openStore())
+    if sub != "list" && sub != "forget" { FileHandle.standardError.write(Data("⚠ \(EldrClient.buzzDisclosure)\n".utf8)) }
+    do {
+        switch sub {
+        case "join":
+            guard let link = rest.first else { fail("buzz join <invite link>") }
+            let w = try await client.buzzJoin(link: link, name: name, ageConfirmed: age)
+            emit(["type": "buzz", "joined": w.id, "host": w.host, "role": w.role], human: "Joined \(w.name) (\(w.host)) as \(w.role).")
+        case "list":
+            let ws = await client.buzzWorkspaces
+            if json { emit(["type": "buzz", "workspaces": ws.map { ["id": $0.id, "name": $0.name, "host": $0.host, "role": $0.role] }], human: "") }
+            else { if ws.isEmpty { print("(no Buzz workspaces)") }; for w in ws { print("\(w.id.prefix(8))\t\(w.name)\t\(w.host)\t\(w.role)") } }
+        case "forget":
+            guard let q = rest.first else { fail("buzz forget <ws>") }
+            try await client.buzzForget(q)
+            emit(["type": "buzz", "forgot": q], human: "Forgot the workspace and destroyed its key on this device.")
+        case "channels":
+            guard let q = rest.first else { fail("buzz channels <ws>") }
+            let c = try await client.buzzClient(q)
+            for ch in try await c.channels() where !ch.isHidden {
+                emit(["type": "buzzChannel", "id": ch.id, "name": ch.name], human: "\(ch.id.prefix(12))\t#\(ch.name)\(ch.isPrivate ? " (private)" : "")")
+            }
+        case "read":
+            guard rest.count >= 2 else { fail("buzz read <ws> <channel>") }
+            let c = try await client.buzzClient(rest[0])
+            let chID = try await c.channels().first { $0.id.hasPrefix(rest[1]) || $0.name == rest[1].trimmingCharacters(in: CharacterSet(charactersIn: "#")) }?.id ?? rest[1]
+            for m in try await c.history(channelID: chID, limit: last) {
+                emit(["type": "buzzMessage", "id": m.id, "author": m.authorPubkey, "createdAt": m.createdAt, "text": m.content],
+                     human: "[\(m.authorPubkey.prefix(8))] \(m.content)")
+            }
+        case "send":
+            guard rest.count >= 3 else { fail("buzz send <ws> <channel> <text…>") }
+            let c = try await client.buzzClient(rest[0])
+            let chID = try await c.channels().first { $0.id.hasPrefix(rest[1]) || $0.name == rest[1].trimmingCharacters(in: CharacterSet(charactersIn: "#")) }?.id ?? rest[1]
+            let ev = try await c.send(rest.dropFirst(2).joined(separator: " "), to: chID)
+            emit(["type": "buzzSent", "id": ev.id], human: "Sent (readable by the workspace operator).")
+        default: fail("unknown buzz subcommand \(sub)")
+        }
+    } catch { fail("\(error)") }
+
+case "contact":
+    // Contact management (WS-N7): rename, safety code + verify, block, pin, delete history.
+    guard args.count >= 2 else { fail("contact rename|safety|verify|unverify|block|unblock|pin|unpin|delete-history <contact> [name…]") }
+    let sub = args[0], who = args[1]
+    let client = await openClient(openStore())
+    do {
+        switch sub {
+        case "rename":
+            let n = args.dropFirst(2).joined(separator: " ")
+            try await client.renameContact(who, to: n.isEmpty ? nil : n)
+            emit(["type": "contact", "renamed": n], human: n.isEmpty ? "Name cleared." : "Renamed to \(n).")
+        case "safety":
+            let code = try await client.safetyCode(with: who)
+            emit(["type": "safety", "code": code], human: "Safety code (compare in person or on a call):\n\(code)")
+        case "verify", "unverify":
+            try await client.setVerified(who, sub == "verify")
+            emit(["type": "contact", "verified": sub == "verify"], human: sub == "verify" ? "Marked verified." : "Verification cleared.")
+        case "block", "unblock":
+            try await client.setBlocked(who, sub == "block")
+            emit(["type": "contact", "blocked": sub == "block"], human: sub == "block" ? "Blocked. Their messages are dropped; they are not told." : "Unblocked.")
+        case "pin", "unpin":
+            try await client.setPinned(who, sub == "pin")
+            emit(["type": "contact", "pinned": sub == "pin"], human: sub == "pin" ? "Pinned." : "Unpinned.")
+        case "delete-history":
+            let n = try await client.deleteHistory(with: who)
+            emit(["type": "contact", "deleted": n], human: "Deleted \(n) messages locally. The contact and session stay.")
+        default: fail("unknown contact subcommand \(sub)")
+        }
+    } catch { fail("\(error)") }
+
+case "ai-mark":
+    // "Add to AI Context" on one of my messages (id prefix or "last").
+    let thread = takeOption("--thread")
+    guard args.count >= 2, ["on", "off"].contains(args.last!) else { fail("ai-mark <conv>|--thread T <message-id|last> on|off") }
+    let client = await openClient(openStore())
+    do {
+        let id = try await client.markAIContext(in: thread == nil ? args[0] : "", thread: thread, message: args[args.count - 2], args.last == "on")
+        emit(["type": "aiMark", "message": id, "on": args.last == "on"], human: args.last == "on" ? "Added to your AI's context." : "Removed from your AI's context.")
+    } catch { fail("\(error)") }
+
+case "send-as-ai":
+    // Human-directed AI message ("made with you & your AI", AC44).
+    let thread = takeOption("--thread")
+    guard args.count >= (thread == nil ? 2 : 1) else { fail("send-as-ai <conv>|--thread T <text…>") }
+    var text = args.dropFirst(thread == nil ? 1 : 0).joined(separator: " ")
+    if text == "-" { text = String(data: FileHandle.standardInput.readDataToEndOfFile(), encoding: .utf8) ?? "" }
+    let client = await openClient(openStore())
+    do {
+        let r = try await client.sendAsMyAI(text, in: thread == nil ? args[0] : "", thread: thread)
+        emit(["type": "sent", "reached": r.reached], human: "Sent as your AI to \(r.reached).")
+    } catch { fail("\(error)") }
+
+case "ai-sees":
+    // "What your AI sees": the exact transcript my AI would get here, read-only.
+    let thread = takeOption("--thread")
+    let client = await openClient(openStore())
+    do {
+        let t = try await client.aiContextPreview(in: args.first ?? "", thread: thread)
+        if t.isEmpty { emit(["type": "aiSees", "entries": 0], human: "Your AI is off here, so it sees nothing.") }
+        for e in t {
+            emit(["type": "aiSees", "from": e.senderDisplayName, "participant": "\(e.participantType)", "text": e.text],
+                 human: "\(e.senderDisplayName)\(e.participantType == .agent ? " (AI)" : ""): \(e.text)")
+        }
+    } catch { fail("\(error)") }
+
+case "ai-context":
+    // Bilateral AI context sharing (SPEC N24). Human only.
+    let thread = takeOption("--thread")
+    let axis = takeOption("--axis") ?? "human"
+    guard let d = args.last, (thread != nil || args.count >= 2) else { fail("ai-context <conv>|--thread T [--axis human|ai] 1h|8h|24h|off") }
+    let dur: [String: Int64] = ["1h": 3600, "8h": 8 * 3600, "24h": 24 * 3600]
+    guard d == "off" || dur[d] != nil else { fail("duration is 1h, 8h, 24h or off") }
+    let client = await openClient(openStore())
+    do {
+        let u = try await client.setContextSharing(in: thread == nil ? args[0] : "", thread: thread, axis: axis, seconds: d == "off" ? nil : dur[d])
+        emit(["type": "aiContext", "axis": axis, "until": u as Any],
+             human: u.map { "AI context sharing (\(axis)) on until \(iso(Date(timeIntervalSince1970: TimeInterval($0)))). It only flows while the other person shares too." } ?? "AI context sharing (\(axis)) off.")
     } catch { fail("\(error)") }
 
 case "ai-window", "ai-invite":
@@ -671,13 +828,15 @@ case "ai-config":
             emit(["type": "ai-config", "cleared": true], human: "AI provider and key removed.")
         } else if takeFlag("--show") || args.isEmpty {
             let c = await client.providerConfig
-            emit(["type": "ai-config", "baseURL": c?.baseURL as Any, "model": c?.model as Any,
+            emit(["type": "ai-config", "kind": c?.effectiveKind as Any, "baseURL": c?.baseURL as Any, "model": c?.model as Any,
                   "keyStored": await client.hasStoredAPIKey, "keyFromEnv": env["ELDR_AI_API_KEY"] != nil],
-                 human: c.map { "endpoint \($0.baseURL) model \($0.model)\(env["ELDR_AI_API_KEY"] != nil ? " · key from $ELDR_AI_API_KEY" : "")" } ?? "(no AI provider configured)")
+                 human: c.map { "\($0.effectiveKind) endpoint \($0.baseURL.isEmpty ? "(vendor default)" : $0.baseURL) model \($0.model)\(env["ELDR_AI_API_KEY"] != nil ? " · key from $ELDR_AI_API_KEY" : "")" } ?? "(no AI provider configured)")
             if let c, !json { print("key stored in keystore: \(await client.hasStoredAPIKey ? "yes" : "no")\(c.instructions.map { "\ninstructions: \($0)" } ?? "")") }
         } else {
             let keyStdin = takeFlag("--key-stdin")
-            guard let base = takeOption("--base-url") else { fail("ai-config needs --base-url") }
+            let kind = takeOption("--kind")
+            guard let base = takeOption("--base-url") ?? (kind.map { $0 != "custom" } == true ? "" : nil)
+            else { fail("ai-config needs --base-url (or --kind claude|openai|gemini|openrouter|groq)") }
             let model = takeOption("--model") ?? ""
             let instr = takeOption("--instructions")
             let timeout = takeOption("--timeout").flatMap(Double.init)
@@ -687,9 +846,9 @@ case "ai-config":
                     .trimmingCharacters(in: .whitespacesAndNewlines)
             }
             try await client.configureProvider(
-                AIProviderConfig(baseURL: base, model: model, instructions: instr, timeoutSeconds: timeout), apiKey: key)
+                AIProviderConfig(baseURL: base, model: model, instructions: instr, timeoutSeconds: timeout, kind: kind), apiKey: key)
             emit(["type": "ai-config", "baseURL": base, "model": model, "keyStored": key != nil],
-                 human: "AI provider set: \(base)\(key != nil ? " (key saved encrypted)" : "")")
+                 human: "AI provider set: \(kind.map { $0 + " " } ?? "")\(base)\(key != nil ? " (key saved encrypted)" : "")")
         }
     } catch { fail("\(error)") }
 
@@ -761,3 +920,16 @@ default:
     fail("unknown command '\(command)' — see `eldr-chat help`")
 }
 exit(0)
+
+enum WorldTownRowsCLI {
+    static func rows(_ g: [AgentEngine.StandingGrantStatus]) -> [(String, String, String)] {
+        let now = Int64(Date().timeIntervalSince1970)
+        let byPeer = Dictionary(grouping: g, by: \.peerIdentityHex)
+        return byPeer.keys.sorted().map { peer in
+            let e = byPeer[peer] ?? []
+            let until = e.map(\.activeUntil).max() ?? 0
+            let st = until <= now ? "expired" : (until - now <= 86_400 ? "expiring soon" : "authorized")
+            return (String(peer.prefix(12)) + "…", Set(e.map { $0.plane.rawValue }).sorted().joined(separator: " + "), st)
+        }
+    }
+}

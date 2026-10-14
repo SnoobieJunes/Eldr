@@ -26,17 +26,21 @@ Linux surfaces: `eldr-chat` (CLI), `eldr-gtk` (GTK 4 via C, AC164), `eldr-node`
 | **Group chats** (`createGroup`/`reviseRoster`, D1) | **done (WS-N1, AC173)**: CLI `group …`/`groups`, GTK sidebar + group conversations. *proven*: `GroupTests` and a live 3-identity run on relay.lerants.com | rename/leave done (AC176, *proven* by GroupTests) |
 | Threads (`ThreadCreate`, D7) | **done (WS-N2, AC174)**: CLI `thread create|send|history`/`threads`, GTK thread rows. *proven*: AITests + live relay run, GTK sidebar screenshot | — |
 | AI windows 1/8/24 h, `ai_invite`, loop guard (SPEC §13) | **done (WS-N2, AC174)**: AgentEngine wired into EldrClient; CLI `ai-window`/`ai-invite`/`ai-status`, GTK AI bar. *proven*: AITests; live relay window reply and in-thread invite reply with mock LLM | — |
-| Standing grants / context grants / revocation | **partial (WS-N2)**: town grants issue/revoke/list (*proven* by unit test only); context grants not exposed | follow-up |
-| LLM providers: OpenAI-compatible / Anthropic / Gemini / Groq / OpenRouter | **partial (WS-N3, AC176)**: OpenAI-compatible wired (`ai-config`, GTK Settings; key in keystore "ai-key"); *proven* live against a mock. Anthropic/Gemini native not wired (use OpenAI-compatible gateways) | follow-up for native providers |
-| On-device Foundation Models / PCC | **n/a**: Apple-only | declined: not available on Linux |
-| Pairing link / QR | **done (WS-N4, AC175)**: in-repo QR encoder; `eldr-chat qr`, GTK "Show QR". *proven*: QRTests, OpenCV decode of the GTK window screenshot | — |
-| Contacts management (rename, remove, safety code) | **partial**: add/list only | WS-N4b (not started) |
-| Settings (relay list, display name, loop-guard limit) | **done (WS-N5, AC176)**: `eldr-chat settings`, GTK Settings window. *proven*: validation tests, GTK screenshot | — |
-| Attachments (`ContentPointer`) | **missing**: the receive path only flags them | WS-N6 |
-| Buzz workspaces / channels | **missing** | WS-N7: after the WS-BM Phase 2 decision |
-| World map / town view | **missing** (AC155: no Linux dashboard) | covered by the existing BACKLOG B1 dashboard item; not duplicated |
-| ACP approval cards / terminal | **partial**: `eldr-acp` CLI host (AC WS-L4) | WS-N8: GTK approval card |
-| Onboarding tour | **missing** | low priority |
+| Standing grants / context grants / revocation | **done (AC183, AC184)**: town grants plus human/ai context grants, marks, and "what my AI sees". *proven* by unit tests | iOS 1:1 scope asymmetry *unverified* |
+| LLM providers: OpenAI-compatible / Anthropic / Gemini / Groq / OpenRouter | **done (AC182)**: native kinds. *proven* mapping; real-API calls *unverified* | — |
+| On-device Foundation Models / PCC / MLX | **n/a**: Apple-only (AC189). Linux equivalent: local OpenAI-compatible server via `custom` | — |
+| Pairing link / QR | **done (WS-N4, AC175)** *proven* | — |
+| Contacts management (rename, safety code, verify, block, pin, delete history) | **done (AC181)** *proven* | — |
+| Settings | **done (WS-N5, AC176)** *proven* | — |
+| Attachments | **done** for large text (chunking); blob `ContentPointer` **n/a** (blob server rejected, AC189) | — |
+| Buzz workspaces / channels | **done (AC186)**: CLI + GTK. *proven* against the simulator; real workspace *unverified* | — |
+| World / town view | **done as list (AC187)**; map **partial** | tech-debt |
+| ACP approval cards / terminal | **deferred** with WS-N6 | WS-N6 |
+| Onboarding tour | **done (AC188)**, generated from iOS | — |
+| Coauthored send, per-thread loop guard, pin/verify markers | **done (AC184, AC185)** *proven* | — |
+| State forward-compat (AC177) | **done (AC180)** *proven* | — |
+| Unread/markRead, retry, mentions, multi-AI roster/critique, context mode, solo AI chat, relay status panel | **partial / missing** | Phase A follow-up (BACKLOG) |
+| Multipeer / nearby | **n/a** (AC189) | — |
 
 ## Matrix: Huginn (Apps/Huginn, Mac)
 

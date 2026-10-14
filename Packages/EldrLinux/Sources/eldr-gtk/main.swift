@@ -109,6 +109,9 @@ final class AppUI: @unchecked Sendable {
         let toolRow = hbox(4)
         append(toolRow, button("Show QR") { [unowned self] in self.showQR() })
         append(toolRow, button("Settings") { [unowned self] in self.showSettings() })
+        append(toolRow, button("Buzz") { [unowned self] in self.showBuzz() })
+        append(toolRow, button("World") { [unowned self] in self.showWorld() })
+        append(toolRow, button("Tour") { [unowned self] in self.showTour(0) })
         append(side, toolRow)
         bannerLabel = label("", wrap: true); addClass(bannerLabel, "banner"); gtk_widget_set_visible(bannerLabel, 0)
         append(side, bannerLabel)
@@ -156,6 +159,7 @@ final class AppUI: @unchecked Sendable {
             append(sponsorBar, button("Sponsor \(d) day\(d == 1 ? "" : "s")") { [unowned self] in self.sponsor(days: d) })
         }
         append(sponsorBar, button("Revoke") { [unowned self] in self.revoke() })
+        append(sponsorBar, button("Contact…") { [unowned self] in self.showContact() })
         gtk_widget_set_visible(sponsorBar, 0)
         append(main, sponsorBar)
         // My AI (SPEC §13): a window in a conversation, an invite in a thread. Every
@@ -167,6 +171,20 @@ final class AppUI: @unchecked Sendable {
         }
         append(aiBar, button("Off") { [unowned self] in self.myAI(seconds: 0) })
         append(aiBar, button("Draft privately") { [unowned self] in self.draft() })
+        append(aiBar, button("What my AI sees") { [unowned self] in self.showAISees() })
+        append(aiBar, button("Send as my AI") { [unowned self] in self.sendAsAI() })
+        append(aiBar, button("Add last to AI context") { [unowned self] in
+            guard let id = self.selected else { return }
+            let tid = UISnapshot.threadID(id), conv = self.conversationForAI(id)
+            self.act("Your last message here is now in your AI's context (they were told).") { c in
+                _ = try await c.markAIContext(in: conv, thread: tid, message: "last", true)
+            }
+        })
+        append(aiBar, button("Share context 1h") { [unowned self] in self.shareContext(axis: "human", seconds: 3600) })
+        append(aiBar, button("Share AI replies 1h") { [unowned self] in self.shareContext(axis: "ai", seconds: 3600) })
+        append(aiBar, button("Stop sharing") { [unowned self] in
+            self.shareContext(axis: "human", seconds: nil); self.shareContext(axis: "ai", seconds: nil)
+        })
         threadEntry = gtk_entry_new()
         gtk_entry_set_placeholder_text(cast(threadEntry), "New thread title")
         expand(threadEntry, h: true)
@@ -459,6 +477,233 @@ final class AppUI: @unchecked Sendable {
         act("You left the group (history kept on this device).") { c in try await c.leaveGroup(gid) }
     }
 
+    /// Bilateral AI context sharing (SPEC N24): flows only while the other human shares too.
+    func shareContext(axis: String, seconds: Int64?) {
+        guard let id = selected else { status("Pick a conversation first."); return }
+        let tid = UISnapshot.threadID(id), conv = conversationForAI(id)
+        act(seconds == nil ? "Context sharing (\(axis)) stopped." : "Context sharing (\(axis)) on for 1h; it flows only while they share too.") { c in
+            _ = try await c.setContextSharing(in: conv, thread: tid, axis: axis, seconds: seconds)
+        }
+    }
+
+    /// Contact details (iOS ConversationDetailsView): rename, safety code, verify,
+    /// block, pin, delete local history.
+    func showContact() {
+        guard let id = selected, UISnapshot.threadID(id) == nil, UISnapshot.groupID(id) == nil,
+            let c = snap?.contacts.first(where: { $0.identityHex == id }) else { return }
+        let win = gtk_window_new()!
+        gtk_window_set_title(cast(win), "Contact")
+        gtk_window_set_transient_for(cast(win), cast(window))
+        gtk_window_set_default_size(cast(win), 460, -1)
+        let box = vbox(6); margins(box, 12)
+        append(box, label("Name"))
+        let nameE = gtk_entry_new()!; setEntryText(nameE, c.name ?? ""); append(box, nameE)
+        append(box, label("Identity " + c.identityHex, wrap: true, selectable: true))
+        append(box, label("Safety code — compare it in person or on a call:"))
+        let code = label("…", wrap: true, selectable: true); addClass(code, "title"); append(box, code)
+        act(nil) { cl in let s = try await cl.safetyCode(with: id); onMain { setLabel(code, s) } }
+        let row1 = hbox(6)
+        append(row1, button("Save name") { [unowned self] in
+            let n = entryText(nameE)
+            self.act("Renamed.") { cl in try await cl.renameContact(id, to: n) }
+        })
+        append(row1, button(c.verified == true ? "Clear verified" : "Mark verified") { [unowned self] in
+            self.act(c.verified == true ? "Verification cleared." : "Marked verified.") { cl in try await cl.setVerified(id, c.verified != true) }
+            gtk_window_destroy(cast(win))
+        })
+        append(row1, button(c.pinned == true ? "Unpin" : "Pin") { [unowned self] in
+            self.act(nil) { cl in try await cl.setPinned(id, c.pinned != true) }
+            gtk_window_destroy(cast(win))
+        })
+        append(box, row1)
+        let row2 = hbox(6)
+        append(row2, button(c.blocked == true ? "Unblock" : "Block") { [unowned self] in
+            self.act(c.blocked == true ? "Unblocked." : "Blocked. Their messages are dropped; they are not told.") { cl in
+                try await cl.setBlocked(id, c.blocked != true)
+            }
+            gtk_window_destroy(cast(win))
+        })
+        append(row2, button("Delete history on this device") { [unowned self] in
+            self.act("History deleted on this device. The contact stays.") { cl in try await cl.deleteHistory(with: id) }
+            gtk_window_destroy(cast(win))
+        })
+        append(box, row2)
+        gtk_window_set_child(cast(win), box)
+        gtk_window_present(cast(win))
+    }
+
+    /// Buzz workspaces (iOS BuzzJoinWorkspaceView + BuzzChannelView). Signed, NOT
+    /// end-to-end encrypted: the disclosure banner is always on screen.
+    func showBuzz() {
+        let win = gtk_window_new()!
+        gtk_window_set_title(cast(win), "Buzz workspaces")
+        gtk_window_set_transient_for(cast(win), cast(window))
+        gtk_window_set_default_size(cast(win), 760, 560)
+        let box = vbox(6); margins(box, 12)
+        let warn = label("⚠ " + EldrClient.buzzDisclosure, wrap: true); addClass(warn, "banner"); append(box, warn)
+        let joinRow = hbox(6)
+        let linkE = gtk_entry_new()!; gtk_entry_set_placeholder_text(cast(linkE), "Invite link (https://…/invite/… or buzz://join?…)")
+        expand(linkE, h: true); append(joinRow, linkE)
+        let note = label("", wrap: true); addClass(note, "meta")
+        let wsList = gtk_list_box_new()!, chList = gtk_list_box_new()!, msgList = gtk_list_box_new()!
+        var current: (ws: String, ch: String)?
+        func loadMessages() {
+            guard let cur = current else { return }
+            act(nil) { c in
+                let bc = try await c.buzzClient(cur.ws)
+                let ms = try await bc.history(channelID: cur.ch, limit: 100)
+                onMain {
+                    clearList(msgList)
+                    for m in ms { gtk_list_box_append(cast(msgList), label("[\(m.authorPubkey.prefix(8))] " + UIFormat.sanitizeLine(m.content), wrap: true, selectable: true)) }
+                }
+            }
+        }
+        func loadWorkspaces() {
+            act(nil) { c in
+                let ws = await c.buzzWorkspaces
+                onMain {
+                    clearList(wsList)
+                    if ws.isEmpty { gtk_list_box_append(cast(wsList), label("No workspaces yet.")) }
+                    for w in ws {
+                        let row = hbox(4)
+                        append(row, button("\(w.name) · \(w.host)") { [unowned self] in
+                            setLabel(note, "Connecting to \(w.host)…")
+                            self.act(nil) { c in
+                                let chs = try await c.buzzClient(w.id).channels().filter { !$0.isHidden }
+                                onMain {
+                                    clearList(chList); setLabel(note, "")
+                                    for ch in chs {
+                                        gtk_list_box_append(cast(chList), button("#" + UIFormat.sanitizeLine(ch.name)) {
+                                            current = (w.id, ch.id); loadMessages()
+                                        })
+                                    }
+                                }
+                            }
+                        })
+                        append(row, button("Forget") { [unowned self] in
+                            self.act("Forgot \(w.name); its key was destroyed.") { c in try await c.buzzForget(w.id) }
+                            loadWorkspaces()
+                        })
+                        gtk_list_box_append(cast(wsList), row)
+                    }
+                }
+            }
+        }
+        append(joinRow, button("Join") { [unowned self] in
+            let l = entryText(linkE)
+            setLabel(note, "Claiming the invite…")
+            self.act(nil) { c in
+                do { let w = try await c.buzzJoin(link: l); onMain { setLabel(note, "Joined \(w.name) as \(w.role)."); setEntryText(linkE, ""); loadWorkspaces() } }
+                catch { onMain { setLabel(note, "⚠ \(error)") } }
+            }
+        })
+        append(box, joinRow); append(box, note)
+        let panes = hbox(8)
+        let left = vbox(4); append(left, label("Workspaces")); append(left, wsList); append(left, label("Channels"))
+        let cs = scrolled(chList); expand(cs, v: true); append(left, cs)
+        gtk_widget_set_size_request(left, 240, -1); append(panes, left)
+        let right = vbox(4)
+        let ms = scrolled(msgList); expand(ms, h: true, v: true); append(right, ms)
+        let sendRow = hbox(4)
+        let msgE = gtk_entry_new()!; gtk_entry_set_placeholder_text(cast(msgE), "Message (readable by the workspace operator)")
+        expand(msgE, h: true); append(sendRow, msgE)
+        append(sendRow, button("Send") { [unowned self] in
+            guard let cur = current else { setLabel(note, "Pick a channel first."); return }
+            let t = entryText(msgE); guard !t.isEmpty else { return }
+            self.act(nil) { c in _ = try await c.buzzClient(cur.ws).send(t, to: cur.ch); onMain { setEntryText(msgE, ""); loadMessages() } }
+        })
+        append(right, sendRow); expand(right, h: true); append(panes, right)
+        expand(panes, v: true); append(box, panes)
+        gtk_window_set_child(cast(win), box)
+        gtk_window_present(cast(win))
+        loadWorkspaces()
+    }
+
+    func showWorld() {
+        act(nil) { c in
+            let rows = WorldDerivation.townRows(await c.townGrants(), now: Int64(Date().timeIntervalSince1970))
+            let ws = await c.buzzWorkspaces, p = await c.providerConfig
+            onMain { [self] in
+                let win = gtk_window_new()!
+                gtk_window_set_title(cast(win), "World")
+                gtk_window_set_transient_for(cast(win), cast(self.window))
+                gtk_window_set_default_size(cast(win), 520, 420)
+                let box = vbox(6); margins(box, 12)
+                let h1 = label("Towns you've authorized"); addClass(h1, "title"); append(box, h1)
+                let n1 = label("This is what you granted from this device. Whether a town is connected is visible only on the node running it.", wrap: true)
+                addClass(n1, "meta"); append(box, n1)
+                if rows.isEmpty { append(box, label("No town access granted yet. Use eldr-chat town-grant issue.")) }
+                for r in rows { append(box, label("\(r.title)  ·  \(r.planes)  ·  \(r.status.label)")) }
+                let h2 = label("Buzz workspaces"); addClass(h2, "title"); append(box, h2)
+                let n2 = label("Workspace messages are readable by the workspace's operator. Eldr conversations are not.", wrap: true)
+                addClass(n2, "meta"); append(box, n2)
+                if ws.isEmpty { append(box, label("No workspaces joined.")) }
+                for w in ws { append(box, label("\(UIFormat.sanitizeLine(w.name))  ·  \(w.host)  ·  \(w.role)")) }
+                let h3 = label("Your AI"); addClass(h3, "title"); append(box, h3)
+                append(box, label(p.map { "\($0.effectiveKind) · \($0.model.isEmpty ? "default model" : $0.model)" } ?? "Not set up (Settings)."))
+                gtk_window_set_child(cast(win), scrolled(box))
+                gtk_window_present(cast(win))
+            }
+        }
+    }
+
+    /// iOS "Draft with AI ▸ Send as my AI": the composer text goes out as a
+    /// co-authored AI message ("made with you & your AI").
+    func sendAsAI() {
+        guard let id = selected else { return }
+        let text = textViewText(composer)
+        guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { status("Draft something first."); return }
+        let tid = UISnapshot.threadID(id), conv = conversationForAI(id)
+        act("Sent as your AI (marked “made with you & your AI”).") { c in
+            _ = try await c.sendAsMyAI(text, in: conv, thread: tid)
+            onMain { [self] in setTextViewText(self.composer, "") }
+        }
+    }
+
+    func showAISees() {
+        guard let id = selected else { status("Pick a conversation first."); return }
+        let tid = UISnapshot.threadID(id), conv = conversationForAI(id)
+        act(nil) { c in
+            let t = try await c.aiContextPreview(in: conv, thread: tid)
+            let text = t.isEmpty ? "Your AI is off here, so it sees nothing."
+                : t.map { "\($0.senderDisplayName)\($0.participantType == .agent ? " (AI)" : ""): \($0.text)" }.joined(separator: "\n\n")
+            onMain { [self] in
+                let win = gtk_window_new()!
+                gtk_window_set_title(cast(win), "What my AI sees (read-only)")
+                gtk_window_set_transient_for(cast(win), cast(self.window))
+                gtk_window_set_default_size(cast(win), 560, 480)
+                let l = label(UIFormat.sanitizeLine(text).isEmpty ? "" : text, wrap: true, selectable: true)
+                let sc = scrolled(l); margins(sc, 10)
+                gtk_window_set_child(cast(win), sc)
+                gtk_window_present(cast(win))
+            }
+        }
+    }
+
+    /// The onboarding tour (text shared with iOS via OnboardingTourText).
+    func showTour(_ i: Int) {
+        let steps = OnboardingTourText.steps
+        guard steps.indices.contains(i) else { return }
+        let win = gtk_window_new()!
+        gtk_window_set_title(cast(win), "Welcome to Eldr — \(i + 1) of \(steps.count)")
+        gtk_window_set_transient_for(cast(win), cast(window))
+        gtk_window_set_default_size(cast(win), 520, -1)
+        let box = vbox(8); margins(box, 16)
+        let t = label(steps[i].title); addClass(t, "title"); append(box, t)
+        append(box, label(steps[i].subtitle, wrap: true))
+        append(box, label(steps[i].body, wrap: true))
+        if !steps[i].fieldNote.isEmpty { let n = label(steps[i].fieldNote, wrap: true); addClass(n, "meta"); append(box, n) }
+        let row = hbox(6)
+        if i > 0 { append(row, button("Back") { [unowned self] in gtk_window_destroy(cast(win)); self.showTour(i - 1) }) }
+        append(row, button(i + 1 < steps.count ? "Next" : "Set sail") { [unowned self] in
+            gtk_window_destroy(cast(win)); if i + 1 < steps.count { self.showTour(i + 1) }
+        })
+        append(row, button("Skip") { gtk_window_destroy(cast(win)) })
+        append(box, row)
+        gtk_window_set_child(cast(win), box)
+        gtk_window_present(cast(win))
+    }
+
     // MARK: QR + Settings windows
 
     func showQR() {
@@ -499,7 +744,8 @@ final class AppUI: @unchecked Sendable {
         let guardE = field("Loop guard: consecutive AI messages before AIs pause (0 = off)",
                            String(s.settings.loopGuardLimit ?? EldrClient.defaultLoopGuardLimit))
         let relays = field("Relays (comma-separated; used from the next launch)", relayURL)
-        append(box, label("AI endpoint (OpenAI-compatible: LM Studio, Ollama, vLLM, OpenAI, OpenRouter…)"))
+        append(box, label("AI endpoint"))
+        let kindE = field("Kind: custom (OpenAI-compatible URL), claude, openai, gemini, openrouter, groq", s.provider?.effectiveKind ?? "custom")
         let base = field("Base URL, e.g. http://127.0.0.1:11434/v1", s.provider?.baseURL ?? "")
         let model = field("Model", s.provider?.model ?? "")
         let instr = field("Instructions (optional system prompt)", s.provider?.instructions ?? "")
@@ -511,11 +757,17 @@ final class AppUI: @unchecked Sendable {
                                     loopGuardLimit: Int(entryText(guardE)))
             let relayList = entryText(relays).split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces) }
             let b = entryText(base).trimmingCharacters(in: .whitespaces), m = entryText(model), i = entryText(instr), k = entryText(key)
+            let kd = entryText(kindE).trimmingCharacters(in: .whitespaces).lowercased()
             self.act("Settings saved.") { c in
                 try await c.updateSettings(st)
                 try await c.setRelays(relayList)
-                if b.isEmpty { try await c.configureProvider(nil, apiKey: nil) }
-                else { try await c.configureProvider(AIProviderConfig(baseURL: b, model: m, instructions: i.isEmpty ? nil : i), apiKey: k.isEmpty ? nil : k) }
+                if b.isEmpty && (kd.isEmpty || kd == "custom") { try await c.configureProvider(nil, apiKey: nil) }
+                else {
+                    try await c.configureProvider(
+                        AIProviderConfig(baseURL: b, model: m, instructions: i.isEmpty ? nil : i,
+                                         kind: kd.isEmpty || kd == "custom" ? nil : kd),
+                        apiKey: k.isEmpty ? nil : k)
+                }
             }
             setEntryText(key, "")
         })
@@ -579,7 +831,7 @@ final class AppUI: @unchecked Sendable {
                 if fresh { try EldrClient.initialize(store: store, relays: [relayURL]) }
                 let c = try await EldrClient(store: store, transport: defaultTransportFactory(url: relayURL))
                 if let autoAccept { await c.setAutoAccept(nostrPubkeyHex: autoAccept, identityHex: autoAcceptIdentity) }
-                if fresh { try await c.announce() }
+                if fresh { try await c.announce(); onMain { [self] in self.showTour(0) } }
                 let events = try await c.start()
                 onMain { [self] in self.client = c; self.status("Connected."); self.refresh() }
                 for await ev in events {
@@ -598,6 +850,7 @@ final class AppUI: @unchecked Sendable {
                     case .groupChanged(let g):
                         note = "👥 Group “\(UIFormat.sanitizeLine(g.name))” roster updated (\(g.members.count) members)."
                     case .aiWindow, .aiInvite, .threadCreated: note = nil
+                    case .aiContextGrant(_, _, _, let axis, let until): note = "🔗 AI context sharing (\(axis)) \(until == nil ? "stopped" : "enabled")"
                     case .myAI(_, _, let err): note = err.map { "⚠ My AI failed: " + $0 }
                     case .message, .quarantined: note = nil
                     }

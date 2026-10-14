@@ -12,6 +12,7 @@ public struct ConversationSummary: Equatable, Sendable {
     public var preview: String
     public var lastAt: Int64
     public var isAgent: Bool
+    public var pinned: Bool = false
 }
 
 public struct UISnapshot: Sendable {
@@ -119,8 +120,12 @@ public struct UISnapshot: Sendable {
                 identityHex: c.identityHex, title: UIFormat.title(c),
                 preview: l.map { UIFormat.preview(($0.outgoing ? "You: " : "") + $0.text) } ?? "No messages yet",
                 lastAt: l?.sentAt ?? Int64(c.addedAt.timeIntervalSince1970),
-                isAgent: history.last { $0.peerIdentityHex == c.identityHex && !$0.outgoing && $0.groupID == nil }?.agent ?? false)
-        }).sorted { $0.lastAt != $1.lastAt ? $0.lastAt > $1.lastAt : $0.title < $1.title }
+                isAgent: history.last { $0.peerIdentityHex == c.identityHex && !$0.outgoing && $0.groupID == nil }?.agent ?? false,
+                pinned: c.pinned == true)
+        }).sorted {
+            if $0.pinned != $1.pinned { return $0.pinned }
+            return $0.lastAt != $1.lastAt ? $0.lastAt > $1.lastAt : $0.title < $1.title
+        }
     }
 
     public func messages(with identityHex: String) -> [HistoryEntry] {
@@ -175,6 +180,7 @@ public struct UISnapshot: Sendable {
 public enum UIFormat {
     public static func title(_ c: ContactRecord) -> String {
         sanitizeLine(c.name ?? Bech32.npub(c.nostrPubkeyHex).prefix(16) + "…")
+            + (c.pinned == true ? " 📌" : "") + (c.verified == true ? " ✓" : "") + (c.blocked == true ? " ⛔" : "")
     }
 
     public static func date(_ unix: Int64) -> String {
@@ -187,6 +193,9 @@ public enum UIFormat {
     /// AI account (sponsorship), and an agent row with neither is flagged.
     public static func rowBadge(_ e: HistoryEntry, names: (String) -> String?) -> (text: String, warn: Bool) {
         guard e.agent || e.mine == true else { return ("", false) }
+        if e.coauthored == true {
+            return (e.outgoing ? "🤖 made with you & your AI" : "🤖 made with \(names(e.peerIdentityHex) ?? "them") & their AI", false)
+        }
         if e.mine == true { return ("🤖 your AI", false) }
         if let until = e.aiAuthorizedUntil {
             return ("🤖 \(names(e.peerIdentityHex) ?? "their")'s AI · on until \(date(until))", false)

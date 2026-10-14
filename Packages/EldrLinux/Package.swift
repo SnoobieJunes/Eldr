@@ -18,10 +18,10 @@ var products: [Product] = [
 ]
 var extraTargets: [Target] = [
     // GTK-free presentation logic (tested everywhere).
-    .target(name: "EldrUIModel", dependencies: ["EldrClientCore", "PQRCCore", "PQRCNostr"],
+    .target(name: "EldrUIModel", dependencies: ["EldrClientCore", "PQRCCore", "PQRCNostr", .product(name: "PQRCAgent", package: "PQRCAgent")],
             swiftSettings: [.swiftLanguageMode(.v6)]),
     .testTarget(name: "EldrUIModelTests",
-                dependencies: ["EldrUIModel", "EldrClientCore", "PQRCCore", "PQRCNostr"],
+                dependencies: ["EldrUIModel", "EldrClientCore", "PQRCCore", "PQRCNostr", .product(name: "PQRCAgent", package: "PQRCAgent")],
                 swiftSettings: [.swiftLanguageMode(.v6)]),
 ]
 #if os(Linux)
@@ -68,7 +68,7 @@ let package = Package(
         .testTarget(
             name: "EldrClientCoreTests",
             dependencies: [
-                "EldrClientCore", "PQRCCore", "PQRCNostr",
+                "EldrClientCore", "EldrUIModel", "PQRCCore", "PQRCNostr",
                 .product(name: "PQRCAgent", package: "PQRCAgent"),
                 .product(name: "EldrKeystore", package: "EldrKeystore"),
             ],

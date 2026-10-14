@@ -4,6 +4,7 @@ import Foundation
 import Testing
 
 @testable import EldrClientCore
+import EldrUIModel
 import EldrKeystore
 @testable import PQRCAgent
 @testable import PQRCCore
@@ -269,6 +270,171 @@ struct AITests {
         #expect(await a.log.until { _ in await a.client.groups.first?.members.contains(b.client.identityHex) == false })
         #expect(await a.client.groupHistory(g.groupID).contains { $0.text == "left the group" })
         await #expect(throws: EldrClientError.self) { try await a.client.reviseGroup(g.groupID, rename: "  ") }
+    }
+}
+
+@Suite("Linux parity Phase A (WS-N7)", .serialized)
+struct ParityATests {
+    @Test func aiContextMarks_coauthoredSend_andPerThreadLoopGuard() async throws {
+        let relay = LocalRelaySimulator()
+        let a = try await node(relay), b = try await node(relay)
+        try await pair(a, b, "alice", "bob")
+        let ai = Recorder("ok")
+        await a.client.setProviderOverride(ai)
+        try await a.client.say("plan: ship friday", in: "bob")
+        try await a.client.say("unmarked chatter", in: "bob")
+        // AI off: a private draft sees only what I marked.
+        _ = try await a.client.markAIContext(in: "bob", message: try #require(await a.client.history(with: b.client.identityHex).first { $0.text == "plan: ship friday" }?.id), true)
+        _ = try await a.client.draftWithMyAI(in: "bob")
+        let ctx = await ai.contexts.last
+        #expect(ctx?.transcript.map(\.text) == ["plan: ship friday"])
+        // The peer mirrors the mark on its copy (content-free control, no new row).
+        #expect(await b.log.until { _ in await b.client.history(with: a.client.identityHex).first { $0.text == "plan: ship friday" }?.aiContext == true })
+        #expect(await b.client.history(with: a.client.identityHex).filter { $0.text.isEmpty }.isEmpty)
+
+        try await a.client.sendAsMyAI("drafted with my AI", in: "bob")
+        #expect(await b.log.until { await $0.texts(agent: true).contains("drafted with my AI") })
+        let row = await b.client.history(with: a.client.identityHex).last
+        #expect(row?.coauthored == true && row?.agent == true)
+        #expect(UIFormat.rowBadge(try #require(row), names: { _ in "Alice" }).text.contains("made with Alice"))
+
+        let t = try await a.client.createThread(in: "bob", title: "t")
+        try await a.client.setThreadLoopGuard(t.threadID, limit: 2)
+        #expect(await a.client.threads.first?.loopGuardLimit == 2)
+        await #expect(throws: EldrClientError.self) { try await a.client.setThreadLoopGuard(t.threadID, limit: 5000) }
+    }
+
+    @Test func newerSchemaState_isRefused_andLeftUntouched() async throws {
+        let relay = LocalRelaySimulator()
+        let a = try await node(relay)
+        await a.client.stop()
+        let file = a.store.directory.appendingPathComponent("state.enc")
+        // Re-save the state with a future schema, as a newer build would.
+        var st = try JSONDecoder().decode(ClientState.self, from: try #require(a.store.load(account: "state")))
+        #expect(st.schema == ClientState.currentSchema)
+        st.schema = ClientState.currentSchema + 1
+        try a.store.save(JSONEncoder().encode(st), account: "state")
+        let before = try Data(contentsOf: file)
+        await #expect(throws: EldrClientError.self) { _ = try await EldrClient(store: a.store, transport: { await relay.connect() }) }
+        #expect(try Data(contentsOf: file) == before, "an older build must not rewrite newer state")
+        // A stopped client never writes again (late background persist after lock release).
+        try await a.client.persist()
+        #expect(try Data(contentsOf: file) == before)
+    }
+
+    @Test func contactManagement_renameVerifyPinBlockDelete_andSymmetricSafetyCode() async throws {
+        let relay = LocalRelaySimulator()
+        let a = try await node(relay), b = try await node(relay)
+        try await pair(a, b, "alice", "bob")
+        let ca = try await a.client.safetyCode(with: "bob"), cb = try await b.client.safetyCode(with: "alice")
+        #expect(ca == cb && ca.split(separator: " ").count == 12 && ca.filter(\.isNumber).count == 60)
+        try await a.client.renameContact("bob", to: "Robert")
+        #expect(await a.client.contacts.first?.name == "Robert")
+        try await a.client.setVerified("Robert", true)
+        try await a.client.setPinned("Robert", true)
+        let first = await a.client.contacts.first
+        #expect(first?.verified == true && first?.pinned == true)
+        try await a.client.setBlocked("Robert", true)
+        try await b.client.send("while blocked", to: "alice")
+        try await Task.sleep(for: .milliseconds(600))
+        #expect(await !a.log.texts().contains("while blocked"))
+        try await a.client.setBlocked("Robert", false)
+        try await b.client.send("after unblock", to: "alice")
+        #expect(await a.log.until { await $0.texts().contains("after unblock") })
+        let n = try await a.client.deleteHistory(with: "Robert")
+        #expect(n >= 1)
+        #expect(await a.client.history(with: b.client.identityHex).isEmpty)
+        #expect(await a.client.contacts.count == 1, "deleting history is not unfriending")
+    }
+
+    @Test func providerKinds_mapToTheVendorProviders() {
+        func k(_ kind: String?) -> String {
+            String(describing: type(of: EldrClient.makeProvider(AIProviderConfig(baseURL: "http://x/v1", model: "", kind: kind), key: "k")))
+        }
+        #expect(k(nil) == "CustomOpenAIProvider")
+        #expect(k("claude") == "AnthropicAPIProvider")
+        #expect(k("openai") == "OpenAIAPIProvider")
+        #expect(k("gemini") == "GeminiAPIProvider")
+        #expect(k("openrouter") == "OpenRouterAPIProvider")
+        #expect(k("groq") == "GroqAPIProvider")
+    }
+
+    @Test func contextGrants_areBilateral_andGatePeerAIContentInAWindow() async throws {
+        let relay = LocalRelaySimulator()
+        let a = try await node(relay), b = try await node(relay), bot = try await node(relay)
+        try await pair(a, b, "alice", "bob")
+        let ai = Recorder("ok")
+        await a.client.setProviderOverride(ai)
+        await #expect(throws: EldrClientError.self) { try await a.client.setContextSharing(in: "bob", axis: "ai", seconds: 120) }
+        _ = try await a.client.startAIWindow(in: "bob", seconds: 3600)
+        // Bob's AI posts (window from Bob), then Bob asks a question.
+        let bobAI = Recorder("bob-ai-says-hi")
+        await b.client.setProviderOverride(bobAI)
+        _ = try await b.client.startAIWindow(in: "alice", seconds: 3600)
+        try await a.client.say("hello bob", in: "bob")
+        #expect(await a.log.until { await $0.texts(agent: true).contains("bob-ai-says-hi") })
+        try await b.client.endAIWindow()
+        try await b.client.send("question", to: "alice")
+        #expect(await a.log.until { _ in await ai.contexts.contains { $0.transcript.last?.text == "question" } })
+        await a.client.settleAI()
+        let ctx1 = await ai.contexts.last { $0.transcript.last?.text == "question" }
+        #expect(ctx1?.transcript.contains { $0.text == "question" } == true)
+        #expect(ctx1?.transcript.contains { $0.text == "bob-ai-says-hi" } == false, "peer AI content needs the ai-axis grant")
+
+        // One-sided grant is not enough; both sides make it flow.
+        _ = try await a.client.setContextSharing(in: "bob", axis: "ai", seconds: 3600)
+        #expect(await a.client.contextSharedNow(conversationID: b.client.identityHex, threadID: nil, axis: "ai") == false)
+        _ = try await b.client.setContextSharing(in: "alice", axis: "ai", seconds: 3600)
+        #expect(await a.log.until { _ in await a.client.contextSharedNow(conversationID: b.client.identityHex, threadID: nil, axis: "ai") })
+        let live = await a.client.contextGrants(conversationID: b.client.identityHex, threadID: nil, axis: "ai")
+        #expect(live.count == 2)
+        try await b.client.send("question 2", to: "alice")
+        #expect(await a.log.until { _ in await ai.contexts.contains { $0.transcript.last?.text == "question 2" } })
+        await a.client.settleAI()
+        #expect(await ai.contexts.last { $0.transcript.last?.text == "question 2" }?.transcript.contains { $0.text == "bob-ai-says-hi" } == true)
+        // Withdraw mine: it stops again.
+        _ = try await a.client.setContextSharing(in: "bob", axis: "ai", seconds: nil)
+        #expect(await a.client.contextSharedNow(conversationID: b.client.identityHex, threadID: nil, axis: "ai") == false)
+        _ = bot
+    }
+}
+
+private actor StubBuzzHTTP: BuzzHTTPTransport {
+    var responses: [BuzzHTTPResponse]
+    init(_ r: [BuzzHTTPResponse]) { responses = r }
+    func send(_ request: BuzzHTTPRequest) async throws -> BuzzHTTPResponse {
+        responses.isEmpty ? BuzzHTTPResponse(status: 500, body: Data()) : responses.removeFirst()
+    }
+}
+
+@Suite("Buzz workspaces on Linux (WS-N7)", .serialized)
+struct BuzzLinuxTests {
+    @Test func join_persistsRecordAndKey_failureLeavesNoKey_forgetDestroysKey() async throws {
+        let relay = LocalRelaySimulator()
+        let a = try await node(relay)
+        let ok = try JSONSerialization.data(withJSONObject: ["status": "joined", "community_id": "c1", "host": "buzz.example", "role": "member"])
+        let policyNone = try JSONSerialization.data(withJSONObject: [String: Any]())
+        let w = try await a.client.buzzJoin(
+            link: "https://buzz.example/invite/CODE123", name: "Team",
+            http: StubBuzzHTTP([BuzzHTTPResponse(status: 200, body: policyNone), BuzzHTTPResponse(status: 200, body: ok)]))
+        #expect(w.communityID == "c1" && w.role == "member" && w.name == "Team")
+        #expect(a.store.load(account: "buzzws.\(w.id)") != nil)
+        #expect(await a.client.buzzWorkspaces.count == 1)
+        // The key is never in the state blob.
+        let blob = try #require(a.store.load(account: "state"))
+        let key = try #require(a.store.load(account: "buzzws.\(w.id)"))
+        #expect(blob.range(of: Data(key.base64EncodedString().utf8)) == nil && blob.range(of: Data(key.hexString.utf8)) == nil)
+
+        await #expect(throws: (any Error).self) {
+            _ = try await a.client.buzzJoin(link: "https://buzz.example/invite/BAD", http: StubBuzzHTTP([]))
+        }
+        #expect(await a.client.buzzWorkspaces.count == 1)
+        let orphans = try FileManager.default.contentsOfDirectory(atPath: a.store.directory.path).filter { $0.hasPrefix("buzzws.") }
+        #expect(orphans.count == 1, "a failed claim leaves no orphan key")
+
+        try await a.client.buzzForget("Team")
+        #expect(a.store.load(account: "buzzws.\(w.id)") == nil)
+        #expect(await a.client.buzzWorkspaces.isEmpty)
     }
 }
 

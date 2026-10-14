@@ -21,6 +21,10 @@ public struct ContactRecord: Codable, Sendable, Equatable {
     public var bindingEvent: NostrEvent
     public var session: RatchetSnapshot?
     public var addedAt: Date
+    /// WS-N7 contact management (schema 3). Optional so older state decodes.
+    public var verified: Bool?
+    public var blocked: Bool?
+    public var pinned: Bool?
 }
 
 /// A pending message request from a non-contact (D12). Only the sender is recorded;
@@ -54,8 +58,17 @@ public struct ClientState: Codable, Sendable {
     public var threads: [ThreadRecord]?
     public var ai: AIState?
     public var settings: ClientSettings?
+    /// State schema (AC177). nil = written before versioning (treated as 1). A build
+    /// refuses to open state with a schema newer than `currentSchema`, so an old binary
+    /// can never re-save (and silently strip) newer fields.
+    public var schema: Int?
+    /// Joined Buzz workspaces (WS-N7, iOS `BuzzWorkspaceRecord`). Schema 3.
+    public var buzz: [BuzzWorkspaceRecord]?
 
     public static let maxSeen = 5000
+    /// Bump whenever a field is added that an older build would drop on save.
+    /// 2 = groups/threads/AI/settings/HistoryEntry.threadID (WS-N1…N5); 3 = WS-N7 contact fields.
+    public static let currentSchema = 3
 }
 
 // `SponsorshipStatus` and `IssuedSponsorship` live in PQRCCore (SponsorshipLedger.swift),
@@ -82,6 +95,10 @@ public struct HistoryEntry: Codable, Sendable, Equatable, Identifiable {
     /// Local, monotonic order of arrival. The AI-context cutoff uses it instead of
     /// the sender-chosen `sentAt`, which a peer could set to anything.
     public var seq: Int? = nil
+    /// "Add to AI Context" (iOS feature 7 / N25): marked by its author. Schema 3.
+    public var aiContext: Bool? = nil
+    /// "Made with <person> & their AI": a human-directed AI message (AC44). Schema 3.
+    public var coauthored: Bool? = nil
 }
 
 public struct ThreadRecord: Codable, Sendable, Equatable {
@@ -90,6 +107,8 @@ public struct ThreadRecord: Codable, Sendable, Equatable {
     public var conversationID: String
     public var title: String
     public var createdBy: String
+    /// Per-thread loop-guard override (iOS setThreadLoopGuardLimit). Schema 3.
+    public var loopGuardLimit: Int? = nil
 }
 
 /// A signed window/invite we hold (ours or a peer's), replayed into the AgentEngine at
@@ -109,9 +128,15 @@ public struct AIProviderConfig: Codable, Sendable, Equatable {
     public var model: String
     public var instructions: String?
     public var timeoutSeconds: Double?
-    public init(baseURL: String, model: String, instructions: String? = nil, timeoutSeconds: Double? = nil) {
+    /// Backend kind, iOS `BackendRegistry` tags: nil/"custom" (OpenAI-compatible at
+    /// `baseURL`), "claude", "openai", "gemini", "openrouter", "groq". Schema 3.
+    public var kind: String?
+    public init(baseURL: String, model: String, instructions: String? = nil, timeoutSeconds: Double? = nil, kind: String? = nil) {
         self.baseURL = baseURL; self.model = model; self.instructions = instructions; self.timeoutSeconds = timeoutSeconds
+        self.kind = kind
     }
+    public static let kinds = ["custom", "claude", "openai", "gemini", "openrouter", "groq"]
+    public var effectiveKind: String { kind ?? "custom" }
 }
 
 public struct AIState: Codable, Sendable {
@@ -124,6 +149,8 @@ public struct AIState: Codable, Sendable {
     /// conversation/thread id → the history `seq` at which my AI was turned on there.
     /// The AI only sees messages after it, never earlier history.
     public var activeSince: [String: Int64]?
+    /// Signed AI context-sharing grants (mine and received), replayed at start. Schema 3.
+    public var contextGrants: [AIContextGrant]?
 }
 
 /// User settings (WS-N5). Every field optional; nil = default.
@@ -174,4 +201,17 @@ public struct AgentState: Codable, Sendable {
     public static let maxHistory = 5000
     public static let maxRevoked = 2000
     public static let maxHistoryBytes = 32 * 1024 * 1024
+}
+
+/// A joined Buzz workspace. Its per-workspace secret key lives in the keystore under
+/// `buzzws.<id>` (never in this record), like iOS's Keychain account.
+public struct BuzzWorkspaceRecord: Codable, Sendable, Equatable {
+    public var id: String
+    public var relayURL: String
+    public var name: String
+    public var communityID: String
+    public var role: String
+    public var pubkeyHex: String
+    public var joinedAt: Int64
+    public var host: String { URL(string: relayURL)?.host ?? relayURL }
 }

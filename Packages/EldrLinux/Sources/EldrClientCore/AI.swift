@@ -89,7 +89,8 @@ extension EldrClient {
         _ text: String, conversationID conv: String, threadID: String? = nil,
         participant requested: ParticipantType = .human, aiWindow: AIWindowAnnouncement? = nil,
         aiInvite: AIInvite? = nil, threadCreate: ThreadCreate? = nil, isContext: Bool = false,
-        mine: Bool = false
+        mine: Bool = false, aiContextGrant: AIContextGrant? = nil, aiContext: Bool = false,
+        coauthored: Bool = false, aiContextMark: AIContextMark? = nil
     ) async throws -> (reached: Int, skipped: Int) {
         let t = try targets(conv)
         let participant: ParticipantType = isAgent ? .agent : requested
@@ -98,6 +99,10 @@ extension EldrClient {
             group: t.group.map { RumorContent.GroupRef(id: $0.groupID) },
             thread: threadID.map { RumorContent.ThreadRef(id: $0) },
             threadCreate: threadCreate, aiInvite: aiInvite, isContext: isContext ? true : nil)
+        body.aiContextGrant = aiContextGrant
+        body.aiContextMark = aiContextMark
+        if aiContext { body.aiContext = true }
+        if coauthored { body.coauthored = true }
         if isAgent { body.agentSponsorship = try liveSponsorship() }
         var reached = 0
         var lastError: Error?
@@ -114,9 +119,12 @@ extension EldrClient {
         e.groupID = t.group?.groupID
         e.threadID = threadID
         e.mine = mine ? true : nil
-        appendHistory(e)
+        e.aiContext = aiContext ? true : nil
+        e.coauthored = coauthored ? true : nil
+        // A content-free control (a context mark) renders nothing (iOS N25).
+        if !text.isEmpty { appendHistory(e) }
         // Engine-posted agent turns are counted by the engine itself.
-        if let threadID, participant == .human {
+        if let threadID, participant == .human, !text.isEmpty {
             await engine.recordThreadMessage(threadID: threadID, participantType: .human)
         }
         try await persist()
@@ -283,6 +291,11 @@ extension EldrClient {
             storeInvite(inv)
             events.append(.aiInvite(identityHex: sender, threadID: tid, until: inv.activeUntil > now ? inv.activeUntil : nil))
         }
+        if let g = m.aiContextGrant, (try? await engine.receiveContextGrant(g, fromSenderIdentityHex: sender)) != nil {
+            storeContextGrant(g)
+            events.append(.aiContextGrant(identityHex: sender, conversationID: conv, threadID: threadID,
+                                          axis: g.scope.axis, until: g.activeUntil > now ? g.activeUntil : nil))
+        }
         if let tid = threadID { await engine.recordThreadMessage(threadID: tid, participantType: m.participantType) }
         var authorized: Int64?
         if m.participantType == .agent {
@@ -334,9 +347,19 @@ extension EldrClient {
         let gid = UIConversation.groupID(conv)
         let names = Dictionary(state.contacts.map { ($0.identityHex, $0.name ?? String($0.identityHex.prefix(8))) },
                                uniquingKeysWith: { a, _ in a })
+        // iOS `aiAuthorGate`: an invited thread member sees every author; outside a
+        // thread a PEER's AI content also needs the bilateral ai-axis context grant.
+        let peerHumanAllowed = contextSharedNow(conversationID: conv, threadID: threadID, axis: AIContextGrant.Scope.humanAxis)
+        let peerAIAllowed = threadID != nil || contextSharedNow(conversationID: conv, threadID: nil, axis: AIContextGrant.Scope.aiAxis)
         let rows = history.filter { e in
             let inConv = gid != nil ? e.groupID == gid : (e.peerIdentityHex == conv && e.groupID == nil)
-            return inConv && e.threadID == threadID && Int64(e.seq ?? 0) >= since
+            let peerAI = !e.outgoing && e.agent
+            guard inConv, e.threadID == threadID, !peerAI || peerAIAllowed else { return false }
+            if Int64(e.seq ?? 0) >= since { return true }
+            // "Add to AI Context" (feature 7): my marked messages always; a peer's
+            // marked message only under the bilateral human-axis grant (N24/N25).
+            guard e.aiContext == true else { return false }
+            return e.outgoing || peerHumanAllowed
         }.suffix(Self.maxTranscript)
         let transcript = rows.map { e in
             TranscriptEntry(
@@ -383,8 +406,13 @@ extension EldrClient {
     /// `ELDR_AI_API_KEY` in the environment overrides it at run time.
     public func configureProvider(_ cfg: AIProviderConfig?, apiKey: String?) async throws {
         if let cfg {
-            guard let u = URL(string: cfg.baseURL), let scheme = u.scheme, ["http", "https"].contains(scheme), u.host != nil
-            else { throw EldrClientError.badProviderURL(cfg.baseURL) }
+            guard AIProviderConfig.kinds.contains(cfg.effectiveKind) else {
+                throw EldrClientError.badSetting("unknown AI kind '\(cfg.effectiveKind)' (\(AIProviderConfig.kinds.joined(separator: ", ")))")
+            }
+            if cfg.effectiveKind == "custom" {
+                guard let u = URL(string: cfg.baseURL), let scheme = u.scheme, ["http", "https"].contains(scheme), u.host != nil
+                else { throw EldrClientError.badProviderURL(cfg.baseURL) }
+            }
             if let apiKey { try store.save(Data(apiKey.utf8), account: Self.aiKeyAccount) }
         } else {
             store.delete(account: Self.aiKeyAccount)
@@ -401,7 +429,22 @@ extension EldrClient {
         guard let cfg = providerConfig else { return nil }
         let key = ProcessInfo.processInfo.environment["ELDR_AI_API_KEY"]
             ?? store.load(account: Self.aiKeyAccount).map { String(decoding: $0, as: UTF8.self) } ?? ""
-        return CustomOpenAIProvider(baseURL: cfg.baseURL, apiKey: key, model: cfg.model, requestTimeoutSeconds: cfg.timeoutSeconds ?? 120)
+        return Self.makeProvider(cfg, key: key)
+    }
+
+    /// One provider per kind, mirroring iOS `BackendRegistry` (cloud kinds use their
+    /// vendor endpoint; an empty model keeps the provider's default).
+    static func makeProvider(_ cfg: AIProviderConfig, key: String) -> any AgentProvider {
+        let m = cfg.model.isEmpty ? nil : cfg.model
+        switch cfg.effectiveKind {
+        case "claude": return m.map { AnthropicAPIProvider(apiKey: key, model: $0) } ?? AnthropicAPIProvider(apiKey: key)
+        case "openai": return m.map { OpenAIAPIProvider(apiKey: key, model: $0) } ?? OpenAIAPIProvider(apiKey: key)
+        case "gemini": return m.map { GeminiAPIProvider(apiKey: key, model: $0) } ?? GeminiAPIProvider(apiKey: key)
+        case "openrouter": return m.map { OpenRouterAPIProvider(apiKey: key, model: $0) } ?? OpenRouterAPIProvider(apiKey: key)
+        case "groq": return m.map { GroqAPIProvider(apiKey: key, model: $0) } ?? GroqAPIProvider(apiKey: key)
+        default:
+            return CustomOpenAIProvider(baseURL: cfg.baseURL, apiKey: key, model: cfg.model, requestTimeoutSeconds: cfg.timeoutSeconds ?? 120)
+        }
     }
 
     /// "Test AI now": one draft against a fixed sample. Nothing is sent to anyone.
@@ -507,6 +550,10 @@ extension EldrClient {
             try? await engine.receiveInvite(i.invite, fromSenderIdentityHex: i.invite.enabledBy.hexString)
         }
         for g in a.grants ?? [] { try? await engine.receiveStandingGrant(g, fromSenderIdentityHex: identityHex) }
+        a.contextGrants = (a.contextGrants ?? []).filter { $0.activeUntil > now }
+        aiState = a
+        for g in a.contextGrants ?? [] { try? await engine.receiveContextGrant(g, fromSenderIdentityHex: g.enabledBy.hexString) }
         await engine.setLoopGuardLimit(settings.loopGuardLimit ?? EldrClient.defaultLoopGuardLimit)
+        for t in threads { if let l = t.loopGuardLimit { await engine.setThreadLoopGuardLimit(l, threadID: t.threadID) } }
     }
 }

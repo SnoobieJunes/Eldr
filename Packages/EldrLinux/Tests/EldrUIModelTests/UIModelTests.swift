@@ -162,3 +162,20 @@ struct UIModelTests {
 
     @Test func markdownRulesCompiled() { #expect(UIFormat.rules.count == 6) }
 }
+
+@Suite("World + tour (WS-N7)")
+struct WorldTourTests {
+    @Test func worldRows_collapsePlanesPerPeer_andNeverSayConnected() {
+        let now: Int64 = 1_000_000
+        #expect(WorldDerivation.status(activeUntil: now - 1, now: now) == .expired)
+        #expect(WorldDerivation.status(activeUntil: now + 3600, now: now) == .expiringSoon(until: now + 3600))
+        #expect(WorldDerivation.status(activeUntil: now + 200_000, now: now) == .authorized(until: now + 200_000))
+        for s in [WorldGrantStatus.expired, .expiringSoon(until: 1), .authorized(until: 1)] { #expect(!s.label.contains("connect")) }
+    }
+
+    @Test func tourText_isGeneratedFromIOS() {
+        #expect(OnboardingTourText.steps.count >= 10)
+        #expect(OnboardingTourText.steps.first?.title == "Cast off")
+        #expect(OnboardingTourText.steps.allSatisfy { !$0.title.isEmpty && !$0.body.isEmpty })
+    }
+}
