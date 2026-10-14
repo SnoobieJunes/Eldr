@@ -196,7 +196,7 @@ public actor RelayA2ATransport {
             droppedFrameCount += 1
             return
         }
-        entry.chunks[chunk.seq] = chunk.payload
+        entry.put(chunk.seq, chunk.payload)
         if entry.chunks.count == Int(chunk.total) {
             reassembly[chunk.lineId] = nil
             // Concatenate payloads in seq order (1...total) — reassembly is
