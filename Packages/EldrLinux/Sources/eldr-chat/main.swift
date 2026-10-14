@@ -22,7 +22,7 @@ let usage = """
 
       init [--no-announce]          create a new identity and publish its keys
       keystore status               what protects your keys at rest (TPM / passphrase)
-      keystore upgrade [--keep-passphrase]
+      keystore upgrade [--keep-passphrase] [--security-key]   (FIDO2 hmac-secret; touch the key)
                                     move a passphrase keystore to this machine's TPM
       whoami                        identity hex, npub and pqrc:add pairing link
       announce                      re-publish keys (10420/10421/10050)
@@ -293,11 +293,13 @@ case "keystore":
         switch prot {
         case .tpm: lines.append("Protection: TPM — keys are bound to this machine's TPM. A copied disk cannot open them.")
         case .tpmAndPassphrase: lines.append("Protection: TPM + passphrase — both are required.")
+        case .securityKey: lines.append("Protection: FIDO2 security key — the key (and a touch) is required to unlock.")
+        case .securityKeyAndPassphrase: lines.append("Protection: FIDO2 security key + passphrase — both are required.")
         case .passphraseOnly:
             lines.append("Protection: ⚠️ PASSPHRASE ONLY — anyone with a copy of this disk can try to guess it offline,")
             lines.append("            and a passphrase FILE next to the state is no protection at all.")
             if tpm != nil { lines.append("Fix: `eldr-chat keystore upgrade` (a TPM is available here).") }
-            else { lines.append("No usable TPM here (VM without vTPM, or tpm2-tss not installed). Type the passphrase instead of using a file.") }
+            else { lines.append("No usable TPM here (VM without vTPM, or tpm2-tss not installed). Use `keystore upgrade --security-key` with a FIDO2 key (libfido2), or type the passphrase instead of using a file.") }
         case .uninitialized: lines.append("No keystore yet (run `eldr-chat init`).")
         }
         lines.append("TPM device: \(defaultTpmPresent() ? "present" : "none") · tpm2-tss: \(SystemTPM.compiledIn ? "built in" : "not built in")")
@@ -308,9 +310,13 @@ case "keystore":
         guard KeystoreProtection.inspect(directory: stateDir) == .passphraseOnly else {
             fail("nothing to upgrade: keystore is \(KeystoreProtection.inspect(directory: stateDir).rawValue)")
         }
-        guard let tpm = defaultTPMSealer(environment: env, tpmPresent: defaultTpmPresent) else {
-            fail("no usable TPM (need /dev/tpmrm0 and the tpm2-tss libraries; ELDR_TPM_TCTI overrides)")
+        let useKey = args.contains("--security-key")
+        let tpm = useKey ? nil : defaultTPMSealer(environment: env, tpmPresent: defaultTpmPresent)
+        let fido = useKey ? defaultFIDOAuthenticator(environment: env) : nil
+        if !useKey && tpm == nil {
+            fail("no usable TPM (need /dev/tpmrm0 and the tpm2-tss libraries; ELDR_TPM_TCTI overrides). Try --security-key.")
         }
+        if useKey && fido == nil { fail("FIDO2 not supported in this build") }
         var pass = env["ELDR_CHAT_PASSPHRASE"]
         if pass == nil || pass!.isEmpty, let f = env["ELDR_CHAT_PASSPHRASE_FILE"],
             let d = FileManager.default.contents(atPath: f) {
@@ -321,13 +327,18 @@ case "keystore":
         }
         guard let pass, !pass.isEmpty else { fail("need the current passphrase (ELDR_CHAT_PASSPHRASE[_FILE] or a TTY)") }
         do {
-            try upgradeKeystoreToTPM(directory: stateDir, passphrase: pass, keepPassphrase: keep, tpm: tpm)
+            if let fido {
+                FileHandle.standardError.write(Data("Touch your security key (twice: enroll, then verify)…\n".utf8))
+                try upgradeKeystoreToSecurityKey(directory: stateDir, passphrase: pass, keepPassphrase: keep, fido: fido)
+            } else if let tpm {
+                try upgradeKeystoreToTPM(directory: stateDir, passphrase: pass, keepPassphrase: keep, tpm: tpm)
+            }
         } catch { fail("upgrade failed, nothing changed: \(error)") }
         emit(["type": "keystore", "upgraded": true, "protection": KeystoreProtection.inspect(directory: stateDir).rawValue],
-             human: keep ? "Upgraded: TPM + passphrase (both now required)."
-                : "Upgraded: TPM. The passphrase is no longer needed; delete any passphrase file.")
+             human: keep ? "Upgraded: \(useKey ? "security key" : "TPM") + passphrase (both now required)."
+                : "Upgraded: \(useKey ? "security key" : "TPM"). The passphrase is no longer needed; delete any passphrase file.")
     default:
-        fail("keystore status | upgrade [--keep-passphrase]")
+        fail("keystore status | upgrade [--keep-passphrase] [--security-key]")
     }
 
 case "init":
