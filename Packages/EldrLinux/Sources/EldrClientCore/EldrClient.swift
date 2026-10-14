@@ -307,7 +307,30 @@ public actor EldrClient {
             await self?.republishDone()
         }
     }
-    private func republishDone() { republishing = false }
+    private func republishDone() {
+        republishing = false
+        let w = bundleWaiters; bundleWaiters = []
+        for c in w { c.resume() }
+    }
+    private var bundleWaiters: [CheckedContinuation<Void, Never>] = []
+
+    /// True once every spent one-time prekey has been refilled AND republished (AC167).
+    var publishedBundleIsFresh: Bool {
+        get async {
+            await prekeyManager.oneTimePrekeyCount >= Self.otpTarget && state.publishedBundleStale == false && !republishing
+        }
+    }
+
+    /// Waits (event-driven, no polling) until the published bundle no longer lists a spent
+    /// OTP, or one republish attempt has finished. Used by tests that pair a second contact
+    /// right after a first: otherwise both initiators can draw the same OTP from the stale
+    /// bundle and the second handshake is refused as a replay (the group-test flake).
+    func waitForBundleRepublish() async {
+        if await publishedBundleIsFresh { return }
+        await refreshBundleIfNeeded()
+        if !republishing { return }
+        await withCheckedContinuation { bundleWaiters.append($0) }
+    }
     private var republishing = false
     private var stopped = false
     private var bindingTask: Task<Void, Never>?
