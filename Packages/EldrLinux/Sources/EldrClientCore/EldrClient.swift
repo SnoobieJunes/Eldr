@@ -327,6 +327,10 @@ public actor EldrClient {
             state.seenWrapIDs.removeFirst(state.seenWrapIDs.count - ClientState.maxSeen)
         }
         state.schema = ClientState.currentSchema
+        // Re-check after the awaits above (AC217): actor reentrancy let a persist that
+        // passed the entry guard resume AFTER stop() released the lock and overwrite
+        // state another process now owns (the flaky newerSchemaState test).
+        guard !stopped else { return }
         try store.save(JSONEncoder().encode(state), account: Self.stateAccount)
     }
 

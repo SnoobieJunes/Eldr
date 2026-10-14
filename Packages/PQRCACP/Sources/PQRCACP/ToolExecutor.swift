@@ -528,12 +528,19 @@ public struct ToolExecutor: Sendable {
         let absURL = URL(fileURLWithPath: absolutePath(path)).standardizedFileURL
         var existing = absURL
         var tail: [String] = []
-        while !fm.fileExists(atPath: existing.path) {
+        // `fileExists` FOLLOWS symlinks, so a DANGLING link (`notes.txt -> ~/.ssh/x`,
+        // target not yet created — e.g. shipped in a cloned repo) looked like a new leaf
+        // and the write followed it out of the jail (security/audit-1, AC213, PoC in
+        // AuditJailExploitTests). Walk with lstat semantics instead, and refuse any
+        // path whose deepest present component is a link that does not resolve.
+        func lexists(_ p: String) -> Bool { (try? fm.attributesOfItem(atPath: p)) != nil }
+        while !lexists(existing.path) {
             let parent = existing.deletingLastPathComponent()
             if parent.path == existing.path { break }  // reached "/"
             tail.insert(existing.lastPathComponent, at: 0)
             existing = parent
         }
+        if !fm.fileExists(atPath: existing.path) { return nil }  // dangling symlink
         var resolved = canonical(existing.path)
         for component in tail { resolved += "/" + component }
         resolved = canonical(resolved)  // also resolve a leaf that is itself a symlink
