@@ -93,6 +93,8 @@ final class AppModel {
     var messagesByConversation: [String: [StoredMessage]] = [:]
     var threadsByConversation: [String: [ThreadVM]] = [:]
     var messageRequests: [String] = []
+    /// AC220: held group invites awaiting Join / Decline.
+    var groupInvites: [GroupInviteVM] = []
     /// conversationID -> (identityHex -> activeUntil): drives the pinned banner.
     var aiWindows: [String: [String: Int64]] = [:]
     /// threadID -> (identityHex -> activeUntil): drives the thread header.
@@ -261,6 +263,10 @@ final class AppModel {
         case .messageRequest(let sender):
             if !messageRequests.contains(sender) {
                 messageRequests.append(sender)
+            }
+        case .groupInvite(let groupID, let name, let invitedBy):
+            if !groupInvites.contains(where: { $0.id == groupID }) {
+                groupInvites.append(GroupInviteVM(id: groupID, name: name, invitedBy: invitedBy))
             }
         case .protocolViolation(_, let reason):
             protocolViolations.append(reason)
@@ -1032,6 +1038,20 @@ final class AppModel {
         return conversationID
     }
 
+    /// AC220: joins a held group invite; its held posts are delivered.
+    func acceptGroupInvite(_ groupID: String) async -> String {
+        await runtime.acceptGroupInvite(groupID)
+        groupInvites.removeAll { $0.id == groupID }
+        await refreshConversationRow(groupID, lastMessage: messagesByConversation[groupID]?.last { $0.threadID == nil })
+        return groupID
+    }
+
+    /// AC220: declines a held group invite (held posts dropped; the group stays silent).
+    func declineGroupInvite(_ groupID: String) async {
+        await runtime.declineGroupInvite(groupID)
+        groupInvites.removeAll { $0.id == groupID }
+    }
+
     func declineRequest(_ senderNostrPubkeyHex: String) async {
         await runtime.declineMessageRequest(senderNostrPubkeyHex: senderNostrPubkeyHex)
         messageRequests.removeAll { $0 == senderNostrPubkeyHex }
@@ -1113,4 +1133,12 @@ final class AppModel {
         }
         return nil
     }
+}
+
+
+/// AC220: a held invite row. `invitedBy` is an identity hex (name resolved in the view).
+struct GroupInviteVM: Identifiable, Sendable, Equatable {
+    let id: String
+    let name: String
+    let invitedBy: String
 }
