@@ -130,7 +130,7 @@ public actor RelayMCPTransport: MCPLineSeam {
             droppedFrameCount += 1
             return
         }
-        entry.chunks[chunk.seq] = chunk.payload
+        entry.put(chunk.seq, chunk.payload)
         if entry.chunks.count == Int(chunk.total) {
             reassembly[chunk.lineId] = nil
             var bytes = Data()
