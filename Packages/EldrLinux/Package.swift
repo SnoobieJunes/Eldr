@@ -64,7 +64,7 @@ let package = Package(
         ),
         .executableTarget(
             name: "eldr-chat",
-            dependencies: ["EldrClientCore", "PQRCCore", "PQRCNostr", .product(name: "PQRCAgent", package: "PQRCAgent")],
+            dependencies: ["EldrClientCore", "PQRCCore", "PQRCNostr", .product(name: "PQRCAgent", package: "PQRCAgent"), .product(name: "Crypto", package: "swift-crypto")],
             swiftSettings: [.swiftLanguageMode(.v6)]
         ),
         .testTarget(

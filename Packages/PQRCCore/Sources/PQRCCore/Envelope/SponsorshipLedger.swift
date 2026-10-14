@@ -11,7 +11,7 @@ public enum SponsorshipStatus: Codable, Sendable, Equatable {
     /// Agent-labeled, carrying a valid, unexpired, unrevoked sponsorship.
     case sponsored(sponsorIdentityHex: String, label: String?, activeUntil: Int64)
     /// Agent-labeled, carrying a sponsorship that failed (bad signature, wrong agent,
-    /// expired, revoked, over 30 days…). Shown as a warning, never as sponsored.
+    /// expired, revoked, over 7 days…). Shown as a warning, never as sponsored.
     case invalid(reason: String)
 
     public var isSponsored: Bool { if case .sponsored = self { return true } else { return false } }
@@ -84,7 +84,7 @@ public enum SponsorshipLedgerError: Error, Equatable, Sendable {
 /// type (persist it encrypted); signing uses the caller's identity, and sending the
 /// returned bodies is the caller's job. Used by iOS; mirrors EldrClient (Linux).
 public struct SponsorshipLedger: Codable, Sendable, Equatable {
-    public static let dayChoices = [1, 7, 30]
+    public static let dayChoices = [1, 7]
     public static let maxRevoked = 2000
     public private(set) var issued: [IssuedSponsorship] = []
     /// "<sponsorHex>:<sponsorshipID>" for every revocation issued or verified-received.
@@ -113,7 +113,7 @@ public struct SponsorshipLedger: Codable, Sendable, Equatable {
         to agentHex: String, days: Int, label: String?, identity: PQRCIdentity, now: Int64,
         sponsorshipID: String = UUID().uuidString.lowercased()
     ) throws -> MessageBody {
-        guard (1...30).contains(days) else { throw SponsorshipLedgerError.badDuration }
+        guard (1...7).contains(days) else { throw SponsorshipLedgerError.badDuration }
         guard agentHex != identity.publicKeyData.hexString else { throw SponsorshipLedgerError.selfSponsorship }
         let label = label.flatMap { $0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? nil : $0 }
         let sp = try AgentSponsorship.make(

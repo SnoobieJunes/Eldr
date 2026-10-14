@@ -3360,7 +3360,7 @@ actor PersonaRuntime {
         }
     }
 
-    /// Signs a sponsorship (1–30 days) vouching for this contact as an AI account I
+    /// Signs a sponsorship (1–7 days) vouching for this contact as an AI account I
     /// answer for, and sends it to them over our session. Nothing is recorded if the
     /// send fails. Agents (my tethered AIs) never call this: only the human UI does.
     func sponsorAIAccount(_ contactHex: String, days: Int, label: String?) async throws {

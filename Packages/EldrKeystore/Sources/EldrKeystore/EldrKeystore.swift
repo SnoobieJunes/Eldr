@@ -142,6 +142,7 @@ public enum LinuxKeystoreError: Error, CustomStringConvertible {
     case corruptMasterWrap
     case writeFailed(String)
     case passphraseFileTooOpen(String)
+    case weakPassphrase(String)
 
     public var description: String {
         switch self {
@@ -161,6 +162,10 @@ public enum LinuxKeystoreError: Error, CustomStringConvertible {
                 + "keystore is corrupt. Refusing to proceed (fail-closed)."
         case .writeFailed(let path):
             return "keystore: could not write keystore file \(path)."
+        case .weakPassphrase(let why):
+            return "keystore: passphrase too weak (\(why)). Use at least \(PassphrasePolicy.minLength) characters "
+                + "with some variety — four or five random words work well. It only protects a copied disk if "
+                + "it is hard to guess."
         case .passphraseFileTooOpen(let path):
             return "keystore: passphrase file \(path) is readable by other users. "
                 + "Run `chmod 600 \(path)` (fail-closed, like ssh with a private key)."
@@ -429,6 +434,8 @@ private func unwrapOrInitMaster(directory: URL, passphrase: String) throws -> Sy
     }
 
     // First run: fresh master key, fresh salt, wrap and persist (0600) before returning.
+    // AC222: a new keystore gets a minimum-strength passphrase (existing ones still open).
+    try PassphrasePolicy.check(passphrase)
     let masterRaw = SymmetricKey(size: .bits256).withUnsafeBytes { Data($0) }
     let salt = SymmetricKey(size: .bits128).withUnsafeBytes { Data($0) }
     let kek = try LinuxKeystoreScrypt.kek(passphrase: passphrase, salt: salt)
@@ -437,4 +444,25 @@ private func unwrapOrInitMaster(directory: URL, passphrase: String) throws -> Sy
     try FileIdentityStore.writeFile(saltURL, salt)
     try FileIdentityStore.writeFile(wrapURL, wrapped)
     return SymmetricKey(data: masterRaw)
+}
+
+
+/// Minimum passphrase strength at keystore CREATION (AC222, owner decision). Deliberately
+/// simple and explainable: length, variety, and not a well-known password. Existing
+/// keystores keep opening with whatever passphrase they were made with.
+public enum PassphrasePolicy {
+    public static let minLength = 12
+    public static let minDistinct = 6
+    static let common: Set<String> = [
+        "password1234", "passwordpassword", "123456789012", "qwertyuiopas", "letmeinletmein",
+        "correct horse battery staple", "iloveyou1234", "administrator", "changemechangeme",
+    ]
+
+    public static func check(_ p: String) throws {
+        if p.count < minLength { throw LinuxKeystoreError.weakPassphrase("shorter than \(minLength) characters") }
+        if Set(p.lowercased()).count < minDistinct {
+            throw LinuxKeystoreError.weakPassphrase("too few different characters")
+        }
+        if common.contains(p.lowercased()) { throw LinuxKeystoreError.weakPassphrase("a well-known password") }
+    }
 }

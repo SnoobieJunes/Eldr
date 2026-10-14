@@ -613,6 +613,9 @@ public struct GroupCreate: Codable, Equatable, Sendable {
     public let conversationType: String
     /// Monotonic revision so roster changes order deterministically.
     public let revision: Int
+    /// Identities allowed to change the roster (AC220). Optional on the wire: absent =
+    /// unchanged / legacy (receivers then treat the group's creator as its only admin).
+    public let admins: [String]?
 
     enum CodingKeys: String, CodingKey {
         case groupID = "group_id"
@@ -620,14 +623,16 @@ public struct GroupCreate: Codable, Equatable, Sendable {
         case members
         case conversationType = "conversation_type"
         case revision
+        case admins
     }
 
-    public init(groupID: String, name: String, members: [String], revision: Int) {
+    public init(groupID: String, name: String, members: [String], revision: Int, admins: [String]? = nil) {
         self.groupID = groupID
         self.name = name
         self.members = members
         self.conversationType = "group"
         self.revision = revision
+        self.admins = admins
     }
 }
 

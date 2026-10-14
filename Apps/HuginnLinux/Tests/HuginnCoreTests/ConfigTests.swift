@@ -88,9 +88,9 @@ struct ConfigTests {
         let paths = tmp.paths
         guard !FileManager.default.fileExists(atPath: "/dev/tpmrm0"), !FileManager.default.fileExists(atPath: "/dev/tpm0") else { return }
         #expect(throws: (any Error).self) { _ = try HuginnSecrets.open(paths: paths, environment: [:]) }
-        let (store, posture) = try HuginnSecrets.open(paths: paths, environment: ["HUGINN_PASSPHRASE": "correct horse battery staple"])
+        let (store, posture) = try HuginnSecrets.open(paths: paths, environment: ["HUGINN_PASSPHRASE": "violet tractor moss engine"])
         try store.save(Data("x".utf8), account: "llm-token")
-        let (again, _) = try HuginnSecrets.open(paths: paths, environment: ["HUGINN_PASSPHRASE": "correct horse battery staple"])
+        let (again, _) = try HuginnSecrets.open(paths: paths, environment: ["HUGINN_PASSPHRASE": "violet tractor moss engine"])
         #expect(HuginnSecrets.string(again, "llm-token") == "x")
         #expect(!posture.isEmpty)
     }

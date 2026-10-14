@@ -103,7 +103,7 @@ struct ConversationView: View {
         model.contactNames[conversationID] ?? "Conversation"
     }
 
-    /// AC168: sponsor this contact as an AI account I answer for (1/7/30 days), or
+    /// AC168: sponsor this contact as an AI account I answer for (1/7 days), or
     /// revoke. Every choice goes through a confirmation dialog: signing a sponsorship
     /// is a statement made with my identity key.
     @ViewBuilder private var sponsorshipMenu: some View {

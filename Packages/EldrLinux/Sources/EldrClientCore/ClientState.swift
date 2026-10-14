@@ -54,6 +54,9 @@ public struct ClientState: Codable, Sendable {
     public var publishedBundleStale: Bool?
     /// Group rosters (APP-SPEC §7 D1, WS-N1). Optional so older state still decodes.
     public var groups: [GroupRecord]?
+    /// Group invites waiting for my approval (AC220), and groups I declined.
+    public var pendingGroupInvites: [GroupRecord]?
+    public var declinedGroups: [String]?
     /// Threads (D7, WS-N2) and AI-participation state (SPEC §13). Optional for old state.
     public var threads: [ThreadRecord]?
     public var ai: AIState?
@@ -71,7 +74,7 @@ public struct ClientState: Codable, Sendable {
     /// Bump whenever a field is added that an older build would drop on save.
     /// 2 = groups/threads/AI/settings/HistoryEntry.threadID (WS-N1…N5); 3 = WS-N7 contact fields;
     /// 4 = WS-N7a unread, retry, mentions, multi-AI roster, context modes.
-    public static let currentSchema = 4
+    public static let currentSchema = 5  // 5 = group admins + invites (AC220)
 }
 
 // `SponsorshipStatus` and `IssuedSponsorship` live in PQRCCore (SponsorshipLedger.swift),
@@ -203,14 +206,20 @@ public struct GroupRecord: Codable, Sendable, Equatable {
     public var members: [String]
     public var assertedBy: String
     public var revision: Int
+    /// Who may change the roster (AC220). nil = state from before admins (legacy: the
+    /// last asserter is treated as the admin).
+    public var admins: [String]?
+    /// Who invited me (pending invites only).
+    public var invitedBy: String?
 
     public init(_ r: GroupRoster) {
         groupID = r.groupID; name = r.name; members = r.members
-        assertedBy = r.assertedBy; revision = r.revision
+        assertedBy = r.assertedBy; revision = r.revision; admins = r.admins
     }
     var roster: GroupRoster {
         GroupRoster(
-            create: GroupCreate(groupID: groupID, name: name, members: members, revision: revision),
+            create: GroupCreate(groupID: groupID, name: name, members: members, revision: revision,
+                                admins: admins ?? [assertedBy]),
             assertedBy: assertedBy)
     }
 }

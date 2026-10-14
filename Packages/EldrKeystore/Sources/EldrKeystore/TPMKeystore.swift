@@ -107,6 +107,7 @@ enum TPMMaster {
         var salt: Data?
         var pk: SymmetricKey?
         if let passphrase {
+            try PassphrasePolicy.check(passphrase)  // AC222 (creation / layering)
             let s = SymmetricKey(size: .bits128).withUnsafeBytes { Data($0) }
             salt = s
             pk = try LinuxKeystoreScrypt.kek(passphrase: passphrase, salt: s)

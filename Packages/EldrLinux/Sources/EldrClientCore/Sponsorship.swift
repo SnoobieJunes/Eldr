@@ -9,12 +9,12 @@ import PQRCNostr
 ///   (agent-key signed by the engine) and carries the owner's sponsorship; with no
 ///   live sponsorship the send is refused before anything leaves the box.
 /// - The agent accepts a sponsorship ONLY from its pinned owner identity.
-/// - A human persona can sponsor a contact for 1–30 days and revoke it; revocation
+/// - A human persona can sponsor a contact for 1–7 days and revoke it; revocation
 ///   is effective on receipt, both at the agent and in the sponsor's own view.
 /// - Every received agent message is checked on its own: signature, agent ==
-///   sender, ≤30 days, unexpired, unrevoked.
+///   sender, ≤7 days, unexpired, unrevoked.
 extension EldrClient {
-    public static let sponsorshipDayChoices = [1, 7, 30]
+    public static let sponsorshipDayChoices = [1, 7]
     /// Total bytes held for incomplete chunked messages (AC214).
     public static let maxBufferedChunkBytes = 48 * 1024 * 1024
 
@@ -82,8 +82,8 @@ extension EldrClient {
     @discardableResult
     public func sponsor(_ q: String, days: Int, label: String? = nil) async throws -> AgentSponsorship {
         guard !isAgent else { throw EldrClientError.agentCannotSponsor }
-        guard (1...30).contains(days) else {
-            throw EldrClientError.notSponsored("duration must be 1–30 days")
+        guard (1...7).contains(days) else {
+            throw EldrClientError.notSponsored("duration must be 1–7 days")
         }
         let c = try contact(matching: q)
         let now = Self.nowSeconds
