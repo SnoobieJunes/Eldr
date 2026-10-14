@@ -68,6 +68,46 @@ struct UIModelTests {
         #expect(snap.messages(with: a).count == 1)
     }
 
+    @Test func groups_areOwnConversations_andStayOutOf1to1() {
+        let ev = NostrEvent(pubkey: "", createdAt: 0, kind: 10420, tags: [], content: "")
+        let a = String(repeating: "aa", count: 32), me = String(repeating: "cc", count: 32)
+        let cs = [ContactRecord(name: "alice", nostrPubkeyHex: a, identityHex: a, bindingEvent: ev, session: nil, addedAt: Date(timeIntervalSince1970: 1))]
+        let g = GroupRecord(GroupRoster(create: GroupCreate(groupID: "G1", name: "team<b>", members: [me, a], revision: 3), assertedBy: a))
+        var gm = HistoryEntry(id: "2", peerIdentityHex: a, outgoing: false, text: "group hi", sentAt: 30, agent: false, sponsorship: .human)
+        gm.groupID = "G1"
+        let h = [HistoryEntry(id: "1", peerIdentityHex: a, outgoing: false, text: "dm", sentAt: 10, agent: false, sponsorship: .human), gm]
+        var snap = UISnapshot(me: me, npub: "", link: "", isAgent: false, agentBanner: nil, contacts: cs, requests: [], history: h, issued: [])
+        snap.groups = [g]
+        let conv = snap.conversations()
+        #expect(conv.map(\.identityHex) == ["group:G1", a])
+        #expect(conv[0].preview == "alice: group hi" && conv[1].preview == "dm")
+        #expect(snap.messages(with: a).map(\.text) == ["dm"])
+        #expect(snap.messages(with: "group:G1").map(\.text) == ["group hi"])
+        #expect(snap.header(for: "group:G1").contains("roster asserted by alice (rev 3)"))
+    }
+
+    @Test func threads_aiIndicator_andRowBadges() {
+        let ev = NostrEvent(pubkey: "", createdAt: 0, kind: 10420, tags: [], content: "")
+        let a = String(repeating: "aa", count: 32), me = String(repeating: "cc", count: 32)
+        let cs = [ContactRecord(name: "alice", nostrPubkeyHex: a, identityHex: a, bindingEvent: ev, session: nil, addedAt: Date(timeIntervalSince1970: 1))]
+        var t1 = HistoryEntry(id: "t1", peerIdentityHex: a, outgoing: false, text: "in thread", sentAt: 50, agent: true, sponsorship: .unsponsored)
+        t1.threadID = "T"; t1.aiAuthorizedUntil = 9_999_999_999
+        let dm = HistoryEntry(id: "d", peerIdentityHex: a, outgoing: false, text: "dm", sentAt: 10, agent: true, sponsorship: .unsponsored)
+        var snap = UISnapshot(me: me, npub: "", link: "", isAgent: false, agentBanner: nil, contacts: cs, requests: [], history: [dm, t1], issued: [])
+        snap.threads = [ThreadRecord(threadID: "T", conversationID: a, title: "plan", createdBy: a)]
+        snap.aiActive = ["thread:T": [a: 9_999_999_999, me: 9_999_999_999]]
+        snap.loopGuarded = ["thread:T"]
+        #expect(snap.conversations().first?.identityHex == "thread:T")
+        #expect(snap.messages(with: a).map(\.text) == ["dm"])
+        #expect(snap.messages(with: "thread:T").map(\.text) == ["in thread"])
+        let h = snap.header(for: "thread:T", now: 100)
+        #expect(h.contains("alice's AI on until") && h.contains("your AI on until") && h.contains("loop guard"))
+        #expect(!UIFormat.rowBadge(t1, names: snap.name(of:)).warn)
+        #expect(UIFormat.rowBadge(dm, names: snap.name(of:)).warn, "an agent row with no authorization is flagged")
+        var mine = dm; mine.mine = true; mine.outgoing = true
+        #expect(UIFormat.rowBadge(mine, names: snap.name(of:)).text == "🤖 your AI")
+    }
+
     /// Tags must nest properly and no raw '<' may come from message text.
     private func wellFormed(_ m: String) -> Bool {
         var stack: [String] = []
@@ -121,4 +161,50 @@ struct UIModelTests {
     }
 
     @Test func markdownRulesCompiled() { #expect(UIFormat.rules.count == 6) }
+}
+
+@Suite("World + tour (WS-N7)")
+struct WorldTourTests {
+    @Test func worldRows_collapsePlanesPerPeer_andNeverSayConnected() {
+        let now: Int64 = 1_000_000
+        #expect(WorldDerivation.status(activeUntil: now - 1, now: now) == .expired)
+        #expect(WorldDerivation.status(activeUntil: now + 3600, now: now) == .expiringSoon(until: now + 3600))
+        #expect(WorldDerivation.status(activeUntil: now + 200_000, now: now) == .authorized(until: now + 200_000))
+        for s in [WorldGrantStatus.expired, .expiringSoon(until: 1), .authorized(until: 1)] { #expect(!s.label.contains("connect")) }
+    }
+
+    @Test func tourText_isGeneratedFromIOS() {
+        #expect(OnboardingTourText.steps.count >= 10)
+        #expect(OnboardingTourText.steps.first?.title == "Cast off")
+        #expect(OnboardingTourText.steps.allSatisfy { !$0.title.isEmpty && !$0.body.isEmpty })
+    }
+}
+
+@Suite("World map geometry (WS-N7a)")
+struct WorldMapTests {
+    @Test func ringPositions_lifetime_andBreath() {
+        let p0 = WorldMapLayout.unitPosition(index: 0, count: 4)
+        #expect(abs(p0.x) < 1e-9 && abs(p0.y + 1) < 1e-9)  // 12 o'clock
+        let p1 = WorldMapLayout.unitPosition(index: 1, count: 4)
+        #expect(abs(p1.x - 1) < 1e-9 && abs(p1.y) < 1e-9)  // clockwise → 3 o'clock
+        #expect(WorldMapLayout.unitPosition(index: 0, count: 0) == (0, 0))
+        #expect(WorldMapLayout.ringRadius(width: 480, height: 300) == 98)
+        #expect(WorldMapLayout.lifetimeFraction(expiresAt: 100, now: 200) == 0)
+        #expect(WorldMapLayout.lifetimeFraction(expiresAt: nil, now: 0) == 0)
+        #expect(WorldMapLayout.lifetimeFraction(expiresAt: Int64.max, now: 0) == 1)
+        #expect(WorldMapLayout.breath(time: 123, urgent: false) == 0.5)
+        let b = WorldMapLayout.breath(time: 0.4, urgent: true)
+        #expect(b >= 0 && b <= 1 && b != 0.5)
+        #expect(WorldMapLayout.until(.expired) == nil && WorldMapLayout.until(.authorized(until: 9)) == 9)
+    }
+
+    @Test func unreadTitle_andNotSentBadge() {
+        var c = ConversationSummary(identityHex: "x", title: "Bob", preview: "", lastAt: 0, isAgent: false)
+        #expect(c.displayTitle == "Bob")
+        c.unread = 3
+        #expect(c.displayTitle == "Bob  (3)")
+        var e = HistoryEntry(id: "1", peerIdentityHex: "x", outgoing: true, text: "t", sentAt: 0, agent: false, sponsorship: .human)
+        e.failed = true
+        #expect(UIFormat.rowBadge(e, names: { _ in nil }) == ("✗ Not sent", true))
+    }
 }

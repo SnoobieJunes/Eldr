@@ -4,6 +4,7 @@ import EldrKeystore
 import Foundation
 import PQRCCore
 import PQRCNostr
+import PQRCAgent
 
 #if canImport(Glibc)
 import Glibc
@@ -25,6 +26,14 @@ public enum EldrClientError: Error, CustomStringConvertible {
     case agentCannotSponsor
     case unknownSponsorship(String)
     case messageTooLarge
+    case unknownGroup(String)
+    case unknownThread(String)
+    case badDuration
+    case badProviderURL(String)
+    case badSetting(String)
+    case notAgentAccount
+    case stateFromNewerBuild(found: Int, supported: Int)
+    case bridgeGated(String)
 
     public var description: String {
         switch self {
@@ -39,8 +48,17 @@ public enum EldrClientError: Error, CustomStringConvertible {
         case .notSponsored(let why):
             return "this is an AI account and has no live sponsorship from its owner (\(why)) — "
                 + "ask the owner to sponsor it; nothing was sent"
-        case .agentCannotSponsor: return "an AI account cannot sponsor another identity (agents cannot self-grant)"
+        case .agentCannotSponsor: return "an AI account cannot sponsor, open AI windows or invites, or issue grants (agents cannot self-grant)"
         case .unknownSponsorship(let s): return "no sponsorship issued by you matches '\(s)'"
+        case .unknownGroup(let s): return "no group matches '\(s)'"
+        case .unknownThread(let s): return "no thread matches '\(s)'"
+        case .badDuration: return "AI windows and invites last 1h, 8h or 24h"
+        case .badProviderURL(let u): return "not an http(s) endpoint: \(u)"
+        case .badSetting(let why): return why
+        case .stateFromNewerBuild(let f, let sup):
+            return "this state was written by a newer Eldr build (schema \(f); this build reads up to \(sup)). Refusing to open it so nothing is lost — run the newer build"
+        case .notAgentAccount: return "the agent bridge only runs on an AI account (`eldr-chat agent-mode on --owner HEX`)"
+        case .bridgeGated(let why): return "agent reply refused: \(why)"
         case .messageTooLarge: return "message is too large to send (over the chunk limit)"
         case .stateUnreadable:
             return "state.enc exists but cannot be decrypted/decoded — refusing to start (and "
@@ -53,7 +71,7 @@ public enum EldrClientError: Error, CustomStringConvertible {
 
 /// What the client surfaces to a front end (CLI, GTK, agent).
 public enum ClientEvent: Sendable {
-    case message(ContactRecord, ReceivedMessage)
+    case message(ContactRecord, ReceivedMessage, groupID: String? = nil)
     case request(nostrPubkeyHex: String, autoAccepted: Bool)
     case quarantined(wrapID: String, reason: String)
     case protocolViolation(senderIdentityHex: String, reason: String)
@@ -68,6 +86,18 @@ public enum ClientEvent: Sendable {
     /// This contact reset and wants a new session; it needs the user's OK (AC166).
     /// `autoAccepted` is true when `approveReconnect` was given beforehand.
     case reconnectRequest(ContactRecord, autoAccepted: Bool)
+    /// A group roster was created or changed (asserted by its sender).
+    case groupChanged(GroupRecord)
+    /// A window (conversation scope) or invite (thread scope) changed. `until` nil = ended.
+    case aiWindow(identityHex: String, conversationID: String, until: Int64?)
+    case aiInvite(identityHex: String, threadID: String, until: Int64?)
+    case threadCreated(ThreadRecord)
+    /// My AI posted (or failed: `error` set).
+    case myAI(conversationID: String, threadID: String?, error: String?)
+    case aiContextGrant(identityHex: String, conversationID: String, threadID: String?, axis: String, until: Int64?)
+    /// I @-mentioned one of my AIs where it isn't live (no window, not solo): offer a
+    /// private draft instead of posting (iOS decision #5).
+    case aiMentionChoice(conversationID: String, aiName: String)
 }
 
 public typealias TransportFactory = @Sendable () async throws -> any RelayTransport
@@ -128,6 +158,24 @@ public actor EldrClient {
     /// Identities refused by the auto-accept pin; their replayed messages never surface.
     private var rejectedIdentities: Set<String> = []
     private var pumpTask: Task<Void, Never>?
+    /// SPEC §13 enforcement (windows, invites, loop guard, standing grants). Its only
+    /// output path is `ClientAgentSink` → `post` (the recording guarantee).
+    public let engine: AgentEngine
+    let clock: any Clock
+    let sinkRef: ClientRef
+    /// In-flight AI turns (so `stop()` and tests can wait for them).
+    var aiTasks: [Task<Void, Never>] = []
+    /// Test seam: overrides the configured OpenAI-compatible provider.
+    var providerOverride: (any AgentProvider)?
+    /// Test seam: providers for extra AIs by id.
+    var aiOverrides: [String: any AgentProvider] = [:]
+    /// AI-context marks that arrived before their message (message id → author, value).
+    var pendingMarks: [String: (sender: String, value: Bool)] = [:]
+    /// My AIs @-mentioned by my last send where they weren't live (for the CLI, which has no event stream).
+    public internal(set) var lastMentionChoices: [String] = []
+    /// The live relay transport, for the status panel (observational only).
+    var relayTransport: (any RelayTransport)?
+    var eventSink: AsyncStream<ClientEvent>.Continuation?
 
     static let keysAccount = "keys"
     static let stateAccount = "state"
@@ -148,13 +196,16 @@ public actor EldrClient {
         try store.save(JSONEncoder().encode(keys), account: keysAccount)
         var st = ClientState()
         st.relays = relays
+        st.schema = ClientState.currentSchema
         try store.save(JSONEncoder().encode(st), account: stateAccount)
     }
 
     /// Opens an existing identity: takes the directory lock, re-verifies every stored
     /// contact binding OFFLINE, restores sessions + seen IDs. Does not touch the network
     /// beyond dialing the transport.
-    public init(store: FileIdentityStore, transport: TransportFactory) async throws {
+    public init(
+        store: FileIdentityStore, transport: TransportFactory, clock: any Clock = SystemClock()
+    ) async throws {
         lock = try DirectoryLock(directory: store.directory)
         guard let kd = store.load(account: Self.keysAccount) else { throw EldrClientError.notInitialized }
         let keys = try JSONDecoder().decode(ClientKeys.self, from: kd)
@@ -166,6 +217,10 @@ public actor EldrClient {
             guard let d = store.load(account: Self.stateAccount),
                 let decoded = try? JSONDecoder().decode(ClientState.self, from: d)
             else { throw EldrClientError.stateUnreadable }
+            let found = decoded.schema ?? 1
+            guard found <= ClientState.currentSchema else {
+                throw EldrClientError.stateFromNewerBuild(found: found, supported: ClientState.currentSchema)
+            }
             st = decoded
         }
         let kp = try NostrKeypair(privateKey: keys.nostrPrivateKey)
@@ -174,10 +229,11 @@ public actor EldrClient {
             try PrekeyManager(identity: identity, randomSource: SystemRandomSource(), state: $0)
         } ?? PrekeyManager(identity: identity, randomSource: SystemRandomSource(), oneTimeCount: 16)
         if try await pm.replenish(to: 16) { st.publishedBundleStale = true }
+        let liveTransport = try await transport()
         let m = try PQRCMessenger(
             identity: identity, nostrKeypair: kp, prekeyManager: pm,
             identityDH: try Curve25519.KeyAgreement.PrivateKey(rawRepresentation: keys.identityDH),
-            transports: [try await transport()], clock: SystemClock(),
+            transports: [liveTransport], clock: clock,
             randomSource: SystemRandomSource(), nonceSource: SystemNonceSource())
         // Offline restore: a contact whose stored binding no longer verifies is DROPPED
         // (fail-closed), never trusted.
@@ -194,12 +250,25 @@ public actor EldrClient {
         await m.seedProcessedWrapIDs(Set(st.seenWrapIDs))
         self.store = store
         self.messenger = m
+        self.relayTransport = liveTransport
         self.prekeyManager = pm
         self.identity = identity
         self.identityHex = identity.publicKeyData.hexString
         self.nostrPubkeyHex = kp.publicKeyHex
         self.state = st
+        self.clock = clock
+        let ref = ClientRef()
+        self.sinkRef = ref
+        self.engine = AgentEngine(
+            myIdentity: identity, clock: clock, sink: ClientAgentSink(ref: ref),
+            loopGuardLimit: st.settings?.loopGuardLimit ?? EldrClient.defaultLoopGuardLimit)
         try await persist()
+        // Wire the engine's sink and replay signed AI state at OPEN, not at start():
+        // one-shot CLI commands (ai-invite, thread send, ai-status) never call start(),
+        // and without this their AI turns were dropped and live invites looked absent
+        // (DEVIATIONS AC198).
+        await ref.set(self)
+        await replayAIState()
     }
 
     public func setAutoAccept(nostrPubkeyHex: String?, identityHex: String? = nil) {
@@ -238,12 +307,16 @@ public actor EldrClient {
     }
     private func republishDone() { republishing = false }
     private var republishing = false
+    private var stopped = false
+    private var bindingTask: Task<Void, Never>?
     static let otpTarget = 16
 
     // MARK: - Persistence
 
     /// Encrypted save of sessions, prekeys, contacts, requests and seen IDs.
     public func persist() async throws {
+        // After stop() the lock is released; a late background task must not write.
+        guard !stopped else { return }
         state.prekeys = await prekeyManager.snapshot()
         for i in state.contacts.indices {
             if let snap = await messenger.sessionSnapshot(peerIdentityHex: state.contacts[i].identityHex) {
@@ -253,6 +326,7 @@ public actor EldrClient {
         if state.seenWrapIDs.count > ClientState.maxSeen {
             state.seenWrapIDs.removeFirst(state.seenWrapIDs.count - ClientState.maxSeen)
         }
+        state.schema = ClientState.currentSchema
         try store.save(JSONEncoder().encode(state), account: Self.stateAccount)
     }
 
@@ -346,19 +420,37 @@ public actor EldrClient {
             text: text, sentAt: Int64(Date().timeIntervalSince1970), messageID: UUID().uuidString)
         let participant: ParticipantType = isAgent ? .agent : .human
         if isAgent { body.agentSponsorship = try liveSponsorship() }
-        let route = try await deliver(body, to: c, participant: participant)
-        appendHistory(HistoryEntry(
+        if participant == .human {
+            let ms = resolveMentions(in: text)
+            if !ms.isEmpty { body.mentions = ms }
+        }
+        var e = HistoryEntry(
             id: body.messageID ?? UUID().uuidString, peerIdentityHex: c.identityHex, outgoing: true,
-            text: text, sentAt: body.sentAt, agent: isAgent,
-            sponsorship: isAgent ? .sponsored(
-                sponsorIdentityHex: body.agentSponsorship!.enabledBy.hexString,
-                label: body.agentSponsorship!.label, activeUntil: body.agentSponsorship!.activeUntil) : .human))
+            text: text, sentAt: body.sentAt, agent: isAgent, sponsorship: .human)
+        if let s = body.agentSponsorship {
+            e.sponsorship = .sponsored(sponsorIdentityHex: s.enabledBy.hexString, label: s.label, activeUntil: s.activeUntil)
+        }
+        let route: DeliveryRoute
+        do {
+            route = try await deliver(body, to: c, participant: participant)
+        } catch {
+            // Keep a "Not sent" row so the user can retry it (iOS localStatus .failed).
+            e.failed = true
+            appendHistory(e)
+            try? await persist()
+            throw error
+        }
+        appendHistory(e)
         try await persist()
+        await afterMySend(text, conversationID: c.identityHex, threadID: nil)
         return route
     }
 
     /// Low-level delivery of one logical body (chunked if needed).
-    func deliver(_ body: MessageBody, to c: ContactRecord, participant: ParticipantType) async throws -> DeliveryRoute {
+    func deliver(
+        _ body: MessageBody, to c: ContactRecord, participant: ParticipantType,
+        aiWindow: AIWindowAnnouncement? = nil
+    ) async throws -> DeliveryRoute {
         if !(await messenger.hasSession(peerIdentityHex: c.identityHex)) {
             let (vc, bundle) = try await messenger.fetchVerifiedPeer(
                 nostrPubkeyHex: c.nostrPubkeyHex, timeout: .seconds(15))
@@ -369,7 +461,7 @@ public actor EldrClient {
             // single-envelope message rides it directly; an agent or chunked message
             // first opens the session with an empty opener (never rendered by this
             // client) so its label and chunks travel on ordinary ratchet messages.
-            if participant == .human,
+            if participant == .human, aiWindow == nil,
                 MessageChunker.split(body.text, budgetBytes: await messenger.chunkTextBudget()).count == 1
             {
                 let r = try await messenger.establishSession(with: vc, bundle: bundle, firstMessage: body)
@@ -382,7 +474,7 @@ public actor EldrClient {
         let parts = MessageChunker.split(body.text, budgetBytes: await messenger.chunkTextBudget())
         guard parts.count <= PQRCConstants.maxChunksPerMessage else { throw EldrClientError.messageTooLarge }
         if parts.count == 1 {
-            return try await messenger.send(body, to: c.identityHex, participantType: participant)
+            return try await messenger.send(body, to: c.identityHex, participantType: participant, aiWindow: aiWindow)
         }
         let id = UUID().uuidString
         let bodies = parts.enumerated().map { i, part -> MessageBody in
@@ -391,7 +483,7 @@ public actor EldrClient {
             b.chunk = MessageChunk(id: id, index: i, total: parts.count)
             return b
         }
-        return try await messenger.sendBatch(bodies, to: c.identityHex, participantType: participant)
+        return try await messenger.sendBatch(bodies, to: c.identityHex, participantType: participant, aiWindow: aiWindow)
     }
 
     // MARK: - Reconnect (AC166)
@@ -430,9 +522,11 @@ public actor EldrClient {
     public func start() async throws -> AsyncStream<ClientEvent> {
         precondition(!started, "start() once per client")
         started = true
+        await reapplyBlocks()
         let raw = try await messenger.start()
         await refreshBundleIfNeeded()
         let (stream, cont) = AsyncStream.makeStream(of: ClientEvent.self)
+        eventSink = cont
         pumpTask = Task { [weak self] in
             for await ev in raw {
                 guard let self else { break }
@@ -441,7 +535,7 @@ public actor EldrClient {
             cont.finish()
         }
         // Background binding refresh (after the offline re-verify done at launch).
-        Task { [weak self] in
+        bindingTask = Task { [weak self] in
             for ev in await self?.refreshBindings() ?? [] { cont.yield(ev) }
         }
         return stream
@@ -470,9 +564,12 @@ public actor EldrClient {
 
     /// Stops receiving, saves, and releases the state-directory lock.
     public func stop() async {
+        for t in aiTasks { await t.value }
+        bindingTask?.cancel()
         await messenger.stop()
         pumpTask?.cancel()
         try? await persist()
+        stopped = true
         lock.release()
     }
 
@@ -498,12 +595,27 @@ public actor EldrClient {
                 out.append(contentsOf: processControl(full))
                 let status = sponsorshipStatus(of: full)
                 let isControlOnly = full.body.text.isEmpty
+                if let mark = full.body.aiContextMark { applyContextMark(mark, from: msg.senderIdentityHex) }
+                let routed = routeGroup(full)
+                if let g = routed.changed { out.append(.groupChanged(g)) }
+                let conv = routed.groupID.map { UIConversation.group($0) } ?? c.identityHex
+                let ai = await receiveAI(full, conversationID: conv)
+                out.append(contentsOf: ai.events)
                 if !isControlOnly {
-                    appendHistory(HistoryEntry(
+                    var e = HistoryEntry(
                         id: whole.messageID ?? msg.wrapEventID, peerIdentityHex: c.identityHex,
                         outgoing: false, text: whole.text, sentAt: whole.sentAt,
-                        agent: msg.participantType == .agent, sponsorship: status))
-                    out.append(.message(c, full))
+                        agent: msg.participantType == .agent, sponsorship: status)
+                    e.groupID = routed.groupID
+                    e.threadID = ai.threadID
+                    e.aiAuthorizedUntil = ai.authorizedUntil
+                    e.aiContext = whole.aiContext == true ? true : nil
+                    e.coauthored = whole.coauthored == true && msg.participantType == .agent ? true : nil
+                    if whole.mentions?.contains(where: { $0.kind == "person" && $0.id == identityHex }) == true { e.mentionsMe = true }
+                    applyPendingMark(to: &e)
+                    appendHistory(e)
+                    out.append(.message(c, full, groupID: routed.groupID))
+                    scheduleMyAI(after: full, conversationID: conv, threadID: ai.threadID)
                 }
             }
         case .messageRequest(let sender, _):

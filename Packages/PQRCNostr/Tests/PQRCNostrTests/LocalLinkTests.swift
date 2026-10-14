@@ -295,6 +295,10 @@ struct LocalLinkTests {
             (try? WireJSON.decoder().decode(LinkPayload.self, from: $0))?.kind == .seal
         }
         #expect(sealsToMallory.isEmpty, "no message traffic may reach an unproven peer")
+        // Bounded poll: the forged proof's drop is async and flaked under parallel load.
+        for _ in 0..<100 where await alice.link.droppedPayloadCount == 0 {
+            try? await Task.sleep(for: .milliseconds(50))
+        }
         #expect(await alice.link.droppedPayloadCount > 0)
     }
 

@@ -114,6 +114,8 @@ Tests landed alongside the post-v1 features (DEVIATIONS A20–A36). The framewor
 
 ---
 
+> Hands-on owner pass for October 2026: [`guide/OWNER-TEST-PLAN.md`](guide/OWNER-TEST-PLAN.md).
+
 ## 14. Live bring-up & manual end-to-end test (phone ↔ Mac node ↔ LLM ↔ Xcode) + troubleshooting
 
 This section is the **manual runbook** for the ACP-router stack — the part the headless

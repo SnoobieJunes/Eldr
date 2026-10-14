@@ -17,7 +17,7 @@ private func tempDir() -> URL {
 private actor Events {
     var all: [ClientEvent] = []
     func attach(_ s: AsyncStream<ClientEvent>) { Task { for await e in s { self.all.append(e) } } }
-    var texts: [String] { all.compactMap { if case .message(_, let m) = $0 { return m.body.text } else { return nil } } }
+    var texts: [String] { all.compactMap { if case .message(_, let m, _) = $0 { return m.body.text } else { return nil } } }
     var notes: [String] { all.compactMap { if case .sponsorship(let n) = $0 { return n } else { return nil } } }
     func wait(_ cond: @Sendable ([ClientEvent]) -> Bool, timeout: Double = 10) async -> Bool {
         let end = Date().addingTimeInterval(timeout)

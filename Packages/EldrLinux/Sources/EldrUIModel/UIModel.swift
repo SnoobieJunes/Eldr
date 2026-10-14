@@ -12,6 +12,8 @@ public struct ConversationSummary: Equatable, Sendable {
     public var preview: String
     public var lastAt: Int64
     public var isAgent: Bool
+    public var pinned: Bool = false
+    public var unread: Int = 0
 }
 
 public struct UISnapshot: Sendable {
@@ -26,6 +28,32 @@ public struct UISnapshot: Sendable {
     public var issued: [IssuedSponsorship]
     /// Contacts whose reset (last-resort re-handshake) is waiting for my OK (AC166).
     public var pendingReconnects: Set<String> = []
+    public var groups: [GroupRecord] = []
+    public var threads: [ThreadRecord] = []
+    /// conversation or `thread:<id>` → (identity → until) of every live AI there.
+    public var aiActive: [String: [String: Int64]] = [:]
+    public var myWindowConversation: String?
+    public var settings = ClientSettings()
+    public var provider: AIProviderConfig?
+    public var loopGuarded: Set<String> = []
+    /// conversation id → unread count (WS-N7a).
+    public var unread: [String: Int] = [:]
+    /// My AIs (primary first): name, kind, autonomous.
+    public var ais: [String] = []
+    public var contextModes: [String: String] = [:]
+    public var critique: Set<String> = []
+    public var solo: Set<String> = []
+
+    public static let threadPrefix = "thread:"
+    public static func threadID(_ conversationID: String) -> String? {
+        conversationID.hasPrefix(threadPrefix) ? String(conversationID.dropFirst(threadPrefix.count)) : nil
+    }
+
+    /// Conversation ids: a contact's identity hex, or `group:<groupID>`.
+    public static let groupPrefix = "group:"
+    public static func groupID(_ conversationID: String) -> String? {
+        conversationID.hasPrefix(groupPrefix) ? String(conversationID.dropFirst(groupPrefix.count)) : nil
+    }
 
     public static func capture(_ c: EldrClient) async -> UISnapshot {
         let isAgent = await c.isAgent
@@ -42,7 +70,39 @@ public struct UISnapshot: Sendable {
             me: c.identityHex, npub: await c.npub, link: await c.pairingLink.uri, isAgent: isAgent,
             agentBanner: banner, contacts: await c.contacts, requests: await c.requests,
             history: await c.history, issued: await c.issuedSponsorships,
-            pendingReconnects: Set(await c.pendingReconnects()))
+            pendingReconnects: Set(await c.pendingReconnects()), groups: await c.groups,
+            threads: await c.threads, aiActive: await aiActive(c), myWindowConversation: await c.myWindowConversation,
+            settings: await c.settings, provider: await c.providerConfig, loopGuarded: await guarded(c),
+            unread: await unreadCounts(c), ais: await c.myAIs().map(\.name), contextModes: await c.allContextModes,
+            critique: await c.critiqueConversations,
+            solo: Set(await c.groups.map { UIConversation.group($0.groupID) }.asyncFilter { await c.isSolo($0) }))
+    }
+
+    static func unreadCounts(_ c: EldrClient) async -> [String: Int] {
+        var out: [String: Int] = [:]
+        for k in await c.contacts.map(\.identityHex) + (await c.groups).map({ UIConversation.group($0.groupID) }) {
+            let n = await c.unreadCount(k)
+            if n > 0 { out[k] = n }
+        }
+        return out
+    }
+
+    static func aiActive(_ c: EldrClient) async -> [String: [String: Int64]] {
+        var out: [String: [String: Int64]] = [:]
+        for k in await c.contacts.map(\.identityHex) + (await c.groups).map({ UIConversation.group($0.groupID) }) {
+            let m = await c.activeWindows(in: k)
+            if !m.isEmpty { out[k] = m }
+        }
+        for t in await c.threads {
+            let m = await c.activeInvites(thread: t.threadID)
+            if !m.isEmpty { out[threadPrefix + t.threadID] = m }
+        }
+        return out
+    }
+    static func guarded(_ c: EldrClient) async -> Set<String> {
+        var s: Set<String> = []
+        for t in await c.threads where await c.loopGuardActive(thread: t.threadID) { s.insert(threadPrefix + t.threadID) }
+        return s
     }
 
     public func name(of identityHex: String) -> String? {
@@ -52,19 +112,46 @@ public struct UISnapshot: Sendable {
 
     public func conversations() -> [ConversationSummary] {
         var last: [String: HistoryEntry] = [:]
-        for h in history { last[h.peerIdentityHex] = h }
-        return contacts.map { c in
+        var lastGroup: [String: HistoryEntry] = [:]
+        var lastThread: [String: HistoryEntry] = [:]
+        for h in history {
+            if let t = h.threadID { lastThread[t] = h } else if let g = h.groupID { lastGroup[g] = h } else { last[h.peerIdentityHex] = h }
+        }
+        let threadRows = threads.map { t -> ConversationSummary in
+            let l = lastThread[t.threadID]
+            let parent = Self.groupID(t.conversationID).flatMap { g in groups.first { $0.groupID == g }?.name }
+                ?? name(of: t.conversationID) ?? "?"
+            return ConversationSummary(
+                identityHex: Self.threadPrefix + t.threadID, title: "🧵 " + UIFormat.sanitizeLine(t.title) + " · in " + UIFormat.sanitizeLine(parent),
+                preview: l.map { UIFormat.preview(($0.outgoing ? ($0.mine == true ? "\($0.agentName ?? "Your AI"): " : "You: ") : "\(name(of: $0.peerIdentityHex) ?? "?")\($0.agent ? "'s AI" : ""): ") + $0.text) } ?? "",
+                lastAt: l?.sentAt ?? 0, isAgent: false)
+        }
+        let groupRows = groups.map { g -> ConversationSummary in
+            let l = lastGroup[g.groupID]
+            return ConversationSummary(
+                identityHex: Self.groupPrefix + g.groupID, title: "👥 " + UIFormat.sanitizeLine(g.name),
+                preview: l.map { UIFormat.preview(($0.outgoing ? ($0.mine == true ? "\($0.agentName ?? "Your AI"): " : "You: ") : "\(name(of: $0.peerIdentityHex) ?? "?")\($0.agent ? "'s AI" : ""): ") + $0.text) }
+                    ?? "\(g.members.count) members",
+                lastAt: l?.sentAt ?? 0, isAgent: false, unread: unread[Self.groupPrefix + g.groupID] ?? 0)
+        }
+        return (threadRows + groupRows + contacts.map { c in
             let l = last[c.identityHex]
             return ConversationSummary(
                 identityHex: c.identityHex, title: UIFormat.title(c),
                 preview: l.map { UIFormat.preview(($0.outgoing ? "You: " : "") + $0.text) } ?? "No messages yet",
                 lastAt: l?.sentAt ?? Int64(c.addedAt.timeIntervalSince1970),
-                isAgent: history.last { $0.peerIdentityHex == c.identityHex && !$0.outgoing }?.agent ?? false)
-        }.sorted { $0.lastAt != $1.lastAt ? $0.lastAt > $1.lastAt : $0.title < $1.title }
+                isAgent: history.last { $0.peerIdentityHex == c.identityHex && !$0.outgoing && $0.groupID == nil }?.agent ?? false,
+                pinned: c.pinned == true, unread: unread[c.identityHex] ?? 0)
+        }).sorted {
+            if $0.pinned != $1.pinned { return $0.pinned }
+            return $0.lastAt != $1.lastAt ? $0.lastAt > $1.lastAt : $0.title < $1.title
+        }
     }
 
     public func messages(with identityHex: String) -> [HistoryEntry] {
-        history.filter { $0.peerIdentityHex == identityHex }
+        if let t = Self.threadID(identityHex) { return history.filter { $0.threadID == t } }
+        if let g = Self.groupID(identityHex) { return history.filter { $0.groupID == g && $0.threadID == nil } }
+        return history.filter { $0.peerIdentityHex == identityHex && $0.groupID == nil && $0.threadID == nil }
     }
 
     /// Live (unrevoked, unexpired) sponsorships I issued to this contact.
@@ -73,7 +160,31 @@ public struct UISnapshot: Sendable {
     }
 
     /// The header line for a conversation.
+    /// "🤖 alice's AI on until 15:00 · your AI on until …" for the conversation/thread.
+    public func aiIndicator(for id: String, now: Int64 = EldrClient.nowSeconds) -> String? {
+        var parts: [String] = []
+        for (who, until) in (aiActive[id] ?? [:]).sorted(by: { $0.key < $1.key }) where until > now {
+            parts.append("🤖 \(who == me ? "your" : (name(of: who) ?? String(who.prefix(8))) + "'s") AI on until \(UIFormat.date(until))")
+        }
+        if loopGuarded.contains(id) { parts.append("⏸ AIs paused by the loop guard until a human posts") }
+        return parts.isEmpty ? nil : parts.joined(separator: " · ")
+    }
+
     public func header(for identityHex: String, now: Int64 = EldrClient.nowSeconds) -> String {
+        let base = baseHeader(for: identityHex, now: now)
+        return aiIndicator(for: identityHex, now: now).map { base + "\n" + $0 } ?? base
+    }
+
+    func baseHeader(for identityHex: String, now: Int64) -> String {
+        if let tid = Self.threadID(identityHex) {
+            guard let t = threads.first(where: { $0.threadID == tid }) else { return "" }
+            return "🧵 \(UIFormat.sanitizeLine(t.title)) · thread in \(Self.groupID(t.conversationID).flatMap { g in groups.first { $0.groupID == g }?.name } ?? name(of: t.conversationID) ?? "?")"
+        }
+        if let gid = Self.groupID(identityHex) {
+            guard let g = groups.first(where: { $0.groupID == gid }) else { return "" }
+            let names = g.members.map { name(of: $0) ?? String($0.prefix(8)) + "…" }
+            return "👥 \(UIFormat.sanitizeLine(g.name)) · \(names.joined(separator: ", ")) · roster asserted by \(name(of: g.assertedBy) ?? String(g.assertedBy.prefix(8))) (rev \(g.revision))"
+        }
         guard let c = contacts.first(where: { $0.identityHex == identityHex }) else { return "" }
         var parts = [UIFormat.title(c), "id \(identityHex.prefix(12))…"]
         if let lastIn = history.last(where: { $0.peerIdentityHex == identityHex && !$0.outgoing }), lastIn.agent {
@@ -89,12 +200,33 @@ public struct UISnapshot: Sendable {
 public enum UIFormat {
     public static func title(_ c: ContactRecord) -> String {
         sanitizeLine(c.name ?? Bech32.npub(c.nostrPubkeyHex).prefix(16) + "…")
+            + (c.pinned == true ? " 📌" : "") + (c.verified == true ? " ✓" : "") + (c.blocked == true ? " ⛔" : "")
     }
 
     public static func date(_ unix: Int64) -> String {
         let f = DateFormatter()
         f.dateFormat = "MMM d, HH:mm"
         return f.string(from: Date(timeIntervalSince1970: TimeInterval(unix)))
+    }
+
+    /// Badge for a history row: a human's own AI (window/invite) reads differently from an
+    /// AI account (sponsorship), and an agent row with neither is flagged.
+    public static func rowBadge(_ e: HistoryEntry, names: (String) -> String?) -> (text: String, warn: Bool) {
+        if e.failed == true { return ("✗ Not sent", true) }
+        if e.mentionsMe == true, !e.agent { return ("@ mentions you", false) }
+        guard e.agent || e.mine == true else { return ("", false) }
+        if e.coauthored == true {
+            return (e.outgoing ? "🤖 made with you & your AI" : "🤖 made with \(names(e.peerIdentityHex) ?? "them") & their AI", false)
+        }
+        if e.mine == true { return ("🤖 " + (e.agentName.map(sanitizeLine) ?? "your AI"), false) }
+        if let until = e.aiAuthorizedUntil {
+            return ("🤖 \(names(e.peerIdentityHex) ?? "their")'s AI · on until \(date(until))", false)
+        }
+        switch e.sponsorship {
+        case .sponsored: return (badge(e.sponsorship, names: names), false)
+        case .invalid, .unsponsored: return (badge(e.sponsorship, names: names), true)
+        case .human: return ("AI · not authorized by a window, invite or sponsorship", true)
+        }
     }
 
     public static func badge(_ s: SponsorshipStatus, names: (String) -> String?) -> String {
@@ -237,4 +369,17 @@ public enum UIFormat {
         }
         return s
     }
+}
+
+extension Array {
+    func asyncFilter(_ f: (Element) async -> Bool) async -> [Element] {
+        var out: [Element] = []
+        for e in self where await f(e) { out.append(e) }
+        return out
+    }
+}
+
+public extension ConversationSummary {
+    /// Sidebar title with the unread count (iOS badge).
+    var displayTitle: String { unread > 0 ? "\(title)  (\(unread))" : title }
 }

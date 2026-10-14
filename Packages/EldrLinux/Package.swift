@@ -18,16 +18,18 @@ var products: [Product] = [
 ]
 var extraTargets: [Target] = [
     // GTK-free presentation logic (tested everywhere).
-    .target(name: "EldrUIModel", dependencies: ["EldrClientCore", "PQRCCore", "PQRCNostr"],
+    .target(name: "EldrUIModel", dependencies: ["EldrClientCore", "PQRCCore", "PQRCNostr", .product(name: "PQRCAgent", package: "PQRCAgent")],
             swiftSettings: [.swiftLanguageMode(.v6)]),
     .testTarget(name: "EldrUIModelTests",
-                dependencies: ["EldrUIModel", "EldrClientCore", "PQRCCore", "PQRCNostr"],
+                dependencies: ["EldrUIModel", "EldrClientCore", "PQRCCore", "PQRCNostr", .product(name: "PQRCAgent", package: "PQRCAgent")],
                 swiftSettings: [.swiftLanguageMode(.v6)]),
 ]
 #if os(Linux)
 // Milestone 3: the native GTK 4 desktop app. GTK's C API is imported directly through a
 // system-library module (no third-party bindings); `GtkKit` is our own thin wrapper.
 products.append(.executable(name: "eldr-gtk", targets: ["eldr-gtk"]))
+// WS-N10: GtkKit is also a library product so the AGPL HuginnLinux package can reuse it.
+products.append(.library(name: "GtkKit", targets: ["GtkKit"]))
 extraTargets += [
     .systemLibrary(name: "CGtk4", pkgConfig: "gtk4", providers: [.apt(["libgtk-4-dev"])]),
     .target(name: "GtkKit", dependencies: ["CGtk4"], swiftSettings: [.swiftLanguageMode(.v5)]),
@@ -44,6 +46,7 @@ let package = Package(
     dependencies: [
         .package(path: "../PQRCCore"),
         .package(path: "../PQRCNostr"),
+        .package(path: "../PQRCAgent"),
         .package(path: "../EldrKeystore"),
         .package(url: "https://github.com/apple/swift-crypto.git", from: "4.3.1"),
     ],
@@ -53,6 +56,7 @@ let package = Package(
             dependencies: [
                 "PQRCCore",
                 "PQRCNostr",
+                .product(name: "PQRCAgent", package: "PQRCAgent"),
                 .product(name: "EldrKeystore", package: "EldrKeystore"),
                 .product(name: "Crypto", package: "swift-crypto"),
             ],
@@ -60,13 +64,14 @@ let package = Package(
         ),
         .executableTarget(
             name: "eldr-chat",
-            dependencies: ["EldrClientCore", "PQRCCore", "PQRCNostr"],
+            dependencies: ["EldrClientCore", "PQRCCore", "PQRCNostr", .product(name: "PQRCAgent", package: "PQRCAgent")],
             swiftSettings: [.swiftLanguageMode(.v6)]
         ),
         .testTarget(
             name: "EldrClientCoreTests",
             dependencies: [
-                "EldrClientCore", "PQRCCore", "PQRCNostr",
+                "EldrClientCore", "EldrUIModel", "PQRCCore", "PQRCNostr",
+                .product(name: "PQRCAgent", package: "PQRCAgent"),
                 .product(name: "EldrKeystore", package: "EldrKeystore"),
             ],
             swiftSettings: [.swiftLanguageMode(.v6)]

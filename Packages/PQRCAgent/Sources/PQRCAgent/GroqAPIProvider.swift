@@ -1,5 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 import Foundation
+#if canImport(FoundationNetworking)
+import FoundationNetworking
+#endif
 
 /// Remote inference via Groq (APP-SPEC §9, D3) — OpenAI-compatible, very fast
 /// inference of open models (Llama/Qwen/GPT-OSS), no-training and no-retention by

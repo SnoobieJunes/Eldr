@@ -89,35 +89,11 @@ jobs:
       - uses: actions/checkout@v4
       - name: GTK 4 headers for eldr-gtk (AC164)
         run: apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq libgtk-4-dev pkg-config
-      - name: Build the Linux-portable packages
-        run: |
-          set -e
-          for p in PQRCCore PQRCNostr PQRCACP PQRCMCP; do
-            echo "::group::build $p"
-            swift build --package-path "Packages/$p"
-            echo "::endgroup::"
-          done
-          # EldrNode: the reusable serve loop AND the eldr-node daemon (identity + keystore
-          # + SwiftNIO relay transport + the WS-L4 agent host) — the whole node compiles
-          # on Linux.
-          swift build --package-path Packages/EldrNode --product EldrNodeCore
-          swift build --package-path Packages/EldrNode --product eldr-node
-      - name: Linux-verified tests (keystore + NIO WebSocket + ACP agent host)
-        run: |
-          set -e
-          swift test --package-path Packages/EldrNode --filter LinuxKeystore
-          swift test --package-path Packages/PQRCNostr --filter connectsAndEchoesOverLoopback
-          # WS-L4: the whole agent tool-host suite runs on Linux (PTY + shell + spawn +
-          # runner E2E). Live goose/hermes/cloud-CLI handshakes self-skip when the
-          # binaries aren't installed — absent tools skip, they never pass vacuously.
-          swift test --package-path Packages/PQRCACP
-          # Linux client (AC156–AC161): shared keystore, client engine, node session
-          # persistence, and the snapshot-aliasing regression that only bites on Linux.
-          swift test --package-path Packages/EldrKeystore
-          swift test --package-path Packages/EldrLinux
-          swift build --package-path Packages/EldrLinux --product eldr-gtk
-          swift test --package-path Packages/EldrNode --filter NodeSessionStore
-          swift test --package-path Packages/PQRCCore --filter SnapshotAliasing
+      - name: All packages' tests + every Linux executable (scripts/linux-ci.sh, AC172)
+        # Same gate run locally before every push: all ten packages' FULL suites
+        # (protocol regressions surface on Linux too) plus eldr-chat, eldr-gtk,
+        # eldr-node, eldr-acp, eldrctl and pqrc-relay builds. Non-zero ⇒ red.
+        run: scripts/linux-ci.sh
 
   app-build:
     name: xcodebuild build (iOS + Mac Catalyst — fast gate)

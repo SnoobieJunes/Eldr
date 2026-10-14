@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 import Foundation
+#if canImport(OSLog)
 import OSLog
+#endif
 import PQRCCore
 import PQRCNostr
 
