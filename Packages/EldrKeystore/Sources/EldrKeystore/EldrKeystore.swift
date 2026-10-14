@@ -117,6 +117,7 @@ public enum LinuxKeystoreError: Error, CustomStringConvertible {
     case noPassphrase(KeystoreProfile)
     case corruptMasterWrap
     case writeFailed(String)
+    case passphraseFileTooOpen(String)
 
     public var description: String {
         switch self {
@@ -134,6 +135,9 @@ public enum LinuxKeystoreError: Error, CustomStringConvertible {
                 + "keystore is corrupt. Refusing to proceed (fail-closed)."
         case .writeFailed(let path):
             return "keystore: could not write keystore file \(path)."
+        case .passphraseFileTooOpen(let path):
+            return "keystore: passphrase file \(path) is readable by other users. "
+                + "Run `chmod 600 \(path)` (fail-closed, like ssh with a private key)."
         }
     }
 }
@@ -301,6 +305,14 @@ private func resolveMasterKey(
 private func obtainPassphrase(_ env: [String: String], _ profile: KeystoreProfile) throws -> (passphrase: String, typed: Bool) {
     if let p = env[profile.passphraseEnv], !p.isEmpty {
         return (p, false)
+    }
+    if let path = env[profile.passphraseFileEnv], !path.isEmpty {
+        // AC215: a group/world-readable passphrase file hands every local user the
+        // master key's only protection. Refuse it rather than use it silently.
+        var st = stat()
+        if stat(path, &st) == 0, st.st_mode & 0o077 != 0 {
+            throw LinuxKeystoreError.passphraseFileTooOpen(path)
+        }
     }
     if let path = env[profile.passphraseFileEnv], !path.isEmpty,
         let data = try? Data(contentsOf: URL(fileURLWithPath: path)),
