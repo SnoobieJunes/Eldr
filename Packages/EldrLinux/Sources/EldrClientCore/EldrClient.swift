@@ -167,6 +167,8 @@ public actor EldrClient {
     let sinkRef: ClientRef
     /// In-flight AI turns (so `stop()` and tests can wait for them).
     var aiTasks: [Task<Void, Never>] = []
+    /// Audit-2 L1: label-independent cap on my AI's AUTONOMOUS turns per scope.
+    var autoTurnLimiter = AutoTurnLimiter()
     /// Test seam: overrides the configured OpenAI-compatible provider.
     var providerOverride: (any AgentProvider)?
     /// Test seam: providers for extra AIs by id.
@@ -335,6 +337,7 @@ public actor EldrClient {
     private var stopped = false
     private var bindingTask: Task<Void, Never>?
     static let otpTarget = 16
+    static let maxRequests = 32
 
     // MARK: - Persistence
 
@@ -602,7 +605,7 @@ public actor EldrClient {
         lock.release()
     }
 
-    private func handle(_ ev: MessengerEvent) async -> [ClientEvent] {
+    func handle(_ ev: MessengerEvent) async -> [ClientEvent] {
         var out: [ClientEvent] = []
         switch ev {
         case .message(let msg):
@@ -669,6 +672,13 @@ public actor EldrClient {
             } else {
                 state.requests.append(
                     RequestRecord(nostrPubkeyHex: sender, firstSeen: now, lastSeen: now, count: 1))
+                // Audit-2 R1: a flood of strangers must not grow persisted state without
+                // bound. The messenger holds envelopes for only the newest 32 senders, so
+                // older request records could never be accepted anyway.
+                if state.requests.count > Self.maxRequests {
+                    state.requests.sort { $0.lastSeen < $1.lastSeen }
+                    state.requests.removeFirst(state.requests.count - Self.maxRequests)
+                }
             }
             var accepted = false
             if sender == autoAcceptNostrHex,

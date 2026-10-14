@@ -3746,7 +3746,11 @@ actor PersonaRuntime {
         }
 
         // Thread bookkeeping (D7).
-        if let create = body.threadCreate {
+        // Audit-2 T1: adopt a thread only from its creator, and never move an existing
+        // thread to another conversation or rename it (matches Linux receiveAI).
+        if let create = body.threadCreate, create.createdBy == senderHex,
+            threadConversations[create.threadID] == nil
+        {
             threadConversations[create.threadID] = conversationID
             threadTitles[create.threadID] = create.title
             persistThread(create.threadID)
