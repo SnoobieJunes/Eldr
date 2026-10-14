@@ -200,10 +200,11 @@ public func upgradeKeystoreToTPM(
 
 /// What protects a keystore directory, without unlocking it (for `keystore status`).
 public enum KeystoreProtection: String, Sendable {
-    case tpm, tpmAndPassphrase, passphraseOnly, uninitialized
+    case tpm, tpmAndPassphrase, securityKey, securityKeyAndPassphrase, passphraseOnly, uninitialized
 
     public static func inspect(directory dir: URL) -> KeystoreProtection {
         if let rec = try? TPMMaster.read(dir) { return rec.passphraseSalt == nil ? .tpm : .tpmAndPassphrase }
+        if let rec = try? FIDOMaster.read(dir) { return rec.passphraseSalt == nil ? .securityKey : .securityKeyAndPassphrase }
         if FileManager.default.fileExists(atPath: dir.appendingPathComponent("master.wrap").path) { return .passphraseOnly }
         return .uninitialized
     }

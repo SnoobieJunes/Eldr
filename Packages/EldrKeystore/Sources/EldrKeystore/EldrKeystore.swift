@@ -95,9 +95,14 @@ public enum KeystorePosture: String, Sendable {
     case tpmWrapped
     /// TPM-wrapped AND passphrase-protected: both are required to unlock.
     case tpmWrappedWithPassphrase
+    /// Master key wrapped under a FIDO2 security key's hmac-secret (AC224).
+    case securityKey
+    /// Security key AND passphrase: both required.
+    case securityKeyWithPassphrase
 
     public var isHardwareBacked: Bool {
         self == .tpmSealed || self == .tpmWrapped || self == .tpmWrappedWithPassphrase
+            || self == .securityKey || self == .securityKeyWithPassphrase
     }
 
     /// Short label for status bars / `keystore status`.
@@ -109,6 +114,8 @@ public enum KeystorePosture: String, Sendable {
         case .passphraseOnDisk: return "passphrase file only ⚠"
         case .tpmWrapped: return "TPM"
         case .tpmWrappedWithPassphrase: return "TPM + passphrase"
+        case .securityKey: return "security key"
+        case .securityKeyWithPassphrase: return "security key + passphrase"
         }
     }
 
@@ -132,6 +139,10 @@ public enum KeystorePosture: String, Sendable {
             return "keystore: master key wrapped by this machine's TPM — a copied disk cannot open it."
         case .tpmWrappedWithPassphrase:
             return "keystore: master key wrapped by this machine's TPM AND your passphrase — both required."
+        case .securityKey:
+            return "keystore: master key wrapped by your FIDO2 security key — a copied disk cannot open it without the key."
+        case .securityKeyWithPassphrase:
+            return "keystore: master key wrapped by your FIDO2 security key AND your passphrase — both required."
         }
     }
 }
@@ -288,12 +299,14 @@ public func makeLinuxKeystore(
     profile: KeystoreProfile,
     environment: [String: String] = ProcessInfo.processInfo.environment,
     tpmPresent: () -> Bool = defaultTpmPresent,
-    tpm: (any TPMSealer)? = nil
+    tpm: (any TPMSealer)? = nil,
+    fido: (any FIDOAuthenticator)? = nil
 ) throws -> (store: FileIdentityStore, posture: KeystorePosture) {
     try FileIdentityStore.ensureDirectory(dir)
     let sealer = tpm ?? defaultTPMSealer(environment: environment, tpmPresent: tpmPresent)
     let (masterKey, posture) = try resolveMasterKey(
-        directory: dir, profile: profile, environment: environment, tpmPresent: tpmPresent, tpm: sealer)
+        directory: dir, profile: profile, environment: environment, tpmPresent: tpmPresent, tpm: sealer,
+        fido: fido ?? defaultFIDOAuthenticator(environment: environment))
     return (FileIdentityStore(directory: dir, masterKey: masterKey, profile: profile), posture)
 }
 
@@ -308,7 +321,7 @@ public func defaultTpmPresent() -> Bool {
 /// unused (invariant 10); else the scrypt-passphrase rung.
 private func resolveMasterKey(
     directory: URL, profile: KeystoreProfile, environment env: [String: String], tpmPresent: () -> Bool,
-    tpm: (any TPMSealer)?
+    tpm: (any TPMSealer)?, fido: (any FIDOAuthenticator)?
 ) throws -> (SymmetricKey, KeystorePosture) {
     // Rung 1 — TPM via systemd-creds: the plaintext key sits in $CREDENTIALS_DIRECTORY,
     // unsealed by systemd from a TPM-sealed credential. No TPM code in this process.
@@ -331,6 +344,14 @@ private func resolveMasterKey(
         if rec.passphraseSalt != nil { pass = try obtainPassphrase(env, profile).passphrase }
         let key = try TPMMaster.open(rec, tpm: tpm, passphrase: pass)
         return (key, pass == nil ? .tpmWrapped : .tpmWrappedWithPassphrase)
+    }
+    // Rung 1c — FIDO2 security-key wrap (AC224). Authoritative and fail-closed like master.tpm.
+    if let rec = try FIDOMaster.read(directory) {
+        guard let fido else { throw FIDOKeystoreError.unavailable("this keystore needs a FIDO2 security key (libfido2)") }
+        var pass: String?
+        if rec.passphraseSalt != nil { pass = try obtainPassphrase(env, profile).passphrase }
+        let key = try FIDOMaster.open(rec, fido: fido, passphrase: pass)
+        return (key, pass == nil ? .securityKey : .securityKeyWithPassphrase)
     }
     // First run on a host with a usable TPM: create a TPM-wrapped keystore. A passphrase from
     // env/file (never prompted here) is layered on top when given.

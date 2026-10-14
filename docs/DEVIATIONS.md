@@ -1653,3 +1653,6 @@ New keystores: >=12 chars, >=6 distinct, not on common list. Existing keystores 
 
 ## AC223 — ACP tools never follow symlinks (audit decision 5)
 Lexical jail + lstat every component; all tool I/O via openat walk with O_NOFOLLOW, regular files only, writes refuse nlink>1. Closes TOCTOU for agent tools (swap test). Client-delegated fs/* still pre-check only (residual).
+
+## AC224 — Optional FIDO2 security-key wrap factor
+For hosts without a TPM: `eldr-chat keystore upgrade --security-key [--keep-passphrase]` wraps the master key under KEK = HKDF(hmac-secret(salt) || scryptKEK?) in `master.fido`; authoritative and fail-closed (no fallback). libfido2 dlopen'd (CEldrFIDO, prototypes declared locally — no headers, no Swift deps). Env: ELDR_FIDO_DEVICE, ELDR_FIDO_PIN. Proven: mock-key tests (other key refused, both factors required, failed upgrade leaves keystore intact). Unverified: real hardware, PIN/UV flows.
