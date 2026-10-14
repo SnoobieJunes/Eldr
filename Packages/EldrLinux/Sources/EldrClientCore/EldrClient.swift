@@ -31,6 +31,8 @@ public enum EldrClientError: Error, CustomStringConvertible {
     case badDuration
     case badProviderURL(String)
     case badSetting(String)
+    case notAgentAccount
+    case bridgeGated(String)
 
     public var description: String {
         switch self {
@@ -52,6 +54,8 @@ public enum EldrClientError: Error, CustomStringConvertible {
         case .badDuration: return "AI windows and invites last 1h, 8h or 24h"
         case .badProviderURL(let u): return "not an http(s) endpoint: \(u)"
         case .badSetting(let why): return why
+        case .notAgentAccount: return "the agent bridge only runs on an AI account (`eldr-chat agent-mode on --owner HEX`)"
+        case .bridgeGated(let why): return "agent reply refused: \(why)"
         case .messageTooLarge: return "message is too large to send (over the chunk limit)"
         case .stateUnreadable:
             return "state.enc exists but cannot be decrypted/decoded — refusing to start (and "
@@ -235,7 +239,7 @@ public actor EldrClient {
         self.sinkRef = ref
         self.engine = AgentEngine(
             myIdentity: identity, clock: clock, sink: ClientAgentSink(ref: ref),
-            loopGuardLimit: st.settings?.loopGuardLimit ?? PQRCConstants.agentLoopGuardLimit)
+            loopGuardLimit: st.settings?.loopGuardLimit ?? EldrClient.defaultLoopGuardLimit)
         try await persist()
     }
 

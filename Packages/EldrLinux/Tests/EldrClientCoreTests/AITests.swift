@@ -211,6 +211,50 @@ struct AITests {
         await #expect(throws: EldrClientError.self) { try await b.client.issueTownGrant(to: "owner", planes: [.wall], days: 1) }
     }
 
+    @Test func externalAgentBridge_gatesOnSponsorshipOwnerAndLoopGuard() async throws {
+        let relay = LocalRelaySimulator()
+        let a = try await node(relay), b = try await node(relay), c = try await node(relay)
+        try await pair(a, b, "owner", "eldr")
+        try await pair(c, b, "carol", "eldr")
+        // Human account: the bridge refuses outright.
+        await #expect(throws: EldrClientError.self) { try await b.client.bridgeReply("x", to: "owner", thread: nil) }
+        try await b.client.setAgentMode(true, ownerIdentityHex: a.client.identityHex)
+        let ctx0 = await b.client.bridgeContext(conversationID: a.client.identityHex, threadID: nil)
+        #expect(ctx0.refusal != nil && ctx0.ownerPresent)
+        await #expect(throws: EldrClientError.self) { try await b.client.bridgeReply("unsponsored", to: "owner", thread: nil) }
+
+        _ = try await a.client.sponsor("eldr", days: 1, label: "ELDR")
+        #expect(await b.log.until { _ in (try? await b.client.liveSponsorship()) != nil })
+        let t = try await a.client.createThread(in: "eldr", title: "plan")
+        #expect(await b.log.until { _ in await b.client.threads.contains { $0.threadID == t.threadID } })
+        let ctx = await b.client.bridgeContext(conversationID: a.client.identityHex, threadID: t.threadID)
+        #expect(ctx.refusal == nil && ctx.threadTitle == "plan" && ctx.sponsoredUntil != nil)
+
+        // Default limit is 50 (iOS parity): seven consecutive agent turns are fine.
+        #expect(EldrClient.defaultLoopGuardLimit == 50)
+        for i in 0..<7 { try await b.client.bridgeReply("turn \(i)", to: nil, thread: "plan") }
+        #expect(await a.log.until { await $0.texts(agent: true).contains("turn 6") })
+        #expect(await a.client.threadHistory(t.threadID).filter { $0.agent }.count == 7)
+
+        // Tight limit: the bridge stops at the guard until a human posts.
+        try await b.client.updateSettings(ClientSettings(loopGuardLimit: 8))
+        try await b.client.bridgeReply("turn 7", to: nil, thread: "plan")
+        await #expect(throws: EldrClientError.self) { try await b.client.bridgeReply("turn 8", to: nil, thread: "plan") }
+        try await a.client.say("human again", in: "", thread: t.threadID)
+        #expect(await b.log.until { await $0.texts().contains("human again") })
+        try await b.client.bridgeReply("after human", to: nil, thread: "plan")
+
+        // Owner absent: no replies into Carol's 1:1.
+        let cc = await b.client.bridgeContext(conversationID: c.client.identityHex, threadID: nil)
+        #expect(cc.ownerPresent == false && cc.refusal != nil)
+        await #expect(throws: EldrClientError.self) { try await b.client.bridgeReply("hi carol", to: "carol", thread: nil) }
+
+        // Revocation stops the bridge.
+        _ = try await a.client.revokeSponsorship("eldr")
+        #expect(await b.log.until { _ in (try? await b.client.liveSponsorship()) == nil })
+        await #expect(throws: EldrClientError.self) { try await b.client.bridgeReply("after revoke", to: nil, thread: "plan") }
+    }
+
     @Test func group_renameAndLeave() async throws {
         let relay = LocalRelaySimulator()
         let a = try await node(relay), b = try await node(relay), c = try await node(relay)

@@ -30,6 +30,7 @@ let usage = """
       send <contact> <text…>        send one message and exit (text "-" reads stdin)
       chat <contact>                interactive chat (type lines; /quit to exit)
       listen [--inbox FILE.jsonl] [--outbox DIR] [--auto-accept <npub|link>]
+                                    outbox files: {"to"|"group"|"thread": …, "text": …}
              [--auto-accept-identity HEX] [--for SECONDS]
                                     receive (and send outbox files) until stopped
       agent-mode on --owner HEX | off   mark this identity as an AI account that
@@ -138,6 +139,12 @@ func openStore() -> FileIdentityStore {
         }
         return store
     } catch { fail("\(error)") }
+}
+func outboxDestination(_ o: [String: Any]) -> String? {
+    if let t = o["to"] as? String { return t }
+    if let g = o["group"] as? String { return "group:" + g }
+    if let t = o["thread"] as? String { return "thread:" + t }
+    return nil
 }
 func openClient(_ store: FileIdentityStore) async -> EldrClient {
     guard EldrClient.exists(in: store) else { fail("\(EldrClientError.notInitialized)") }
@@ -370,7 +377,7 @@ case "listen":
                     let stamp = "\(Int(Date().timeIntervalSince1970))-\(f.lastPathComponent)"
                     guard let d = try? Data(contentsOf: f),
                         let o = try? JSONSerialization.jsonObject(with: d) as? [String: Any],
-                        let to = (o["to"] as? String) ?? (o["group"] as? String).map { "group:" + $0 },
+                        let to = outboxDestination(o),
                         let text = o["text"] as? String, !text.isEmpty
                     else {
                         try? FileManager.default.moveItem(at: f, to: failed.appendingPathComponent(stamp))
@@ -379,7 +386,15 @@ case "listen":
                     }
                     do {
                         let r: String
-                        if to.hasPrefix("group:") {
+                        if await client.isAgent {
+                            // AI account: every outbox reply goes through the bridge gates (AC178).
+                            let thread = (o["thread"] as? String) ?? (to.hasPrefix("thread:") ? String(to.dropFirst(7)) : nil)
+                            let n = try await client.bridgeReply(text, to: thread == nil ? to : nil, thread: thread)
+                            r = "agent(\(n.reached) reached, \(n.skipped) skipped)"
+                        } else if to.hasPrefix("thread:") {
+                            let n = try await client.say(text, in: "", thread: String(to.dropFirst(7)))
+                            r = "thread(\(n.reached) reached)"
+                        } else if to.hasPrefix("group:") {
                             let n = try await client.sendToGroup(text, group: String(to.dropFirst(6)))
                             r = "group(\(n.reached) reached, \(n.skipped) skipped)"
                         } else { r = "\(try await client.send(text, to: to))" }
@@ -407,9 +422,21 @@ case "listen":
     for await ev in events {
         let (o, h) = eventObject(ev)
         emit(o, human: h)
-        if let inbox, case .message = ev,
-            var d = try? JSONSerialization.data(withJSONObject: o, options: [.sortedKeys, .withoutEscapingSlashes])
-        {
+        if let inbox, case .message(let c, let m, let gid) = ev {
+            var o = o
+            let conv = gid.map { "group:" + $0 } ?? c.identityHex
+            let ctx = await client.bridgeContext(conversationID: conv, threadID: m.body.thread?.id)
+            o["conversation"] = ctx.conversationID
+            if let t = ctx.threadTitle { o["threadTitle"] = t }
+            if await client.isAgent {
+                var b: [String: Any] = ["canReply": ctx.refusal == nil, "ownerPresent": ctx.ownerPresent, "loopGuarded": ctx.loopGuarded]
+                if let u = ctx.sponsoredUntil { b["sponsoredUntil"] = u }
+                if let r = ctx.refusal { b["refusal"] = r }
+                o["bridge"] = b
+                // Reply hint: write {"thread": …} or {"to": …} to the outbox.
+                o["replyTo"] = ctx.threadID.map { ["thread": $0] } ?? ["to": ctx.conversationID]
+            }
+            guard var d = try? JSONSerialization.data(withJSONObject: o, options: [.sortedKeys, .withoutEscapingSlashes]) else { continue }
             d.append(0x0A)
             try? FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: inbox.path)
             if let fh = try? FileHandle(forWritingTo: inbox) { fh.seekToEndOfFile(); fh.write(d); try? fh.close() }
@@ -720,9 +747,9 @@ case "settings":
         if name != nil || lg != nil { try await client.updateSettings(s) }
         if let relays { try await client.setRelays(relays.split(separator: ",").map(String.init)) }
         let st = await client.state
-        emit(["type": "settings", "displayName": s.displayName as Any, "loopGuard": s.loopGuardLimit ?? PQRCConstants.agentLoopGuardLimit,
+        emit(["type": "settings", "displayName": s.displayName as Any, "loopGuard": s.loopGuardLimit ?? EldrClient.defaultLoopGuardLimit,
               "relays": st.relays],
-             human: "name: \(s.displayName ?? "(none)")\nloop guard: \(s.loopGuardLimit ?? PQRCConstants.agentLoopGuardLimit) consecutive AI messages (0 = off)\nrelays: \(st.relays.joined(separator: ", "))")
+             human: "name: \(s.displayName ?? "(none)")\nloop guard: \(s.loopGuardLimit ?? EldrClient.defaultLoopGuardLimit) consecutive AI messages (0 = off)\nrelays: \(st.relays.joined(separator: ", "))")
     } catch { fail("\(error)") }
 
 case "qr":

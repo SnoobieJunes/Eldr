@@ -235,3 +235,4 @@ it's a thought, and thoughts go in `private/`.
 - [x] WS-N2–N5 Linux parity (threads/AI/providers/QR/settings, group rename/leave) — PR #28; live in-thread reply proven 2026-10-13
 - [ ] Forward-compat: an older eldr-chat/eldr-gtk build that loads newer state drops unknown fields (threads, AI state, HistoryEntry.threadID) on save. Seen live when the launcher ran a stale binary. See AC177.
 - [ ] Linux: native Anthropic/Gemini providers, context grants UI, contact rename/remove/safety code.
+- [ ] WS-N6: Linux ACP-over-relay client (`eldr-chat acp <node>`) so ELDR can drive eldr-acp/Xcode on Auston's Mac, plus a second-driver story for eldr-node (single `--owner` today). See `docs/plan/LINUX-PARITY.md` WS-N6 and `docs/guide/OWNER-TEST-PLAN.md` Phase 4.

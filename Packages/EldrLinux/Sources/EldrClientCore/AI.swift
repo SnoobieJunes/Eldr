@@ -439,7 +439,7 @@ extension EldrClient {
         if let l = s.loopGuardLimit, l < 0 || l > 1000 { throw EldrClientError.badSetting("loop guard must be 0–1000") }
         if let n = s.displayName, n.count > 64 { throw EldrClientError.badSetting("display name is limited to 64 characters") }
         state.settings = s
-        await engine.setLoopGuardLimit(s.loopGuardLimit ?? PQRCConstants.agentLoopGuardLimit)
+        await engine.setLoopGuardLimit(s.loopGuardLimit ?? EldrClient.defaultLoopGuardLimit)
         try await persist()
     }
 
@@ -507,6 +507,6 @@ extension EldrClient {
             try? await engine.receiveInvite(i.invite, fromSenderIdentityHex: i.invite.enabledBy.hexString)
         }
         for g in a.grants ?? [] { try? await engine.receiveStandingGrant(g, fromSenderIdentityHex: identityHex) }
-        await engine.setLoopGuardLimit(settings.loopGuardLimit ?? PQRCConstants.agentLoopGuardLimit)
+        await engine.setLoopGuardLimit(settings.loopGuardLimit ?? EldrClient.defaultLoopGuardLimit)
     }
 }

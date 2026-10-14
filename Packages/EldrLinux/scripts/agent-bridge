@@ -1,0 +1,51 @@
+#!/usr/bin/env bash
+# SPDX-License-Identifier: Apache-2.0
+# agent-bridge: let an external orchestrator (not an HTTP LLM) speak on Eldr through
+# an AI account. eldr-chat enforces the gates (sponsorship from the pinned owner, owner
+# in the conversation, thread loop guard); this script only moves files. AC178.
+#
+#   agent-bridge run                 keep `eldr-chat listen` running (foreground)
+#   agent-bridge next                print inbox lines not yet consumed, advance cursor
+#   agent-bridge reply thread <id|title> <text…|->
+#   agent-bridge reply to <contact|group:ID> <text…|->
+#   agent-bridge status              sponsorship / agent-mode summary
+#
+# Env: ELDR_BRIDGE_STATE (eldr-chat --state dir, required), ELDR_BRIDGE_DIR
+# (default $ELDR_BRIDGE_STATE/bridge), ELDR_CHAT (binary, default eldr-chat),
+# plus eldr-chat's own ELDR_CHAT_PASSPHRASE_FILE etc.
+set -euo pipefail
+: "${ELDR_BRIDGE_STATE:?set ELDR_BRIDGE_STATE to the AI account state dir}"
+DIR="${ELDR_BRIDGE_DIR:-$ELDR_BRIDGE_STATE/bridge}"
+BIN="${ELDR_CHAT:-eldr-chat}"
+INBOX="$DIR/inbox.jsonl"; OUTBOX="$DIR/outbox"; CURSOR="$DIR/cursor"
+umask 077; mkdir -p "$OUTBOX"
+chat() { "$BIN" --state "$ELDR_BRIDGE_STATE" "$@"; }
+do_next() {
+  [ -f "$INBOX" ] || return 0
+  local seen total
+  seen=$(cat "$CURSOR" 2>/dev/null || echo 0)
+  total=$(wc -l < "$INBOX")
+  if [ "$total" -gt "$seen" ]; then tail -n +"$((seen + 1))" "$INBOX" | head -n "$((total - seen))"; fi
+  echo "$total" > "$CURSOR"
+}
+do_reply() {
+  local kind="${1:-}" dest="${2:-}" text f
+  if [ -z "$dest" ] || { [ "$kind" != thread ] && [ "$kind" != to ]; }; then
+    echo "usage: reply thread|to <dest> <text…|->" >&2; exit 2
+  fi
+  shift 2
+  if [ "${1:-}" = "-" ]; then text=$(cat); else text="$*"; fi
+  [ -n "$text" ] || { echo "empty reply" >&2; exit 2; }
+  f="$OUTBOX/$(date +%s%N)-$$"
+  KIND="$kind" DEST="$dest" TEXT="$text" python3 -c 'import json, os; print(json.dumps({os.environ["KIND"]: os.environ["DEST"], "text": os.environ["TEXT"]}))' > "$f.tmp"
+  mv "$f.tmp" "$f.json"
+  echo "queued $f.json; see $OUTBOX/sent and $OUTBOX/failed"
+}
+cmd="${1:-}"; [ $# -gt 0 ] && shift
+case "$cmd" in
+  run) exec "$BIN" --state "$ELDR_BRIDGE_STATE" listen --inbox "$INBOX" --outbox "$OUTBOX" ;;
+  next) do_next ;;
+  reply) do_reply "$@" ;;
+  status) chat sponsorships ;;
+  *) sed -n '2,15p' "$0"; exit 2 ;;
+esac

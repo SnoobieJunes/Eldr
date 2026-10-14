@@ -497,7 +497,7 @@ final class AppUI: @unchecked Sendable {
         }
         let name = field("Display name (shown to your AI)", s.settings.displayName ?? "")
         let guardE = field("Loop guard: consecutive AI messages before AIs pause (0 = off)",
-                           String(s.settings.loopGuardLimit ?? PQRCConstants.agentLoopGuardLimit))
+                           String(s.settings.loopGuardLimit ?? EldrClient.defaultLoopGuardLimit))
         let relays = field("Relays (comma-separated; used from the next launch)", relayURL)
         append(box, label("AI endpoint (OpenAI-compatible: LM Studio, Ollama, vLLM, OpenAI, OpenRouter…)"))
         let base = field("Base URL, e.g. http://127.0.0.1:11434/v1", s.provider?.baseURL ?? "")

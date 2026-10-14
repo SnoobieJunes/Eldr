@@ -57,3 +57,14 @@ Linux surfaces: `eldr-chat` (CLI), `eldr-gtk` (GTK 4 via C, AC164), `eldr-node`
 
 WS-N1 groups (**done**). Then WS-N2 threads + AI windows/grants/loop guard, WS-N3
 providers, WS-N4 pairing/contacts, WS-N5 settings, then the rest.
+
+## WS-N6: ELDR as an AI participant, and ELDR drives Xcode (added 2026-10-13)
+
+Owner: ELDR (Linux agent). Exit: Phase 4 of `docs/guide/OWNER-TEST-PLAN.md` passes on Auston's Mac.
+
+| Item | Status |
+|---|---|
+| External-agent bridge (AI account + inbox/outbox + `scripts/agent-bridge`, AC178) | **done**. *proven*: `externalAgentBridge_gatesOnSponsorshipOwnerAndLoopGuard`, plus a live relay run with n3 (owner) and the mock LLM covering turn-taking, the loop-guard stop, human resume and revocation. |
+| Loop-guard default 50 (AC179) | **done**. *proven* by unit test. |
+| Linux ACP-over-relay client (`RelayACPTransport` + `ACPClientDriver` on `EldrClient`, permission prompts surfaced to the bridge) | **missing**: blocks the Xcode phase. |
+| A second driver for `eldr-node` (own instance, or a delegated-driver grant) | **missing / unverified** |
