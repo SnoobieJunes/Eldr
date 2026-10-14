@@ -106,6 +106,15 @@ public actor NIONostrTransport: RelayTransport {
     }
 
     public func authenticate(keypair: NostrKeypair, randomSource: any RandomSource) async throws {
+        try await authenticate(keypair: keypair, randomSource: randomSource, extraTags: [])
+    }
+
+    /// NIP-42 AUTH with `extraTags` appended after `relay`/`challenge` — Buzz's
+    /// owner-attested agent path needs the NIP-OA `["auth", …]` tag here. Mirrors
+    /// `NostrWebSocketTransport.authenticate(keypair:randomSource:extraTags:)`.
+    public func authenticate(
+        keypair: NostrKeypair, randomSource: any RandomSource, extraTags: [[String]]
+    ) async throws {
         try await ensureConnected()
         // The challenge may already be here (relays send it on connect) or still in flight.
         let challenge: String
@@ -129,7 +138,7 @@ public actor NIONostrTransport: RelayTransport {
                 pubkey: keypair.publicKeyHex,
                 createdAt: Int64(Date().timeIntervalSince1970),
                 kind: 22242,
-                tags: [["relay", url.absoluteString], ["challenge", challenge]],
+                tags: [["relay", url.absoluteString], ["challenge", challenge]] + extraTags,
                 content: ""),
             randomSource: randomSource)
         try await channel.send(text: NostrWire.encode(.auth(authEvent)))

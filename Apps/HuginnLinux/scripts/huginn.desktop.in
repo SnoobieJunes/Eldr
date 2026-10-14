@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Huginn
+GenericName=Local AI agent host
+Comment=Configure, test and serve Eldr's local coding agent
+Exec=@HUGINN@
+Terminal=false
+Categories=Development;Utility;
+Keywords=Eldr;agent;ACP;LLM;

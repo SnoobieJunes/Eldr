@@ -28,6 +28,8 @@ var extraTargets: [Target] = [
 // Milestone 3: the native GTK 4 desktop app. GTK's C API is imported directly through a
 // system-library module (no third-party bindings); `GtkKit` is our own thin wrapper.
 products.append(.executable(name: "eldr-gtk", targets: ["eldr-gtk"]))
+// WS-N10: GtkKit is also a library product so the AGPL HuginnLinux package can reuse it.
+products.append(.library(name: "GtkKit", targets: ["GtkKit"]))
 extraTargets += [
     .systemLibrary(name: "CGtk4", pkgConfig: "gtk4", providers: [.apt(["libgtk-4-dev"])]),
     .target(name: "GtkKit", dependencies: ["CGtk4"], swiftSettings: [.swiftLanguageMode(.v5)]),

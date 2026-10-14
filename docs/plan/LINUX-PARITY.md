@@ -50,18 +50,14 @@ Linux surfaces: `eldr-chat` (CLI), `eldr-gtk` (GTK 4 via C, AC164), `eldr-node`
 
 ## Matrix: Huginn (Apps/Huginn, Mac)
 
-| Feature | Linux status | Plan |
-|---|---|---|
-| Agent host over relay (ACPRelayHost/ACPNodeHost) | **done**: `eldr-node` (WS-L4, *proven* by the suite) | — |
-| Configuration / setup / relay wizards | **partial**: `eldr-node` flags | WS-N9: an `eldrctl` subcommand or a GTK panel |
-| Log console / diagnostics | **partial**: stderr/journald | — |
-| Test chat | **done** in effect: `eldr-chat` against the node | — |
-| MLX local models | **n/a**: Apple-only | WS-N3 covers local models via OpenAI-compatible servers (llama.cpp / Ollama) |
-| A2A server, MCP client | **partial**: SwiftA2A and PQRCMCP *proven* on Linux (AC172); no Linux host wiring | WS-N9 |
-| Buzz connections / gateway | **missing** | WS-N7 |
-| Town grants / world view | **missing** | see the BACKLOG dashboard item |
-| Nearby scanner | **missing**: no BLE/Bonjour on Linux | declined for now |
-| Status bar / menu bar | **missing** | low priority (tray icons are desktop-specific) |
+**Superseded 2026-10-13 by `docs/plan/HUGINN-LINUX.md` (WS-N10, AC201–AC210).** That
+file carries the full feature-by-feature audit. Summary: Configuration, keystore
+secrets, installer + launcher, health, Test Chat, project memory, logs, Bridge
+(eldr-node supervisor), Buzz (eldr-buzz-agent now runs on Linux), relay provisioner,
+world map and acpx/Zed registration are **done** in `Apps/HuginnLinux` (huginn-gtk + huginn-cli).
+**Partial:** Inspector, Setup wizard, context-graph fields.
+**Missing (WS-N10b):** town-grants editor, A2A/MCP host, notifications.
+**N/A:** MLX, Nearby, menu bar, Secure Enclave, Xcode (Zed instead).
 
 ## Order
 

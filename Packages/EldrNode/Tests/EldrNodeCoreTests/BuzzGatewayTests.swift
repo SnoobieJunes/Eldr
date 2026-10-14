@@ -5,8 +5,42 @@ import PQRCCore
 import PQRCNostr
 import Testing
 
-#if canImport(Network)
 @testable import EldrBuzzGateway
+
+/// WS-N10: a relay the gateway and the "human" both reach. macOS: a real loopback
+/// WebSocket server (`NostrRelayServer`, Network.framework). Linux has no relay server,
+/// so both sides attach to the same in-process `LocalRelaySimulator` (the gateway's logic,
+/// signing, NIP-44 and status lines are identical; only the socket is absent).
+extension LocalRelayConnection: BuzzGatewayTransport {
+    public func gatewayConnect() async throws {}
+    public func authenticate(
+        keypair: NostrKeypair, randomSource: any RandomSource, extraTags: [[String]]
+    ) async throws {
+        try await authenticate(keypair: keypair, randomSource: randomSource)
+    }
+}
+
+private struct TestRelay {
+    let url: URL
+    let makeTransport: @Sendable () async -> any BuzzGatewayTransport
+    let stop: @Sendable () async -> Void
+}
+
+private func startTestRelay() async throws -> TestRelay {
+    let relay = LocalRelaySimulator(url: "ws://127.0.0.1:0")
+    #if canImport(Network)
+    let server = NostrRelayServer(relay: relay, port: 0)
+    let port = try await server.start()
+    let url = URL(string: "ws://127.0.0.1:\(port)")!
+    return TestRelay(
+        url: url, makeTransport: { NostrWebSocketTransport(url: url) },
+        stop: { await server.stop() })
+    #else
+    return TestRelay(
+        url: URL(string: "ws://127.0.0.1:0")!, makeTransport: { await relay.connect() },
+        stop: {})
+    #endif
+}
 
 /// Tests for the Eldr↔Buzz gateway (WS-I5).
 ///
@@ -149,11 +183,9 @@ struct BuzzGatewayTests {
         let channel = UUID().uuidString
 
         // A real in-process Nostr relay over a loopback socket.
-        let relay = LocalRelaySimulator(url: "ws://127.0.0.1:0")
-        let server = NostrRelayServer(relay: relay, port: 0)
-        let port = try await server.start()
-        defer { Task { await server.stop() } }
-        let url = URL(string: "ws://127.0.0.1:\(port)")!
+        let testRelay = try await startTestRelay()
+        defer { Task { await testRelay.stop() } }
+        let url = testRelay.url
 
         // Deterministic local "model" that also reports token usage.
         let box = UsageBox()
@@ -164,7 +196,7 @@ struct BuzzGatewayTests {
             relayURL: url, channelIds: [channel], displayName: "Eldr", about: "test",
             systemPrompt: "Be concise.", ownerPubkeyHex: owner.publicKeyHex,
             respondToMentionsOnly: true, emitTurnMetrics: true, emitObserverFrames: true)
-        let gatewayTransport = NostrWebSocketTransport(url: url)
+        let gatewayTransport = await testRelay.makeTransport()
         // Fold the gateway's machine-readable status lines exactly as Huginn's
         // supervisor does, so the GUI's status row is proven against the REAL
         // emitter rather than a hand-written sample.
@@ -182,9 +214,10 @@ struct BuzzGatewayTests {
         try await Task.sleep(for: .milliseconds(1200))
 
         // The "human" (owner) connects, subscribes to replies + metrics, posts a mention.
-        let human = NostrWebSocketTransport(url: url)
-        _ = await human.connect()
-        try await human.authenticate(keypair: owner, randomSource: SystemRandomSource())
+        let human = await testRelay.makeTransport()
+        try await human.gatewayConnect()
+        try await human.authenticate(
+            keypair: owner, randomSource: SystemRandomSource(), extraTags: [])
         let replyStream = await human.subscribe([
             NostrFilter(kinds: [9], hTags: [channel])
         ])
@@ -250,11 +283,9 @@ struct BuzzGatewayTests {
         let agent = try NostrKeypair(privateKey: Data(hexString: Self.agentKeyHex)!)
         let channel = UUID().uuidString
 
-        let relay = LocalRelaySimulator(url: "ws://127.0.0.1:0")
-        let server = NostrRelayServer(relay: relay, port: 0)
-        let port = try await server.start()
-        defer { Task { await server.stop() } }
-        let url = URL(string: "ws://127.0.0.1:\(port)")!
+        let testRelay = try await startTestRelay()
+        defer { Task { await testRelay.stop() } }
+        let url = testRelay.url
 
         // Real local model, with real token usage feeding NIP-AM.
         let box = UsageBox()
@@ -271,16 +302,17 @@ struct BuzzGatewayTests {
             ownerPubkeyHex: owner.publicKeyHex, respondToMentionsOnly: true, emitTurnMetrics: true,
             emitObserverFrames: true, model: llmConfig.model)
         let gateway = BuzzGateway(
-            transport: NostrWebSocketTransport(url: url), keypair: agent, llm: llm, config: config,
+            transport: await testRelay.makeTransport(), keypair: agent, llm: llm, config: config,
             usageBox: box, log: { print("GATEWAY: \($0)") })
 
         let runTask = Task { try? await gateway.run() }
         defer { runTask.cancel() }
         try await Task.sleep(for: .milliseconds(1200))
 
-        let human = NostrWebSocketTransport(url: url)
-        _ = await human.connect()
-        try await human.authenticate(keypair: owner, randomSource: SystemRandomSource())
+        let human = await testRelay.makeTransport()
+        try await human.gatewayConnect()
+        try await human.authenticate(
+            keypair: owner, randomSource: SystemRandomSource(), extraTags: [])
         let replyStream = await human.subscribe([NostrFilter(kinds: [9], hTags: [channel])])
 
         let mention = try owner.sign(
@@ -353,4 +385,3 @@ private struct MetricMockLLM: LLMClient {
         return LLMResponse(content: reply)
     }
 }
-#endif

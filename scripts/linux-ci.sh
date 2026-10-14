@@ -11,8 +11,15 @@ for p in PQRCCore PQRCNostr PQRCAgent PQRCACP PQRCMCP EldrNode Eldrctl SwiftA2A 
     echo "FAIL $p"; grep -E '✘|error:' <<<"$out" | head -20; fail=1
   fi
 done
-for prod in "EldrLinux eldr-chat" "EldrLinux eldr-gtk" "EldrNode eldr-node" "PQRCACP eldr-acp" "Eldrctl eldrctl" "PQRCNostr pqrc-relay"; do
+# WS-N10: the AGPL Huginn-for-Linux package lives under Apps/ (AC203).
+if out=$(swift test --package-path "Apps/HuginnLinux" 2>&1); then
+  echo "PASS HuginnLinux: $(grep -E 'Test run with' <<<"$out" | tail -1)"
+else
+  echo "FAIL HuginnLinux"; grep -E '✘|error:' <<<"$out" | head -20; fail=1
+fi
+for prod in "EldrLinux eldr-chat" "EldrLinux eldr-gtk" "EldrNode eldr-node" "PQRCACP eldr-acp" "Eldrctl eldrctl" "PQRCNostr pqrc-relay" "EldrNode eldr-buzz-agent" "HuginnLinux huginn-cli" "HuginnLinux huginn-gtk"; do
   set -- $prod
-  if swift build --package-path "Packages/$1" --product "$2" >/dev/null 2>&1; then echo "BUILD OK $2"; else echo "BUILD FAIL $2"; fail=1; fi
+  dir="Packages/$1"; [[ "$1" == HuginnLinux ]] && dir="Apps/HuginnLinux"
+  if swift build --package-path "$dir" --product "$2" >/dev/null 2>&1; then echo "BUILD OK $2"; else echo "BUILD FAIL $2"; fail=1; fi
 done
 exit $fail

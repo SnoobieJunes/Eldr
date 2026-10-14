@@ -238,5 +238,6 @@ it's a thought, and thoughts go in `private/`.
 - [x] WS-N7 Phase A EldrChat parity (contacts, providers, context grants/marks, Buzz, world list, tour, AC177) — PR #28 (AC180–AC189)
 - [x] WS-N7a remaining EldrChat gaps (unread, retry, mentions, multi-AI roster/critique, context mode, solo AI chat, relay panel, world map) — PR #28, AC191–AC200; live smoke 2026-10-13
 - [ ] WS-N7b small leftovers: peer-AI codename mentions (AC193), held marks across restart (AC199), live network-failure retry check (AC192). Owner: Grok Bot. Exit: each has a test and a matrix row marked done.
-- [ ] WS-N10 Phase B: Huginn Linux GTK app + launcher. Owner: Grok Bot. Exit: Huginn matrix rows done/n-a.
+- [x] WS-N10 Phase B: Huginn Linux GTK app + launcher (`Apps/HuginnLinux`, AGPL) — PR #28, AC201–AC210, plan `docs/plan/HUGINN-LINUX.md`
+- [ ] WS-N10b Huginn Linux leftovers: context-graph fields, per-request LLM inspector, town-grants editor, setup wizard/tour, A2A/MCP host, approval notifications, live Buzz workspace + phone-driven bridge checks, macOS compile of the BuzzGateway transport change (AC205). Owner: Grok Bot. Exit: each row in HUGINN-LINUX.md done or declined in DEVIATIONS.
 - [ ] WS-N6: Linux ACP-over-relay client (`eldr-chat acp <node>`) so ELDR can drive eldr-acp/Xcode on Auston's Mac, plus a second-driver story for eldr-node (single `--owner` today). See `docs/plan/LINUX-PARITY.md` WS-N6 and `docs/guide/OWNER-TEST-PLAN.md` Phase 4.

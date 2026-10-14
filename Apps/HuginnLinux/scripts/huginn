@@ -1,0 +1,27 @@
+#!/usr/bin/env bash
+# SPDX-License-Identifier: AGPL-3.0-only
+# Huginn for Linux — launcher. Builds what is missing (release), then starts huginn-gtk with
+# HUGINN_BIN_SOURCE pointing at the freshly built eldr-acp / eldr-node / eldr-buzz-agent so the
+# Setup tab's "Install" copies real binaries.   Usage: huginn [--rebuild] [--cli ARGS...] [--open TAB]
+set -euo pipefail
+here="$(cd "$(dirname "$(readlink -f "$0")")" && pwd)"
+repo="$(cd "$here/../../.." && pwd)"
+conf=release
+rebuild=0
+if [[ "${1:-}" == "--rebuild" ]]; then rebuild=1; shift; fi
+build() { # package-dir product
+  local bin; bin="$(swift build -c "$conf" --package-path "$repo/$1" --show-bin-path)"
+  if [[ $rebuild == 1 || ! -x "$bin/$2" ]]; then
+    echo "huginn: building $2…" >&2
+    swift build -c "$conf" --package-path "$repo/$1" --product "$2" >&2
+  fi
+  printf '%s' "$bin"
+}
+hbin="$(build Apps/HuginnLinux huginn-cli)"
+build Apps/HuginnLinux huginn-gtk >/dev/null
+abin="$(build Packages/PQRCACP eldr-acp)"
+nbin="$(build Packages/EldrNode eldr-node)"
+build Packages/EldrNode eldr-buzz-agent >/dev/null
+export HUGINN_BIN_SOURCE="$hbin:$abin:$nbin"
+if [[ "${1:-}" == "--cli" ]]; then shift; exec "$hbin/huginn-cli" "$@"; fi
+exec "$hbin/huginn-gtk" "$@"
