@@ -22,7 +22,13 @@ func die(_ s: String, _ code: Int32 = 1) -> Never { err("huginn-cli: " + s); exi
     return v
 }
 func secrets() -> any SecretStore {
-    do { return try HuginnSecrets.open(paths: paths).store } catch {
+    do {
+        let (store, posture) = try HuginnSecrets.open(paths: paths)
+        if HuginnSecrets.isWarning(posture) {
+            FileHandle.standardError.write(Data("huginn: \(posture) — no TPM protects these secrets; a copied disk exposes them to offline guessing.\n".utf8))
+        }
+        return store
+    } catch {
         die("cannot open Huginn's keystore (\(error)). Set HUGINN_PASSPHRASE_FILE or run under systemd-creds.")
     }
 }

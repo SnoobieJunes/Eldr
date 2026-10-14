@@ -33,8 +33,16 @@ public enum HuginnSecrets {
         let (store, posture) = try makeLinuxKeystore(
             directory: URL(fileURLWithPath: paths.keystoreDir), profile: profile,
             environment: environment)
-        return (store, "\(posture)")
+        return (store, label(posture))
     }
+
+    /// Protection label shown persistently (AC218): a non-hardware posture is a warning.
+    public static func label(_ p: KeystorePosture) -> String {
+        p.isHardwareBacked ? "🔒 Keys: \(p.shortLabel)" : "⚠️ Keys: \(p.shortLabel)"
+    }
+
+    /// True when `label` describes a non-hardware (warning) posture.
+    public static func isWarning(_ label: String) -> Bool { label.hasPrefix("⚠️") }
 
     public static func string(_ store: any SecretStore, _ account: String) -> String? {
         store.load(account: account).flatMap { String(data: $0, encoding: .utf8) }

@@ -44,7 +44,9 @@ func die(_ s: String) -> Never { FileHandle.standardError.write(Data("eldr-gtk: 
 
 try? FileManager.default.createDirectory(at: stateDir, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
 let store: FileIdentityStore
-do { store = try makeClientKeystore(directory: stateDir, environment: env).0 } catch { die("\(error)") }
+let keystorePosture: KeystorePosture
+do { (store, keystorePosture) = try makeClientKeystore(directory: stateDir, environment: env) } catch { die("\(error)") }
+if !keystorePosture.isHardwareBacked { FileHandle.standardError.write(Data("eldr-gtk: \(keystorePosture.report)\n".utf8)) }
 
 /// All UI state. Touched ONLY on the GTK main thread (callbacks and `onMain`).
 // @unchecked Sendable: GTK is single-threaded; every access is on the main loop
@@ -163,6 +165,11 @@ final class AppUI: @unchecked Sendable {
         reqTitle = label("Requests"); addClass(reqTitle, "meta"); append(side, reqTitle)
         reqList = gtk_list_box_new(); gtk_list_box_set_selection_mode(cast(reqList), GTK_SELECTION_NONE)
         append(side, reqList)
+        // Visible, always-on protection indicator (AC218).
+        let shield = label((keystorePosture.isHardwareBacked ? "🔒 Keys: " : "⚠️ Keys: ") + keystorePosture.shortLabel, wrap: true)
+        gtk_widget_set_tooltip_text(shield, keystorePosture.report)
+        if !keystorePosture.isHardwareBacked { addClass(shield, "error") }
+        append(side, shield)
         statusLabel = label("", wrap: true, selectable: true); addClass(statusLabel, "meta"); append(side, statusLabel)
         gtk_paned_set_start_child(cast(paned), side)
         gtk_paned_set_shrink_start_child(cast(paned), 0)

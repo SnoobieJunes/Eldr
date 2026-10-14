@@ -20,6 +20,9 @@ let usage = """
     USAGE: eldr-chat [--state DIR] [--relay URL] [--json] <command> [args]
 
       init [--no-announce]          create a new identity and publish its keys
+      keystore status               what protects your keys at rest (TPM / passphrase)
+      keystore upgrade [--keep-passphrase]
+                                    move a passphrase keystore to this machine's TPM
       whoami                        identity hex, npub and pqrc:add pairing link
       announce                      re-publish keys (10420/10421/10050)
       add <link|npub|hex> [--name N] [--expect-identity HEX]
@@ -152,7 +155,8 @@ func iso(_ d: Date) -> String { ISO8601DateFormatter().string(from: d) }
 func openStore() -> FileIdentityStore {
     do {
         let (store, posture) = try makeClientKeystore(directory: stateDir, environment: env)
-        if posture == .passphraseOnDisk && !json {
+        // Loud and on EVERY start (AC218): never a silent non-hardware posture.
+        if !posture.isHardwareBacked {
             FileHandle.standardError.write(Data("eldr-chat: \(posture.report)\n".utf8))
         }
         return store
@@ -248,6 +252,57 @@ args.removeFirst()
 switch command {
 case "help", "-h", "--help":
     print(usage)
+
+case "keystore":
+    switch args.first {
+    case "status":
+        let prot = KeystoreProtection.inspect(directory: stateDir)
+        let tpm = defaultTPMSealer(environment: env, tpmPresent: defaultTpmPresent)
+        var o: [String: Any] = [
+            "type": "keystore", "protection": prot.rawValue, "stateDir": stateDir.path,
+            "tpmDevice": defaultTpmPresent(), "tpmLibrary": SystemTPM.compiledIn,
+            "tpmUsable": tpm != nil,
+        ]
+        var lines = ["Keystore: \(stateDir.path)"]
+        switch prot {
+        case .tpm: lines.append("Protection: TPM — keys are bound to this machine's TPM. A copied disk cannot open them.")
+        case .tpmAndPassphrase: lines.append("Protection: TPM + passphrase — both are required.")
+        case .passphraseOnly:
+            lines.append("Protection: ⚠️ PASSPHRASE ONLY — anyone with a copy of this disk can try to guess it offline,")
+            lines.append("            and a passphrase FILE next to the state is no protection at all.")
+            if tpm != nil { lines.append("Fix: `eldr-chat keystore upgrade` (a TPM is available here).") }
+            else { lines.append("No usable TPM here (VM without vTPM, or tpm2-tss not installed). Type the passphrase instead of using a file.") }
+        case .uninitialized: lines.append("No keystore yet (run `eldr-chat init`).")
+        }
+        lines.append("TPM device: \(defaultTpmPresent() ? "present" : "none") · tpm2-tss: \(SystemTPM.compiledIn ? "built in" : "not built in")")
+        if prot == .passphraseOnly { o["warning"] = "passphrase-only" }
+        emit(o, human: lines.joined(separator: "\n"))
+    case "upgrade":
+        let keep = args.contains("--keep-passphrase")
+        guard KeystoreProtection.inspect(directory: stateDir) == .passphraseOnly else {
+            fail("nothing to upgrade: keystore is \(KeystoreProtection.inspect(directory: stateDir).rawValue)")
+        }
+        guard let tpm = defaultTPMSealer(environment: env, tpmPresent: defaultTpmPresent) else {
+            fail("no usable TPM (need /dev/tpmrm0 and the tpm2-tss libraries; ELDR_TPM_TCTI overrides)")
+        }
+        var pass = env["ELDR_CHAT_PASSPHRASE"]
+        if pass == nil || pass!.isEmpty, let f = env["ELDR_CHAT_PASSPHRASE_FILE"],
+            let d = FileManager.default.contents(atPath: f) {
+            pass = String(decoding: d, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        if pass == nil || pass!.isEmpty, isatty(0) == 1, let c = getpass("current keystore passphrase: ") {
+            pass = String(cString: c)
+        }
+        guard let pass, !pass.isEmpty else { fail("need the current passphrase (ELDR_CHAT_PASSPHRASE[_FILE] or a TTY)") }
+        do {
+            try upgradeKeystoreToTPM(directory: stateDir, passphrase: pass, keepPassphrase: keep, tpm: tpm)
+        } catch { fail("upgrade failed, nothing changed: \(error)") }
+        emit(["type": "keystore", "upgraded": true, "protection": KeystoreProtection.inspect(directory: stateDir).rawValue],
+             human: keep ? "Upgraded: TPM + passphrase (both now required)."
+                : "Upgraded: TPM. The passphrase is no longer needed; delete any passphrase file.")
+    default:
+        fail("keystore status | upgrade [--keep-passphrase]")
+    }
 
 case "init":
     let noAnnounce = takeFlag("--no-announce")
