@@ -147,6 +147,8 @@ final class HuginnUI {
                 Task { await self.refreshMemory() }
             }
             status("Keystore unlocked (\(posture)).")
+            // Persistent indicator in the title bar (AC218), not just a transient status line.
+            gtk_window_set_title(cast(window), "Huginn — \(posture)")
             refreshBuzz()
         } catch {
             status("Keystore locked: \(error). Secrets (LLM token, Buzz keys) are unavailable until you unlock it.")

@@ -17,9 +17,13 @@ let package = Package(
         .package(url: "https://github.com/apple/swift-crypto.git", from: "4.3.1")
     ],
     targets: [
+        // TPM 2.0 seal/unseal over the SYSTEM tpm2-tss (dlopen'd at run time; compiled to
+        // "unavailable" stubs when the headers are absent) — no Swift package dependency.
+        .target(name: "CEldrTPM", linkerSettings: [.linkedLibrary("dl", .when(platforms: [.linux]))]),
         .target(
             name: "EldrKeystore",
             dependencies: [
+                "CEldrTPM",
                 .product(name: "Crypto", package: "swift-crypto"),
                 .product(name: "CryptoExtras", package: "swift-crypto"),
             ],
