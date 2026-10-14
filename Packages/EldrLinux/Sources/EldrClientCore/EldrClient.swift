@@ -95,6 +95,9 @@ public enum ClientEvent: Sendable {
     /// My AI posted (or failed: `error` set).
     case myAI(conversationID: String, threadID: String?, error: String?)
     case aiContextGrant(identityHex: String, conversationID: String, threadID: String?, axis: String, until: Int64?)
+    /// I @-mentioned one of my AIs where it isn't live (no window, not solo): offer a
+    /// private draft instead of posting (iOS decision #5).
+    case aiMentionChoice(conversationID: String, aiName: String)
 }
 
 public typealias TransportFactory = @Sendable () async throws -> any RelayTransport
@@ -164,6 +167,14 @@ public actor EldrClient {
     var aiTasks: [Task<Void, Never>] = []
     /// Test seam: overrides the configured OpenAI-compatible provider.
     var providerOverride: (any AgentProvider)?
+    /// Test seam: providers for extra AIs by id.
+    var aiOverrides: [String: any AgentProvider] = [:]
+    /// AI-context marks that arrived before their message (message id → author, value).
+    var pendingMarks: [String: (sender: String, value: Bool)] = [:]
+    /// My AIs @-mentioned by my last send where they weren't live (for the CLI, which has no event stream).
+    public internal(set) var lastMentionChoices: [String] = []
+    /// The live relay transport, for the status panel (observational only).
+    var relayTransport: (any RelayTransport)?
     var eventSink: AsyncStream<ClientEvent>.Continuation?
 
     static let keysAccount = "keys"
@@ -218,10 +229,11 @@ public actor EldrClient {
             try PrekeyManager(identity: identity, randomSource: SystemRandomSource(), state: $0)
         } ?? PrekeyManager(identity: identity, randomSource: SystemRandomSource(), oneTimeCount: 16)
         if try await pm.replenish(to: 16) { st.publishedBundleStale = true }
+        let liveTransport = try await transport()
         let m = try PQRCMessenger(
             identity: identity, nostrKeypair: kp, prekeyManager: pm,
             identityDH: try Curve25519.KeyAgreement.PrivateKey(rawRepresentation: keys.identityDH),
-            transports: [try await transport()], clock: clock,
+            transports: [liveTransport], clock: clock,
             randomSource: SystemRandomSource(), nonceSource: SystemNonceSource())
         // Offline restore: a contact whose stored binding no longer verifies is DROPPED
         // (fail-closed), never trusted.
@@ -238,6 +250,7 @@ public actor EldrClient {
         await m.seedProcessedWrapIDs(Set(st.seenWrapIDs))
         self.store = store
         self.messenger = m
+        self.relayTransport = liveTransport
         self.prekeyManager = pm
         self.identity = identity
         self.identityHex = identity.publicKeyData.hexString
@@ -250,6 +263,12 @@ public actor EldrClient {
             myIdentity: identity, clock: clock, sink: ClientAgentSink(ref: ref),
             loopGuardLimit: st.settings?.loopGuardLimit ?? EldrClient.defaultLoopGuardLimit)
         try await persist()
+        // Wire the engine's sink and replay signed AI state at OPEN, not at start():
+        // one-shot CLI commands (ai-invite, thread send, ai-status) never call start(),
+        // and without this their AI turns were dropped and live invites looked absent
+        // (DEVIATIONS AC198).
+        await ref.set(self)
+        await replayAIState()
     }
 
     public func setAutoAccept(nostrPubkeyHex: String?, identityHex: String? = nil) {
@@ -401,14 +420,29 @@ public actor EldrClient {
             text: text, sentAt: Int64(Date().timeIntervalSince1970), messageID: UUID().uuidString)
         let participant: ParticipantType = isAgent ? .agent : .human
         if isAgent { body.agentSponsorship = try liveSponsorship() }
-        let route = try await deliver(body, to: c, participant: participant)
-        appendHistory(HistoryEntry(
+        if participant == .human {
+            let ms = resolveMentions(in: text)
+            if !ms.isEmpty { body.mentions = ms }
+        }
+        var e = HistoryEntry(
             id: body.messageID ?? UUID().uuidString, peerIdentityHex: c.identityHex, outgoing: true,
-            text: text, sentAt: body.sentAt, agent: isAgent,
-            sponsorship: isAgent ? .sponsored(
-                sponsorIdentityHex: body.agentSponsorship!.enabledBy.hexString,
-                label: body.agentSponsorship!.label, activeUntil: body.agentSponsorship!.activeUntil) : .human))
+            text: text, sentAt: body.sentAt, agent: isAgent, sponsorship: .human)
+        if let s = body.agentSponsorship {
+            e.sponsorship = .sponsored(sponsorIdentityHex: s.enabledBy.hexString, label: s.label, activeUntil: s.activeUntil)
+        }
+        let route: DeliveryRoute
+        do {
+            route = try await deliver(body, to: c, participant: participant)
+        } catch {
+            // Keep a "Not sent" row so the user can retry it (iOS localStatus .failed).
+            e.failed = true
+            appendHistory(e)
+            try? await persist()
+            throw error
+        }
+        appendHistory(e)
         try await persist()
+        await afterMySend(text, conversationID: c.identityHex, threadID: nil)
         return route
     }
 
@@ -488,8 +522,6 @@ public actor EldrClient {
     public func start() async throws -> AsyncStream<ClientEvent> {
         precondition(!started, "start() once per client")
         started = true
-        await sinkRef.set(self)
-        await replayAIState()
         await reapplyBlocks()
         let raw = try await messenger.start()
         await refreshBundleIfNeeded()
@@ -579,6 +611,8 @@ public actor EldrClient {
                     e.aiAuthorizedUntil = ai.authorizedUntil
                     e.aiContext = whole.aiContext == true ? true : nil
                     e.coauthored = whole.coauthored == true && msg.participantType == .agent ? true : nil
+                    if whole.mentions?.contains(where: { $0.kind == "person" && $0.id == identityHex }) == true { e.mentionsMe = true }
+                    applyPendingMark(to: &e)
                     appendHistory(e)
                     out.append(.message(c, full, groupID: routed.groupID))
                     scheduleMyAI(after: full, conversationID: conv, threadID: ai.threadID)

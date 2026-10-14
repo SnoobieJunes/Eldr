@@ -14,7 +14,7 @@ import PQRCNostr
 let usage = """
     eldr-gtk — Eldr post-quantum messenger, Linux desktop
 
-    USAGE: eldr-gtk [--state DIR] [--relay URL] [--auto-accept NPUB] [--auto-accept-identity HEX]
+    USAGE: eldr-gtk [--state DIR] [--relay URL] [--auto-accept NPUB] [--auto-accept-identity HEX] [--open world|ais|relays|tour]
 
     State + keystore are the same as eldr-chat (default $ELDR_CHAT_DIR or
     ~/.local/share/eldr-chat; passphrase from ELDR_CHAT_PASSPHRASE[_FILE] or the TTY).
@@ -37,6 +37,8 @@ let stateDir: URL = {
 }()
 let autoAccept = opt("--auto-accept").flatMap { PairingLink.parse($0)?.nostrPubkeyHex }
 let autoAcceptIdentity = opt("--auto-accept-identity")
+/// `--open world|ais|relays|tour`: open that window once connected (screenshots, demos).
+let openWindow = opt("--open")
 
 func die(_ s: String) -> Never { FileHandle.standardError.write(Data("eldr-gtk: \(s)\n".utf8)); exit(1) }
 
@@ -77,6 +79,7 @@ final class AppUI: @unchecked Sendable {
     var threadButton: Widget!
     var groupBar: Widget!
     var renameEntry: Widget!
+    var mentionHint: Widget!
 
     func status(_ s: String) { setLabel(statusLabel, UIFormat.sanitizeLine(s)) }
 
@@ -91,6 +94,7 @@ final class AppUI: @unchecked Sendable {
             .banner { background: alpha(#9141ac, 0.15); border-radius: 6px; padding: 6px; }
             .warn { color: #c01c28; }
             .title { font-weight: bold; font-size: 1.2em; }
+            .unread { font-weight: bold; }
             """)
         window = gtk_application_window_new(app)
         gtk_window_set_title(cast(window), "Eldr")
@@ -113,6 +117,16 @@ final class AppUI: @unchecked Sendable {
         append(toolRow, button("World") { [unowned self] in self.showWorld() })
         append(toolRow, button("Tour") { [unowned self] in self.showTour(0) })
         append(side, toolRow)
+        let toolRow2 = hbox(4)
+        append(toolRow2, button("My AIs") { [unowned self] in self.showAIHub() })
+        append(toolRow2, button("Solo AI chat") { [unowned self] in
+            self.act(nil) { c in
+                let g = try await c.createSoloAIChat(name: "My AI")
+                onMain { [self] in self.selected = UISnapshot.groupPrefix + g.groupID; self.status("Solo AI chat ready: only you and your AIs. Nothing leaves this device except to your AI providers.") }
+            }
+        })
+        append(toolRow2, button("Relays") { [unowned self] in self.showRelays() })
+        append(side, toolRow2)
         bannerLabel = label("", wrap: true); addClass(bannerLabel, "banner"); gtk_widget_set_visible(bannerLabel, 0)
         append(side, bannerLabel)
         let addRow = hbox(4)
@@ -140,6 +154,10 @@ final class AppUI: @unchecked Sendable {
             let changed = self.selected != self.convIDs[i]
             self.selected = self.convIDs[i]
             self.renderConversation(scrollToEnd: changed)
+            if (self.snap?.unread[self.convIDs[i]] ?? 0) > 0 {
+                let conv = self.convIDs[i]
+                self.act(nil) { c in try await c.markRead(conv) }
+            }
         }
         let cs = scrolled(convList); expand(cs, v: true); append(side, cs)
         reqTitle = label("Requests"); addClass(reqTitle, "meta"); append(side, reqTitle)
@@ -171,6 +189,7 @@ final class AppUI: @unchecked Sendable {
         }
         append(aiBar, button("Off") { [unowned self] in self.myAI(seconds: 0) })
         append(aiBar, button("Draft privately") { [unowned self] in self.draft() })
+        append(aiBar, button("AIs here…") { [unowned self] in self.showAIsHere() })
         append(aiBar, button("What my AI sees") { [unowned self] in self.showAISees() })
         append(aiBar, button("Send as my AI") { [unowned self] in self.sendAsAI() })
         append(aiBar, button("Add last to AI context") { [unowned self] in
@@ -227,7 +246,8 @@ final class AppUI: @unchecked Sendable {
         gtk_widget_set_size_request(compScroll, -1, 130)
         append(main, compScroll)
         let sendRow = hbox(6)
-        let hint = label("Enter = new line · Ctrl+Enter = send · paste Markdown of any size"); addClass(hint, "meta")
+        mentionHint = label("", wrap: true); addClass(mentionHint, "meta"); append(main, mentionHint)
+        let hint = label("Enter = new line · Ctrl+Enter = send · @name mentions · paste Markdown of any size"); addClass(hint, "meta")
         expand(hint, h: true); append(sendRow, hint)
         sendButton = button("Send") { [unowned self] in self.send() }
         append(sendRow, sendButton)
@@ -260,7 +280,9 @@ final class AppUI: @unchecked Sendable {
         convIDs = convs.map(\.identityHex)
         for c in convs {
             let row = vbox(2); margins(row, 6)
-            append(row, label((c.isAgent ? "🤖 " : "") + c.title))
+            let tl = label((c.isAgent ? "🤖 " : "") + c.displayTitle)
+            if c.unread > 0 { addClass(tl, "unread") }
+            append(row, tl)
             let p = label(c.preview); addClass(p, "meta")
             gtk_label_set_ellipsize(cast(p), PANGO_ELLIPSIZE_END)
             append(row, p)
@@ -298,6 +320,9 @@ final class AppUI: @unchecked Sendable {
         gtk_widget_set_visible(aiBar, s.isAgent ? 0 : 1)
         gtk_widget_set_visible(threadEntry, isThread ? 0 : 1)
         gtk_widget_set_visible(threadButton, isThread ? 0 : 1)
+        setLabel(mentionHint, s.ais.isEmpty && s.contacts.isEmpty ? "" : "Mention: " + (s.ais.map { "@" + $0 } + (isGroup ? (s.groups.first { UISnapshot.groupPrefix + $0.groupID == id }?.members ?? []).compactMap { s.name(of: $0) }.filter { $0 != "you" }.map { "@" + ($0.split(separator: " ").first.map(String.init) ?? $0) } : [])).joined(separator: " ")
+            + (s.solo.contains(id) ? "  ·  Solo AI chat: your AIs answer every message" : "")
+            + (s.contextModes[conversationForAI(id)].map { "  ·  AI context: \($0)" } ?? ""))
         setLabel(aiLabel, s.provider == nil ? "My AI (set it up in Settings):" : (isThread ? "Invite my AI:" : "My AI answers here for:"))
         gtk_widget_set_visible(reconnectBar, s.pendingReconnects.contains(id) ? 1 : 0)
         let adj = gtk_scrolled_window_get_vadjustment(cast(msgScroll))
@@ -322,6 +347,10 @@ final class AppUI: @unchecked Sendable {
             addClass(body, m.outgoing ? "bubble-out" : "bubble-in")
             if m.agent { addClass(body, "bubble-ai") }
             append(col, body)
+            if m.failed == true {
+                let mid = m.id
+                append(col, button("Not sent — retry") { [unowned self] in self.act("Re-sent.") { c in _ = try await c.retry(mid) } })
+            }
             if truncated {
                 let full = m.text
                 append(col, button("Showing first \(UIFormat.maxRenderedChars) characters — copy full message") { [unowned self] in
@@ -627,13 +656,28 @@ final class AppUI: @unchecked Sendable {
                 let win = gtk_window_new()!
                 gtk_window_set_title(cast(win), "World")
                 gtk_window_set_transient_for(cast(win), cast(self.window))
-                gtk_window_set_default_size(cast(win), 520, 420)
+                gtk_window_set_default_size(cast(win), 540, 700)
                 let box = vbox(6); margins(box, 12)
                 let h1 = label("Towns you've authorized"); addClass(h1, "title"); append(box, h1)
                 let n1 = label("This is what you granted from this device. Whether a town is connected is visible only on the node running it.", wrap: true)
                 addClass(n1, "meta"); append(box, n1)
                 if rows.isEmpty { append(box, label("No town access granted yet. Use eldr-chat town-grant issue.")) }
                 for r in rows { append(box, label("\(r.title)  ·  \(r.planes)  ·  \(r.status.label)")) }
+                let mapRows = rows
+                let me = String(self.snap?.me.prefix(8) ?? "me")
+                if let map = drawingArea(width: 480, height: 300, { cr, w, h in
+                    WorldMapDraw.draw(cr, Double(w), Double(h), rows: mapRows, me: me, now: Int64(Date().timeIntervalSince1970),
+                                      time: Date().timeIntervalSince1970)
+                }) {
+                    append(box, map)
+                    if mapRows.contains(where: { if case .expiringSoon = $0.status { return true }; return false }) {
+                        // Only an expiring grant animates; nothing else moves on this map.
+                        let src = every(seconds: 1) { redraw(map) }
+                        on(win, "destroy") { g_source_remove(src) }
+                    }
+                    let mn = label("Dashed everywhere: this device sees what you authorized, not whether a town is connected.", wrap: true)
+                    addClass(mn, "meta"); append(box, mn)
+                }
                 let h2 = label("Buzz workspaces"); addClass(h2, "title"); append(box, h2)
                 let n2 = label("Workspace messages are readable by the workspace's operator. Eldr conversations are not.", wrap: true)
                 addClass(n2, "meta"); append(box, n2)
@@ -701,6 +745,145 @@ final class AppUI: @unchecked Sendable {
         append(row, button("Skip") { gtk_window_destroy(cast(win)) })
         append(box, row)
         gtk_window_set_child(cast(win), box)
+        gtk_window_present(cast(win))
+    }
+
+    // MARK: AI hub (iOS AIHubSheet), per-conversation AI settings, relay panel
+
+    func smallWindow(_ title: String, _ w: Int32 = 520) -> (Widget, Widget) {
+        let win = gtk_window_new()!
+        gtk_window_set_title(cast(win), title)
+        gtk_window_set_transient_for(cast(win), cast(window))
+        gtk_window_set_default_size(cast(win), w, -1)
+        let box = vbox(6); margins(box, 12)
+        gtk_window_set_child(cast(win), box)
+        return (win, box)
+    }
+
+    func showAIHub() {
+        let (win, box) = smallWindow("My AIs")
+        let t = label("My AIs"); addClass(t, "title"); append(box, t)
+        let listBox = vbox(4); append(box, listBox)
+        let note = label("", wrap: true); addClass(note, "meta")
+        func load() {
+            act(nil) { c in
+                let ais = await c.myAIs()
+                onMain {
+                    var child = gtk_widget_get_first_child(listBox)
+                    while let ch = child { child = gtk_widget_get_next_sibling(ch); gtk_box_remove(cast(listBox), ch) }
+                    if ais.isEmpty { append(listBox, label("No AI yet. Set the primary one in Settings.")) }
+                    for a in ais {
+                        let row = hbox(6)
+                        let l = label("\(a.name) · \(a.kind)\(a.id == EldrClient.primaryAIID ? " · primary (Settings)" : "")\(a.autonomous ? "" : " · draft-only")")
+                        expand(l, h: true); append(row, l)
+                        if a.id != EldrClient.primaryAIID {
+                            append(row, button("Remove") { [unowned self] in
+                                self.act("Removed \(a.name) and its key.") { c in try await c.removeAI(a.id) }; load()
+                            })
+                        }
+                        append(listBox, row)
+                    }
+                }
+            }
+        }
+        append(box, label("Primary AI name"))
+        let pn = gtk_entry_new()!; append(box, pn)
+        append(box, button("Rename primary") { [unowned self] in let n = entryText(pn); self.act("Renamed.") { c in try await c.renamePrimaryAI(n) }; load() })
+        let h = label("Add another AI"); addClass(h, "title"); append(box, h)
+        func field(_ ph: String, password: Bool = false) -> Widget {
+            let e = password ? gtk_password_entry_new()! : gtk_entry_new()!
+            if !password { gtk_entry_set_placeholder_text(cast(e), ph) } else { append(box, label(ph)) }
+            append(box, e); return e
+        }
+        let nameE = field("Name (letters, digits, - or _; used for @mentions)")
+        let kindE = field("Kind: custom, claude, openai, gemini, openrouter, groq")
+        let baseE = field("Base URL (custom only)")
+        let modelE = field("Model (blank = vendor default)")
+        let instrE = field("Instructions (optional)")
+        let keyE = field("API key (saved encrypted)", password: true)
+        let auto = gtk_check_button_new_with_label("Takes autonomous turns (off = draft-only)")!
+        gtk_check_button_set_active(cast(auto), 1); append(box, auto)
+        append(box, button("Add AI") { [unowned self] in
+            let n = entryText(nameE), k = entryText(kindE).isEmpty ? "custom" : entryText(kindE).lowercased()
+            let cfg = AIProviderConfig(baseURL: entryText(baseE), model: entryText(modelE), instructions: entryText(instrE).isEmpty ? nil : entryText(instrE), kind: k)
+            let key = entryText(keyE), on = gtk_check_button_get_active(cast(auto)) != 0
+            self.act(nil) { c in
+                do { _ = try await c.addAI(name: n, config: cfg, apiKey: key.isEmpty ? nil : key, autonomous: on); onMain { setLabel(note, "Added \(n)."); setEntryText(keyE, ""); load() } }
+                catch { onMain { setLabel(note, "⚠ \(error)") } }
+            }
+        })
+        append(box, note)
+        load()
+        gtk_window_present(cast(win))
+    }
+
+    /// Per-conversation: which AIs reply and in what order, ordered critique, context mode.
+    func showAIsHere() {
+        guard let id = selected, let s = snap else { status("Pick a conversation first."); return }
+        let tid = UISnapshot.threadID(id), conv = conversationForAI(id)
+        let (win, box) = smallWindow("AIs in this conversation")
+        append(box, label("Reply order (comma-separated names). all = every autonomous AI; none = silence.", wrap: true))
+        append(box, label("Your AIs: " + (s.ais.isEmpty ? "(none)" : s.ais.joined(separator: ", ")), wrap: true))
+        let rosterE = gtk_entry_new()!; gtk_entry_set_placeholder_text(cast(rosterE), "all"); append(box, rosterE)
+        append(box, button("Save order") { [unowned self] in
+            let t = entryText(rosterE).trimmingCharacters(in: .whitespaces)
+            let names: [String]? = t.isEmpty || t == "all" ? nil : (t == "none" ? [] : t.split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces) })
+            self.act("Reply order saved.") { c in try await c.setAIRoster(names, in: conv, thread: tid) }
+        })
+        if tid == nil {
+            let crit = gtk_check_button_new_with_label("AIs reply in order: primary → reviewer/critic → synthesizer")!
+            gtk_check_button_set_active(cast(crit), s.critique.contains(conv) ? 1 : 0)
+            on(crit, "toggled") { [unowned self] in
+                let v = gtk_check_button_get_active(cast(crit)) != 0
+                self.act(v ? "Ordered critique on." : "Ordered critique off.") { c in try await c.setOrderedCritique(v, in: conv) }
+            }
+            append(box, crit)
+            append(box, label("What my AIs may read here (now: \(s.contextModes[conv] ?? "default")):"))
+            let row = hbox(4)
+            for (t, m) in [("Off (silent)", "off"), ("Only marked", "marked"), ("Full", "full"), ("Default", "")] {
+                append(row, button(t) { [unowned self] in
+                    self.act("AI context here: \(m.isEmpty ? "default" : m).") { c in try await c.setContextMode(m.isEmpty ? nil : m, in: conv) }
+                    gtk_window_destroy(cast(win))
+                })
+            }
+            append(box, row)
+        }
+        gtk_window_present(cast(win))
+    }
+
+    func mentionChoice(_ conv: String, _ name: String) {
+        let (win, box) = smallWindow("@\(name)")
+        append(box, label("@\(name) isn't live in this conversation. A private draft only you see, or turn your AI on here (everyone is told)?", wrap: true))
+        let row = hbox(6)
+        append(row, button("Private draft") { [unowned self] in
+            gtk_window_destroy(cast(win))
+            self.act(nil) { c in
+                let d = try await c.draftWithMyAI(in: conv, ai: name)
+                onMain { [self] in setTextViewText(self.composer, d); self.status("Draft from \(name) ready — edit, then Ctrl+Enter.") }
+            }
+        })
+        append(row, button("Turn on 1h") { [unowned self] in
+            gtk_window_destroy(cast(win))
+            self.act("Your AI answers here for 1h; everyone here sees it.") { c in _ = try await c.startAIWindow(in: conv, seconds: 3600) }
+        })
+        append(row, button("Cancel") { gtk_window_destroy(cast(win)) })
+        append(box, row)
+        gtk_window_present(cast(win))
+    }
+
+    func showRelays() {
+        let (win, box) = smallWindow("Relays")
+        let st = label("…", wrap: true, selectable: true); append(box, st)
+        func load(_ check: Bool) {
+            act(nil) { c in
+                let r = await c.relayStatus(check: check)
+                onMain { setLabel(st, "Configured (next launch): " + r.relays.joined(separator: ", ") + "\nLive connection \(relayURL): \(r.status.label)") }
+            }
+        }
+        append(box, button("Check now") { load(true) })
+        let n = label("Observational only: delivery never depends on this indicator; unsent messages show “Not sent — retry”.", wrap: true)
+        addClass(n, "meta"); append(box, n)
+        load(false)
         gtk_window_present(cast(win))
     }
 
@@ -833,7 +1016,16 @@ final class AppUI: @unchecked Sendable {
                 if let autoAccept { await c.setAutoAccept(nostrPubkeyHex: autoAccept, identityHex: autoAcceptIdentity) }
                 if fresh { try await c.announce(); onMain { [self] in self.showTour(0) } }
                 let events = try await c.start()
-                onMain { [self] in self.client = c; self.status("Connected."); self.refresh() }
+                onMain { [self] in
+                    self.client = c; self.status("Connected."); self.refresh()
+                    switch openWindow {
+                    case "world": self.showWorld()
+                    case "ais": self.showAIHub()
+                    case "relays": self.showRelays()
+                    case "tour": self.showTour(0)
+                    default: break
+                    }
+                }
                 for await ev in events {
                     let note: String?
                     switch ev {
@@ -852,6 +1044,9 @@ final class AppUI: @unchecked Sendable {
                     case .aiWindow, .aiInvite, .threadCreated: note = nil
                     case .aiContextGrant(_, _, _, let axis, let until): note = "🔗 AI context sharing (\(axis)) \(until == nil ? "stopped" : "enabled")"
                     case .myAI(_, _, let err): note = err.map { "⚠ My AI failed: " + $0 }
+                    case .aiMentionChoice(let conv, let name):
+                        note = "@\(name) isn't live here."
+                        onMain { [self] in self.mentionChoice(conv, name) }
                     case .message, .quarantined: note = nil
                     }
                     onMain { [self] in if let note { self.status(note) }; self.refresh() }
@@ -867,6 +1062,35 @@ final class AppUI: @unchecked Sendable {
         let sem = DispatchSemaphore(value: 0)
         Task.detached { await c.stop(); sem.signal() }
         _ = sem.wait(timeout: .now() + 4)
+    }
+}
+
+/// Cairo drawing of the World map (WorldMapLayout geometry, tested in EldrUIModel).
+enum WorldMapDraw {
+    static func draw(_ cr: OpaquePointer, _ w: Double, _ h: Double, rows: [WorldTownRow], me: String, now: Int64, time: Double) {
+        let cx = w / 2, cy = h / 2, r = WorldMapLayout.ringRadius(width: w, height: h)
+        cairo_set_line_width(cr, 1.5)
+        for (i, row) in rows.enumerated() {
+            let u = WorldMapLayout.unitPosition(index: i, count: rows.count)
+            let x = cx + u.x * r, y = cy + u.y * r
+            var dash: [Double] = [5, 4]
+            cairo_set_dash(cr, &dash, 2, 0)
+            cairo_set_source_rgba(cr, 0.5, 0.5, 0.5, 0.8)
+            cairo_move_to(cr, cx, cy); cairo_line_to(cr, x, y); cairo_stroke(cr)
+            cairo_set_dash(cr, nil, 0, 0)
+            let frac = WorldMapLayout.lifetimeFraction(expiresAt: WorldMapLayout.until(row.status), now: now)
+            let urgent: Bool = { if case .expiringSoon = row.status { return true }; return false }()
+            let b = WorldMapLayout.breath(time: time, urgent: urgent)
+            cairo_set_source_rgba(cr, urgent ? 0.9 : 0.2, urgent ? 0.5 : 0.6, 0.2, 0.5 + 0.5 * b)
+            cairo_arc(cr, x, y, 14, -Double.pi / 2, -Double.pi / 2 + 2 * Double.pi * max(frac, 0.02)); cairo_stroke(cr)
+            cairo_set_source_rgba(cr, 0.35, 0.35, 0.35, 1)
+            cairo_arc(cr, x, y, 8, 0, 2 * Double.pi); cairo_fill(cr)
+            cairo_move_to(cr, x - 30, y + 28); cairo_show_text(cr, "\(row.title) · \(row.status.label)")
+        }
+        cairo_set_source_rgba(cr, 0.57, 0.25, 0.67, 1)
+        cairo_arc(cr, cx, cy, 12, 0, 2 * Double.pi); cairo_fill(cr)
+        cairo_move_to(cr, cx - 14, cy + 28); cairo_show_text(cr, me == "me" ? "you" : "you · " + me)
+        if rows.isEmpty { cairo_move_to(cr, cx - 70, cy - 30); cairo_show_text(cr, "No towns authorized yet") }
     }
 }
 

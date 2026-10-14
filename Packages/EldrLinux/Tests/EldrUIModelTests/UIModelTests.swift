@@ -179,3 +179,32 @@ struct WorldTourTests {
         #expect(OnboardingTourText.steps.allSatisfy { !$0.title.isEmpty && !$0.body.isEmpty })
     }
 }
+
+@Suite("World map geometry (WS-N7a)")
+struct WorldMapTests {
+    @Test func ringPositions_lifetime_andBreath() {
+        let p0 = WorldMapLayout.unitPosition(index: 0, count: 4)
+        #expect(abs(p0.x) < 1e-9 && abs(p0.y + 1) < 1e-9)  // 12 o'clock
+        let p1 = WorldMapLayout.unitPosition(index: 1, count: 4)
+        #expect(abs(p1.x - 1) < 1e-9 && abs(p1.y) < 1e-9)  // clockwise → 3 o'clock
+        #expect(WorldMapLayout.unitPosition(index: 0, count: 0) == (0, 0))
+        #expect(WorldMapLayout.ringRadius(width: 480, height: 300) == 98)
+        #expect(WorldMapLayout.lifetimeFraction(expiresAt: 100, now: 200) == 0)
+        #expect(WorldMapLayout.lifetimeFraction(expiresAt: nil, now: 0) == 0)
+        #expect(WorldMapLayout.lifetimeFraction(expiresAt: Int64.max, now: 0) == 1)
+        #expect(WorldMapLayout.breath(time: 123, urgent: false) == 0.5)
+        let b = WorldMapLayout.breath(time: 0.4, urgent: true)
+        #expect(b >= 0 && b <= 1 && b != 0.5)
+        #expect(WorldMapLayout.until(.expired) == nil && WorldMapLayout.until(.authorized(until: 9)) == 9)
+    }
+
+    @Test func unreadTitle_andNotSentBadge() {
+        var c = ConversationSummary(identityHex: "x", title: "Bob", preview: "", lastAt: 0, isAgent: false)
+        #expect(c.displayTitle == "Bob")
+        c.unread = 3
+        #expect(c.displayTitle == "Bob  (3)")
+        var e = HistoryEntry(id: "1", peerIdentityHex: "x", outgoing: true, text: "t", sentAt: 0, agent: false, sponsorship: .human)
+        e.failed = true
+        #expect(UIFormat.rowBadge(e, names: { _ in nil }) == ("✗ Not sent", true))
+    }
+}

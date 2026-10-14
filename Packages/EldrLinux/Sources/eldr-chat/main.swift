@@ -68,8 +68,18 @@ let usage = """
                                     vLLM, OpenAI, OpenRouter…); the key is read from
                                     stdin into the encrypted keystore, or from
                                     $ELDR_AI_API_KEY at run time — never from argv
+      ai-add <name> --kind K [--base-url URL] [--model M] [--key-stdin] [--instructions T] [--draft-only]
+      ai-remove <name>  |  ai-list  |  ai-name <name>   more tethered AIs (iOS AI hub)
+      ai-roster <conv>|--thread T all|none|name,name…   which AIs reply here, in order
+      ai-critique <conv> on|off     AIs reply in order: primary → reviewer/critic → synthesizer
+      ai-mode <conv> off|marked|full|default   what my AIs may read (and whether they post) here
+      ai-chat <name>                a solo AI chat (just you and your AIs)
+      mentions <conv>               @-mention candidates (my AIs, then people)
+      unread  |  read <conv>        unread counts / mark a conversation read
+      unsent  |  retry <msg-id>     messages that reached nobody / send one again
+      relays [--check]              relay list and live connection status
       ai-test                       one test completion (nothing is sent to anyone)
-      ai-draft <conv> [--thread T]  a private draft from my AI (nothing is sent)
+      ai-draft <conv> [--thread T] [--ai NAME]  a private draft from my AI (nothing is sent)
       town-grant issue <contact> --planes wall,delegate --days 1|3|7|14|30
                  [--messages N --bytes N --tasks N]  |  revoke <grant-id>  |  list
       settings [--name N] [--loop-guard N] [--relays URL,URL]   (no flags = show)
@@ -221,6 +231,9 @@ func eventObject(_ ev: ClientEvent) -> ([String: Any], String) {
     case .myAI(let conv, let t, let err):
         return (["type": "myAI", "conversation": conv, "thread": t as Any, "error": err as Any],
             err.map { "⚠ my AI failed: \($0)" } ?? "🤖 my AI posted\(t.map { " in thread \($0.prefix(8))" } ?? "")")
+    case .aiMentionChoice(let conv, let name):
+        return (["type": "aiMentionChoice", "conversation": conv, "ai": name],
+            "🤖 @\(name) isn't live here. Draft privately: `eldr-chat ai-draft \(conv.prefix(12)) --ai \(name)`, or turn on `ai-window`.")
     case .aiContextGrant(let who, let conv, let t, let axis, let until):
         return (["type": "aiContextGrant", "identity": who, "conversation": conv, "thread": t as Any, "axis": axis, "until": until as Any],
             "🔗 \(short(who)) \(until == nil ? "stopped" : "enabled") AI context sharing (\(axis) axis)\(t.map { " in thread \($0.prefix(8))" } ?? "")")
@@ -328,6 +341,10 @@ case "send":
     do {
         let route = try await client.send(text, to: to)
         emit(["type": "sent", "to": to, "route": "\(route)", "chars": text.count], human: "Sent (\(route)).")
+        for n in await client.lastMentionChoices {
+            emit(["type": "aiMentionChoice", "ai": n], human: "🤖 @\(n) isn't live here. Private draft: `eldr-chat ai-draft \(to) --ai \(n)`; or `ai-window \(to) 1h` so it answers.")
+        }
+        await client.stop()  // waits for any @AI turn this send started, then saves
     } catch { fail("\(error)") }
 
 case "chat":
@@ -511,8 +528,118 @@ case "history":
     for e in entries {
         emit(["type": "history", "outgoing": e.outgoing, "sentAt": e.sentAt, "chars": e.text.count,
               "sponsorship": label(e), "text": e.text.count > 200 ? String(e.text.prefix(200)) + "…" : e.text],
-             human: "\(e.outgoing ? "→" : "←") [\(label(e))]\(e.aiContext == true ? " [in AI context]" : "") \(e.text.count > 120 ? String(e.text.prefix(120)) + "… (\(e.text.count) chars)" : e.text)")
+             human: "\(e.failed == true ? "✗ NOT SENT (retry \(e.id.prefix(8))) " : "")\(e.mentionsMe == true ? "@ " : "")\(e.outgoing ? "→" : "←") [\(e.agentName.map { $0 + " · " } ?? "")\(label(e))]\(e.aiContext == true ? " [in AI context]" : "") \(e.text.count > 120 ? String(e.text.prefix(120)) + "… (\(e.text.count) chars)" : e.text)")
     }
+
+    try? await client.markRead(c.identityHex)
+
+case "ai-add":
+    guard let name = args.first else { fail("ai-add <name> --kind K …") }
+    let kind = takeOption("--kind") ?? "custom"
+    let base = takeOption("--base-url") ?? ""
+    let model = takeOption("--model") ?? ""
+    let instr = takeOption("--instructions")
+    let draftOnly = takeFlag("--draft-only")
+    var key: String?
+    if takeFlag("--key-stdin") {
+        key = String(data: FileHandle.standardInput.readDataToEndOfFile(), encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+    let client = await openClient(openStore())
+    do {
+        let r = try await client.addAI(name: name, config: AIProviderConfig(baseURL: base, model: model, instructions: instr, kind: kind),
+                                       apiKey: key, autonomous: !draftOnly)
+        emit(["type": "ai-add", "id": r.id, "name": r.name, "kind": kind], human: "Added AI \(r.name) (\(kind))\(draftOnly ? ", draft-only" : "")")
+    } catch { fail("\(error)") }
+
+case "ai-remove":
+    guard let name = args.first else { fail("ai-remove <name>") }
+    let client = await openClient(openStore())
+    do { try await client.removeAI(name); emit(["type": "ai-remove", "name": name], human: "Removed \(name) and its key.") } catch { fail("\(error)") }
+
+case "ai-name":
+    guard let name = args.first else { fail("ai-name <name>") }
+    let client = await openClient(openStore())
+    do { try await client.renamePrimaryAI(name); emit(["type": "ai-name", "name": name], human: "Primary AI is now \(name).") } catch { fail("\(error)") }
+
+case "ai-list":
+    let client = await openClient(openStore())
+    let ais = await client.myAIs()
+    if ais.isEmpty { emit(["type": "ai-list", "ais": []], human: "(no AIs; set one with ai-config)") }
+    for a in ais {
+        emit(["type": "ai", "id": a.id, "name": a.name, "kind": a.kind, "autonomous": a.autonomous],
+             human: "\(a.name)  \(a.kind)\(a.autonomous ? "" : "  draft-only")  [\(a.id)]")
+    }
+
+case "ai-roster":
+    let thread = takeOption("--thread")
+    guard let spec = args.last else { fail("ai-roster <conv>|--thread T all|none|name,name") }
+    let conv = args.count >= 2 ? args[0] : ""
+    let names: [String]? = spec == "all" ? nil : (spec == "none" ? [] : spec.split(separator: ",").map(String.init))
+    let client = await openClient(openStore())
+    do {
+        try await client.setAIRoster(names, in: conv, thread: thread)
+        emit(["type": "ai-roster", "roster": names as Any], human: names.map { $0.isEmpty ? "No AI replies here." : "Reply order: \($0.joined(separator: " → "))" } ?? "All autonomous AIs, in config order.")
+    } catch { fail("\(error)") }
+
+case "ai-critique":
+    guard args.count == 2, ["on", "off"].contains(args[1]) else { fail("ai-critique <conv> on|off") }
+    let client = await openClient(openStore())
+    do { try await client.setOrderedCritique(args[1] == "on", in: args[0]); emit(["type": "ai-critique", "on": args[1] == "on"], human: "Ordered critique \(args[1]).") }
+    catch { fail("\(error)") }
+
+case "ai-mode":
+    guard args.count == 2 else { fail("ai-mode <conv> off|marked|full|default") }
+    let client = await openClient(openStore())
+    do {
+        try await client.setContextMode(args[1] == "default" ? nil : args[1], in: args[0])
+        emit(["type": "ai-mode", "mode": args[1]], human: "AI context here: \(args[1]).")
+    } catch { fail("\(error)") }
+
+case "ai-chat":
+    guard !args.isEmpty else { fail("ai-chat <name>") }
+    let client = await openClient(openStore())
+    do {
+        let g = try await client.createSoloAIChat(name: args.joined(separator: " "))
+        emit(["type": "ai-chat", "groupID": g.groupID, "name": g.name], human: "Solo AI chat \"\(g.name)\" (group:\(g.groupID.prefix(8))). `eldr-chat group send \(g.groupID.prefix(8)) …`; replies arrive in this process.")
+    } catch { fail("\(error)") }
+
+case "mentions":
+    let client = await openClient(openStore())
+    do {
+        let conv = try await client.resolveConversation(args.first ?? "")
+        for m in await client.mentionCandidates(conversationID: conv) { emit(["type": "mention", "name": m.name, "kind": m.kind], human: "@\(m.name)  (\(m.kind))") }
+    } catch { fail("\(error)") }
+
+case "unread":
+    let client = await openClient(openStore())
+    var convs = await client.state.contacts.map { ($0.identityHex, $0.name ?? short($0.identityHex)) }
+    convs += await client.groups.map { (UIConversation.group($0.groupID), "#" + $0.name) }
+    for (id, name) in convs {
+        let n = await client.unreadCount(id)
+        if n > 0 { emit(["type": "unread", "conversation": id, "name": name, "count": n], human: "\(name): \(n) unread") }
+    }
+
+case "read":
+    let client = await openClient(openStore())
+    do { try await client.markRead(args.first ?? ""); emit(["type": "read"], human: "Marked read.") } catch { fail("\(error)") }
+
+case "unsent":
+    let client = await openClient(openStore())
+    let f = await client.failedMessages()
+    if f.isEmpty { emit(["type": "unsent", "count": 0], human: "Nothing unsent.") }
+    for e in f { emit(["type": "unsent", "id": e.id, "text": e.text], human: "\(e.id.prefix(8))  \(e.text.prefix(80))") }
+
+case "retry":
+    guard let id = args.first else { fail("retry <msg-id>") }
+    let client = await openClient(openStore())
+    do { let r = try await client.retry(id); emit(["type": "retry", "reached": r.reached], human: "Re-sent to \(r.reached).") } catch { fail("\(error)") }
+
+case "relays":
+    let check = takeFlag("--check")
+    let client = await openClient(openStore())
+    let st = await client.relayStatus(check: check)
+    emit(["type": "relays", "relays": st.relays, "status": st.status.label],
+         human: st.relays.map { "\($0)" }.joined(separator: "\n") + "\nlive connection (\(relay)): \(st.status.label)")
 
 case "reconnect":
     let decline = takeFlag("--decline")
@@ -590,6 +717,8 @@ case "group":
             if text == "-" { text = String(data: FileHandle.standardInput.readDataToEndOfFile(), encoding: .utf8) ?? "" }
             guard !text.isEmpty else { fail("empty message") }
             let n = try await client.sendToGroup(text, group: args[0])
+            await client.settleAI()  // solo AI chat replies / @AI turns finish before exit
+            try await client.persist()
             emit(["type": "sent", "group": args[0], "reached": n.reached, "skipped": n.skipped],
                  human: "Sent to \(n.reached) member(s)\(n.skipped > 0 ? "; \(n.skipped) member(s) aren't your contacts and were skipped" : "").")
         case "history":
@@ -597,7 +726,7 @@ case "group":
             let g = try await client.group(matching: q)
             let names = Dictionary(await client.contacts.map { ($0.identityHex, $0.name ?? short($0.identityHex)) }, uniquingKeysWith: { a, _ in a })
             for e in await client.groupHistory(g.groupID).suffix(limit) {
-                let who = e.outgoing ? "me" : (names[e.peerIdentityHex] ?? short(e.peerIdentityHex))
+                let who = e.outgoing ? (e.mine == true ? "🤖 " + (e.agentName ?? "my AI") : "me") : ((names[e.peerIdentityHex] ?? short(e.peerIdentityHex)) + (e.agent ? "'s AI" : ""))
                 emit(["type": "history", "groupID": g.groupID, "from": who, "outgoing": e.outgoing, "sentAt": e.sentAt, "text": e.text],
                      human: "\(who): \(e.text.count > 120 ? String(e.text.prefix(120)) + "…" : e.text)")
             }
@@ -628,6 +757,8 @@ case "thread":
             var text = args.dropFirst().joined(separator: " ")
             if text == "-" { text = String(data: FileHandle.standardInput.readDataToEndOfFile(), encoding: .utf8) ?? "" }
             let r = try await client.say(text, in: "", thread: args[0])
+            await client.settleAI()
+            try await client.persist()
             emit(["type": "sent", "reached": r.reached, "skipped": r.skipped], human: "Sent to \(r.reached).")
         case "guard":
             guard args.count == 2 else { fail("thread guard <thread> <N>|default") }
@@ -638,7 +769,7 @@ case "thread":
             let t = try await client.thread(matching: q)
             let names = Dictionary(await client.contacts.map { ($0.identityHex, $0.name ?? short($0.identityHex)) }, uniquingKeysWith: { a, _ in a })
             for e in await client.threadHistory(t.threadID).suffix(limit) {
-                let who = e.outgoing ? (e.mine == true ? "my AI" : "me") : ((names[e.peerIdentityHex] ?? short(e.peerIdentityHex)) + (e.agent ? "'s AI" : ""))
+                let who = e.outgoing ? (e.mine == true ? "🤖 " + (e.agentName ?? "my AI") : "me") : ((names[e.peerIdentityHex] ?? short(e.peerIdentityHex)) + (e.agent ? "'s AI" : ""))
                 emit(["type": "history", "from": who, "agent": e.agent, "text": e.text], human: "\(who): \(e.text)")
             }
         default: fail("thread create|send|history …")
@@ -861,7 +992,8 @@ case "ai-draft":
     let thread = takeOption("--thread")
     let client = await openClient(openStore())
     do {
-        let d = try await client.draftWithMyAI(in: args.first ?? "", thread: thread)
+        let ai = takeOption("--ai")
+        let d = try await client.draftWithMyAI(in: args.first ?? "", thread: thread, ai: ai)
         emit(["type": "draft", "text": d], human: "Draft (not sent):\n\(d)")
     } catch { fail("\(error)") }
 

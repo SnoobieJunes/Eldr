@@ -84,10 +84,11 @@ extension EldrClient {
     @discardableResult
     public func sendToGroup(_ text: String, group q: String) async throws -> (reached: Int, skipped: Int) {
         let g = try group(matching: q)
-        let others = g.members.filter { $0 != identityHex }
-        let targets = state.contacts.filter { others.contains($0.identityHex) }
-        let reached = try await fanOut(text: text, group: g, groupCreate: nil, to: targets, record: true)
-        return (reached, others.count - targets.count)
+        // The shared send path: mentions, "Not sent" rows, then solo replies / @AI routing.
+        let conv = UIConversation.group(g.groupID)
+        let r = try await post(text, conversationID: conv)
+        await afterMySend(text, conversationID: conv, threadID: nil)
+        return r
     }
 
     private func fanOut(

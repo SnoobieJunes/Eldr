@@ -33,11 +33,11 @@ struct ClientAgentSink: AgentMessageSink {
     let ref: ClientRef
     func postAgentMessage(_ body: MessageBody, threadID: String, agentName: String?, agentAIID: String?) async throws {
         guard let c = await ref.client else { throw PQRCError.sessionNotEstablished }
-        try await c.postMyAIThreadMessage(body, threadID: threadID)
+        try await c.postMyAIThreadMessage(body, threadID: threadID, agentName: agentName)
     }
     func postAgentReply(_ body: MessageBody, conversationID: String, agentName: String?, agentAIID: String?) async throws {
         guard let c = await ref.client else { throw PQRCError.sessionNotEstablished }
-        try await c.postMyAIWindowReply(body, conversationID: conversationID)
+        try await c.postMyAIWindowReply(body, conversationID: conversationID, agentName: agentName)
     }
     func reportAgentFailure(_ reason: String, threadID: String?, agentName: String?) async {
         await ref.client?.noteMyAIFailure(reason, threadID: threadID)
@@ -90,7 +90,7 @@ extension EldrClient {
         participant requested: ParticipantType = .human, aiWindow: AIWindowAnnouncement? = nil,
         aiInvite: AIInvite? = nil, threadCreate: ThreadCreate? = nil, isContext: Bool = false,
         mine: Bool = false, aiContextGrant: AIContextGrant? = nil, aiContext: Bool = false,
-        coauthored: Bool = false, aiContextMark: AIContextMark? = nil
+        coauthored: Bool = false, aiContextMark: AIContextMark? = nil, agentName: String? = nil
     ) async throws -> (reached: Int, skipped: Int) {
         let t = try targets(conv)
         let participant: ParticipantType = isAgent ? .agent : requested
@@ -104,6 +104,11 @@ extension EldrClient {
         if aiContext { body.aiContext = true }
         if coauthored { body.coauthored = true }
         if isAgent { body.agentSponsorship = try liveSponsorship() }
+        // @-mentions (iOS C2): people and AIs, inside the ciphertext. Human text only.
+        if participant == .human, !text.isEmpty {
+            let ms = resolveMentions(in: text)
+            if !ms.isEmpty { body.mentions = ms }
+        }
         var reached = 0
         var lastError: Error?
         for c in t.contacts {
@@ -121,6 +126,9 @@ extension EldrClient {
         e.mine = mine ? true : nil
         e.aiContext = aiContext ? true : nil
         e.coauthored = coauthored ? true : nil
+        e.agentName = agentName
+        // "Not sent" (iOS localStatus .failed): there were recipients and none was reached.
+        if reached == 0, lastError != nil, !t.contacts.isEmpty { e.failed = true }
         // A content-free control (a context mark) renders nothing (iOS N25).
         if !text.isEmpty { appendHistory(e) }
         // Engine-posted agent turns are counted by the engine itself.
@@ -138,9 +146,13 @@ extension EldrClient {
         if let thread {
             let t = try self.thread(matching: thread)
             let r = try await post(text, conversationID: t.conversationID, threadID: t.threadID)
+            await afterMySend(text, conversationID: t.conversationID, threadID: t.threadID)
             return r
         }
-        return try await post(text, conversationID: try resolveConversation(conversationQuery))
+        let conv = try resolveConversation(conversationQuery)
+        let r = try await post(text, conversationID: conv)
+        await afterMySend(text, conversationID: conv, threadID: nil)
+        return r
     }
 
     // MARK: Threads (D7)
@@ -311,7 +323,7 @@ extension EldrClient {
     /// After a received message: let MY AI take its turn if (and only if) the engine's
     /// gates allow it. The provider runs off the receive pump.
     func scheduleMyAI(after m: ReceivedMessage, conversationID conv: String, threadID: String?) {
-        guard m.senderIdentityHex != identityHex, currentProvider() != nil else { return }
+        guard m.senderIdentityHex != identityHex, !tetheredAIs().isEmpty else { return }
         if threadID == nil {
             // Conversation scope answers humans only, and only in MY window's conversation.
             guard m.participantType == .human, myWindowConversation == conv else { return }
@@ -319,15 +331,27 @@ extension EldrClient {
         spawnAI(conversationID: conv, threadID: threadID)
     }
 
-    func spawnAI(conversationID conv: String, threadID: String?) {
-        guard let provider = currentProvider() else { return }
-        let ctx = agentContext(conversationID: conv, threadID: threadID)
+    /// Runs my AIs' autonomous turns for a scope, in roster order (ordered critique
+    /// when enabled), each one re-reading the history so it sees the AIs before it.
+    /// Every post still passes the engine's window/invite/loop-guard gate. `only`
+    /// restricts to the named AIs (an @-mention). `solo` = a chat with no other human.
+    func spawnAI(conversationID conv: String, threadID: String?, only: Set<String>? = nil, solo: Bool = false) {
+        guard contextMode(conv) != "off" else { return }
+        var turn = aiTurnOrder(conversationID: conv, threadID: threadID)
+        if let only { turn = turn.filter { only.contains($0.ai.name.lowercased()) } }
+        guard !turn.isEmpty else { return }
         let engine = self.engine
-        let t = Task {
-            if let threadID {
-                _ = await engine.runThreadTurn(provider: provider, context: ctx, threadID: threadID)
-            } else {
-                _ = await engine.runWindowReply(provider: provider, context: ctx, conversationID: conv)
+        let t = Task { [weak self] in
+            for (ai, role) in turn {
+                guard let self else { return }
+                let ctx = await self.agentContext(conversationID: conv, threadID: threadID, aiRole: role, aiName: ai.name, instructions: ai.instructions)
+                if solo {
+                    await self.runSoloTurn(ai, context: ctx, conversationID: conv)
+                } else if let threadID {
+                    _ = await engine.runThreadTurn(provider: ai.provider, context: ctx, threadID: threadID, agentName: ai.name, agentAIID: ai.id)
+                } else {
+                    _ = await engine.runWindowReply(provider: ai.provider, context: ctx, conversationID: conv, agentName: ai.name, agentAIID: ai.id)
+                }
             }
         }
         aiTasks = Array((aiTasks + [t]).suffix(32))
@@ -342,8 +366,13 @@ extension EldrClient {
 
     /// What the provider may see: this conversation (or thread) since my AI was turned on
     /// there, and never earlier history.
-    func agentContext(conversationID conv: String, threadID: String?) -> AgentContext {
-        let since = aiState.activeSince?[threadID ?? conv] ?? Int64.max
+    func agentContext(
+        conversationID conv: String, threadID: String?, aiRole: String = AICritiqueRole.primary,
+        aiName: String? = nil, instructions: String? = nil
+    ) -> AgentContext {
+        let mode = contextMode(conv)
+        // "marked" (iOS strict): only rows explicitly added to AI context.
+        let since = mode == "marked" ? Int64.max : (aiState.activeSince?[threadID ?? conv] ?? Int64.max)
         let gid = UIConversation.groupID(conv)
         let names = Dictionary(state.contacts.map { ($0.identityHex, $0.name ?? String($0.identityHex.prefix(8))) },
                                uniquingKeysWith: { a, _ in a })
@@ -351,7 +380,7 @@ extension EldrClient {
         // thread a PEER's AI content also needs the bilateral ai-axis context grant.
         let peerHumanAllowed = contextSharedNow(conversationID: conv, threadID: threadID, axis: AIContextGrant.Scope.humanAxis)
         let peerAIAllowed = threadID != nil || contextSharedNow(conversationID: conv, threadID: nil, axis: AIContextGrant.Scope.aiAxis)
-        let rows = history.filter { e in
+        let rows = mode == "off" ? [] : history.filter { e in
             let inConv = gid != nil ? e.groupID == gid : (e.peerIdentityHex == conv && e.groupID == nil)
             let peerAI = !e.outgoing && e.agent
             guard inConv, e.threadID == threadID, !peerAI || peerAIAllowed else { return false }
@@ -364,26 +393,28 @@ extension EldrClient {
         let transcript = rows.map { e in
             TranscriptEntry(
                 senderIdentityHex: e.outgoing ? identityHex : e.peerIdentityHex,
-                senderDisplayName: e.outgoing ? (e.mine == true ? "\(myName)'s AI" : myName) : (names[e.peerIdentityHex] ?? "them"),
+                senderDisplayName: e.outgoing ? (e.mine == true ? (e.agentName ?? primaryAIName) : myName)
+                    : (e.agent ? "\(names[e.peerIdentityHex] ?? "their")'s AI" : (names[e.peerIdentityHex] ?? "them")),
                 participantType: (e.agent || e.mine == true) ? .agent : .human, text: e.text)
         }
         return AgentContext(
             myIdentityHex: identityHex, myDisplayName: myName, transcript: Array(transcript),
             threadID: threadID, threadTitle: threads.first { $0.threadID == threadID }?.title,
-            instructions: providerConfig?.instructions)
+            instructions: instructions ?? providerConfig?.instructions,
+            systemPromptOverride: rolePrompt(aiRole, aiName: aiName, threadID: threadID, conv: conv, instructions: instructions))
     }
 
     // Sink targets.
-    func postMyAIThreadMessage(_ body: MessageBody, threadID: String) async throws {
+    func postMyAIThreadMessage(_ body: MessageBody, threadID: String, agentName: String? = nil) async throws {
         guard let t = threads.first(where: { $0.threadID == threadID }) else { throw EldrClientError.unknownThread(threadID) }
         try await post(body.text, conversationID: t.conversationID, threadID: threadID, participant: .agent,
-                       isContext: body.isContext ?? false, mine: true)
+                       isContext: body.isContext ?? false, mine: true, agentName: agentName)
         emit(.myAI(conversationID: t.conversationID, threadID: threadID, error: nil))
     }
-    func postMyAIWindowReply(_ body: MessageBody, conversationID: String) async throws {
+    func postMyAIWindowReply(_ body: MessageBody, conversationID: String, agentName: String? = nil) async throws {
         // Re-check at post time: the window may have moved while the provider ran (F1).
         guard myWindowConversation == conversationID else { return }
-        try await post(body.text, conversationID: conversationID, participant: .agent, mine: true)
+        try await post(body.text, conversationID: conversationID, participant: .agent, mine: true, agentName: agentName)
         emit(.myAI(conversationID: conversationID, threadID: nil, error: nil))
     }
     func noteMyAIFailure(_ reason: String, threadID: String?) {
@@ -400,6 +431,8 @@ extension EldrClient {
 
     /// Test seam (internal): replaces the configured provider.
     func setProviderOverride(_ p: (any AgentProvider)?) { providerOverride = p }
+    /// Test seam (internal): a provider for one extra AI.
+    func setAIOverride(_ id: String, _ p: any AgentProvider) { aiOverrides[id] = p }
 
     /// Sets (or with nil clears) the OpenAI-compatible endpoint. The key goes into its own
     /// encrypted keystore account. It never goes into the state blob, logs, or argv.
@@ -458,19 +491,25 @@ extension EldrClient {
     }
 
     /// A private draft for me in a conversation or thread. Nothing is sent.
-    public func draftWithMyAI(in conversationQuery: String, thread: String? = nil) async throws -> String {
-        guard let p = currentProvider() else { throw AgentProviderError.notConfigured }
+    public func draftWithMyAI(in conversationQuery: String, thread: String? = nil, ai aiName: String? = nil) async throws -> String {
+        let ais = tetheredAIs()
+        let chosen = try aiName.map { n in
+            guard let a = ais.first(where: { $0.name.lowercased() == n.lowercased() || $0.id == n }) else { throw EldrClientError.badSetting("no AI named '\(n)'") }
+            return a
+        } ?? ais.first
+        guard let chosen else { throw AgentProviderError.notConfigured }
+        let p = chosen.provider
         let (conv, tid): (String, String?) = try thread.map { let t = try self.thread(matching: $0); return (t.conversationID, t.threadID) }
             ?? (try resolveConversation(conversationQuery), nil)
         // A private draft may read the recent conversation (it never leaves this box
         // except to the provider the user configured).
-        var ctx = agentContext(conversationID: conv, threadID: tid)
-        if ctx.transcript.isEmpty {
+        var ctx = agentContext(conversationID: conv, threadID: tid, aiName: chosen.name, instructions: chosen.instructions)
+        if ctx.transcript.isEmpty, contextMode(conv) == nil || contextMode(conv) == "full" {
             var a = aiState
             a.activeSince = (a.activeSince ?? [:]).merging([tid ?? conv: 0]) { o, _ in o }
             let saved = aiState
             aiState = a
-            ctx = agentContext(conversationID: conv, threadID: tid)
+            ctx = agentContext(conversationID: conv, threadID: tid, aiName: chosen.name, instructions: chosen.instructions)
             aiState = saved
         }
         return try await engine.draft(provider: p, context: ctx).text

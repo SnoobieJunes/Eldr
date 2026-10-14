@@ -481,3 +481,175 @@ struct QRTests {
         #expect((raw >> 10) << 10 | rem == raw)
     }
 }
+
+@Suite("WS-N7a EldrChat parity", .serialized)
+struct WSN7aTests {
+    @Test func unread_markRead_retry_mentions_relayStatus() async throws {
+        let relay = LocalRelaySimulator()
+        let a = try await node(relay), b = try await node(relay)
+        try await pair(a, b, "alice", "bob")
+        try await a.client.send("ping @bob and @nobody", to: "bob")
+        #expect(await b.log.until { await $0.texts().contains("ping @bob and @nobody") })
+        let aHex = a.client.identityHex
+        #expect(await b.client.unreadCount(aHex) >= 2)
+        let row = await b.client.history(with: aHex).last
+        #expect(row?.mentionsMe == true)
+        #expect(UIFormat.rowBadge(try #require(row), names: { _ in nil }).text.contains("mentions you"))
+        try await b.client.markRead(aHex)
+        #expect(await b.client.unreadCount(aHex) == 0)
+        // My own messages never count as unread.
+        try await b.client.send("pong", to: "alice")
+        #expect(await b.client.unreadCount(aHex) == 0)
+
+        // Retry: a "Not sent" row is replaced by a fresh delivery (synthesized failure).
+        var failed = HistoryEntry(id: "failed-1", peerIdentityHex: b.client.identityHex, outgoing: true,
+                                  text: "second try", sentAt: 1, agent: false, sponsorship: .human)
+        failed.failed = true
+        await a.client.appendHistory(failed)
+        #expect(await a.client.failedMessages().count == 1)
+        let r = try await a.client.retry("failed-1")
+        #expect(r.reached == 1)
+        #expect(await a.client.failedMessages().isEmpty)
+        #expect(await b.log.until { await $0.texts().contains("second try") })
+        await #expect(throws: EldrClientError.self) { try await a.client.retry("nope") }
+
+        let st = await a.client.relayStatus(check: true)
+        #expect(st.status == .connected)
+    }
+
+    @Test func multiAI_rosterOrder_orderedCritique_roles_inThread() async throws {
+        let relay = LocalRelaySimulator()
+        let a = try await node(relay), b = try await node(relay)
+        try await pair(a, b, "alice", "bob")
+        let p1 = Recorder("primary says"), p2 = Recorder("second says")
+        await a.client.setProviderOverride(p1)
+        try await a.client.configureProvider(AIProviderConfig(baseURL: "", model: "", kind: "openai"), apiKey: nil)
+        let second = try await a.client.addAI(name: "Critic", config: AIProviderConfig(baseURL: "", model: "", kind: "groq"), apiKey: nil)
+        await a.client.setAIOverride(second.id, p2)
+        await #expect(throws: EldrClientError.self) { try await a.client.addAI(name: "critic", config: AIProviderConfig(baseURL: "", model: ""), apiKey: nil) }
+        await #expect(throws: EldrClientError.self) { try await a.client.addAI(name: "has space", config: AIProviderConfig(baseURL: "", model: "", kind: "openai"), apiKey: nil) }
+
+        let t = try await a.client.createThread(in: "bob", title: "review")
+        #expect(await b.log.until { _ in await b.client.threads.contains { $0.threadID == t.threadID } })
+        try await a.client.setOrderedCritique(true, in: "bob")
+        try await a.client.setAIRoster(["Critic", await a.client.primaryAIName], in: "bob")
+        _ = try await a.client.inviteMyAI(thread: t.threadID, seconds: 3600)
+        await a.client.settleAI()
+        // Roster order: Critic first (role primary, no override), then the primary AI as synthesizer.
+        let rows = await a.client.threadHistory(t.threadID).filter { $0.mine == true }
+        #expect(rows.map(\.agentName) == ["Critic", await a.client.primaryAIName])
+        let c2 = await p2.contexts.last, c1 = await p1.contexts.last
+        #expect(c2?.systemPromptOverride == nil)
+        #expect(c1?.systemPromptOverride?.isEmpty == false)
+        // The synthesizer saw the critic's message first.
+        #expect(c1?.transcript.contains { $0.text == "second says" && $0.senderDisplayName == "Critic" } == true)
+
+        // Silence roster → no AI posts.
+        try await a.client.setAIRoster([], in: "bob")
+        let before = await p1.calls + p2.calls
+        try await b.client.say("anyone?", in: "alice", thread: t.threadID)
+        #expect(await a.log.until { await $0.texts().contains("anyone?") })
+        await a.client.settleAI()
+        #expect(await p1.calls + p2.calls == before)
+        try await a.client.removeAI("Critic")
+        #expect(await a.client.myAIs().count == 1)
+    }
+
+    @Test func contextMode_off_and_marked() async throws {
+        let relay = LocalRelaySimulator()
+        let a = try await node(relay), b = try await node(relay)
+        try await pair(a, b, "alice", "bob")
+        let ai = Recorder("auto")
+        await a.client.setProviderOverride(ai)
+        _ = try await a.client.startAIWindow(in: "bob", seconds: 3600)
+        try await a.client.setContextMode("off", in: "bob")
+        try await b.client.send("are you there", to: "alice")
+        #expect(await a.log.until { await $0.texts().contains("are you there") })
+        await a.client.settleAI()
+        #expect(await ai.calls == 0)  // off = silent
+        let d = try await a.client.draftWithMyAI(in: "bob")
+        #expect(d.hasPrefix("draft:"))
+        #expect(await ai.contexts.last?.transcript.isEmpty == true)
+
+        try await a.client.setContextMode("marked", in: "bob")
+        try await a.client.say("secret plan", in: "bob")
+        try await a.client.say("public plan", in: "bob")
+        _ = try await a.client.markAIContext(in: "bob", message: try #require(await a.client.history(with: b.client.identityHex).last?.id), true)
+        _ = try await a.client.draftWithMyAI(in: "bob")
+        #expect(await ai.contexts.last?.transcript.map(\.text) == ["public plan"])
+        await #expect(throws: EldrClientError.self) { try await a.client.setContextMode("loud", in: "bob") }
+    }
+
+    @Test func soloAIChat_repliesWithoutWindow_andMentionChoice() async throws {
+        let relay = LocalRelaySimulator()
+        let a = try await node(relay), b = try await node(relay)
+        try await pair(a, b, "alice", "bob")
+        let p1 = Recorder("solo primary"), p2 = Recorder("solo helper")
+        await a.client.setProviderOverride(p1)
+        let h = try await a.client.addAI(name: "Helper", config: AIProviderConfig(baseURL: "", model: "", kind: "openai"), apiKey: nil)
+        await a.client.setAIOverride(h.id, p2)
+        let g = try await a.client.createSoloAIChat(name: "Me")
+        #expect(await a.client.isSolo(UIConversation.group(g.groupID)))
+        _ = try await a.client.sendToGroup("help me think", group: g.groupID)
+        await a.client.settleAI()
+        let rows = await a.client.history.filter { $0.groupID == g.groupID && $0.mine == true }
+        #expect(Set(rows.compactMap(\.agentName)) == [await a.client.primaryAIName, "Helper"])
+        // @Helper in solo → only Helper answers.
+        _ = try await a.client.sendToGroup("@Helper just you", group: g.groupID)
+        await a.client.settleAI()
+        let last = await a.client.history.filter { $0.groupID == g.groupID && $0.mine == true }.suffix(1)
+        #expect(last.first?.agentName == "Helper")
+        #expect(await p2.contexts.last?.transcript.last?.text == "@Helper just you")
+        // Nothing reached bob.
+        #expect(await b.log.texts().allSatisfy { !$0.contains("solo") && !$0.contains("help me think") })
+
+        // @Helper in a regular chat with no window → a choice event, nothing posted.
+        let calls = await p2.calls
+        try await a.client.send("@Helper what do you think", to: "bob")
+        #expect(await a.log.until { await $0.all.contains { if case .aiMentionChoice(_, "Helper") = $0 { return true }; return false } })
+        await a.client.settleAI()
+        #expect(await p2.calls == calls)
+    }
+}
+
+@Suite("AC198 one-shot client (no start) runs AI turns", .serialized)
+struct OneShotAITests {
+    @Test func aiInvite_withoutStart_postsTurn_andSeesReplayedInvite() async throws {
+        let relay = LocalRelaySimulator()
+        let a = try await node(relay), b = try await node(relay)
+        try await pair(a, b, "alice", "bob")
+        let t = try await a.client.createThread(in: "bob", title: "oneshot")
+        #expect(await b.log.until { _ in await b.client.threads.contains { $0.threadID == t.threadID } })
+        await a.client.stop()
+        // A CLI-style client: opened, never started.
+        let c = try await EldrClient(store: a.store, transport: { await relay.connect() })
+        await c.setProviderOverride(Recorder("one-shot reply"))
+        _ = try await c.inviteMyAI(thread: t.threadID, seconds: 3600)
+        await c.settleAI()
+        #expect(await c.threadHistory(t.threadID).contains { $0.mine == true && $0.text == "one-shot reply" })
+        #expect(await b.log.until { await $0.texts(agent: true).contains("one-shot reply") })
+        await c.stop()
+        // A second one-shot open sees the invite replayed (ai-status).
+        let d = try await EldrClient(store: a.store, transport: { await relay.connect() })
+        #expect(await d.activeInvites(thread: t.threadID)[d.identityHex] != nil)
+        await d.stop()
+    }
+}
+
+@Suite("AC199 early context mark")
+struct EarlyMarkTests {
+    @Test func markBeforeMessage_isAppliedWhenMessageArrives() async throws {
+        let relay = LocalRelaySimulator()
+        let a = try await node(relay)
+        let peer = "ab" + String(repeating: "c", count: 62)
+        await a.client.applyContextMark(AIContextMark(messageID: "m-1", value: true), from: peer)
+        var e = HistoryEntry(id: "m-1", peerIdentityHex: peer, outgoing: false, text: "x", sentAt: 0, agent: false, sponsorship: .human)
+        await a.client.applyPendingMark(to: &e)
+        #expect(e.aiContext == true)
+        // Another author can't use someone else's held mark.
+        await a.client.applyContextMark(AIContextMark(messageID: "m-2", value: true), from: peer)
+        var f = HistoryEntry(id: "m-2", peerIdentityHex: "other", outgoing: false, text: "x", sentAt: 0, agent: false, sponsorship: .human)
+        await a.client.applyPendingMark(to: &f)
+        #expect(f.aiContext == nil)
+    }
+}

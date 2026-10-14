@@ -184,3 +184,26 @@ public func installCSS(_ css: String) {
 public func copyToClipboard(_ w: Widget, _ s: String) {
     gdk_clipboard_set_text(gtk_widget_get_clipboard(w), s)
 }
+
+// MARK: - Drawing
+
+/// A GtkDrawingArea whose draw func calls `f(cairo, width, height)`. The closure box is
+/// released with the widget.
+public func drawingArea(width: Int32, height: Int32, _ f: @escaping (OpaquePointer, Int32, Int32) -> Void) -> Widget? {
+    guard let w = gtk_drawing_area_new() else { return nil }
+    gtk_widget_set_size_request(w, width, height)
+    let box = Unmanaged.passRetained(Box(f) as AnyObject).toOpaque()
+    let draw: GtkDrawingAreaDrawFunc = { _, cr, wd, ht, d in
+        guard let d, let cr,
+            let b = Unmanaged<AnyObject>.fromOpaque(d).takeUnretainedValue() as? Box<(OpaquePointer, Int32, Int32) -> Void>
+        else { return }
+        b.f(cr, wd, ht)
+    }
+    let destroy: GDestroyNotify = { d in
+        guard let d else { return }
+        Unmanaged<AnyObject>.fromOpaque(d).release()
+    }
+    gtk_drawing_area_set_draw_func(cast(w), draw, box, destroy)
+    return w
+}
+public func redraw(_ w: Widget) { gtk_widget_queue_draw(w) }

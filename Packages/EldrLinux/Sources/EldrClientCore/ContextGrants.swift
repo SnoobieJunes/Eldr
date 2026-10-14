@@ -116,10 +116,21 @@ extension EldrClient {
         var a = agentState
         guard var h = a.history,
             let i = h.firstIndex(where: { $0.id == mark.messageID && !$0.outgoing && $0.peerIdentityHex == sender })
-        else { return }
+        else {
+            // The relay may deliver the mark before its message: hold it (bounded,
+            // in memory) and apply when that message arrives (DEVIATIONS AC199).
+            if pendingMarks.count < 256 { pendingMarks[mark.messageID] = (sender, mark.value) }
+            return
+        }
         h[i].aiContext = mark.value ? true : nil
         a.history = h
         agentState = a
+    }
+
+    /// Applies a held mark to a just-received row (same author only).
+    func applyPendingMark(to e: inout HistoryEntry) {
+        guard let p = pendingMarks.removeValue(forKey: e.id), p.sender == e.peerIdentityHex, !e.outgoing else { return }
+        e.aiContext = p.value ? true : nil
     }
 
     /// "Add to AI Context" on one of MY messages (by id, or "last" = my latest here).

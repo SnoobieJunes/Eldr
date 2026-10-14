@@ -34,12 +34,18 @@ Linux surfaces: `eldr-chat` (CLI), `eldr-gtk` (GTK 4 via C, AC164), `eldr-node`
 | Settings | **done (WS-N5, AC176)** *proven* | — |
 | Attachments | **done** for large text (chunking); blob `ContentPointer` **n/a** (blob server rejected, AC189) | — |
 | Buzz workspaces / channels | **done (AC186)**: CLI + GTK. *proven* against the simulator; real workspace *unverified* | — |
-| World / town view | **done as list (AC187)**; map **partial** | tech-debt |
+| World / town view | **done (AC187 list, AC200 map)** *proven* (unit + screenshot) | — |
 | ACP approval cards / terminal | **deferred** with WS-N6 | WS-N6 |
 | Onboarding tour | **done (AC188)**, generated from iOS | — |
 | Coauthored send, per-thread loop guard, pin/verify markers | **done (AC184, AC185)** *proven* | — |
 | State forward-compat (AC177) | **done (AC180)** *proven* | — |
-| Unread/markRead, retry, mentions, multi-AI roster/critique, context mode, solo AI chat, relay status panel | **partial / missing** | Phase A follow-up (BACKLOG) |
+| Unread / mark-read | **done (AC191)** *proven* live | — |
+| Retry "Not sent" | **done (AC192)** *proven* by unit test; live failure *unverified* | — |
+| @-mentions (people, my AIs; draft-or-turn-on choice) | **done (AC193)** *proven* live; peer-AI codename mentions missing | tech-debt |
+| Multi-AI roster, reply order, ordered critique | **done (AC194)** *proven* live | — |
+| Context mode off/marked/full | **done (AC195)** *proven* live | — |
+| Solo AI chat | **done (AC196)** *proven* live (CLI) | — |
+| Relay status panel | **done (AC197)** *proven* live | — |
 | Multipeer / nearby | **n/a** (AC189) | — |
 
 ## Matrix: Huginn (Apps/Huginn, Mac)

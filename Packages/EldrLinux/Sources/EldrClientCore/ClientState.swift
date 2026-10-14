@@ -64,11 +64,14 @@ public struct ClientState: Codable, Sendable {
     public var schema: Int?
     /// Joined Buzz workspaces (WS-N7, iOS `BuzzWorkspaceRecord`). Schema 3.
     public var buzz: [BuzzWorkspaceRecord]?
+    /// conversation id → newest `sentAt` I have read (iOS `lastReadAt`). Schema 4.
+    public var lastRead: [String: Int64]?
 
     public static let maxSeen = 5000
     /// Bump whenever a field is added that an older build would drop on save.
-    /// 2 = groups/threads/AI/settings/HistoryEntry.threadID (WS-N1…N5); 3 = WS-N7 contact fields.
-    public static let currentSchema = 3
+    /// 2 = groups/threads/AI/settings/HistoryEntry.threadID (WS-N1…N5); 3 = WS-N7 contact fields;
+    /// 4 = WS-N7a unread, retry, mentions, multi-AI roster, context modes.
+    public static let currentSchema = 4
 }
 
 // `SponsorshipStatus` and `IssuedSponsorship` live in PQRCCore (SponsorshipLedger.swift),
@@ -99,6 +102,12 @@ public struct HistoryEntry: Codable, Sendable, Equatable, Identifiable {
     public var aiContext: Bool? = nil
     /// "Made with <person> & their AI": a human-directed AI message (AC44). Schema 3.
     public var coauthored: Bool? = nil
+    /// Outgoing message that reached no recipient ("Not sent", tap to retry). Schema 4.
+    public var failed: Bool? = nil
+    /// Which of my AIs (or the peer's) wrote an agent row (`agent_name`). Schema 4.
+    public var agentName: String? = nil
+    /// Received message whose @-mentions name me. Schema 4.
+    public var mentionsMe: Bool? = nil
 }
 
 public struct ThreadRecord: Codable, Sendable, Equatable {
@@ -151,6 +160,29 @@ public struct AIState: Codable, Sendable {
     public var activeSince: [String: Int64]?
     /// Signed AI context-sharing grants (mine and received), replayed at start. Schema 3.
     public var contextGrants: [AIContextGrant]?
+    /// Additional tethered AIs after the primary (`provider`). Schema 4.
+    public var extraAIs: [TetheredAIConfig]?
+    /// scope (thread id or conversation id) → ordered AI ids; [] = silence. Schema 4.
+    public var rosters: [String: [String]]?
+    /// Conversations where my AIs reply in order (primary → reviewer/critic → synthesizer).
+    public var orderedCritique: [String]?
+    /// conversation id → "off" | "marked" | "full" (iOS conversationContextMode).
+    public var contextModes: [String: String]?
+    /// Display name of the primary AI (default "<me>'s AI").
+    public var primaryName: String?
+}
+
+/// One extra tethered AI (iOS `TetheredAI`, minus Apple-only backends). Its key lives in
+/// keystore account `ai-key.<id>`.
+public struct TetheredAIConfig: Codable, Sendable, Equatable {
+    public var id: String
+    public var name: String
+    public var config: AIProviderConfig
+    /// false = draft-only: never takes an autonomous turn.
+    public var autonomous: Bool
+    public init(id: String, name: String, config: AIProviderConfig, autonomous: Bool = true) {
+        self.id = id; self.name = name; self.config = config; self.autonomous = autonomous
+    }
 }
 
 /// User settings (WS-N5). Every field optional; nil = default.
