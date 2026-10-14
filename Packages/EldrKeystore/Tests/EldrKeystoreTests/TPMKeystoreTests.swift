@@ -159,10 +159,10 @@ struct SwtpmKeystoreTests {
 
         // Upgrade a passphrase keystore in place.
         let old = tmp()
-        let penv = ["ELDR_CHAT_PASSPHRASE": "pw"]
+        let penv = ["ELDR_CHAT_PASSPHRASE": "pw-long-enough-1"]
         let (ps, _) = try makeLinuxKeystore(directory: old, profile: .eldrChat, environment: penv, tpmPresent: { false })
         try ps.save(Data("id".utf8), account: "id")
-        try upgradeKeystoreToTPM(directory: old, passphrase: "pw", keepPassphrase: true, tpm: tpm)
+        try upgradeKeystoreToTPM(directory: old, passphrase: "pw-long-enough-1", keepPassphrase: true, tpm: tpm)
         let (us, up) = try makeLinuxKeystore(directory: old, profile: .eldrChat,
                                              environment: penv.merging(env) { a, _ in a }, tpmPresent: { false })
         #expect(up == .tpmWrappedWithPassphrase)

@@ -48,7 +48,7 @@ struct SponsorshipLedgerTests {
     @Test func issue_rejectsBadDurationAndSelf() throws {
         var l = SponsorshipLedger()
         #expect(throws: SponsorshipLedgerError.badDuration) { var c = l; _ = try c.issue(to: agentHex, days: 0, label: nil, identity: owner, now: now) }
-        #expect(throws: SponsorshipLedgerError.badDuration) { var c = l; _ = try c.issue(to: agentHex, days: 31, label: nil, identity: owner, now: now) }
+        #expect(throws: SponsorshipLedgerError.badDuration) { var c = l; _ = try c.issue(to: agentHex, days: 8, label: nil, identity: owner, now: now) }
         #expect(throws: SponsorshipLedgerError.selfSponsorship) {
             var c = l; _ = try c.issue(to: owner.publicKeyData.hexString, days: 1, label: nil, identity: owner, now: now)
         }
@@ -58,7 +58,7 @@ struct SponsorshipLedgerTests {
     @Test func revoke_isEffectiveLocally_andProducesVerifiableRevocations() throws {
         var l = SponsorshipLedger()
         let sp1 = try #require(try l.issue(to: agentHex, days: 1, label: nil, identity: owner, now: now).agentSponsorship)
-        _ = try l.issue(to: agentHex, days: 30, label: nil, identity: owner, now: now)
+        _ = try l.issue(to: agentHex, days: 7, label: nil, identity: owner, now: now)
         let bodies = try l.revokeAll(to: agentHex, identity: owner, now: now + 5)
         #expect(bodies.count == 2)
         for b in bodies { try #require(b.agentSponsorshipRevocation).verify(presentedBy: owner.publicKeyData.hexString) }

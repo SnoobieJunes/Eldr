@@ -63,7 +63,7 @@ struct LinuxKeystoreTests {
     /// host WITH a TPM must refuse passphrase-only (fail-closed) unless knowingly overridden.
     @Test func ladderRefusesPassphraseWhenTpmPresent() throws {
         let dir = tempDir(); defer { try? FileManager.default.removeItem(at: dir) }
-        let env = ["ELDR_NODE_DATA_DIR": dir.path, "ELDR_KEYSTORE_PASSPHRASE": "hunter2"]
+        let env = ["ELDR_NODE_DATA_DIR": dir.path, "ELDR_KEYSTORE_PASSPHRASE": "hunter2-long-pass"]
         #expect(throws: LinuxKeystoreError.self) {
             _ = try makeLinuxIdentityStore(environment: env, tpmPresent: { true })
         }
@@ -81,7 +81,7 @@ struct LinuxKeystoreTests {
         // env-passphrase rung → on-disk posture
         let dir = tempDir(); defer { try? FileManager.default.removeItem(at: dir) }
         let (_, onDisk) = try makeLinuxIdentityStore(
-            environment: ["ELDR_NODE_DATA_DIR": dir.path, "ELDR_KEYSTORE_PASSPHRASE": "pw"],
+            environment: ["ELDR_NODE_DATA_DIR": dir.path, "ELDR_KEYSTORE_PASSPHRASE": "pw-long-enough-1"],
             tpmPresent: { false })
         #expect(onDisk == .passphraseOnDisk)
         #expect(!onDisk.isHardwareBacked)
@@ -95,7 +95,7 @@ struct LinuxKeystoreTests {
         let (_, sealed) = try makeLinuxIdentityStore(
             environment: [
                 "ELDR_NODE_DATA_DIR": dir2.path, "CREDENTIALS_DIRECTORY": credDir.path,
-                "ELDR_KEYSTORE_PASSPHRASE": "pw",
+                "ELDR_KEYSTORE_PASSPHRASE": "pw-long-enough-1",
             ], tpmPresent: { true })
         #expect(sealed == .tpmSealed)
         #expect(sealed.isHardwareBacked)
@@ -105,7 +105,7 @@ struct LinuxKeystoreTests {
     /// survives a node restart.
     @Test func masterKeyPersistsAcrossReopen() throws {
         let dir = tempDir(); defer { try? FileManager.default.removeItem(at: dir) }
-        let env = ["ELDR_NODE_DATA_DIR": dir.path, "ELDR_KEYSTORE_PASSPHRASE": "correct-horse"]
+        let env = ["ELDR_NODE_DATA_DIR": dir.path, "ELDR_KEYSTORE_PASSPHRASE": "correct-horse-staple"]
         let (store1, _) = try makeLinuxIdentityStore(environment: env, tpmPresent: { false })
         let secret = Data("identity-dh-seed".utf8)
         try store1.save(secret, account: "node-identity-dh")
@@ -119,7 +119,7 @@ struct LinuxKeystoreTests {
     @Test func wrongPassphraseFailsClosed() throws {
         let dir = tempDir(); defer { try? FileManager.default.removeItem(at: dir) }
         _ = try makeLinuxIdentityStore(
-            environment: ["ELDR_NODE_DATA_DIR": dir.path, "ELDR_KEYSTORE_PASSPHRASE": "first"],
+            environment: ["ELDR_NODE_DATA_DIR": dir.path, "ELDR_KEYSTORE_PASSPHRASE": "first-long-passphrase"],
             tpmPresent: { false })
         #expect(throws: LinuxKeystoreError.self) {
             _ = try makeLinuxIdentityStore(
@@ -132,7 +132,7 @@ struct LinuxKeystoreTests {
     /// silently mint a fresh master key and orphan the existing identity (audit finding 6).
     @Test func partialKeystoreRefusesRatherThanRemint() throws {
         let dir = tempDir(); defer { try? FileManager.default.removeItem(at: dir) }
-        let env = ["ELDR_NODE_DATA_DIR": dir.path, "ELDR_KEYSTORE_PASSPHRASE": "pw"]
+        let env = ["ELDR_NODE_DATA_DIR": dir.path, "ELDR_KEYSTORE_PASSPHRASE": "pw-long-enough-1"]
         _ = try makeLinuxIdentityStore(environment: env, tpmPresent: { false })  // writes wrap + salt
         try FileManager.default.removeItem(at: dir.appendingPathComponent("master.salt"))
         #expect(throws: LinuxKeystoreError.self) {

@@ -24,7 +24,7 @@ struct AuditRevocationFloodTests {
 
     @Test func floodCannotEvictThirdPartyRevocation() throws {
         var issuer = SponsorshipLedger()
-        let sp = try #require(try issuer.issue(to: agent.publicKeyData.hexString, days: 30, label: nil, identity: owner, now: now).agentSponsorship)
+        let sp = try #require(try issuer.issue(to: agent.publicKeyData.hexString, days: 7, label: nil, identity: owner, now: now).agentSponsorship)
         let rev = try #require(try issuer.revokeAll(to: agent.publicKeyData.hexString, identity: owner, now: now + 1).first?.agentSponsorshipRevocation)
         var viewer = SponsorshipLedger()  // someone the owner notified
         let ok = viewer.receive(revocation: rev, from: owner.publicKeyData.hexString); #expect(ok)
@@ -37,9 +37,25 @@ struct AuditRevocationFloodTests {
 
     @Test func floodCannotEvictMyOwnRevocation() throws {
         var l = SponsorshipLedger()
-        let sp = try #require(try l.issue(to: agent.publicKeyData.hexString, days: 30, label: nil, identity: owner, now: now).agentSponsorship)
+        let sp = try #require(try l.issue(to: agent.publicKeyData.hexString, days: 7, label: nil, identity: owner, now: now).agentSponsorship)
         _ = try l.revokeAll(to: agent.publicKeyData.hexString, identity: owner, now: now + 1)
         try flood(&l)
         #expect(l.isRevoked(sp))
+    }
+}
+
+@Suite("AC219: 7-day sponsorship cap")
+struct SponsorshipCapTests {
+    @Test func eightDaySponsorshipIsRefused_sevenAccepted() throws {
+        let owner = try PQRCIdentity(seed: Data(repeating: 0xA1, count: 32))
+        let agent = try PQRCIdentity(seed: Data(repeating: 0xB2, count: 32)).publicKeyData.hexString
+        let now: Int64 = 1_790_000_000
+        let long = try AgentSponsorship.make(sponsorshipID: "x", agent: agent, label: nil, issuedAt: now,
+                                             activeUntil: now + 8 * 86_400, identity: owner)
+        #expect(throws: AgentSponsorshipError.self) { try long.verify(presentedBy: agent, now: now) }
+        let ok = try AgentSponsorship.make(sponsorshipID: "y", agent: agent, label: nil, issuedAt: now,
+                                           activeUntil: now + 7 * 86_400, identity: owner)
+        try ok.verify(presentedBy: agent, now: now)
+        #expect(SponsorshipLedger.dayChoices == [1, 7])
     }
 }

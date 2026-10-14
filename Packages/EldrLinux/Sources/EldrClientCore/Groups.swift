@@ -36,7 +36,8 @@ extension EldrClient {
         let contacts = try qs.map { try contact(matching: $0) }
         var memberHexes = [identityHex]
         for h in contacts.map(\.identityHex) where !memberHexes.contains(h) { memberHexes.append(h) }
-        let create = GroupCreate(groupID: UUID().uuidString, name: name, members: memberHexes, revision: 1)
+        let create = GroupCreate(groupID: UUID().uuidString, name: name, members: memberHexes, revision: 1,
+                                 admins: [identityHex])
         let rec = GroupRecord(GroupRoster(create: create, assertedBy: identityHex))
         upsert(rec)
         let reached = try await fanOut(
@@ -48,13 +49,18 @@ extension EldrClient {
     /// Adds/removes members (a new roster revision sent to the union of old and new).
     public func reviseGroup(_ q: String, add: [String] = [], remove: [String] = [], rename: String? = nil) async throws -> GroupRecord {
         let g = try group(matching: q)
+        // AC220: only admins change the roster; others would just be ignored by everyone.
+        guard g.roster.isAdmin(identityHex) else {
+            throw EldrClientError.badSetting("only the group's admins can change it")
+        }
         let addHex = try add.map { try contact(matching: $0).identityHex }
         let removeHex = Set(try remove.map { try contact(matching: $0).identityHex })
         var members = g.members.filter { !removeHex.contains($0) || $0 == identityHex }
         for h in addHex where !members.contains(h) { members.append(h) }
         let newName = rename?.trimmingCharacters(in: .whitespacesAndNewlines) ?? g.name
         guard !newName.isEmpty, newName.count <= 100 else { throw EldrClientError.badSetting("group names are 1–100 characters") }
-        let create = GroupCreate(groupID: g.groupID, name: newName, members: members, revision: g.revision + 1)
+        let create = GroupCreate(groupID: g.groupID, name: newName, members: members, revision: g.revision + 1,
+                                 admins: g.roster.admins.filter(members.contains))
         var roster = g.roster
         _ = roster.apply(create, assertedBy: identityHex)
         let rec = GroupRecord(roster)
@@ -130,9 +136,74 @@ extension EldrClient {
         state.groups = gs
     }
 
-    /// Receive-side routing. Applies a carried roster, then returns the group id to
-    /// file this message under (nil = 1:1).
-    func routeGroup(_ m: ReceivedMessage) -> (groupID: String?, changed: GroupRecord?) {
+    /// Group invites waiting for my approval (AC220).
+    public var pendingGroupInvites: [GroupRecord] { state.pendingGroupInvites ?? [] }
+
+    /// Accepts a held invite: the group (and anything posted while it was held) appears.
+    @discardableResult
+    public func acceptGroupInvite(_ q: String) async throws -> GroupRecord {
+        let ql = q.lowercased()
+        guard let g = pendingGroupInvites.first(where: { $0.groupID.lowercased().hasPrefix(ql) || $0.name.lowercased() == ql })
+        else { throw EldrClientError.unknownGroup(q) }
+        state.pendingGroupInvites = pendingGroupInvites.filter { $0.groupID != g.groupID }
+        var rec = g; rec.invitedBy = nil
+        upsert(rec)
+        try await persist()
+        return rec
+    }
+
+    /// Declines a held invite: dropped, its held posts deleted, and later posts ignored.
+    public func declineGroupInvite(_ q: String) async throws {
+        let ql = q.lowercased()
+        guard let g = pendingGroupInvites.first(where: { $0.groupID.lowercased().hasPrefix(ql) || $0.name.lowercased() == ql })
+        else { throw EldrClientError.unknownGroup(q) }
+        state.pendingGroupInvites = pendingGroupInvites.filter { $0.groupID != g.groupID }
+        state.declinedGroups = Array(((state.declinedGroups ?? []) + [g.groupID]).suffix(500))
+        var a = agentState
+        a.history = (a.history ?? []).filter { $0.groupID != g.groupID }
+        agentState = a
+        try await persist()
+    }
+
+    /// Receive-side routing (AC220). Returns the group to file under (nil = 1:1),
+    /// `pending` (file hidden, under a held invite), `drop` (declined group), and any
+    /// roster change or new invite to report.
+    func routeGroup(_ m: ReceivedMessage) -> (groupID: String?, changed: GroupRecord?, invite: GroupRecord?, pending: Bool, drop: Bool) {
+        let sender = m.senderIdentityHex
+        let gid = m.body.groupCreate?.groupID ?? m.body.group?.id
+        if let gid, (state.declinedGroups ?? []).contains(gid) { return (nil, nil, nil, false, true) }
+        if let gid, let i = pendingGroupInvites.firstIndex(where: { $0.groupID == gid }) {
+            var inv = pendingGroupInvites[i]
+            if let create = m.body.groupCreate {
+                var r = inv.roster
+                if r.apply(create, assertedBy: sender) {
+                    let keep = inv.invitedBy
+                    inv = GroupRecord(r); inv.invitedBy = keep
+                    var p = pendingGroupInvites
+                    if create.members.contains(identityHex) { p[i] = inv } else { p.remove(at: i) }
+                    state.pendingGroupInvites = p
+                }
+            }
+            guard inv.members.contains(sender) else { return (nil, nil, nil, false, false) }
+            return (gid, nil, nil, true, false)
+        }
+        if let create = m.body.groupCreate, groups.first(where: { $0.groupID == create.groupID }) == nil {
+            // A NEW group naming me: held as an invite until I approve (like a message request).
+            guard create.members.contains(sender), create.members.contains(identityHex) else { return (nil, nil, nil, false, false) }
+            var inv = GroupRecord(GroupRoster(create: create, assertedBy: sender))
+            inv.invitedBy = sender
+            var p = pendingGroupInvites
+            p.append(inv)
+            if p.count > 32 { p.removeFirst(p.count - 32) }
+            state.pendingGroupInvites = p
+            return (create.groupID, nil, inv, true, false)
+        }
+        let r = routeKnownGroup(m)
+        return (r.groupID, r.changed, nil, false, false)
+    }
+
+    /// Routing for a group I already accepted.
+    func routeKnownGroup(_ m: ReceivedMessage) -> (groupID: String?, changed: GroupRecord?) {
         let sender = m.senderIdentityHex
         if let create = m.body.groupCreate {
             // Only a member of the asserted roster may assert it, and it must include me.

@@ -29,6 +29,8 @@ public struct UISnapshot: Sendable {
     /// Contacts whose reset (last-resort re-handshake) is waiting for my OK (AC166).
     public var pendingReconnects: Set<String> = []
     public var groups: [GroupRecord] = []
+    /// Group invites awaiting my approval (AC220).
+    public var groupInvites: [GroupRecord] = []
     public var threads: [ThreadRecord] = []
     /// conversation or `thread:<id>` → (identity → until) of every live AI there.
     public var aiActive: [String: [String: Int64]] = [:]
@@ -71,6 +73,7 @@ public struct UISnapshot: Sendable {
             agentBanner: banner, contacts: await c.contacts, requests: await c.requests,
             history: await c.history, issued: await c.issuedSponsorships,
             pendingReconnects: Set(await c.pendingReconnects()), groups: await c.groups,
+            groupInvites: await c.pendingGroupInvites,
             threads: await c.threads, aiActive: await aiActive(c), myWindowConversation: await c.myWindowConversation,
             settings: await c.settings, provider: await c.providerConfig, loopGuarded: await guarded(c),
             unread: await unreadCounts(c), ais: await c.myAIs().map(\.name), contextModes: await c.allContextModes,

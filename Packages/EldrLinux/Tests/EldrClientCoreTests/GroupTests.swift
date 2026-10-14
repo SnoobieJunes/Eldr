@@ -14,6 +14,7 @@ private actor Box {
     func groupTexts(_ gid: String?) -> [String] {
         all.compactMap { if case .message(_, let m, let g) = $0, g == gid { return m.body.text } else { return nil } }
     }
+    var invites: [GroupRecord] { all.compactMap { if case .groupInvite(let g, _) = $0 { return g } else { return nil } } }
     var rosters: [GroupRecord] { all.compactMap { if case .groupChanged(let g) = $0 { return g } else { return nil } } }
     func wait(_ cond: @Sendable (Box) async -> Bool, timeout: Double = 10) async -> Bool {
         let end = Date().addingTimeInterval(timeout)
@@ -56,9 +57,14 @@ struct GroupTests {
         let (g, reached) = try await a.createGroup(name: "trio", members: ["bob", "carol"])
         #expect(reached == 2)
         #expect(g.members == [a.identityHex, b.identityHex, c.identityHex])
-        #expect(await bb.wait { await $0.rosters.contains { $0.groupID == g.groupID } })
-        #expect(await cb.wait { await $0.rosters.contains { $0.groupID == g.groupID } })
+        // AC220: an invite is held until accepted.
+        #expect(await bb.wait { await $0.invites.contains { $0.groupID == g.groupID } })
+        #expect(await cb.wait { await $0.invites.contains { $0.groupID == g.groupID } })
+        #expect(await b.groups.isEmpty)
+        try await b.acceptGroupInvite(g.groupID)
+        try await c.acceptGroupInvite(g.groupID)
         #expect(await b.groups.first?.assertedBy == a.identityHex)
+        #expect(await b.groupHistory(g.groupID).contains { $0.text == "created the group \"trio\"" })
 
         let sent = try await a.sendToGroup("hi group", group: "trio")
         #expect(sent.reached == 2 && sent.skipped == 0)
@@ -90,7 +96,8 @@ struct GroupTests {
         try await link(a, b, bb, name: "bob", back: "alice")
         try await link(m, b, bb, name: "bob", back: "mallory")
         let (g, _) = try await a.createGroup(name: "pair", members: ["bob"])
-        #expect(await bb.wait { await $0.rosters.contains { $0.groupID == g.groupID } })
+        #expect(await bb.wait { await $0.invites.contains { $0.groupID == g.groupID } })
+        try await b.acceptGroupInvite(g.groupID)
 
         // Mallory (Bob's contact, not a member) tags a message with the group id, and
         // also tries to assert a roster that adds herself.
@@ -104,10 +111,48 @@ struct GroupTests {
             MessageBody(text: "roster", sentAt: 2, messageID: "x2", groupCreate: forged),
             to: bobForM, participant: .human)
         #expect(await bb.wait { await $0.groupTexts(nil).contains("roster") })
-        #expect(await bb.groupTexts(g.groupID) == ["created the group \"pair\""])
+        #expect(await bb.groupTexts(g.groupID).isEmpty)
         #expect(await bb.groupTexts(nil).contains("spoofed"))
         let roster = await b.groups.first { $0.groupID == g.groupID }
         #expect(roster?.revision == 1 && roster?.name == "pair")
+    }
+
+    /// AC220: a non-admin member cannot change the roster; a declined group stays silent.
+    @Test func onlyAdminsChangeRoster_andDeclineDropsPosts() async throws {
+        let relay = LocalRelaySimulator()
+        let (a, _) = try await client(relay)
+        let (b, bb) = try await client(relay)
+        let (c, cb) = try await client(relay)
+        try await link(a, b, bb, name: "bob", back: "alice")
+        try await link(a, c, cb, name: "carol", back: "alice")
+        try await link(b, c, cb, name: "carol", back: "bob")
+        let (g, _) = try await a.createGroup(name: "admins", members: ["bob", "carol"])
+        #expect(await bb.wait { await $0.invites.contains { $0.groupID == g.groupID } })
+        #expect(await cb.wait { await $0.invites.contains { $0.groupID == g.groupID } })
+        try await b.acceptGroupInvite(g.groupID)
+        try await c.acceptGroupInvite(g.groupID)
+        // Bob (member, not admin): his own client refuses…
+        await #expect(throws: EldrClientError.self) { _ = try await b.reviseGroup(g.groupID, remove: ["carol"]) }
+        // …and a forged revision he sends anyway is ignored by Carol.
+        let forged = GroupCreate(groupID: g.groupID, name: "bob's now", members: [b.identityHex, c.identityHex],
+                                 revision: 5, admins: [b.identityHex])
+        _ = try await b.deliver(MessageBody(text: "x", sentAt: 3, messageID: "f1", group: RumorContent.GroupRef(id: g.groupID), groupCreate: forged),
+                                to: try await b.contact(matching: "carol"), participant: .human)
+        #expect(await cb.wait({ await $0.groupTexts(g.groupID).contains("x") }, timeout: 20))
+        let cg = await c.groups.first { $0.groupID == g.groupID }
+        #expect(cg?.revision == 1 && cg?.members.count == 3 && cg?.name == "admins")
+        // Leaving is always allowed.
+        try await b.leaveGroup(g.groupID)
+        #expect(await cb.wait { _ in await c.groups.first?.members.contains(b.identityHex) == false })
+
+        // Decline: a second group's posts never surface.
+        let (g2, _) = try await a.createGroup(name: "spam", members: ["carol"])
+        #expect(await cb.wait { await $0.invites.contains { $0.groupID == g2.groupID } })
+        try await c.declineGroupInvite(g2.groupID)
+        _ = try await a.sendToGroup("buy now", group: g2.groupID)
+        try await Task.sleep(for: .milliseconds(500))
+        #expect(await c.groupHistory(g2.groupID).isEmpty)
+        #expect(await !c.history.contains { $0.text == "buy now" })
     }
 
     @Test func oldStateWithoutGroups_decodes() throws {

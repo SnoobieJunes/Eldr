@@ -21,7 +21,7 @@ public enum AgentSponsorshipError: Error, Equatable, Sendable {
 /// `agent` is an AI account I, `enabled_by`, vouch for until `active_until`."
 ///
 /// It follows the standing-grant model exactly: signed by the sponsor's HUMAN
-/// identity key under its own domain string, at most 30 days of life (refused,
+/// identity key under its own domain string, at most 7 days of life (AC219; standing grants keep 30) (refused,
 /// never truncated), revocable by the same key, and checked on every message
 /// rather than cached as a flag. It rides INSIDE the ratchet ciphertext as an
 /// optional `MessageBody` field, so relays never see it and older clients ignore
@@ -139,13 +139,13 @@ public struct AgentSponsorship: Codable, Equatable, Sendable {
     /// - When the AGENT receives it from the sponsor: `presentedBy == enabledBy`.
     /// - When a third party sees it attached to the agent's message:
     ///   `presentedBy == agent`.
-    /// Either way the object must name the agent, verify, and be within 30 days.
+    /// Either way the object must name the agent, verify, and be within 7 days (AC219).
     public func verify(presentedBy: String, now: Int64) throws {
         try validateStructure()
         guard presentedBy == agent || presentedBy == enabledBy.hexString
         else { throw AgentSponsorshipError.notFromSponsor }
         guard hasValidSignature() else { throw AgentSponsorshipError.signatureInvalid }
-        guard activeUntil - now <= PQRCConstants.maxStandingGrantDuration
+        guard activeUntil - now <= PQRCConstants.maxSponsorshipDuration
         else { throw AgentSponsorshipError.durationUnbounded }
         guard now < activeUntil else { throw AgentSponsorshipError.expired }
     }

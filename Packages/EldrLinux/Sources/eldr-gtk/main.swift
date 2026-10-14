@@ -301,7 +301,16 @@ final class AppUI: @unchecked Sendable {
         rebuilding = false
 
         clearList(reqList)
-        gtk_widget_set_visible(reqTitle, s.requests.isEmpty ? 0 : 1)
+        gtk_widget_set_visible(reqTitle, s.requests.isEmpty && s.groupInvites.isEmpty ? 0 : 1)
+        for g in s.groupInvites {
+            let row = hbox(4); margins(row, 4)
+            let l = label("👥 \(UIFormat.sanitizeLine(g.name)) (\(g.members.count))"); expand(l, h: true)
+            append(row, l)
+            let id = g.groupID
+            append(row, button("Join") { [unowned self] in self.act("Joined.") { try await $0.acceptGroupInvite(id) } })
+            append(row, button("Decline") { [unowned self] in self.act("Declined.") { try await $0.declineGroupInvite(id) } })
+            gtk_list_box_append(cast(reqList), row)
+        }
         for r in s.requests {
             let row = hbox(4); margins(row, 4)
             let l = label("✉ \(Bech32.npub(r.nostrPubkeyHex).prefix(20))… ×\(r.count)"); expand(l, h: true)
@@ -1046,6 +1055,8 @@ final class AppUI: @unchecked Sendable {
                     case .reconnectRequest(let rec, let auto):
                         note = auto ? "🔄 \(rec.name ?? "A contact") reset; reconnected."
                             : "🔄 \(rec.name ?? "A contact") reset their app and wants to reconnect. Check their safety code, then use Reconnect in their conversation."
+                    case .groupInvite(let g, let from):
+                        note = "👥 \(from.name ?? "A contact") invited you to “\(UIFormat.sanitizeLine(g.name))” — see Requests."
                     case .groupChanged(let g):
                         note = "👥 Group “\(UIFormat.sanitizeLine(g.name))” roster updated (\(g.members.count) members)."
                     case .aiWindow, .aiInvite, .threadCreated: note = nil

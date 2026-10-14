@@ -88,6 +88,8 @@ public enum ClientEvent: Sendable {
     case reconnectRequest(ContactRecord, autoAccepted: Bool)
     /// A group roster was created or changed (asserted by its sender).
     case groupChanged(GroupRecord)
+    /// Someone added me to a group; nothing shows until I accept (AC220).
+    case groupInvite(GroupRecord, from: ContactRecord)
     /// A window (conversation scope) or invite (thread scope) changed. `until` nil = ended.
     case aiWindow(identityHex: String, conversationID: String, until: Int64?)
     case aiInvite(identityHex: String, threadID: String, until: Int64?)
@@ -602,6 +604,20 @@ public actor EldrClient {
                 if let mark = full.body.aiContextMark { applyContextMark(mark, from: msg.senderIdentityHex) }
                 let routed = routeGroup(full)
                 if let g = routed.changed { out.append(.groupChanged(g)) }
+                if let inv = routed.invite { out.append(.groupInvite(inv, from: c)) }
+                if routed.drop { break }
+                if routed.pending {
+                    // Kept (hidden) so it shows if I accept; no AI, no notification.
+                    if !isControlOnly {
+                        var e = HistoryEntry(
+                            id: whole.messageID ?? msg.wrapEventID, peerIdentityHex: c.identityHex,
+                            outgoing: false, text: whole.text, sentAt: whole.sentAt,
+                            agent: msg.participantType == .agent, sponsorship: status)
+                        e.groupID = routed.groupID
+                        appendHistory(e)
+                    }
+                    break
+                }
                 let conv = routed.groupID.map { UIConversation.group($0) } ?? c.identityHex
                 let ai = await receiveAI(full, conversationID: conv)
                 out.append(contentsOf: ai.events)
