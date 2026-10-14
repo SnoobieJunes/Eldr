@@ -14,6 +14,9 @@ private actor Box {
     func groupTexts(_ gid: String?) -> [String] {
         all.compactMap { if case .message(_, let m, let g) = $0, g == gid { return m.body.text } else { return nil } }
     }
+    func hellos(from id: String) -> Bool {
+        all.contains { if case .message(_, let m, nil) = $0 { return m.senderIdentityHex == id && m.body.text == "hello" } else { return false } }
+    }
     var invites: [GroupRecord] { all.compactMap { if case .groupInvite(let g, _) = $0 { return g } else { return nil } } }
     var rosters: [GroupRecord] { all.compactMap { if case .groupChanged(let g) = $0 { return g } else { return nil } } }
     func wait(_ cond: @Sendable (Box) async -> Bool, timeout: Double = 10) async -> Bool {
@@ -41,7 +44,13 @@ private func link(_ a: EldrClient, _ b: EldrClient, _ bBox: Box, name: String, b
     try await a.send("hello", to: name)
     for _ in 0..<300 where await b.requests.isEmpty { try await Task.sleep(for: .milliseconds(20)) }
     try await b.accept(String(a.nostrPubkeyHex.prefix(10)), name: back)
-    #expect(await bBox.wait { await $0.groupTexts(nil).contains("hello") })
+    // Wait for THIS sender's hello (a hello from an earlier link must not satisfy it).
+    let aID = a.identityHex
+    #expect(await bBox.wait { await $0.hellos(from: aID) })
+    // Root cause of the onlyAdmins flake: b just spent a one-time prekey. Until its
+    // republish lands, the next initiator can draw the SAME OTP from the stale bundle
+    // (1-in-16 per list) and its handshake is refused as a replay (AC165/AC167).
+    await b.waitForBundleRepublish()
 }
 
 @Suite("Group chats (WS-N1)", .serialized)
@@ -138,7 +147,7 @@ struct GroupTests {
                                  revision: 5, admins: [b.identityHex])
         _ = try await b.deliver(MessageBody(text: "x", sentAt: 3, messageID: "f1", group: RumorContent.GroupRef(id: g.groupID), groupCreate: forged),
                                 to: try await b.contact(matching: "carol"), participant: .human)
-        #expect(await cb.wait({ await $0.groupTexts(g.groupID).contains("x") }, timeout: 20))
+        #expect(await cb.wait { await $0.groupTexts(g.groupID).contains("x") })
         let cg = await c.groups.first { $0.groupID == g.groupID }
         #expect(cg?.revision == 1 && cg?.members.count == 3 && cg?.name == "admins")
         // Leaving is always allowed.
