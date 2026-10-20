@@ -13,6 +13,8 @@ import PQRCNostr
 
 extension EldrClient {
     public var groups: [GroupRecord] { state.groups ?? [] }
+    /// groupID → last known name of groups I left (local display only).
+    public var leftGroupNames: [String: String] { state.leftGroupNames ?? [:] }
 
     public func group(matching q: String) throws -> GroupRecord {
         let ql = q.lowercased()
@@ -81,6 +83,7 @@ extension EldrClient {
         let targets = state.contacts.filter { members.contains($0.identityHex) }
         _ = try? await fanOut(text: "left the group", group: g, groupCreate: create, to: targets, record: true)
         state.groups = groups.filter { $0.groupID != g.groupID }
+        state.leftGroupNames = (state.leftGroupNames ?? [:]).merging([g.groupID: g.name]) { _, new in new }
         if myWindowConversation == UIConversation.group(g.groupID) { try? await endAIWindow() }
         try await persist()
     }

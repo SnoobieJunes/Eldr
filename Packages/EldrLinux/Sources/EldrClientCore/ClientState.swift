@@ -57,6 +57,9 @@ public struct ClientState: Codable, Sendable {
     /// Group invites waiting for my approval (AC220), and groups I declined.
     public var pendingGroupInvites: [GroupRecord]?
     public var declinedGroups: [String]?
+    /// groupID → last known name of a group I left, so its kept threads/history can
+    /// still be labelled. Local display only (never sent). Optional so older state decodes.
+    public var leftGroupNames: [String: String]?
     /// Threads (D7, WS-N2) and AI-participation state (SPEC §13). Optional for old state.
     public var threads: [ThreadRecord]?
     public var ai: AIState?

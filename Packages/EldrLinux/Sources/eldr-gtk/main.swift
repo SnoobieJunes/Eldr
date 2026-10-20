@@ -57,6 +57,10 @@ final class AppUI: @unchecked Sendable {
     var selected: String?
     var convIDs: [String] = []
     var rebuilding = false
+    /// Refresh coalescing: a burst of relay events triggers one snapshot + render.
+    var refreshQueued = false
+    /// What the message list was last built from; unchanged → the list is not rebuilt.
+    var renderedSignature = ""
     var pendingSponsor: (id: String, days: Int, at: Date)?
 
     var window: Widget!
@@ -178,46 +182,46 @@ final class AppUI: @unchecked Sendable {
         let main = vbox(6); margins(main, 10)
         headerLabel = label("Select a conversation", wrap: true, selectable: true); addClass(headerLabel, "title")
         append(main, headerLabel)
-        sponsorBar = hbox(6)
-        append(sponsorBar, label("AI sponsorship:"))
+        sponsorBar = flowBar()
+        flowAppend(sponsorBar, label("AI sponsorship:"))
         for d in EldrClient.sponsorshipDayChoices {
-            append(sponsorBar, button("Sponsor \(d) day\(d == 1 ? "" : "s")") { [unowned self] in self.sponsor(days: d) })
+            flowAppend(sponsorBar, button("Sponsor \(d) day\(d == 1 ? "" : "s")") { [unowned self] in self.sponsor(days: d) })
         }
-        append(sponsorBar, button("Revoke") { [unowned self] in self.revoke() })
-        append(sponsorBar, button("Contact…") { [unowned self] in self.showContact() })
+        flowAppend(sponsorBar, button("Revoke") { [unowned self] in self.revoke() })
+        flowAppend(sponsorBar, button("Contact…") { [unowned self] in self.showContact() })
         gtk_widget_set_visible(sponsorBar, 0)
         append(main, sponsorBar)
         // My AI (SPEC §13): a window in a conversation, an invite in a thread. Every
         // live AI is shown in the header for its whole duration (invariant 9).
-        aiBar = hbox(6)
-        aiLabel = label("My AI here:"); append(aiBar, aiLabel)
+        aiBar = flowBar()
+        aiLabel = label("My AI here:"); flowAppend(aiBar, aiLabel)
         for (t, secs) in [("1h", Int64(3600)), ("8h", Int64(8 * 3600)), ("24h", Int64(24 * 3600))] {
-            append(aiBar, button(t) { [unowned self] in self.myAI(seconds: secs) })
+            flowAppend(aiBar, button(t) { [unowned self] in self.myAI(seconds: secs) })
         }
-        append(aiBar, button("Off") { [unowned self] in self.myAI(seconds: 0) })
-        append(aiBar, button("Draft privately") { [unowned self] in self.draft() })
-        append(aiBar, button("AIs here…") { [unowned self] in self.showAIsHere() })
-        append(aiBar, button("What my AI sees") { [unowned self] in self.showAISees() })
-        append(aiBar, button("Send as my AI") { [unowned self] in self.sendAsAI() })
-        append(aiBar, button("Add last to AI context") { [unowned self] in
+        flowAppend(aiBar, button("Off") { [unowned self] in self.myAI(seconds: 0) })
+        flowAppend(aiBar, button("Draft privately") { [unowned self] in self.draft() })
+        flowAppend(aiBar, button("AIs here…") { [unowned self] in self.showAIsHere() })
+        flowAppend(aiBar, button("What my AI sees") { [unowned self] in self.showAISees() })
+        flowAppend(aiBar, button("Send as my AI") { [unowned self] in self.sendAsAI() })
+        flowAppend(aiBar, button("Add last to AI context") { [unowned self] in
             guard let id = self.selected else { return }
             let tid = UISnapshot.threadID(id), conv = self.conversationForAI(id)
             self.act("Your last message here is now in your AI's context (they were told).") { c in
                 _ = try await c.markAIContext(in: conv, thread: tid, message: "last", true)
             }
         })
-        append(aiBar, button("Share context 1h") { [unowned self] in self.shareContext(axis: "human", seconds: 3600) })
-        append(aiBar, button("Share AI replies 1h") { [unowned self] in self.shareContext(axis: "ai", seconds: 3600) })
-        append(aiBar, button("Stop sharing") { [unowned self] in
+        flowAppend(aiBar, button("Share context 1h") { [unowned self] in self.shareContext(axis: "human", seconds: 3600) })
+        flowAppend(aiBar, button("Share AI replies 1h") { [unowned self] in self.shareContext(axis: "ai", seconds: 3600) })
+        flowAppend(aiBar, button("Stop sharing") { [unowned self] in
             self.shareContext(axis: "human", seconds: nil); self.shareContext(axis: "ai", seconds: nil)
         })
         threadEntry = gtk_entry_new()
         gtk_entry_set_placeholder_text(cast(threadEntry), "New thread title")
         expand(threadEntry, h: true)
         on(threadEntry, "activate") { [unowned self] in self.startThread() }
-        append(aiBar, threadEntry)
+        flowAppend(aiBar, threadEntry)
         threadButton = button("Start thread") { [unowned self] in self.startThread() }
-        append(aiBar, threadButton)
+        flowAppend(aiBar, threadButton)
         append(main, aiBar)
         groupBar = hbox(6)
         renameEntry = gtk_entry_new()
@@ -246,6 +250,7 @@ final class AppUI: @unchecked Sendable {
             let enter = kv == 0xff0d || kv == 0xff8d  // GDK_KEY_Return / KP_Enter
             let ctrl = (st.rawValue & GDK_CONTROL_MASK.rawValue) != 0
             if UIFormat.composerShouldSend(isEnter: enter, ctrl: ctrl) { self.send(); return true }
+            if kv == 0x40 { self.suggestMentions() }  // GDK_KEY_at: show who can be @-mentioned
             return false
         }
         gtk_widget_add_controller(composer, key)
@@ -268,11 +273,26 @@ final class AppUI: @unchecked Sendable {
     // MARK: Render
 
     func refresh() {
-        guard let c = client else { return }
-        Task {
-            let s = await UISnapshot.capture(c)
-            onMain { [self] in self.snap = s; self.render() }
+        guard client != nil, !refreshQueued else { return }
+        refreshQueued = true
+        after(ms: 150) { [unowned self] in
+            self.refreshQueued = false
+            guard let c = self.client else { return }
+            Task {
+                let s = await UISnapshot.capture(c)
+                onMain { [self] in self.snap = s; self.render() }
+            }
         }
+    }
+
+    /// Nothing selected (or the selection disappeared, e.g. a group I left): show the
+    /// empty state with no conversation controls.
+    func renderEmpty() {
+        setLabel(headerLabel, "Select a conversation")
+        for w in [sponsorBar, groupBar, aiBar, reconnectBar] { gtk_widget_set_visible(w, 0) }
+        setLabel(mentionHint, "")
+        clearList(msgList)
+        renderedSignature = ""
     }
 
     func render() {
@@ -327,7 +347,8 @@ final class AppUI: @unchecked Sendable {
     /// Otherwise follow new messages only if the reader was already near the bottom,
     /// and keep their place if they had scrolled up.
     func renderConversation(scrollToEnd: Bool) {
-        guard let s = snap, let id = selected else { return }
+        guard let s = snap else { return }
+        guard let id = selected, convIDs.contains(id) else { selected = nil; renderEmpty(); return }
         setLabel(headerLabel, s.header(for: id))
         let isGroup = UISnapshot.groupID(id) != nil
         let isThread = UISnapshot.threadID(id) != nil
@@ -336,7 +357,9 @@ final class AppUI: @unchecked Sendable {
         gtk_widget_set_visible(aiBar, s.isAgent ? 0 : 1)
         gtk_widget_set_visible(threadEntry, isThread ? 0 : 1)
         gtk_widget_set_visible(threadButton, isThread ? 0 : 1)
+        let aisHere = s.othersAIsHere(id)
         setLabel(mentionHint, s.ais.isEmpty && s.contacts.isEmpty ? "" : "Mention: " + (s.ais.map { "@" + $0 } + (isGroup ? (s.groups.first { UISnapshot.groupPrefix + $0.groupID == id }?.members ?? []).compactMap { s.name(of: $0) }.filter { $0 != "you" }.map { "@" + ($0.split(separator: " ").first.map(String.init) ?? $0) } : [])).joined(separator: " ")
+            + (aisHere.isEmpty ? "" : "  ·  AIs here: " + aisHere.joined(separator: ", ") + " (reach them by @-mentioning their owner)")
             + (s.solo.contains(id) ? "  ·  Solo AI chat: your AIs answer every message" : "")
             + (s.contextModes[conversationForAI(id)].map { "  ·  AI context: \($0)" } ?? ""))
         setLabel(aiLabel, s.provider == nil ? "My AI (set it up in Settings):" : (isThread ? "Invite my AI:" : "My AI answers here for:"))
@@ -346,9 +369,13 @@ final class AppUI: @unchecked Sendable {
             value: gtk_adjustment_get_value(adj), pageSize: gtk_adjustment_get_page_size(adj),
             upper: gtk_adjustment_get_upper(adj))
         let keep = gtk_adjustment_get_value(adj)
+        let shown = s.messages(with: id).suffix(300)
+        let sig = id + "|" + shown.map { "\($0.id)\($0.failed == true ? "!" : "")" }.joined(separator: ",")
+        if !scrollToEnd && sig == renderedSignature { return }
+        renderedSignature = sig
         clearList(msgList)
         let peerName = s.name(of: id) ?? "them"
-        for m in s.messages(with: id).suffix(300) {
+        for m in shown {
             let col = vbox(2); margins(col, 4)
             let who = m.outgoing ? "You" : ((isGroup || isThread) ? (s.name(of: m.peerIdentityHex) ?? String(m.peerIdentityHex.prefix(8)) + "…") : peerName)
             var meta = "\(who) · \(UIFormat.date(m.sentAt))"
@@ -463,6 +490,20 @@ final class AppUI: @unchecked Sendable {
         }
     }
 
+    /// On '@': list the mentionable names (my AIs, then people here) in the status line.
+    /// Cheap: reads the last snapshot, no per-keystroke work beyond this key.
+    func suggestMentions() {
+        guard let s = snap, let id = selected else { return }
+        let gid = UISnapshot.groupID(id)
+        let people = (gid.flatMap { g in s.groups.first { $0.groupID == g }?.members } ?? [id])
+            .compactMap { s.name(of: $0) }.filter { $0 != "you" }
+            .map { $0.split(separator: " ").first.map(String.init) ?? $0 }
+        let names = s.ais + people
+        let here = s.othersAIsHere(id)
+        status(names.isEmpty ? "No one to @-mention here." : "@ " + names.joined(separator: "  @")
+            + (here.isEmpty ? "" : "  ·  AIs here: " + here.joined(separator: ", ")))
+    }
+
     func conversationForAI(_ id: String) -> String {
         if let g = UISnapshot.groupID(id) { return UIConversation.group(g) }
         return id
@@ -518,8 +559,22 @@ final class AppUI: @unchecked Sendable {
 
     func leaveGroup() {
         guard let id = selected, let gid = UISnapshot.groupID(id) else { return }
-        selected = nil
-        act("You left the group (history kept on this device).") { c in try await c.leaveGroup(gid) }
+        let name = UIFormat.sanitizeLine(snap?.groupLabel(id) ?? "this group")
+        let (win, box) = smallWindow("Leave group?", 420)
+        gtk_window_set_modal(cast(win), 1)
+        append(box, label("Leave “\(name)”? The other members are told, and you stop receiving its messages. History stays on this device.", wrap: true))
+        let row = hbox(6)
+        gtk_widget_set_halign(row, GTK_ALIGN_END)
+        append(row, button("Cancel") { gtk_window_destroy(cast(win)) })
+        let leave = button("Leave") { [unowned self] in
+            gtk_window_destroy(cast(win))
+            if self.selected == id { self.selected = nil; self.renderEmpty() }
+            self.act("You left the group (history kept on this device).") { c in try await c.leaveGroup(gid) }
+        }
+        addClass(leave, "destructive-action")
+        append(row, leave)
+        append(box, row)
+        gtk_window_present(cast(win))
     }
 
     /// Bilateral AI context sharing (SPEC N24): flows only while the other human shares too.
@@ -890,13 +945,28 @@ final class AppUI: @unchecked Sendable {
     func showRelays() {
         let (win, box) = smallWindow("Relays")
         let st = label("…", wrap: true, selectable: true); append(box, st)
+        let checked = label("", wrap: true); addClass(checked, "meta")
+        var checkButton: Widget?
         func load(_ check: Bool) {
+            if check {
+                setLabel(checked, "Checking…")
+                if let b = checkButton { gtk_widget_set_sensitive(b, 0) }
+            }
+            let b = checkButton
             act(nil) { c in
                 let r = await c.relayStatus(check: check)
-                onMain { setLabel(st, "Configured (next launch): " + r.relays.joined(separator: ", ") + "\nLive connection \(relayURL): \(r.status.label)") }
+                onMain {
+                    setLabel(st, "Configured (next launch): " + r.relays.joined(separator: ", ") + "\nLive connection \(relayURL): \(r.status.label)")
+                    if check {
+                        setLabel(checked, "Checked at \(UIFormat.clock(EldrClient.nowSeconds)): \(r.status.label)")
+                        if let b { gtk_widget_set_sensitive(b, 1) }
+                    }
+                }
             }
         }
-        append(box, button("Check now") { load(true) })
+        checkButton = button("Check now") { load(true) }
+        append(box, checkButton!)
+        append(box, checked)
         let n = label("Observational only: delivery never depends on this indicator; unsent messages show “Not sent — retry”.", wrap: true)
         addClass(n, "meta"); append(box, n)
         load(false)
@@ -1119,8 +1189,19 @@ final class ScrollTarget {
     init(adj: UnsafeMutablePointer<GtkAdjustment>?, toEnd: Bool, value: Double) { self.adj = adj; self.toEnd = toEnd; self.value = value }
 }
 
+/// A toolbar that wraps its buttons onto new rows, so the chat pane can shrink to the window.
+func flowBar() -> Widget {
+    let f = gtk_flow_box_new()!
+    gtk_flow_box_set_selection_mode(cast(f), GTK_SELECTION_NONE)
+    gtk_flow_box_set_homogeneous(cast(f), 0)
+    gtk_flow_box_set_max_children_per_line(cast(f), 32)
+    gtk_flow_box_set_column_spacing(cast(f), 6); gtk_flow_box_set_row_spacing(cast(f), 6)
+    return f
+}
+func flowAppend(_ bar: Widget, _ child: Widget) { gtk_flow_box_append(cast(bar), child) }
+
 let ui = AppUI()
-let app = gtk_application_new("app.eldr.EldrGtk", G_APPLICATION_NON_UNIQUE)!
+let app = gtk_application_new("app.eldr.EldrGtk", GApplicationFlags(rawValue: 32))!
 on(app, "activate") {
     ui.build(app)
     ui.connect()
