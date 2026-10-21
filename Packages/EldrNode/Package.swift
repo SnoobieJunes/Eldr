@@ -42,6 +42,8 @@ let package = Package(
         // EldrNodeCore itself does NOT depend on PQRCMCP — that boundary stands; the
         // WS-G5 `EldrNodeGooseworld` layer and the test target are what link it.
         .package(path: "../PQRCMCP"),
+        // The shared Linux keystore (moved out of eldr-node so the Linux client reuses it).
+        .package(path: "../EldrKeystore"),
         // WS-L3: scrypt (RFC 7914) for the Linux keystore's passphrase KEK, from swift-crypto's
         // `_CryptoExtras` — a product of the ALREADY-pinned swift-crypto, so NO new crypto
         // dependency (honors CLAUDE.md §2 + DEVIATIONS AC31; the port doc's "swift-crypto has no
@@ -87,6 +89,7 @@ let package = Package(
                 // module. Harmless on Apple (the macOS node uses NodeKeychain); linked so the
                 // store compiles + tests everywhere.
                 .product(name: "CryptoExtras", package: "swift-crypto"),
+                .product(name: "EldrKeystore", package: "EldrKeystore"),
             ],
             swiftSettings: [.swiftLanguageMode(.v6)]
         ),
@@ -120,6 +123,7 @@ let package = Package(
                 // and pin the node's gateway connect handshake against silent protocol re-drift.
                 "eldr-node",
                 "EldrBuzzGateway",
+                .product(name: "EldrKeystore", package: "EldrKeystore"),
                 "PQRCCore",
                 "PQRCNostr",
                 .product(name: "PQRCACP", package: "PQRCACP"),

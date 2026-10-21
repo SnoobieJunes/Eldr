@@ -59,7 +59,7 @@ extension DoubleRatchet {
     public func makeSnapshot() -> RatchetSnapshot {
         RatchetSnapshot(
             rootKey: rootKey.rawData,
-            dhs: dhs.rawRepresentation,
+            dhs: dhs.rawRepresentation.detachedCopy,
             dhr: dhr,
             cks: cks?.rawData,
             ckr: ckr?.rawData,
@@ -69,7 +69,7 @@ extension DoubleRatchet {
             messagesSinceRekey: messagesSinceRekey,
             rekeyCounter: rekeyCounter,
             peerRekeyCounter: peerRekeyCounter,
-            myKEMSeeds: myKEMs.map(\.key.seedRepresentation),
+            myKEMSeeds: myKEMs.map { $0.key.seedRepresentation.detachedCopy },
             peerKEM: peerKEM,
             skipped: skipped.map {
                 RatchetSnapshot.SkippedEntry(chain: $0.chain, n: $0.n, messageKey: $0.messageKey.rawData)
