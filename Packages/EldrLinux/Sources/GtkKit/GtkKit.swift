@@ -5,6 +5,7 @@
 // the GTK main thread; `onMain` is the only way back to it from Swift concurrency
 // (the Swift MainActor queue is NOT drained while g_application_run owns the thread).
 @_exported import CGtk4
+import Foundation
 
 public typealias Widget = UnsafeMutablePointer<GtkWidget>
 
@@ -92,6 +93,16 @@ public func onMain(_ f: @escaping @Sendable () -> Void) {
     g_idle_add_full(G_PRIORITY_DEFAULT_IDLE, t, box, nil)
 }
 
+/// A one-shot timer on the GTK main loop (milliseconds).
+public func after(ms: UInt32, _ f: @escaping () -> Void) {
+    let box = Unmanaged.passRetained(Box(f)).toOpaque()
+    let t: @convention(c) (UnsafeMutableRawPointer?) -> gboolean = { d in
+        Unmanaged<Box<() -> Void>>.fromOpaque(d!).takeRetainedValue().f()
+        return 0  // G_SOURCE_REMOVE
+    }
+    g_timeout_add_full(G_PRIORITY_DEFAULT, ms, t, box, nil)
+}
+
 /// A repeating timer on the GTK main loop (seconds). Returns the source id.
 @discardableResult
 public func every(seconds: UInt32, _ f: @escaping () -> Void) -> guint {
@@ -121,8 +132,12 @@ public func setLabel(_ w: Widget, _ text: String) { gtk_label_set_text(cast(w), 
 
 /// Sets Pango markup, falling back to plain `fallback` if Pango rejects it (a label
 /// given invalid markup renders EMPTY, which would hide the message).
+/// GtkLabel also accepts <a href="…"> (clickable links), which plain Pango does not
+/// know, so links are checked as <span> (same nesting) before validating.
 public func setMarkup(_ w: Widget, _ markup: String, fallback: String) {
-    if pango_parse_markup(markup, -1, 0, nil, nil, nil, nil) != 0 {
+    let probe = markup.replacingOccurrences(of: #"<a href="[^"<>]*">"#, with: "<span>", options: .regularExpression)
+        .replacingOccurrences(of: "</a>", with: "</span>")
+    if pango_parse_markup(probe, -1, 0, nil, nil, nil, nil) != 0 {
         gtk_label_set_markup(cast(w), markup)
     } else {
         gtk_label_set_text(cast(w), fallback)

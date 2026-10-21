@@ -29,6 +29,8 @@ public struct UISnapshot: Sendable {
     /// Contacts whose reset (last-resort re-handshake) is waiting for my OK (AC166).
     public var pendingReconnects: Set<String> = []
     public var groups: [GroupRecord] = []
+    /// groupID → last known name of groups I left (threads/history are kept locally).
+    public var leftGroupNames: [String: String] = [:]
     /// Group invites awaiting my approval (AC220).
     public var groupInvites: [GroupRecord] = []
     public var threads: [ThreadRecord] = []
@@ -72,7 +74,7 @@ public struct UISnapshot: Sendable {
             me: c.identityHex, npub: await c.npub, link: await c.pairingLink.uri, isAgent: isAgent,
             agentBanner: banner, contacts: await c.contacts, requests: await c.requests,
             history: await c.history, issued: await c.issuedSponsorships,
-            pendingReconnects: Set(await c.pendingReconnects()), groups: await c.groups,
+            pendingReconnects: Set(await c.pendingReconnects()), groups: await c.groups, leftGroupNames: await c.leftGroupNames,
             groupInvites: await c.pendingGroupInvites,
             threads: await c.threads, aiActive: await aiActive(c), myWindowConversation: await c.myWindowConversation,
             settings: await c.settings, provider: await c.providerConfig, loopGuarded: await guarded(c),
@@ -108,6 +110,13 @@ public struct UISnapshot: Sendable {
         return s
     }
 
+    /// A group conversation's name; a group I left shows its last known name + " (left)".
+    public func groupLabel(_ conversationID: String) -> String? {
+        guard let g = Self.groupID(conversationID) else { return nil }
+        if let live = groups.first(where: { $0.groupID == g }) { return live.name }
+        return leftGroupNames[g].map { $0 + " (left)" }
+    }
+
     public func name(of identityHex: String) -> String? {
         if identityHex == me { return "you" }
         return contacts.first { $0.identityHex == identityHex }.map { UIFormat.title($0) }
@@ -122,8 +131,7 @@ public struct UISnapshot: Sendable {
         }
         let threadRows = threads.map { t -> ConversationSummary in
             let l = lastThread[t.threadID]
-            let parent = Self.groupID(t.conversationID).flatMap { g in groups.first { $0.groupID == g }?.name }
-                ?? name(of: t.conversationID) ?? "?"
+            let parent = groupLabel(t.conversationID) ?? name(of: t.conversationID) ?? "?"
             return ConversationSummary(
                 identityHex: Self.threadPrefix + t.threadID, title: "🧵 " + UIFormat.sanitizeLine(t.title) + " · in " + UIFormat.sanitizeLine(parent),
                 preview: l.map { UIFormat.preview(($0.outgoing ? ($0.mine == true ? "\($0.agentName ?? "Your AI"): " : "You: ") : "\(name(of: $0.peerIdentityHex) ?? "?")\($0.agent ? "'s AI" : ""): ") + $0.text) } ?? "",
@@ -173,6 +181,12 @@ public struct UISnapshot: Sendable {
         return parts.isEmpty ? nil : parts.joined(separator: " · ")
     }
 
+    /// Other people's live AIs in this conversation/thread ("auston's AI"), as in the header.
+    public func othersAIsHere(_ id: String, now: Int64 = EldrClient.nowSeconds) -> [String] {
+        (aiActive[id] ?? [:]).filter { $0.key != me && $0.value > now }.keys.sorted()
+            .map { (name(of: $0) ?? String($0.prefix(8))) + "'s AI" }
+    }
+
     public func header(for identityHex: String, now: Int64 = EldrClient.nowSeconds) -> String {
         let base = baseHeader(for: identityHex, now: now)
         return aiIndicator(for: identityHex, now: now).map { base + "\n" + $0 } ?? base
@@ -181,7 +195,7 @@ public struct UISnapshot: Sendable {
     func baseHeader(for identityHex: String, now: Int64) -> String {
         if let tid = Self.threadID(identityHex) {
             guard let t = threads.first(where: { $0.threadID == tid }) else { return "" }
-            return "🧵 \(UIFormat.sanitizeLine(t.title)) · thread in \(Self.groupID(t.conversationID).flatMap { g in groups.first { $0.groupID == g }?.name } ?? name(of: t.conversationID) ?? "?")"
+            return "🧵 \(UIFormat.sanitizeLine(t.title)) · thread in \(UIFormat.sanitizeLine(groupLabel(t.conversationID) ?? name(of: t.conversationID) ?? "?"))"
         }
         if let gid = Self.groupID(identityHex) {
             guard let g = groups.first(where: { $0.groupID == gid }) else { return "" }
@@ -204,6 +218,12 @@ public enum UIFormat {
     public static func title(_ c: ContactRecord) -> String {
         sanitizeLine(c.name ?? Bech32.npub(c.nostrPubkeyHex).prefix(16) + "…")
             + (c.pinned == true ? " 📌" : "") + (c.verified == true ? " ✓" : "") + (c.blocked == true ? " ⛔" : "")
+    }
+
+    public static func clock(_ unix: Int64) -> String {
+        let f = DateFormatter()
+        f.dateFormat = "HH:mm:ss"
+        return f.string(from: Date(timeIntervalSince1970: TimeInterval(unix)))
     }
 
     public static func date(_ unix: Int64) -> String {
@@ -305,8 +325,9 @@ public enum UIFormat {
     /// is escaped FIRST, so message text can never inject markup; only the tags emitted
     /// here exist, each opened and closed on the same line, so the result is always
     /// well-formed. Supported: # headings, **bold**, *italic* / _italic_, `code`,
-    /// ``` fenced blocks, - / * / + bullets, > quotes, [text](url) shown as "text (url)"
-    /// (never clickable: links from strangers are not one click away).
+    /// ``` fenced blocks, - / * / + bullets, > quotes, [text](url) rendered as a clickable
+    /// "text" (Pango <a href>) for http/https/mailto only; any other scheme stays the
+    /// plain "text (url)" form. The URL also shows as the link's tooltip in GTK.
     public static func markdownToPango(_ md: String) -> String {
         var out: [String] = []
         var inFence = false
@@ -316,7 +337,7 @@ public enum UIFormat {
                 inFence.toggle()
                 continue
             }
-            if inFence { out.append("<tt>" + pangoEscape(line) + "</tt>"); continue }
+            if inFence { out.append(codeOpen + pangoEscape(line) + codeClose); continue }
             var body = Substring(line)
             var prefix = "", suffix = ""
             let hashes = body.prefix(while: { $0 == "#" }).count
@@ -343,7 +364,7 @@ public enum UIFormat {
         let paired = parts.count % 2 == 1
         for (i, p) in parts.enumerated() {
             if paired && i % 2 == 1 {
-                result += "<tt>" + pangoEscape(p) + "</tt>"
+                result += codeOpen + pangoEscape(p) + codeClose
             } else {
                 let piece = paired || i == 0 ? String(p) : "`" + p
                 result += emphasis(pangoEscape(piece))
@@ -352,9 +373,17 @@ public enum UIFormat {
         return result
     }
 
+    /// Inline code / fenced blocks: monospace with a subtle background (a bare <tt> was
+    /// indistinguishable from body text under some GTK themes).
+    static let codeOpen = "<span font_family=\"monospace\" background=\"#888888\" bgalpha=\"18%\">"
+    static let codeClose = "</span>"
+
     /// Patterns are literals; `try?` + compactMap instead of `try!` (no force-try rule).
     /// `markdownRulesCompiled` in the tests pins that none is silently dropped.
     static let rules: [(NSRegularExpression, String)] = ([
+        // Safe schemes become a clickable link; the URL is already escaped (no '"' survives
+        // escaping as a raw quote, and '<' '>' are excluded), so it cannot break the attribute.
+        (#"\[([^\]\n<>]+)\]\(((?:https?://|mailto:)[^)\s<>]+)\)"#, "<a href=\"$2\">$1</a>"),
         (#"\[([^\]\n<>]+)\]\(([^)\s<>]+)\)"#, "$1 <span foreground=\"#3584e4\">($2)</span>"),
         (#"\*\*([^*\n<>]+)\*\*"#, "<b>$1</b>"),
         (#"__([^_\n<>]+)__"#, "<b>$1</b>"),
@@ -365,12 +394,29 @@ public enum UIFormat {
 
     /// Applied to ALREADY-ESCAPED text. Groups exclude '<' and '>' so a span can never
     /// straddle a tag emitted by an earlier rule (no interleaved, malformed markup).
+    /// Links (rules 0–1) are cut out first so the emphasis rules never rewrite inside an
+    /// href (e.g. `_` in a URL); only the link text gets emphasis.
     static func emphasis(_ escaped: String) -> String {
-        var s = escaped
-        for (re, tpl) in rules {
-            s = re.stringByReplacingMatches(in: s, range: NSRange(s.startIndex..., in: s), withTemplate: tpl)
+        let links = rules.prefix(2), spans = rules.dropFirst(2)
+        func styled(_ t: String) -> String {
+            var s = t
+            for (re, tpl) in spans {
+                s = re.stringByReplacingMatches(in: s, range: NSRange(s.startIndex..., in: s), withTemplate: tpl)
+            }
+            return s
         }
-        return s
+        var out = "", rest = Substring(escaped)
+        while true {
+            let str = String(rest), whole = NSRange(str.startIndex..., in: str)
+            let hit = links.enumerated().compactMap { i, rule in rule.0.firstMatch(in: str, range: whole).map { (m: $0, safe: i == 0) } }
+                .min { $0.m.range.location < $1.m.range.location }
+            guard let hit, let r = Range(hit.m.range, in: str),
+                let tr = Range(hit.m.range(at: 1), in: str), let ur = Range(hit.m.range(at: 2), in: str) else { return out + styled(str) }
+            out += styled(String(str[..<r.lowerBound]))
+            let text = styled(String(str[tr])), url = String(str[ur])
+            out += hit.safe ? "<a href=\"\(url)\">\(text)</a>" : "\(text) <span foreground=\"#3584e4\">(\(url))</span>"
+            rest = str[r.upperBound...]
+        }
     }
 }
 

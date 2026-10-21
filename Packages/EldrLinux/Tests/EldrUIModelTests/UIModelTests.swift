@@ -108,6 +108,21 @@ struct UIModelTests {
         #expect(UIFormat.rowBadge(mine, names: snap.name(of:)).text == "🤖 your AI")
     }
 
+    @Test func leftGroup_threadsKeepLastKnownName_andOthersAIsListed() {
+        let ev = NostrEvent(pubkey: "", createdAt: 0, kind: 10420, tags: [], content: "")
+        let a = String(repeating: "aa", count: 32), me = String(repeating: "cc", count: 32)
+        let cs = [ContactRecord(name: "auston", nostrPubkeyHex: a, identityHex: a, bindingEvent: ev, session: nil, addedAt: Date(timeIntervalSince1970: 1))]
+        var snap = UISnapshot(me: me, npub: "", link: "", isAgent: false, agentBanner: nil, contacts: cs, requests: [], history: [], issued: [])
+        snap.threads = [ThreadRecord(threadID: "T", conversationID: "group:G1", title: "plan", createdBy: a)]
+        #expect(snap.conversations().first { $0.identityHex == "thread:T" }?.title.hasSuffix("in ?") == true, "no data at all still falls back")
+        snap.leftGroupNames = ["G1": "linux-gui-test-renamed"]
+        #expect(snap.conversations().first { $0.identityHex == "thread:T" }?.title == "🧵 plan · in linux-gui-test-renamed (left)")
+        #expect(snap.header(for: "thread:T").contains("thread in linux-gui-test-renamed (left)"))
+        snap.aiActive = ["group:G1": [a: 9_999_999_999, me: 9_999_999_999]]
+        #expect(snap.othersAIsHere("group:G1", now: 100) == ["auston's AI"], "my own AI is not listed")
+        #expect(snap.othersAIsHere("group:G1", now: 10_000_000_000).isEmpty, "expired AIs are not listed")
+    }
+
     /// Tags must nest properly and no raw '<' may come from message text.
     private func wellFormed(_ m: String) -> Bool {
         var stack: [String] = []
@@ -119,7 +134,7 @@ struct UIModelTests {
             if name.hasPrefix("/") {
                 guard stack.popLast() == String(name.dropFirst()) else { return false }
             } else {
-                guard ["b", "i", "s", "tt", "span"].contains(name) else { return false }
+                guard ["b", "i", "s", "tt", "span", "a"].contains(name) else { return false }
                 stack.append(name)
             }
             i = m.index(after: gt)
@@ -131,11 +146,10 @@ struct UIModelTests {
         let md = "# Title\n**bold** and *it* and `x < y`\n- item\n> quote\n```\n<b>raw</b>\n```\n[site](https://e.x)"
         let m = UIFormat.markdownToPango(md)
         #expect(m.contains("<span size=\"x-large\" weight=\"bold\">Title</span>"))
-        #expect(m.contains("<b>bold</b> and <i>it</i> and <tt>x &lt; y</tt>"))
+        #expect(m.contains("<b>bold</b> and <i>it</i> and " + UIFormat.codeOpen + "x &lt; y" + UIFormat.codeClose))
         #expect(m.contains("  • item"))
-        #expect(m.contains("<tt>&lt;b&gt;raw&lt;/b&gt;</tt>"))
-        #expect(m.contains("site <span foreground=\"#3584e4\">(https://e.x)</span>"))
-        #expect(!m.contains("<a "), "links are never clickable")
+        #expect(m.contains(UIFormat.codeOpen + "&lt;b&gt;raw&lt;/b&gt;" + UIFormat.codeClose))
+        #expect(m.contains("<a href=\"https://e.x\">site</a>"))
         #expect(wellFormed(m))
     }
 
@@ -160,7 +174,17 @@ struct UIModelTests {
         #expect(UIFormat.shouldFollow(value: 0, pageSize: 500, upper: 400), "short history always follows")
     }
 
-    @Test func markdownRulesCompiled() { #expect(UIFormat.rules.count == 6) }
+    @Test func markdownRulesCompiled() { #expect(UIFormat.rules.count == 7) }
+
+    @Test func markdown_codeIsMonospace_andLinksOnlyForSafeSchemes() {
+        #expect(UIFormat.markdownToPango("a `b` c").contains("font_family=\"monospace\""))
+        #expect(UIFormat.markdownToPango("[docs](https://e.x/a?b=1&c=2)") == "<a href=\"https://e.x/a?b=1&amp;c=2\">docs</a>")
+        #expect(UIFormat.markdownToPango("[me](mailto:a@b.c)") == "<a href=\"mailto:a@b.c\">me</a>")
+        let js = UIFormat.markdownToPango("[x](javascript:alert(1))")
+        #expect(!js.contains("<a "), "unsafe schemes are never clickable")
+        #expect(!UIFormat.markdownToPango("[x](file:///etc/passwd)").contains("<a "))
+        #expect(wellFormed(UIFormat.markdownToPango("[a\"b](https://e.x/\"onclick)")))
+    }
 }
 
 @Suite("World + tour (WS-N7)")
