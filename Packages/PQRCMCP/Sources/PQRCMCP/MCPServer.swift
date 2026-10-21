@@ -17,6 +17,9 @@ public struct MCPServer: Sendable {
     ]
 
     let bridge: any SecureChatBridge
+    /// Audit-2 M1: conversation ids are peer IDENTITY KEYS for 1:1 chats. The MCP client
+    /// (often a cloud model host) only ever sees opaque per-server handles ("c1", "c2", …).
+    let handles = ConversationHandles()
     public init(bridge: any SecureChatBridge) { self.bridge = bridge }
 
     struct RPCError: Error { let code: Int; let message: String }
@@ -173,7 +176,10 @@ public struct MCPServer: Sendable {
             guard let id = args["conversationID"] as? String, !id.isEmpty else {
                 throw RPCError(code: -32602, message: "conversationID is required")
             }
-            return id
+            guard let real = handles.resolve(id) else {
+                throw RPCError(code: -32602, message: "unknown conversationID (use an id from list_conversations)")
+            }
+            return real
         }
 
         func requireText() throws -> String {
@@ -239,7 +245,7 @@ public struct MCPServer: Sendable {
     private func resourcesListResult() async -> [String: Any] {
         let resources = await bridge.conversations().map { c in
             [
-                "uri": "\(Self.resourceScheme)\(c.id)", "name": c.title,
+                "uri": "\(Self.resourceScheme)\(handles.handle(for: c.id))", "name": c.title,
                 "mimeType": "text/plain", "description": "Secure conversation: \(c.title)",
             ]
         }
@@ -250,7 +256,9 @@ public struct MCPServer: Sendable {
         guard let uri = params["uri"] as? String, uri.hasPrefix(Self.resourceScheme) else {
             throw RPCError(code: -32602, message: "unknown resource uri")
         }
-        let id = String(uri.dropFirst(Self.resourceScheme.count))
+        guard let id = handles.resolve(String(uri.dropFirst(Self.resourceScheme.count))) else {
+            throw RPCError(code: -32602, message: "unknown resource uri")
+        }
         let text = render(messages: await bridge.messages(conversationID: id, limit: 50))
         return ["contents": [["uri": uri, "mimeType": "text/plain", "text": text]]]
     }
@@ -261,7 +269,7 @@ public struct MCPServer: Sendable {
         guard !conversations.isEmpty else { return "(no conversations)" }
         return conversations.map { c in
             let unread = c.unread > 0 ? " · \(c.unread) unread" : ""
-            return "- \(c.title)  [id: \(c.id)]\(unread)"
+            return "- \(c.title)  [id: \(handles.handle(for: c.id))]\(unread)"
         }.joined(separator: "\n")
     }
 
@@ -289,5 +297,28 @@ public struct MCPServer: Sendable {
                 #"{"jsonrpc":"2.0","id":null,"error":{"code":-32603,"message":"serialization failed"}}"#
         }
         return string
+    }
+}
+
+
+/// Opaque, per-server conversation handles (audit-2 M1). Never derived from the id, so a
+/// handle reveals nothing; a raw id (identity hex) is not accepted as input either.
+final class ConversationHandles: @unchecked Sendable {  // guarded by `lock`
+    private let lock = NSLock()
+    private var byReal: [String: String] = [:]
+    private var byHandle: [String: String] = [:]
+
+    func handle(for real: String) -> String {
+        lock.lock(); defer { lock.unlock() }
+        if let h = byReal[real] { return h }
+        let h = "c\(byReal.count + 1)"
+        byReal[real] = h
+        byHandle[h] = real
+        return h
+    }
+
+    func resolve(_ handle: String) -> String? {
+        lock.lock(); defer { lock.unlock() }
+        return byHandle[handle]
     }
 }

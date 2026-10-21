@@ -1,5 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
 import Foundation
+#if canImport(Glibc)
+import Glibc
+#elseif canImport(Darwin)
+import Darwin
+#endif
 
 /// What the client said it can do (from `initialize` → clientCapabilities). Drives
 /// whether the agent routes file/shell work THROUGH the client (so edits and
@@ -485,15 +490,7 @@ public struct ToolExecutor: Sendable {
     /// path is run through `jailedPath` so it can only ever land inside the jail.
     private func spill(_ text: String, toRelative rel: String) -> Bool {
         guard let abs = jailedPath(rel) else { return false }
-        let dir = (abs as NSString).deletingLastPathComponent
-        do {
-            try FileManager.default.createDirectory(
-                atPath: dir, withIntermediateDirectories: true)
-            try Data(text.utf8).write(to: URL(fileURLWithPath: abs))
-            return true
-        } catch {
-            return false
-        }
+        return writeNoFollow(abs, Data(text.utf8))
     }
 
     // MARK: Path resolution
@@ -505,39 +502,98 @@ public struct ToolExecutor: Sendable {
         return (environment.effectiveWorkdir as NSString).appendingPathComponent(path)
     }
 
-    /// C-2: resolve `path` to a canonical absolute path and confirm it stays WITHIN the
-    /// session working directory. Returns nil when it escapes — an absolute path outside
-    /// the workdir, a `../` traversal, or a symlink that points out — so the four file
-    /// tools serve the project tree but never `~/.ssh`, `../../etc/...`, or a planted
-    /// symlink. (run_shell is the deliberate, permission-gated escape hatch.) Symlinks
-    /// are resolved BEFORE the prefix check so a link can't step out and back in.
+    /// C-2 + AC223 (owner decision): the file tools NEVER follow a symlink. A path is
+    /// taken lexically relative to the (canonical) workdir; `..` is refused outright and
+    /// every existing component is lstat'ed — any symlink, inside or outside the jail,
+    /// rejects the path. The local read/write paths then re-walk with `openat(...,
+    /// O_NOFOLLOW)` per component and act on the resulting fd (`openNoFollow`), so a
+    /// symlink swapped in between this check and the I/O (TOCTOU) fails with ELOOP/ENOTDIR
+    /// instead of escaping. (run_shell is the deliberate, permission-gated escape hatch.)
     func jailedPath(_ path: String) -> String? {
-        func canonical(_ p: String) -> String {
-            URL(fileURLWithPath: p).resolvingSymlinksInPath().standardizedFileURL.path
+        guard let comps = jailComponents(path) else { return nil }
+        let root = jailRoot()
+        var cur = root
+        for c in comps {
+            cur += "/" + c
+            var st = stat()
+            if lstat(cur, &st) != 0 { break }  // the rest does not exist yet
+            if (st.st_mode & S_IFMT) == S_IFLNK { return nil }
         }
-        var root = canonical(environment.effectiveWorkdir)
+        return comps.isEmpty ? root : root + "/" + comps.joined(separator: "/")
+    }
+
+    /// The canonical workdir (the root itself may legitimately sit behind a symlink,
+    /// e.g. macOS /tmp; that is the operator's choice, not the model's).
+    func jailRoot() -> String {
+        var root = URL(fileURLWithPath: environment.effectiveWorkdir).resolvingSymlinksInPath()
+            .standardizedFileURL.path
         if root.count > 1, root.hasSuffix("/") { root.removeLast() }
-        // `resolvingSymlinksInPath` only resolves a symlinked component when the FULL
-        // path exists on disk. For a NEW file (the normal `write_file` case) the leaf
-        // doesn't exist, so a symlinked PARENT dir is left unresolved — `write_file(
-        // "link/newfile")` through `link -> ~/.ssh` then passed the prefix check while
-        // the actual write followed the link OUT of the jail (CR-2, PoC-confirmed). Fix:
-        // canonicalize the deepest EXISTING ancestor (whose symlinks DO resolve), then
-        // re-append the not-yet-existing leaf components and re-check.
-        let fm = FileManager.default
-        let absURL = URL(fileURLWithPath: absolutePath(path)).standardizedFileURL
-        var existing = absURL
-        var tail: [String] = []
-        while !fm.fileExists(atPath: existing.path) {
-            let parent = existing.deletingLastPathComponent()
-            if parent.path == existing.path { break }  // reached "/"
-            tail.insert(existing.lastPathComponent, at: 0)
-            existing = parent
+        return root
+    }
+
+    /// Lexical components of `path` relative to the jail root; nil if it is absolute
+    /// outside the root or contains `..`.
+    func jailComponents(_ path: String) -> [String]? {
+        let root = jailRoot()
+        var given = URL(fileURLWithPath: environment.effectiveWorkdir).standardizedFileURL.path
+        if given.count > 1, given.hasSuffix("/") { given.removeLast() }
+        var p = path
+        if p.hasPrefix("/") {
+            if p == root || p == given || p == root + "/" || p == given + "/" { return [] }
+            if p.hasPrefix(root + "/") { p = String(p.dropFirst(root.count + 1)) }
+            else if p.hasPrefix(given + "/") { p = String(p.dropFirst(given.count + 1)) }
+            else { return nil }
         }
-        var resolved = canonical(existing.path)
-        for component in tail { resolved += "/" + component }
-        resolved = canonical(resolved)  // also resolve a leaf that is itself a symlink
-        return resolved == root || resolved.hasPrefix(root + "/") ? resolved : nil
+        let comps = p.split(separator: "/").map(String.init).filter { !$0.isEmpty && $0 != "." }
+        if comps.contains("..") { return nil }
+        return comps
+    }
+
+    /// Opens a jailed path without following ANY symlink: `openat(O_NOFOLLOW)` per
+    /// component from a directory fd of the root. `createDirs` makes missing parents.
+    /// Returns -1 on any failure (incl. ELOOP when a component is a symlink).
+    func openNoFollow(_ jailed: String, flags: Int32, createDirs: Bool = false) -> Int32 {
+        guard let comps = jailComponents(jailed), let leaf = comps.last else { return -1 }
+        var dfd = open(jailRoot(), O_RDONLY | O_DIRECTORY | O_CLOEXEC)
+        guard dfd >= 0 else { return -1 }
+        for c in comps.dropLast() {
+            var n = openat(dfd, c, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
+            if n < 0, errno == ENOENT, createDirs, mkdirat(dfd, c, 0o755) == 0 {
+                n = openat(dfd, c, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
+            }
+            close(dfd)
+            guard n >= 0 else { return -1 }
+            dfd = n
+        }
+        let fd = openat(dfd, leaf, flags | O_NOFOLLOW | O_CLOEXEC, 0o644)
+        close(dfd)
+        guard fd >= 0 else { return -1 }
+        var st = stat()
+        // Only regular files; a hard link (nlink > 1) could alias a file outside the jail.
+        guard fstat(fd, &st) == 0, (st.st_mode & S_IFMT) == S_IFREG,
+            (flags & (O_WRONLY | O_RDWR)) == 0 || st.st_nlink <= 1
+        else { close(fd); return -1 }
+        return fd
+    }
+
+    /// Reads up to `limit` bytes from a jailed path (no symlinks followed).
+    func readNoFollow(_ jailed: String, limit: Int = Int.max) -> (data: Data, size: Int)? {
+        let fd = openNoFollow(jailed, flags: O_RDONLY)
+        guard fd >= 0 else { return nil }
+        let h = FileHandle(fileDescriptor: fd, closeOnDealloc: true)
+        var st = stat()
+        let size = fstat(fd, &st) == 0 ? Int(st.st_size) : 0
+        let d = (limit == Int.max ? try? h.readToEnd() : try? h.read(upToCount: limit)) ?? Data()
+        return (d ?? Data(), size)
+    }
+
+    /// Writes (create/truncate) a jailed path through a no-follow fd.
+    func writeNoFollow(_ jailed: String, _ data: Data) -> Bool {
+        let fd = openNoFollow(jailed, flags: O_WRONLY | O_CREAT, createDirs: true)
+        guard fd >= 0 else { return false }
+        let h = FileHandle(fileDescriptor: fd, closeOnDealloc: true)
+        guard ftruncate(fd, 0) == 0 else { return false }
+        do { try h.write(contentsOf: data); return true } catch { return false }
     }
 
     // MARK: read_file
@@ -569,14 +625,12 @@ public struct ToolExecutor: Sendable {
         // Foundation fallback with read-side backpressure: stat first, and if the
         // file is over `maxReadFileBytes` read only a bounded PREFIX off disk (via
         // FileHandle) rather than loading the whole thing into memory just to trim it.
-        let size =
-            (try? FileManager.default.attributesOfItem(atPath: path)[.size] as? Int) ?? nil
-        if let size, maxReadFileBytes != Int.max, size > maxReadFileBytes {
-            guard let handle = FileHandle(forReadingAtPath: path) else {
-                return ToolResult(text: "read_file: cannot read \(path)", isError: true)
-            }
-            defer { try? handle.close() }
-            let prefix = (try? handle.read(upToCount: maxReadFileBytes)) ?? Data()
+        guard let got = readNoFollow(path, limit: maxReadFileBytes) else {
+            return ToolResult(text: "read_file: cannot read \(path)", isError: true)
+        }
+        let size = got.size
+        if maxReadFileBytes != Int.max, size > maxReadFileBytes {
+            let prefix = got.data
             // Cut on a UTF-8 character boundary so the prefix is always valid text.
             let head = String(decoding: prefix, as: UTF8.self)
             let note =
@@ -585,9 +639,7 @@ public struct ToolExecutor: Sendable {
                 + "(ELDR_ACP_MAX_READ_FILE_BYTES). Use search or read a narrower path.]"
             return ToolResult(text: head + note)
         }
-        guard let data = FileManager.default.contents(atPath: path),
-            let text = String(data: data, encoding: .utf8)
-        else {
+        guard let text = String(data: got.data, encoding: .utf8) else {
             return ToolResult(text: "read_file: cannot read \(path)", isError: true)
         }
         return ToolResult(text: text)
@@ -629,16 +681,9 @@ public struct ToolExecutor: Sendable {
                 // Fall back to FileManager below.
             }
         }
-        do {
-            let dir = (path as NSString).deletingLastPathComponent
-            try FileManager.default.createDirectory(
-                atPath: dir, withIntermediateDirectories: true)
-            try content.data(using: .utf8)?.write(to: URL(fileURLWithPath: path))
-            return ToolResult(text: successNote)
-        } catch {
-            return ToolResult(
-                text: "\(label): \(error.localizedDescription) (\(path))", isError: true)
-        }
+        if writeNoFollow(path, Data(content.utf8)) { return ToolResult(text: successNote) }
+        return ToolResult(
+            text: "\(label): cannot write \(path) (symlink, hard link, or not a regular file?)", isError: true)
     }
 
     /// Read a file's full contents as text (prefer the client buffer, then
@@ -655,8 +700,7 @@ public struct ToolExecutor: Sendable {
                 return content
             }
         }
-        guard let data = FileManager.default.contents(atPath: path),
-            let text = String(data: data, encoding: .utf8)
+        guard let got = readNoFollow(path), let text = String(data: got.data, encoding: .utf8)
         else { return nil }
         return text
     }

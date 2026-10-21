@@ -93,6 +93,11 @@ struct ServiceTests {
         // On disk it is sealed (B2), not plaintext.
         let raw = try Data(contentsOf: URL(fileURLWithPath: projects[0].path))
         #expect(String(decoding: raw, as: UTF8.self).hasPrefix(ProjectContext.sealedHeader))
+        // Audit-2 H1: the cwd marker beside it is sealed too (the dir name is only a hash).
+        let marker = (projects[0].path as NSString).deletingLastPathComponent + "/cwd"
+        let rawMarker = try Data(contentsOf: URL(fileURLWithPath: marker))
+        #expect(!String(decoding: rawMarker, as: UTF8.self).contains(cwd))
+        #expect((try FileManager.default.attributesOfItem(atPath: marker)[.posixPermissions] as? Int) == 0o600)
         // Without the key the memory is unreadable (never rendered as text).
         #expect(await ContextLearner(paths: paths, metadataKey: nil).memoryText(projects[0]) == "")
         await l.clear(projects[0])

@@ -88,7 +88,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: GTK 4 headers for eldr-gtk (AC164)
-        run: apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq libgtk-4-dev pkg-config
+        run: apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq libgtk-4-dev pkg-config libtss2-dev swtpm  # swtpm = SIMULATED TPM tests (AC218)
       - name: All packages' tests + every Linux executable (scripts/linux-ci.sh, AC172)
         # Same gate run locally before every push: all ten packages' FULL suites
         # (protocol regressions surface on Linux too) plus eldr-chat, eldr-gtk,

@@ -138,21 +138,24 @@ struct MCPOverRelaySecurityTests {
         defer { try? FileManager.default.removeItem(atPath: workdir) }
 
         // Scripted node brain: turn 1 → call the chat READ tool; turn 2 → call
-        // send_as_my_ai (which the phone refuses, no window); turn 3 → finish.
+        // (after list_conversations for the opaque handle, audit-2 M1) send_as_my_ai (which the phone refuses, no window); turn 3 → finish.
         let llm = ScriptedLLM([
+            LLMResponse(
+                content: "",
+                toolCalls: [LLMToolCall(id: "l0", name: "mcp_list_conversations", arguments: "{}")]),
             LLMResponse(
                 content: "",
                 toolCalls: [
                     LLMToolCall(
                         id: "r1", name: "mcp_read_conversation",
-                        arguments: #"{"conversationID":"alice","limit":20}"#)
+                        arguments: #"{"conversationID":"c1","limit":20}"#)
                 ]),
             LLMResponse(
                 content: "",
                 toolCalls: [
                     LLMToolCall(
                         id: "s1", name: "mcp_send_as_my_ai",
-                        arguments: #"{"conversationID":"alice","text":"auto reply"}"#)
+                        arguments: #"{"conversationID":"c1","text":"auto reply"}"#)
                 ]),
             LLMResponse(content: "done with chat tools"),
         ])
@@ -245,10 +248,13 @@ struct MCPOverRelaySecurityTests {
         let llm = ScriptedLLM([
             LLMResponse(
                 content: "",
+                toolCalls: [LLMToolCall(id: "l0", name: "mcp_list_conversations", arguments: "{}")]),
+            LLMResponse(
+                content: "",
                 toolCalls: [
                     LLMToolCall(
                         id: "s1", name: "mcp_send_as_my_ai",
-                        arguments: #"{"conversationID":"alice","text":"auto reply"}"#)
+                        arguments: #"{"conversationID":"c1","text":"auto reply"}"#)
                 ]),
             LLMResponse(content: "sent"),
         ])

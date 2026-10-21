@@ -143,8 +143,11 @@ public actor ContextLearner {
         let dir = (mdPath as NSString).deletingLastPathComponent
         try? FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
         let marker = (dir as NSString).appendingPathComponent("cwd")
+        // Audit-2 H1: the directory is a HASH of the cwd; a plaintext marker would undo
+        // that. Sealed with the metadata key when there is one; 0600 either way.
         if !FileManager.default.fileExists(atPath: marker) {
-            try? Data(cwd.utf8).write(to: URL(fileURLWithPath: marker))
+            let m = metadataKey.flatMap { ProjectContext.sealForDisk(cwd, key: $0) } ?? Data(cwd.utf8)
+            FileManager.default.createFile(atPath: marker, contents: m, attributes: [.posixPermissions: 0o600])
         }
         var doc = ProjectMemoryDoc(parsing: Self.readMemoryText(mdPath, key: metadataKey))
         mutate(&doc)
@@ -157,6 +160,7 @@ public actor ContextLearner {
             out = Data(serialized.utf8)
         }
         try? out.write(to: URL(fileURLWithPath: mdPath), options: .atomic)
+        try? FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: mdPath)
     }
 
     public func projects() -> [ProjectMemory] {
@@ -167,8 +171,8 @@ public actor ContextLearner {
             let dir = (paths.projectsDir as NSString).appendingPathComponent(hash)
             let md = (dir as NSString).appendingPathComponent("eldr.md")
             guard fm.fileExists(atPath: md) else { continue }
-            let cwd =
-                (try? String(contentsOfFile: (dir as NSString).appendingPathComponent("cwd"), encoding: .utf8))?
+            let markerData = fm.contents(atPath: (dir as NSString).appendingPathComponent("cwd")) ?? Data()
+            let cwd = ProjectContext.openFromDisk(markerData, key: metadataKey)?
                 .trimmingCharacters(in: .whitespacesAndNewlines) ?? hash
             let doc = ProjectMemoryDoc(parsing: Self.readMemoryText(md, key: metadataKey))
             result.append(ProjectMemory(cwd: cwd, path: md, preview: doc.preview))

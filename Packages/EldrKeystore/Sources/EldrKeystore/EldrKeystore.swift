@@ -91,8 +91,33 @@ public enum KeystorePosture: String, Sendable {
     /// scrypt KEK, passphrase from env/file so the daemon can restart unattended — WEAK:
     /// the passphrase travels with the disk image (AC31). Only acceptable knowingly.
     case passphraseOnDisk
+    /// Master key wrapped in-process under a secret sealed in THIS host's TPM (AC218).
+    case tpmWrapped
+    /// TPM-wrapped AND passphrase-protected: both are required to unlock.
+    case tpmWrappedWithPassphrase
+    /// Master key wrapped under a FIDO2 security key's hmac-secret (AC224).
+    case securityKey
+    /// Security key AND passphrase: both required.
+    case securityKeyWithPassphrase
 
-    public var isHardwareBacked: Bool { self == .tpmSealed }
+    public var isHardwareBacked: Bool {
+        self == .tpmSealed || self == .tpmWrapped || self == .tpmWrappedWithPassphrase
+            || self == .securityKey || self == .securityKeyWithPassphrase
+    }
+
+    /// Short label for status bars / `keystore status`.
+    public var shortLabel: String {
+        switch self {
+        case .tpmSealed: return "TPM (systemd-creds)"
+        case .systemdCredential: return "systemd credential, no TPM ⚠"
+        case .passphraseTyped: return "passphrase only ⚠"
+        case .passphraseOnDisk: return "passphrase file only ⚠"
+        case .tpmWrapped: return "TPM"
+        case .tpmWrappedWithPassphrase: return "TPM + passphrase"
+        case .securityKey: return "security key"
+        case .securityKeyWithPassphrase: return "security key + passphrase"
+        }
+    }
 
     /// The line the node prints LOUDLY at start so an operator knows what actually protects
     /// their keys (never a silent downgrade).
@@ -104,10 +129,20 @@ public enum KeystorePosture: String, Sendable {
             return "keystore: master key from a systemd credential, but NO TPM is present — ⚠️ sealing "
                 + "is not verifiable in-process; hardware backing is unconfirmed (invariant 10)."
         case .passphraseTyped:
-            return "keystore: scrypt-passphrase master key, typed interactively — no on-disk passphrase."
+            return "keystore: ⚠️ WARNING — passphrase-only protection (no TPM in use). A copied disk can be "
+                + "attacked offline by guessing the passphrase."
         case .passphraseOnDisk:
-            return "keystore: scrypt-passphrase master key from env/file — ⚠️ the passphrase travels "
-                + "with a stolen disk image (SPEC §0 / DEVIATIONS AC31). No hardware binding on this host."
+            return "keystore: ⚠️ WARNING — passphrase-only protection, and the passphrase is in an env var "
+                + "or file: anyone with a copy of this disk can open your keys (SPEC §0 / DEVIATIONS AC31). "
+                + "No TPM in use. Run `keystore status` for details."
+        case .tpmWrapped:
+            return "keystore: master key wrapped by this machine's TPM — a copied disk cannot open it."
+        case .tpmWrappedWithPassphrase:
+            return "keystore: master key wrapped by this machine's TPM AND your passphrase — both required."
+        case .securityKey:
+            return "keystore: master key wrapped by your FIDO2 security key — a copied disk cannot open it without the key."
+        case .securityKeyWithPassphrase:
+            return "keystore: master key wrapped by your FIDO2 security key AND your passphrase — both required."
         }
     }
 }
@@ -117,6 +152,8 @@ public enum LinuxKeystoreError: Error, CustomStringConvertible {
     case noPassphrase(KeystoreProfile)
     case corruptMasterWrap
     case writeFailed(String)
+    case passphraseFileTooOpen(String)
+    case weakPassphrase(String)
 
     public var description: String {
         switch self {
@@ -124,7 +161,9 @@ public enum LinuxKeystoreError: Error, CustomStringConvertible {
             return "\(tool): a TPM is present (/dev/tpmrm0) but the master key is not TPM-sealed. "
                 + "Invariant 10 allows a passphrase KEK ONLY where no secure element exists — seal the "
                 + "master key with systemd-creds (LoadCredentialEncrypted), or set "
-                + "ELDR_KEYSTORE_ALLOW_NO_TPM=1 to knowingly accept the weaker passphrase posture."
+                + "ELDR_KEYSTORE_ALLOW_NO_TPM=1 to knowingly accept the weaker passphrase posture. "
+                + "An existing passphrase keystore can be moved to the TPM with `keystore upgrade` "
+                + "(needs the tpm2-tss libraries: libtss2-esys, libtss2-tctildr, libtss2-mu)."
         case .noPassphrase(let p):
             return "\(p.tool): no keystore passphrase. Provide \(p.passphraseEnv) (or "
                 + "\(p.passphraseFileEnv)), or start attended at a TTY to type one — or better, "
@@ -134,6 +173,13 @@ public enum LinuxKeystoreError: Error, CustomStringConvertible {
                 + "keystore is corrupt. Refusing to proceed (fail-closed)."
         case .writeFailed(let path):
             return "keystore: could not write keystore file \(path)."
+        case .weakPassphrase(let why):
+            return "keystore: passphrase too weak (\(why)). Use at least \(PassphrasePolicy.minLength) characters "
+                + "with some variety — four or five random words work well. It only protects a copied disk if "
+                + "it is hard to guess."
+        case .passphraseFileTooOpen(let path):
+            return "keystore: passphrase file \(path) is readable by other users. "
+                + "Run `chmod 600 \(path)` (fail-closed, like ssh with a private key)."
         }
     }
 }
@@ -252,11 +298,15 @@ public func makeLinuxKeystore(
     directory dir: URL,
     profile: KeystoreProfile,
     environment: [String: String] = ProcessInfo.processInfo.environment,
-    tpmPresent: () -> Bool = defaultTpmPresent
+    tpmPresent: () -> Bool = defaultTpmPresent,
+    tpm: (any TPMSealer)? = nil,
+    fido: (any FIDOAuthenticator)? = nil
 ) throws -> (store: FileIdentityStore, posture: KeystorePosture) {
     try FileIdentityStore.ensureDirectory(dir)
+    let sealer = tpm ?? defaultTPMSealer(environment: environment, tpmPresent: tpmPresent)
     let (masterKey, posture) = try resolveMasterKey(
-        directory: dir, profile: profile, environment: environment, tpmPresent: tpmPresent)
+        directory: dir, profile: profile, environment: environment, tpmPresent: tpmPresent, tpm: sealer,
+        fido: fido ?? defaultFIDOAuthenticator(environment: environment))
     return (FileIdentityStore(directory: dir, masterKey: masterKey, profile: profile), posture)
 }
 
@@ -270,7 +320,8 @@ public func defaultTpmPresent() -> Bool {
 /// The ladder. TPM-sealed key if systemd handed us one; else refuse if a TPM is present and
 /// unused (invariant 10); else the scrypt-passphrase rung.
 private func resolveMasterKey(
-    directory: URL, profile: KeystoreProfile, environment env: [String: String], tpmPresent: () -> Bool
+    directory: URL, profile: KeystoreProfile, environment env: [String: String], tpmPresent: () -> Bool,
+    tpm: (any TPMSealer)?, fido: (any FIDOAuthenticator)?
 ) throws -> (SymmetricKey, KeystorePosture) {
     // Rung 1 — TPM via systemd-creds: the plaintext key sits in $CREDENTIALS_DIRECTORY,
     // unsealed by systemd from a TPM-sealed credential. No TPM code in this process.
@@ -281,6 +332,41 @@ private func resolveMasterKey(
             // alone does not prove it was TPM-sealed (it could be a plain LoadCredential=).
             return (SymmetricKey(data: raw), tpmPresent() ? .tpmSealed : .systemdCredential)
         }
+    }
+
+    // Rung 1b — in-process TPM wrap (AC218). An existing master.tpm is authoritative: it
+    // NEVER falls back to anything weaker (fail-closed if the TPM is gone or refuses).
+    if let rec = try TPMMaster.read(directory) {
+        guard let tpm else {
+            throw TPMKeystoreError.unavailable("this keystore is TPM-wrapped but no usable TPM was found")
+        }
+        var pass: String?
+        if rec.passphraseSalt != nil { pass = try obtainPassphrase(env, profile).passphrase }
+        let key = try TPMMaster.open(rec, tpm: tpm, passphrase: pass)
+        return (key, pass == nil ? .tpmWrapped : .tpmWrappedWithPassphrase)
+    }
+    // Rung 1c — FIDO2 security-key wrap (AC224). Authoritative and fail-closed like master.tpm.
+    if let rec = try FIDOMaster.read(directory) {
+        guard let fido else { throw FIDOKeystoreError.unavailable("this keystore needs a FIDO2 security key (libfido2)") }
+        var pass: String?
+        if rec.passphraseSalt != nil { pass = try obtainPassphrase(env, profile).passphrase }
+        let key = try FIDOMaster.open(rec, fido: fido, passphrase: pass)
+        return (key, pass == nil ? .securityKey : .securityKeyWithPassphrase)
+    }
+    // First run on a host with a usable TPM: create a TPM-wrapped keystore. A passphrase from
+    // env/file (never prompted here) is layered on top when given.
+    let fm = FileManager.default
+    let fresh = !fm.fileExists(atPath: directory.appendingPathComponent("master.wrap").path)
+        && !fm.fileExists(atPath: directory.appendingPathComponent("master.salt").path)
+    if fresh, let tpm {
+        let pass = optionalPassphrase(env, profile)
+        let master = SymmetricKey(size: .bits256)
+        if let rec = try? TPMMaster.make(master: master, tpm: tpm, passphrase: pass),
+            (try? TPMMaster.writeVerified(rec, dir: directory, master: master, tpm: tpm, passphrase: pass)) != nil
+        {
+            return (master, pass == nil ? .tpmWrapped : .tpmWrappedWithPassphrase)
+        }
+        // The TPM did not work: fall through to the refusal below (fail-closed).
     }
 
     // Rung refusal — a TPM exists but nothing sealed a key to it. Passphrase-only here would
@@ -296,11 +382,32 @@ private func resolveMasterKey(
     return (masterKey, typed ? .passphraseTyped : .passphraseOnDisk)
 }
 
+/// A passphrase from env/file only (no prompt), for layering on a NEW TPM keystore.
+private func optionalPassphrase(_ env: [String: String], _ profile: KeystoreProfile) -> String? {
+    if let p = env[profile.passphraseEnv], !p.isEmpty { return p }
+    if let path = env[profile.passphraseFileEnv], !path.isEmpty {
+        var st = stat()
+        if stat(path, &st) == 0, st.st_mode & 0o077 != 0 { return nil }
+        if let d = try? Data(contentsOf: URL(fileURLWithPath: path)),
+            let p = String(data: d, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines), !p.isEmpty
+        { return p }
+    }
+    return nil
+}
+
 /// Env/file (on-disk posture, lets a daemon restart) or an interactive TTY prompt (typed, no
 /// on-disk trace). A daemon with none of these fails closed.
 private func obtainPassphrase(_ env: [String: String], _ profile: KeystoreProfile) throws -> (passphrase: String, typed: Bool) {
     if let p = env[profile.passphraseEnv], !p.isEmpty {
         return (p, false)
+    }
+    if let path = env[profile.passphraseFileEnv], !path.isEmpty {
+        // AC215: a group/world-readable passphrase file hands every local user the
+        // master key's only protection. Refuse it rather than use it silently.
+        var st = stat()
+        if stat(path, &st) == 0, st.st_mode & 0o077 != 0 {
+            throw LinuxKeystoreError.passphraseFileTooOpen(path)
+        }
     }
     if let path = env[profile.passphraseFileEnv], !path.isEmpty,
         let data = try? Data(contentsOf: URL(fileURLWithPath: path)),
@@ -348,6 +455,8 @@ private func unwrapOrInitMaster(directory: URL, passphrase: String) throws -> Sy
     }
 
     // First run: fresh master key, fresh salt, wrap and persist (0600) before returning.
+    // AC222: a new keystore gets a minimum-strength passphrase (existing ones still open).
+    try PassphrasePolicy.check(passphrase)
     let masterRaw = SymmetricKey(size: .bits256).withUnsafeBytes { Data($0) }
     let salt = SymmetricKey(size: .bits128).withUnsafeBytes { Data($0) }
     let kek = try LinuxKeystoreScrypt.kek(passphrase: passphrase, salt: salt)
@@ -356,4 +465,25 @@ private func unwrapOrInitMaster(directory: URL, passphrase: String) throws -> Sy
     try FileIdentityStore.writeFile(saltURL, salt)
     try FileIdentityStore.writeFile(wrapURL, wrapped)
     return SymmetricKey(data: masterRaw)
+}
+
+
+/// Minimum passphrase strength at keystore CREATION (AC222, owner decision). Deliberately
+/// simple and explainable: length, variety, and not a well-known password. Existing
+/// keystores keep opening with whatever passphrase they were made with.
+public enum PassphrasePolicy {
+    public static let minLength = 12
+    public static let minDistinct = 6
+    static let common: Set<String> = [
+        "password1234", "passwordpassword", "123456789012", "qwertyuiopas", "letmeinletmein",
+        "correct horse battery staple", "iloveyou1234", "administrator", "changemechangeme",
+    ]
+
+    public static func check(_ p: String) throws {
+        if p.count < minLength { throw LinuxKeystoreError.weakPassphrase("shorter than \(minLength) characters") }
+        if Set(p.lowercased()).count < minDistinct {
+            throw LinuxKeystoreError.weakPassphrase("too few different characters")
+        }
+        if common.contains(p.lowercased()) { throw LinuxKeystoreError.weakPassphrase("a well-known password") }
+    }
 }

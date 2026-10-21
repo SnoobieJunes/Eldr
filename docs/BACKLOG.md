@@ -207,7 +207,7 @@ Recorded so they aren't rediscovered as surprises. None is scheduled.
 | `world_delegate` is fire-and-forget — the reply lands on the delegation channel, not as the tool's return value | AC143 |
 | Pairwise fan-out caps at ~8 towns; MLS is the v2 scale path | `pitch/GOOSEWORLD.md` §6 |
 | `.a2aRemote` delegation is refused on Linux (fails loudly as `unsupportedKind`) | AC141 |
-| The Linux TPM rung is systemd-creds sealing, not an in-process `tpm2-tss` shim | AC139 |
+| The Linux TPM rung now includes an in-process `tpm2-tss` wrap (AC218), tested only against **swtpm** (a simulator). Still to do: verify on real TPM hardware; optionally bind to PCRs (measured boot) and use the TPM's own authValue so passphrase guesses hit its anti-hammering; an `eldr-node keystore upgrade` command (the node uses the shared library but has no CLI for it yet) | AC218 |
 | Phone → Huginn grant hand-off is copy/paste; an automatic paired-channel push is future work | AC145 |
 | Headless `eldr-node` gateway continuity is per-process, not per-conversation | AC69 |
 | The in-app **Agent Inspector** and **Nearby scanner** are not built — use OS logs | `TEST-PLAN.md` §14 |
@@ -241,3 +241,4 @@ it's a thought, and thoughts go in `private/`.
 - [x] WS-N10 Phase B: Huginn Linux GTK app + launcher (`Apps/HuginnLinux`, AGPL) — PR #28, AC201–AC210, plan `docs/plan/HUGINN-LINUX.md`
 - [ ] WS-N10b Huginn Linux leftovers: context-graph fields, per-request LLM inspector, town-grants editor, setup wizard/tour, A2A/MCP host, approval notifications, live Buzz workspace + phone-driven bridge checks, macOS compile of the BuzzGateway transport change (AC205). Owner: Grok Bot. Exit: each row in HUGINN-LINUX.md done or declined in DEVIATIONS.
 - [ ] WS-N6: Linux ACP-over-relay client (`eldr-chat acp <node>`) so ELDR can drive eldr-acp/Xcode on Auston's Mac, plus a second-driver story for eldr-node (single `--owner` today). See `docs/plan/LINUX-PARITY.md` WS-N6 and `docs/guide/OWNER-TEST-PLAN.md` Phase 4.
+- [ ] WS-N6 sponsored-driver design: the Mac enforces live short sponsorship, per-call human approval (Mac/phone, deny on timeout, no Always), a no-symlink jail, no secrets leaving the Mac, and instant revoke. Plan `docs/plan/WS-N6-SPONSORED-ACP-DRIVER.md`. Owner: Grok Bot + Auston (Mac/iOS). Exit: OWNER-TEST-PLAN Phase 4 plus the §6 theft drills pass on the Mac.

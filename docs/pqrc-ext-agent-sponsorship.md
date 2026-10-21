@@ -4,7 +4,7 @@
 
 - **Extension URI:** `https://eldr.app/ext/pqrc-agent-sponsorship/v1`
 - **Status:** Draft (implemented in `PQRCCore` `AgentSponsorship` + `EldrClientCore`; DEVIATIONS AC162)
-- **Model:** the standing-grant model ([`pqrc-ext-standing-grants.md`](pqrc-ext-standing-grants.md)): signed by the human identity key, own domain string, ≤ 30 days, revocable, checked per message, rides inside the ciphertext.
+- **Model:** the standing-grant model ([`pqrc-ext-standing-grants.md`](pqrc-ext-standing-grants.md)): signed by the human identity key, own domain string, ≤ 7 days (standing grants: 30), revocable, checked per message, rides inside the ciphertext.
 
 ## Objects (optional `MessageBody` fields — no new rumor type, no new event kind)
 
@@ -21,11 +21,11 @@ Both domain strings are non-prefix with every other PQRC signing domain (tested)
 
 ## Flow
 
-1. The owner (a **human** persona) signs a sponsorship naming the agent's identity for 1, 7 or 30 days and sends it to the agent in an ordinary human-labeled message.
-2. The agent accepts it only if: it is in agent mode, the sender is its **pinned owner**, `enabled_by == sender`, the signature verifies, `agent ==` its own identity, it is unexpired, ≤ 30 days remain, and it is not revoked.
+1. The owner (a **human** persona) signs a sponsorship naming the agent's identity for 1 or 7 days and sends it to the agent in an ordinary human-labeled message.
+2. The agent accepts it only if: it is in agent mode, the sender is its **pinned owner**, `enabled_by == sender`, the signature verifies, `agent ==` its own identity, it is unexpired, ≤ 7 days remain, and it is not revoked.
 3. In agent mode every send is labeled `participant_type: "agent"` (agent-key signed, SPEC §13.4) and **carries the sponsorship**. With no live sponsorship the send is refused locally.
-4. Every receiver checks each agent-labeled message on its own: sponsorship present, `agent == sender`, signature, ≤ 30 days, unexpired, unrevoked. Result: `sponsored(by, label, until)`, `unsponsored`, or `invalid(reason)`. Human messages are `human`.
-5. Revocation: signed by the same key, delivered by that key's owner (anything else is ignored). Effective on receipt: the agent drops its sponsorship and stops sending; the sponsor's own view flips at once; contacts the sponsor chooses to notify flip on receipt. Everyone else stops trusting it at `active_until` (≤ 30 days).
+4. Every receiver checks each agent-labeled message on its own: sponsorship present, `agent == sender`, signature, ≤ 7 days, unexpired, unrevoked. Result: `sponsored(by, label, until)`, `unsponsored`, or `invalid(reason)`. Human messages are `human`.
+5. Revocation: signed by the same key, delivered by that key's owner (anything else is ignored). Effective on receipt: the agent drops its sponsorship and stops sending; the sponsor's own view flips at once; contacts the sponsor chooses to notify flip on receipt. Everyone else stops trusting it at `active_until` (≤ 7 days; revocations are deliberately not published, AC219).
 
 ## What it is not
 

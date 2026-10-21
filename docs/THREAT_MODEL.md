@@ -377,6 +377,30 @@ Honest accounting of what is and isn't encrypted at rest (DEVIATIONS AC69–AC72
   Keychain (`…WhenUnlockedThisDeviceOnly`), a weaker at-rest posture flagged by an inv-10
   tripwire — same caveat as the silo KEK (§2.3a / DEVIATIONS AC31).
 
+### 2.15 Linux at-rest protection (eldr-chat, eldr-gtk, eldr-node, Huginn for Linux)
+
+Every Linux secret lives in an EldrKeystore: per-account AES-256-GCM files under one master
+key. What protects that master key depends on the machine, and the apps say which one, on
+every start and in the UI (`eldr-chat keystore status`, the GTK "Keys:" indicator, Huginn's
+title bar). DEVIATIONS AC31, AC139, AC218.
+
+| Posture | What it protects against | What it does not |
+|---|---|---|
+| **TPM** (`master.tpm`, in-process tpm2-tss wrap) | A copied disk or VM image: the sealed secret only unseals inside this machine's TPM. | Anyone who can run code as you on this machine *while it is running* can ask the TPM to unseal, just as the app does. No PCR/boot-state binding yet. |
+| **TPM + passphrase** | The above, plus a local user or process that lacks the passphrase. | A passphrase kept in an env var or file next to the state brings you back to TPM-only. |
+| **systemd-creds (TPM-sealed)** | A copied disk (sealed outside the process). | Same running-machine caveat. |
+| **Passphrase only** | Casual reading of the files. A strong passphrase that you type in slows an offline attacker (scrypt N=2^16). | **A copied disk can be attacked offline.** A **passphrase file next to the state is no protection at all**: whoever copies the disk copies the key with it. |
+
+Honest limits:
+- **A VM without a vTPM is passphrase-only.** That includes this project's own Linux test box.
+  Cloud and hypervisor vTPMs are trusted to the host operator.
+- TPM support was tested only against **swtpm, a software simulator**. That proves the code
+  path, not hardware protection. It has not yet been verified on a physical TPM.
+- An existing TPM keystore never silently falls back to a passphrase: if the TPM is missing or
+  refuses, the keystore stays locked. **There is no recovery**: a dead motherboard means the
+  keys are gone, so re-pair from your phone.
+- The TPM owner hierarchy must have an empty auth value (the default on desktop Linux).
+
 ## 3. Endpoint compromise
 
 - **Before compromise**: FS holds — past messages' keys no longer exist

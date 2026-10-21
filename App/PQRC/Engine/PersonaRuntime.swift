@@ -8,6 +8,12 @@ import PQRCMCP
 import PQRCNostr
 import SwiftData
 
+/// AC220: roster changes are admin-only.
+enum GroupAdminError: Error, LocalizedError {
+    case notAdmin
+    var errorDescription: String? { "Only the group's creator or an admin can change who's in it or rename it." }
+}
+
 /// Events the runtime surfaces to the UI layer (already persisted).
 enum RuntimeEvent: Sendable {
     case messageAdded(StoredMessage)
@@ -15,6 +21,8 @@ enum RuntimeEvent: Sendable {
     case messageChanged(StoredMessage)
     case conversationChanged(String)
     case messageRequest(senderNostrPubkeyHex: String)
+    /// AC220: an unknown group named me; held until I Join or Decline.
+    case groupInvite(groupID: String, name: String, invitedBy: String)
     case protocolViolation(conversationID: String, reason: String)
     case aiWindowChanged(conversationID: String, identityHex: String, activeUntil: Int64?)
     case aiInviteChanged(threadID: String, identityHex: String, activeUntil: Int64?)
@@ -183,6 +191,12 @@ actor PersonaRuntime {
     private var myAlias: String?
     /// 1:1 conversation id == peer identity hex; groups use the group UUID.
     private var groupRosters: [String: GroupRoster] = [:]
+    /// AC220: held group invites (roster + inviter) and their held messages (memory only,
+    /// capped; a relaunch keeps the invite but not the held posts).
+    private var pendingGroupInvites: [String: (roster: GroupRoster, invitedBy: String)] = [:]
+    private var heldInviteMessages: [String: [ReceivedMessage]] = [:]
+    /// AC220: declined group ids — later posts and rosters are dropped silently.
+    private var declinedGroups: Set<String> = []
     private var threadConversations: [String: String] = [:]  // threadID -> conversationID
     private var threadTitles: [String: String] = [:]
     /// Conversation my active ai_window was started in (window replies route here).
@@ -1013,11 +1027,20 @@ actor PersonaRuntime {
                 with: contact, snapshot: snapshot,
                 usedLastResortPrekey: contactRecords[peerIdentityHex]?.usedLastResortPrekey ?? false)
         }
-        for (id, type, meta, _) in (try? await store.conversationMetas()) ?? [] where type == "group" {
+        for (id, type, meta, _) in (try? await store.conversationMetas()) ?? [] {
             let create = GroupCreate(
                 groupID: meta.groupID ?? id, name: meta.name,
-                members: meta.memberIdentityHexes, revision: meta.rosterRevision)
-            groupRosters[id] = GroupRoster(create: create, assertedBy: meta.rosterAssertedBy ?? identityHex)
+                members: meta.memberIdentityHexes, revision: meta.rosterRevision, admins: meta.rosterAdmins)
+            switch type {
+            case "group":
+                groupRosters[id] = GroupRoster(create: create, assertedBy: meta.rosterAssertedBy ?? identityHex)
+            case "groupInvite":
+                let by = meta.invitedBy ?? meta.rosterAssertedBy ?? ""
+                pendingGroupInvites[id] = (GroupRoster(create: create, assertedBy: meta.rosterAssertedBy ?? by), by)
+            case "groupDeclined":
+                declinedGroups.insert(id)
+            default: break
+            }
         }
         for (threadID, conversationID, meta) in (try? await store.threadMetas()) ?? [] {
             threadConversations[threadID] = conversationID
@@ -1056,6 +1079,10 @@ actor PersonaRuntime {
         let messengerEvents = try await messenger.start()
         let (stream, continuation) = AsyncStream.makeStream(of: RuntimeEvent.self)
         eventContinuation = continuation
+        // AC220: surface invites restored from disk (held across relaunch).
+        for (gid, inv) in pendingGroupInvites {
+            continuation.yield(.groupInvite(groupID: gid, name: inv.roster.name, invitedBy: inv.invitedBy))
+        }
         pumpTask = Task { [weak self] in
             for await event in messengerEvents {
                 await self?.handle(event)
@@ -2473,7 +2500,7 @@ actor PersonaRuntime {
     func createGroup(name: String, memberIdentityHexes: [String]) async throws -> String {
         let groupID = UUID().uuidString
         let members = [identityHex] + memberIdentityHexes
-        let create = GroupCreate(groupID: groupID, name: name, members: members, revision: 1)
+        let create = GroupCreate(groupID: groupID, name: name, members: members, revision: 1, admins: [identityHex])
         groupRosters[groupID] = GroupRoster(create: create, assertedBy: identityHex)
         persistRoster(groupID)
         // A group with no other humans is a solo AI space: turn my AIs "on" from
@@ -2496,9 +2523,53 @@ actor PersonaRuntime {
         let meta = ConversationMeta(
             name: roster.name, memberIdentityHexes: roster.members,
             rosterAssertedBy: roster.assertedBy, rosterRevision: roster.revision,
-            groupID: roster.groupID)
+            groupID: roster.groupID, rosterAdmins: roster.admins)
         let store = store
         Task { try? await store?.saveConversationMeta(id: groupID, type: "group", meta: meta) }
+    }
+
+    // MARK: - Group invites (AC220)
+
+    private func persistInvite(_ groupID: String) {
+        guard let inv = pendingGroupInvites[groupID] else { return }
+        let roster = inv.roster, by = inv.invitedBy
+        let meta = ConversationMeta(
+            name: roster.name, memberIdentityHexes: roster.members,
+            rosterAssertedBy: roster.assertedBy, rosterRevision: roster.revision,
+            groupID: roster.groupID, rosterAdmins: roster.admins, invitedBy: by)
+        let store = store
+        Task { try? await store?.saveConversationMeta(id: groupID, type: "groupInvite", meta: meta) }
+    }
+
+    private func holdInviteMessage(_ groupID: String, _ received: ReceivedMessage) {
+        var held = heldInviteMessages[groupID] ?? []
+        held.append(received)
+        if held.count > 50 { held.removeFirst(held.count - 50) }
+        heldInviteMessages[groupID] = held
+    }
+
+    /// Held invites for the UI: (groupID, name, inviter identity).
+    func groupInvites() -> [(groupID: String, name: String, invitedBy: String)] {
+        pendingGroupInvites.map { ($0.key, $0.value.roster.name, $0.value.invitedBy) }
+    }
+
+    /// Joins a held group: the roster becomes live and held posts are delivered.
+    func acceptGroupInvite(_ groupID: String) async {
+        guard let inv = pendingGroupInvites.removeValue(forKey: groupID) else { return }
+        groupRosters[groupID] = inv.roster
+        persistRoster(groupID)  // same id: overwrites the "groupInvite" record's type
+        let held = heldInviteMessages.removeValue(forKey: groupID) ?? []
+        for r in held { await handleReceived(r) }
+        eventContinuation?.yield(.conversationChanged(groupID))
+    }
+
+    /// Declines: held posts are dropped and the group is remembered so it stays silent.
+    func declineGroupInvite(_ groupID: String) async {
+        pendingGroupInvites[groupID] = nil
+        heldInviteMessages[groupID] = nil
+        declinedGroups.insert(groupID)
+        let meta = ConversationMeta(name: "", memberIdentityHexes: [], rosterAssertedBy: nil, rosterRevision: 0, groupID: groupID)
+        try? await store?.saveConversationMeta(id: groupID, type: "groupDeclined", meta: meta)
     }
 
     private func persistThread(_ threadID: String) {
@@ -2520,8 +2591,12 @@ actor PersonaRuntime {
 
     func reviseRoster(groupID: String, name: String, members: [String]) async throws {
         guard let roster = groupRosters[groupID] else { return }
+        // AC220: only an admin may change the roster; anyone may remove only themselves.
+        let selfLeave = Set(members) == Set(roster.members).subtracting([identityHex]) && name == roster.name
+        guard roster.isAdmin(identityHex) || selfLeave else { throw GroupAdminError.notAdmin }
         let create = GroupCreate(
-            groupID: groupID, name: name, members: members, revision: roster.revision + 1)
+            groupID: groupID, name: name, members: members, revision: roster.revision + 1,
+            admins: roster.admins.filter { members.contains($0) })
         var updated = roster
         _ = updated.apply(create, assertedBy: identityHex)
         groupRosters[groupID] = updated
@@ -3360,7 +3435,7 @@ actor PersonaRuntime {
         }
     }
 
-    /// Signs a sponsorship (1–30 days) vouching for this contact as an AI account I
+    /// Signs a sponsorship (1–7 days) vouching for this contact as an AI account I
     /// answer for, and sends it to them over our session. Nothing is recorded if the
     /// send fails. Agents (my tethered AIs) never call this: only the human UI does.
     func sponsorAIAccount(_ contactHex: String, days: Int, label: String?) async throws {
@@ -3620,21 +3695,62 @@ actor PersonaRuntime {
             return
         }
 
-        // Group routing/roster (D1).
+        // Group routing/roster (D1 + AC220: admin-only rosters, invites held for approval).
+        let groupRef = body.groupCreate?.groupID ?? body.group?.id
+        if let gid = groupRef, declinedGroups.contains(gid) { return }
+        if let gid = groupRef, var invite = pendingGroupInvites[gid] {
+            if let create = body.groupCreate, invite.roster.apply(create, assertedBy: senderHex) {
+                if !create.members.contains(identityHex) {
+                    // Removed before I answered: the invite simply disappears.
+                    pendingGroupInvites[gid] = nil
+                    heldInviteMessages[gid] = nil
+                    let store = store
+                    Task { try? await store?.deleteConversation(gid) }
+                    return
+                }
+                pendingGroupInvites[gid] = invite
+                persistInvite(gid)
+            }
+            guard invite.roster.members.contains(senderHex) else { return }
+            holdInviteMessage(gid, received)
+            return
+        }
         if let create = body.groupCreate {
-            var roster = groupRosters[create.groupID]
-                ?? GroupRoster(create: create, assertedBy: senderHex)
-            _ = roster.apply(create, assertedBy: senderHex)
-            groupRosters[create.groupID] = roster
-            conversationID = create.groupID
-            persistRoster(create.groupID)
-            eventContinuation?.yield(.conversationChanged(create.groupID))
+            if var roster = groupRosters[create.groupID] {
+                guard roster.members.contains(senderHex) else { return }
+                if roster.apply(create, assertedBy: senderHex) {  // admin-only (GroupRoster, AC220)
+                    groupRosters[create.groupID] = roster
+                    persistRoster(create.groupID)
+                    eventContinuation?.yield(.conversationChanged(create.groupID))
+                }
+                conversationID = create.groupID
+            } else {
+                // A NEW group naming me: held like a message request until I Join.
+                guard create.members.contains(senderHex), create.members.contains(identityHex),
+                    pendingGroupInvites.count < 32
+                else { return }
+                pendingGroupInvites[create.groupID] = (GroupRoster(create: create, assertedBy: senderHex), senderHex)
+                persistInvite(create.groupID)
+                holdInviteMessage(create.groupID, received)
+                eventContinuation?.yield(
+                    .groupInvite(groupID: create.groupID, name: create.name, invitedBy: senderHex))
+                return
+            }
         } else if let group = body.group {
-            conversationID = group.id
+            // Only a member's post files under a group I have; anything else stays in
+            // the sender's 1:1 (same as Linux routeKnownGroup — a spoofed group ref
+            // cannot inject into a group).
+            if let roster = groupRosters[group.id], roster.members.contains(senderHex) {
+                conversationID = group.id
+            }
         }
 
         // Thread bookkeeping (D7).
-        if let create = body.threadCreate {
+        // Audit-2 T1: adopt a thread only from its creator, and never move an existing
+        // thread to another conversation or rename it (matches Linux receiveAI).
+        if let create = body.threadCreate, create.createdBy == senderHex,
+            threadConversations[create.threadID] == nil
+        {
             threadConversations[create.threadID] = conversationID
             threadTitles[create.threadID] = create.title
             persistThread(create.threadID)

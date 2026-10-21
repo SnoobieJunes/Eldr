@@ -9,12 +9,14 @@ import PQRCNostr
 ///   (agent-key signed by the engine) and carries the owner's sponsorship; with no
 ///   live sponsorship the send is refused before anything leaves the box.
 /// - The agent accepts a sponsorship ONLY from its pinned owner identity.
-/// - A human persona can sponsor a contact for 1–30 days and revoke it; revocation
+/// - A human persona can sponsor a contact for 1–7 days and revoke it; revocation
 ///   is effective on receipt, both at the agent and in the sponsor's own view.
 /// - Every received agent message is checked on its own: signature, agent ==
-///   sender, ≤30 days, unexpired, unrevoked.
+///   sender, ≤7 days, unexpired, unrevoked.
 extension EldrClient {
-    public static let sponsorshipDayChoices = [1, 7, 30]
+    public static let sponsorshipDayChoices = [1, 7]
+    /// Total bytes held for incomplete chunked messages (AC214).
+    public static let maxBufferedChunkBytes = 48 * 1024 * 1024
 
     var agentState: AgentState {
         get { state.agent ?? AgentState() }
@@ -65,7 +67,13 @@ extension EldrClient {
     }
 
     func isRevoked(_ s: AgentSponsorship) -> Bool {
-        (agentState.revoked ?? []).contains("\(s.enabledBy.hexString):\(s.sponsorshipID)")
+        // My own revocations come from `issued` too, so revocation traffic from others
+        // can never evict them (AC212).
+        if (agentState.issued ?? []).contains(where: {
+            $0.revokedAt != nil && $0.sponsorship.sponsorshipID == s.sponsorshipID
+                && $0.sponsorship.enabledBy == s.enabledBy
+        }) { return true }
+        return (agentState.revoked ?? []).contains("\(s.enabledBy.hexString):\(s.sponsorshipID)")
     }
 
     // MARK: Sponsor side (human)
@@ -74,8 +82,8 @@ extension EldrClient {
     @discardableResult
     public func sponsor(_ q: String, days: Int, label: String? = nil) async throws -> AgentSponsorship {
         guard !isAgent else { throw EldrClientError.agentCannotSponsor }
-        guard (1...30).contains(days) else {
-            throw EldrClientError.notSponsored("duration must be 1–30 days")
+        guard (1...7).contains(days) else {
+            throw EldrClientError.notSponsored("duration must be 1–7 days")
         }
         let c = try contact(matching: q)
         let now = Self.nowSeconds
@@ -122,7 +130,9 @@ extension EldrClient {
                 sponsorshipID: issued.sponsorship.sponsorshipID, revokedAt: now, identity: identity)
             // Close it locally FIRST so a failed send can never leave it open here.
             a.issued![idx].revokedAt = now
-            a.revoked = Array(((a.revoked ?? []) + ["\(identityHex):\(r.sponsorshipID)"]).suffix(AgentState.maxRevoked))
+            var rv = a.revoked ?? []
+            RevocationSet.remember("\(identityHex):\(r.sponsorshipID)", into: &rv, max: AgentState.maxRevoked)
+            a.revoked = rv
             agentState = a
             try await persist()
             revokedIDs.append(r.sponsorshipID)
@@ -151,7 +161,10 @@ extension EldrClient {
         if let r = m.body.agentSponsorshipRevocation {
             if (try? r.verify(presentedBy: sender)) != nil {
                 var a = agentState
-                a.revoked = Array(((a.revoked ?? []) + ["\(sender):\(r.sponsorshipID)"]).suffix(AgentState.maxRevoked))
+                // Per-sponsor quota: one contact's junk revocations can't evict others' (AC212).
+                var rv = a.revoked ?? []
+                RevocationSet.remember("\(sender):\(r.sponsorshipID)", into: &rv, max: AgentState.maxRevoked)
+                a.revoked = rv
                 if let mine = a.mySponsorship, mine.sponsorshipID == r.sponsorshipID,
                     mine.enabledBy.hexString == sender
                 {
@@ -224,6 +237,14 @@ extension EldrClient {
             return (template: t, total: ch.total, parts: [:], order: chunkCounter)
         }()
         guard acc.total == ch.total else { return nil }
+        // Memory bound (AC214): 16 buffers × 512 parts × ~64 KiB let one contact pin
+        // ~0.5 GiB. Cap what is held across ALL incomplete messages.
+        let held = chunkBuffers.values.reduce(0) { $0 + $1.parts.values.reduce(0) { $0 + $1.utf8.count } }
+        let prior = acc.parts[ch.index]?.utf8.count ?? 0
+        if held - prior + m.body.text.utf8.count > Self.maxBufferedChunkBytes {
+            chunkBuffers[key] = nil
+            return nil
+        }
         acc.parts[ch.index] = m.body.text
         acc.order = chunkCounter
         guard acc.parts.count == acc.total else {

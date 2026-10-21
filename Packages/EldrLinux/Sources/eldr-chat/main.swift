@@ -2,6 +2,7 @@
 // eldr-chat — the Linux Eldr command-line client (Milestone 1). Human- and agent-drivable:
 // every command accepts --json for machine-readable output, and `listen` has an
 // inbox/outbox file mode so an AI agent can chat without a TTY.
+import Crypto
 import EldrClientCore
 import Foundation
 import PQRCCore
@@ -20,6 +21,9 @@ let usage = """
     USAGE: eldr-chat [--state DIR] [--relay URL] [--json] <command> [args]
 
       init [--no-announce]          create a new identity and publish its keys
+      keystore status               what protects your keys at rest (TPM / passphrase)
+      keystore upgrade [--keep-passphrase] [--security-key]   (FIDO2 hmac-secret; touch the key)
+                                    move a passphrase keystore to this machine's TPM
       whoami                        identity hex, npub and pqrc:add pairing link
       announce                      re-publish keys (10420/10421/10050)
       add <link|npub|hex> [--name N] [--expect-identity HEX]
@@ -29,13 +33,16 @@ let usage = """
       decline <npub|prefix>
       send <contact> <text…>        send one message and exit (text "-" reads stdin)
       chat <contact>                interactive chat (type lines; /quit to exit)
+      inbox read --inbox FILE       decrypt, print and DELETE what `listen --inbox` stored
       listen [--inbox FILE.jsonl] [--outbox DIR] [--auto-accept <npub|link>]
+             inbox lines are encrypted under the keystore (AC221); outbox files are
+             deleted once sent. --debug-plaintext-inbox keeps plaintext (DEBUG ONLY)
                                     outbox files: {"to"|"group"|"thread": …, "text": …}
              [--auto-accept-identity HEX] [--for SECONDS]
                                     receive (and send outbox files) until stopped
       agent-mode on --owner HEX | off   mark this identity as an AI account that
                                     needs its owner's sponsorship to send
-      sponsor <contact> [--days 1|7|30] [--label NAME]
+      sponsor <contact> [--days 1|7] [--label NAME]
                                     sponsor a contact's AI account (human only)
       revoke <sponsorship-id|contact> [--notify c1,c2]
       reconnect <contact> [--decline]  approve (or refuse) ONE new session from a
@@ -46,7 +53,9 @@ let usage = """
       group add|remove <group> <contact…>   new roster revision to old+new members
       group send <group> <text…>    send to every member you have as a contact
       group history <group> [--last N]
-      group rename <group> <name…>  |  group leave <group>
+      group rename <group> <name…>  |  group leave <group>   (roster changes: admins only)
+      group invites                 group invites waiting for your approval
+      group accept|decline <group>  approve or refuse a held group invite
       groups                        list groups (rosters are "asserted by" someone)
       thread create <conv> <title…> start a thread in a contact or group conversation
       thread send <thread> <text…>  |  thread history <thread>  |  thread guard <t> N|default  |  threads
@@ -152,11 +161,18 @@ func iso(_ d: Date) -> String { ISO8601DateFormatter().string(from: d) }
 func openStore() -> FileIdentityStore {
     do {
         let (store, posture) = try makeClientKeystore(directory: stateDir, environment: env)
-        if posture == .passphraseOnDisk && !json {
+        // Loud and on EVERY start (AC218): never a silent non-hardware posture.
+        if !posture.isHardwareBacked {
             FileHandle.standardError.write(Data("eldr-chat: \(posture.report)\n".utf8))
         }
         return store
     } catch { fail("\(error)") }
+}
+/// Overwrite then unlink (best effort; SSD/journaling may keep old blocks).
+func shred(_ url: URL) {
+    if let n = try? FileManager.default.attributesOfItem(atPath: url.path)[.size] as? Int,
+        let fh = FileHandle(forWritingAtPath: url.path) { fh.write(Data(repeating: 0, count: n)); try? fh.close() }
+    try? FileManager.default.removeItem(at: url)
 }
 func outboxDestination(_ o: [String: Any]) -> String? {
     if let t = o["to"] as? String { return t }
@@ -195,6 +211,9 @@ func eventObject(_ ev: ClientEvent) -> ([String: Any], String) {
         return (["type": "group", "groupID": g.groupID, "name": g.name, "members": g.members,
                  "assertedBy": g.assertedBy, "revision": g.revision],
             "👥 group \"\(g.name)\" (\(g.groupID.prefix(8))) now \(g.members.count) members, asserted by \(short(g.assertedBy)) rev \(g.revision)")
+    case .groupInvite(let g, let from):
+        return (["type": "group-invite", "groupID": g.groupID, "name": g.name, "from": from.identityHex, "members": g.members.count],
+            "👥 \(from.name ?? short(from.identityHex)) invited you to \"\(g.name)\" — `eldr-chat group accept \(g.groupID.prefix(8))` or `group decline`")
     case .request(let n, let auto):
         return (["type": "request", "npub": Bech32.npub(n), "autoAccepted": auto],
             auto ? "✓ auto-accepted request from \(Bech32.npub(n))"
@@ -248,6 +267,79 @@ args.removeFirst()
 switch command {
 case "help", "-h", "--help":
     print(usage)
+
+case "inbox":
+    guard args.first == "read", let path = takeOption("--inbox") else { fail("inbox read --inbox FILE") }
+    let st = openStore()
+    let key: SymmetricKey
+    do { key = try BridgeInbox.key(st) } catch { fail("\(error)") }
+    do {
+        let (recs, bad) = try await BridgeInbox.drain(URL(fileURLWithPath: path), key: key)
+        for r in recs { print(String(decoding: r, as: UTF8.self)) }
+        if bad > 0 { FileHandle.standardError.write(Data("eldr-chat: \(bad) inbox line(s) could not be decrypted (other keystore?) and were discarded\n".utf8)) }
+    } catch { fail("\(error)") }
+
+case "keystore":
+    switch args.first {
+    case "status":
+        let prot = KeystoreProtection.inspect(directory: stateDir)
+        let tpm = defaultTPMSealer(environment: env, tpmPresent: defaultTpmPresent)
+        var o: [String: Any] = [
+            "type": "keystore", "protection": prot.rawValue, "stateDir": stateDir.path,
+            "tpmDevice": defaultTpmPresent(), "tpmLibrary": SystemTPM.compiledIn,
+            "tpmUsable": tpm != nil,
+        ]
+        var lines = ["Keystore: \(stateDir.path)"]
+        switch prot {
+        case .tpm: lines.append("Protection: TPM — keys are bound to this machine's TPM. A copied disk cannot open them.")
+        case .tpmAndPassphrase: lines.append("Protection: TPM + passphrase — both are required.")
+        case .securityKey: lines.append("Protection: FIDO2 security key — the key (and a touch) is required to unlock.")
+        case .securityKeyAndPassphrase: lines.append("Protection: FIDO2 security key + passphrase — both are required.")
+        case .passphraseOnly:
+            lines.append("Protection: ⚠️ PASSPHRASE ONLY — anyone with a copy of this disk can try to guess it offline,")
+            lines.append("            and a passphrase FILE next to the state is no protection at all.")
+            if tpm != nil { lines.append("Fix: `eldr-chat keystore upgrade` (a TPM is available here).") }
+            else { lines.append("No usable TPM here (VM without vTPM, or tpm2-tss not installed). Use `keystore upgrade --security-key` with a FIDO2 key (libfido2), or type the passphrase instead of using a file.") }
+        case .uninitialized: lines.append("No keystore yet (run `eldr-chat init`).")
+        }
+        lines.append("TPM device: \(defaultTpmPresent() ? "present" : "none") · tpm2-tss: \(SystemTPM.compiledIn ? "built in" : "not built in")")
+        if prot == .passphraseOnly { o["warning"] = "passphrase-only" }
+        emit(o, human: lines.joined(separator: "\n"))
+    case "upgrade":
+        let keep = args.contains("--keep-passphrase")
+        guard KeystoreProtection.inspect(directory: stateDir) == .passphraseOnly else {
+            fail("nothing to upgrade: keystore is \(KeystoreProtection.inspect(directory: stateDir).rawValue)")
+        }
+        let useKey = args.contains("--security-key")
+        let tpm = useKey ? nil : defaultTPMSealer(environment: env, tpmPresent: defaultTpmPresent)
+        let fido = useKey ? defaultFIDOAuthenticator(environment: env) : nil
+        if !useKey && tpm == nil {
+            fail("no usable TPM (need /dev/tpmrm0 and the tpm2-tss libraries; ELDR_TPM_TCTI overrides). Try --security-key.")
+        }
+        if useKey && fido == nil { fail("FIDO2 not supported in this build") }
+        var pass = env["ELDR_CHAT_PASSPHRASE"]
+        if pass == nil || pass!.isEmpty, let f = env["ELDR_CHAT_PASSPHRASE_FILE"],
+            let d = FileManager.default.contents(atPath: f) {
+            pass = String(decoding: d, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        if pass == nil || pass!.isEmpty, isatty(0) == 1, let c = getpass("current keystore passphrase: ") {
+            pass = String(cString: c)
+        }
+        guard let pass, !pass.isEmpty else { fail("need the current passphrase (ELDR_CHAT_PASSPHRASE[_FILE] or a TTY)") }
+        do {
+            if let fido {
+                FileHandle.standardError.write(Data("Touch your security key (twice: enroll, then verify)…\n".utf8))
+                try upgradeKeystoreToSecurityKey(directory: stateDir, passphrase: pass, keepPassphrase: keep, fido: fido)
+            } else if let tpm {
+                try upgradeKeystoreToTPM(directory: stateDir, passphrase: pass, keepPassphrase: keep, tpm: tpm)
+            }
+        } catch { fail("upgrade failed, nothing changed: \(error)") }
+        emit(["type": "keystore", "upgraded": true, "protection": KeystoreProtection.inspect(directory: stateDir).rawValue],
+             human: keep ? "Upgraded: \(useKey ? "security key" : "TPM") + passphrase (both now required)."
+                : "Upgraded: \(useKey ? "security key" : "TPM"). The passphrase is no longer needed; delete any passphrase file.")
+    default:
+        fail("keystore status | upgrade [--keep-passphrase] [--security-key]")
+    }
 
 case "init":
     let noAnnounce = takeFlag("--no-announce")
@@ -379,11 +471,18 @@ case "chat":
 
 case "listen":
     let inbox = takeOption("--inbox").map { URL(fileURLWithPath: $0) }
+    let debugPlain = takeFlag("--debug-plaintext-inbox")
+    if debugPlain {
+        FileHandle.standardError.write(Data("eldr-chat: ⚠️ DEBUG: --debug-plaintext-inbox writes message text UNENCRYPTED to disk and keeps sent outbox files. Never use this with real conversations.\n".utf8))
+    }
     let outbox = takeOption("--outbox").map { URL(fileURLWithPath: $0) }
     let autoAccept = takeOption("--auto-accept")
     let autoIdentity = takeOption("--auto-accept-identity")
     let forSeconds = takeOption("--for").flatMap(Double.init)
-    let client = await openClient(openStore())
+    let listenStore = openStore()
+    let inboxKey: SymmetricKey? = inbox == nil || debugPlain ? nil : (try? BridgeInbox.key(listenStore))
+    if inbox != nil && !debugPlain && inboxKey == nil { fail("cannot create the inbox key in the keystore") }
+    let client = await openClient(listenStore)
     if let a = autoAccept {
         guard let link = PairingLink.parse(a) else { fail("bad --auto-accept value") }
         await client.setAutoAccept(nostrPubkeyHex: link.nostrPubkeyHex, identityHex: autoIdentity)
@@ -428,10 +527,18 @@ case "listen":
                             let n = try await client.sendToGroup(text, group: String(to.dropFirst(6)))
                             r = "group(\(n.reached) reached, \(n.skipped) skipped)"
                         } else { r = "\(try await client.send(text, to: to))" }
-                        try? FileManager.default.moveItem(at: f, to: sent.appendingPathComponent(stamp))
+                        // AC221: no plaintext copy kept after sending (debug opt-in keeps it).
+                        if debugPlain { try? FileManager.default.moveItem(at: f, to: sent.appendingPathComponent(stamp)) }
+                        else { shred(f) }
                         emit(["type": "sent", "to": to, "route": "\(r)", "file": f.lastPathComponent], human: "→ sent \(f.lastPathComponent) to \(to)")
                     } catch {
-                        try? FileManager.default.moveItem(at: f, to: failed.appendingPathComponent(stamp))
+                        // Keep only a text-free stub of a failed send (AC221).
+                        if debugPlain { try? FileManager.default.moveItem(at: f, to: failed.appendingPathComponent(stamp)) }
+                        else {
+                            let stub = (try? JSONSerialization.data(withJSONObject: ["to": to, "error": "\(error)", "textRemoved": true])) ?? Data()
+                            FileManager.default.createFile(atPath: failed.appendingPathComponent(stamp).path, contents: stub, attributes: [.posixPermissions: 0o600])
+                            shred(f)
+                        }
                         emit(["type": "error", "error": "send \(f.lastPathComponent): \(error)"], human: "⚠ send failed \(f.lastPathComponent): \(error)")
                     }
                 }
@@ -468,9 +575,9 @@ case "listen":
             }
             guard var d = try? JSONSerialization.data(withJSONObject: o, options: [.sortedKeys, .withoutEscapingSlashes]) else { continue }
             d.append(0x0A)
-            try? FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: inbox.path)
-            if let fh = try? FileHandle(forWritingTo: inbox) { fh.seekToEndOfFile(); fh.write(d); try? fh.close() }
-            else { FileManager.default.createFile(atPath: inbox.path, contents: d, attributes: [.posixPermissions: 0o600]) }
+            d.removeLast()  // BridgeInbox adds the newline
+            do { try BridgeInbox.append(d, to: inbox, key: inboxKey, plaintext: debugPlain) }
+            catch { emit(["type": "error", "error": "inbox write failed"], human: "⚠ inbox write failed") }
         }
     }
 
@@ -692,6 +799,18 @@ case "group":
     let client = await openClient(openStore())
     do {
         switch sub {
+        case "invites":
+            let inv = await client.pendingGroupInvites
+            emit(["type": "group-invites", "invites": inv.map { ["groupID": $0.groupID, "name": $0.name, "members": $0.members.count, "invitedBy": $0.invitedBy ?? ""] }],
+                 human: inv.isEmpty ? "No group invites." : inv.map { "👥 \($0.name) (\($0.groupID.prefix(8))) from \(short($0.invitedBy ?? "?")), \($0.members.count) members" }.joined(separator: "\n"))
+        case "accept":
+            guard let q = args.first else { fail("group accept <group>") }
+            let g = try await client.acceptGroupInvite(q)
+            emit(["type": "group", "groupID": g.groupID, "accepted": true], human: "Joined \"\(g.name)\".")
+        case "decline":
+            guard let q = args.first else { fail("group decline <group>") }
+            try await client.declineGroupInvite(q)
+            emit(["type": "group", "declined": q], human: "Declined; its posts are ignored.")
         case "create":
             guard args.count >= 2 else { fail("group create <name> <contact…>") }
             let (g, n) = try await client.createGroup(name: args[0], members: Array(args.dropFirst()))

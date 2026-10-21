@@ -11,7 +11,7 @@ public enum SponsorshipStatus: Codable, Sendable, Equatable {
     /// Agent-labeled, carrying a valid, unexpired, unrevoked sponsorship.
     case sponsored(sponsorIdentityHex: String, label: String?, activeUntil: Int64)
     /// Agent-labeled, carrying a sponsorship that failed (bad signature, wrong agent,
-    /// expired, revoked, over 30 days…). Shown as a warning, never as sponsored.
+    /// expired, revoked, over 7 days…). Shown as a warning, never as sponsored.
     case invalid(reason: String)
 
     public var isSponsored: Bool { if case .sponsored = self { return true } else { return false } }
@@ -84,7 +84,7 @@ public enum SponsorshipLedgerError: Error, Equatable, Sendable {
 /// type (persist it encrypted); signing uses the caller's identity, and sending the
 /// returned bodies is the caller's job. Used by iOS; mirrors EldrClient (Linux).
 public struct SponsorshipLedger: Codable, Sendable, Equatable {
-    public static let dayChoices = [1, 7, 30]
+    public static let dayChoices = [1, 7]
     public static let maxRevoked = 2000
     public private(set) var issued: [IssuedSponsorship] = []
     /// "<sponsorHex>:<sponsorshipID>" for every revocation issued or verified-received.
@@ -93,7 +93,13 @@ public struct SponsorshipLedger: Codable, Sendable, Equatable {
     public init() {}
 
     public func isRevoked(_ s: AgentSponsorship) -> Bool {
-        revoked.contains("\(s.enabledBy.hexString):\(s.sponsorshipID)")
+        // My own revocations are authoritative from `issued`, so no amount of
+        // revocation traffic from others can evict them (security/audit-1, AC212).
+        if issued.contains(where: {
+            $0.revokedAt != nil && $0.sponsorship.sponsorshipID == s.sponsorshipID
+                && $0.sponsorship.enabledBy == s.enabledBy
+        }) { return true }
+        return revoked.contains("\(s.enabledBy.hexString):\(s.sponsorshipID)")
     }
 
     /// Live (unrevoked, unexpired) sponsorships I issued to this agent.
@@ -107,7 +113,7 @@ public struct SponsorshipLedger: Codable, Sendable, Equatable {
         to agentHex: String, days: Int, label: String?, identity: PQRCIdentity, now: Int64,
         sponsorshipID: String = UUID().uuidString.lowercased()
     ) throws -> MessageBody {
-        guard (1...30).contains(days) else { throw SponsorshipLedgerError.badDuration }
+        guard (1...7).contains(days) else { throw SponsorshipLedgerError.badDuration }
         guard agentHex != identity.publicKeyData.hexString else { throw SponsorshipLedgerError.selfSponsorship }
         let label = label.flatMap { $0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? nil : $0 }
         let sp = try AgentSponsorship.make(
@@ -165,8 +171,37 @@ public struct SponsorshipLedger: Codable, Sendable, Equatable {
     }
 
     private mutating func remember(_ key: String) {
+        RevocationSet.remember(key, into: &revoked, max: Self.maxRevoked)
+    }
+}
+
+/// Bounded revocation memory that one sender cannot flush (security/audit-1, AC212).
+///
+/// Keys are "<sponsorHex>:<sponsorshipID>". Any contact can sign revocations of
+/// made-up IDs under its OWN key, so a single global FIFO let one contact push
+/// thousands of junk entries and evict a real sponsor's revocation, after which the
+/// revoked AI's old (≤30-day) sponsorship verified again. Now each sponsor has its
+/// own quota, and over the global cap the eviction comes from the LARGEST sponsor's
+/// oldest entry, so a flood only ever evicts the flooder's own entries.
+public enum RevocationSet {
+    public static let perSponsorMax = 256
+
+    public static func remember(_ key: String, into revoked: inout [String], max: Int) {
         guard !revoked.contains(key) else { return }
+        let sponsor = key.split(separator: ":", maxSplits: 1).first.map(String.init) ?? key
+        let prefix = sponsor + ":"
         revoked.append(key)
-        if revoked.count > Self.maxRevoked { revoked.removeFirst(revoked.count - Self.maxRevoked) }
+        let mine = revoked.filter { $0.hasPrefix(prefix) }.count
+        if mine > perSponsorMax, let i = revoked.firstIndex(where: { $0.hasPrefix(prefix) }) {
+            revoked.remove(at: i)
+        }
+        while revoked.count > max {
+            var counts: [Substring: Int] = [:]
+            for k in revoked { counts[k.split(separator: ":", maxSplits: 1).first ?? "", default: 0] += 1 }
+            guard let biggest = counts.max(by: { $0.value < $1.value })?.key,
+                let i = revoked.firstIndex(where: { $0.hasPrefix(biggest + ":") })
+            else { revoked.removeFirst(); continue }
+            revoked.remove(at: i)
+        }
     }
 }
