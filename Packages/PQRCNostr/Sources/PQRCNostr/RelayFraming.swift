@@ -66,13 +66,25 @@ enum RelayFraming {
         let total: UInt32
         var chunks: [UInt32: Data] = [:]
         var receivedOrder: UInt64 = 0
+        /// Payload bytes held (kept in step with `chunks` by `put`).
+        var bytes: Int = 0
+        mutating func put(_ seq: UInt32, _ payload: Data) {
+            bytes += payload.count - (chunks[seq]?.count ?? 0)
+            chunks[seq] = payload
+        }
     }
+
+    /// Audit-2 fuzz finding: 256 lines × 4096 chunks × a full event each had no BYTE bound
+    /// (tens of GB from one authenticated peer). Cap what all incomplete lines hold.
+    static let maxPendingReassemblyBytes = 64 * 1024 * 1024
 
     /// Drops the least-recently-touched incomplete line once the map is over capacity.
     /// Shared by both relay transports so the bound can't drift between them.
     static func evictStaleReassembliesIfNeeded(_ map: inout [String: Reassembly]) {
-        guard map.count > maxPendingReassemblies else { return }
-        if let oldest = map.min(by: { $0.value.receivedOrder < $1.value.receivedOrder })?.key {
+        while map.count > maxPendingReassemblies
+            || map.values.reduce(0, { $0 + $1.bytes }) > maxPendingReassemblyBytes,
+            let oldest = map.min(by: { $0.value.receivedOrder < $1.value.receivedOrder })?.key
+        {
             map[oldest] = nil
         }
     }

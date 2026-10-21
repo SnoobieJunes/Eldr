@@ -24,7 +24,7 @@ private actor Collector {
     func attach(_ s: AsyncStream<ClientEvent>) { Task { for await e in s { self.add(e) } } }
     func add(_ e: ClientEvent) { events.append(e) }
     var texts: [String] {
-        events.compactMap { if case .message(_, let m) = $0 { return m.body.text } else { return nil } }
+        events.compactMap { if case .message(_, let m, _) = $0 { return m.body.text } else { return nil } }
     }
     var requests: [(String, Bool)] {
         events.compactMap { if case .request(let n, let a) = $0 { return (n, a) } else { return nil } }
@@ -288,5 +288,87 @@ struct ReHandshakeTests {
         #expect(await aEv.waitTexts(3) == ["two", "I reinstalled", "and again"])
         try await alice.send("welcome back", to: "bob")
         #expect(await b2Ev.waitTexts(1) == ["welcome back"])
+    }
+
+    /// AC167: a consumed one-time prekey must leave the PUBLISHED bundle. Otherwise a
+    /// contact that reinstalls can draw the spent OTP and is refused as a replay.
+    @Test func consumedOTP_isRepublishedAway() async throws {
+        let relay = LocalRelaySimulator()
+        let (_, alice) = try await Peer.make(relay)
+        let (_, bob) = try await Peer.make(relay)
+        let aEv = Collector()
+        await aEv.attach(try await alice.start())
+        _ = try await bob.start()
+        try await bob.addContact(alice.pairingLink.uri, name: "alice")
+        try await bob.send("hi", to: "alice")  // spends one of alice's OTPs
+        for _ in 0..<200 where await alice.requests.isEmpty { try await Task.sleep(for: .milliseconds(20)) }
+        try await alice.accept(String(bob.nostrPubkeyHex.prefix(10)), name: "bob")
+        #expect(await aEv.waitTexts(1) == ["hi"])
+        let held = Set(try await alice.prekeyManager.publicBundle().otp)
+        var published: Set<Data> = []
+        for _ in 0..<100 {
+            published = Set(try await bob.messenger.fetchVerifiedPeer(nostrPubkeyHex: alice.nostrPubkeyHex).bundle.otp)
+            if published == held { break }
+            try await Task.sleep(for: .milliseconds(30))
+        }
+        #expect(published == held)
+        #expect(held.count == EldrClient.otpTarget)
+        #expect(await alice.state.publishedBundleStale == false)
+    }
+}
+
+@Suite("Reconnect approval (AC166)")
+struct ReconnectApprovalTests {
+    @Test func approveBeforeArrival_isRemembered_andDeclineClearsIt() async throws {
+        let relay = LocalRelaySimulator()
+        let (_, alice) = try await Peer.make(relay)
+        let (_, bob) = try await Peer.make(relay)
+        try await alice.addContact(bob.pairingLink.uri, name: "bob")
+        #expect(try await alice.approveReconnect("bob") == false)
+        #expect(await alice.state.approvedReconnects == [bob.identityHex])
+        try await alice.declineReconnect("bob")
+        #expect(await alice.state.approvedReconnects == [])
+        await #expect(throws: EldrClientError.self) { try await alice.approveReconnect("nobody") }
+    }
+}
+
+/// Invariant 12 canary on Linux: a full add / request / accept / reply / restart cycle
+/// writes the message plaintext neither to stderr (the Linux log sink) nor to any
+/// file in either state directory.
+@Suite("Linux log + at-rest canary", .serialized)
+struct LinuxCanaryTests {
+    @Test func plaintextNeverReachesStderrOrDisk() async throws {
+        let canary = "CANARY-\(UUID().uuidString)"
+        let capture = FileManager.default.temporaryDirectory.appendingPathComponent("eldr-stderr-\(UUID().uuidString)")
+        let fd = open(capture.path, O_CREAT | O_RDWR | O_TRUNC, 0o600)
+        try #require(fd >= 0)
+        let saved = dup(2)
+        dup2(fd, 2)
+        let relay = LocalRelaySimulator()
+        let (aliceP, alice) = try await Peer.make(relay)
+        let (bobP, bob) = try await Peer.make(relay)
+        let bobEv = Collector(), aliceEv = Collector()
+        await bobEv.attach(try await bob.start())
+        await aliceEv.attach(try await alice.start())
+        try await alice.addContact(bob.pairingLink.uri, name: "bob")
+        try await alice.send("\(canary) one", to: "bob")
+        for _ in 0..<200 where await bob.requests.isEmpty { try await Task.sleep(for: .milliseconds(20)) }
+        try await bob.accept(String(alice.nostrPubkeyHex.prefix(10)), name: "alice")
+        _ = await bobEv.waitTexts(1)
+        try await bob.send("\(canary) two", to: "alice")
+        _ = await aliceEv.waitTexts(1)
+        await alice.stop(); await bob.stop()
+        dup2(saved, 2); close(saved); close(fd)
+        #expect(await bobEv.texts.first?.contains(canary) == true, "the canary must actually have flowed")
+        let logged = (try? Data(contentsOf: capture)) ?? Data()
+        #expect(!String(decoding: logged, as: UTF8.self).contains(canary), "plaintext reached stderr")
+        for dir in [aliceP.dir, bobP.dir] {
+            let files = FileManager.default.enumerator(at: dir, includingPropertiesForKeys: nil)?
+                .compactMap { $0 as? URL } ?? []
+            #expect(!files.isEmpty)
+            for f in files {
+                if let d = try? Data(contentsOf: f) { #expect(d.range(of: Data(canary.utf8)) == nil, "plaintext at rest in \(f.lastPathComponent)") }
+            }
+        }
     }
 }

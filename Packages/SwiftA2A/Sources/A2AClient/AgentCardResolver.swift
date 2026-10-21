@@ -1,6 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
 import A2ACore
 import Foundation
+#if canImport(FoundationNetworking)
+import FoundationNetworking
+#endif
 
 /// Outcome of attempting to verify an `AgentCard`'s JWS signature(s).
 public struct A2ACardVerification: Sendable, Equatable {

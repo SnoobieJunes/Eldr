@@ -53,10 +53,10 @@ struct EldrKeystoreTests {
         // Node env var must NOT unlock a chat keystore, and vice versa.
         #expect(throws: LinuxKeystoreError.self) {
             _ = try makeLinuxKeystore(directory: dir, profile: .eldrChat,
-                environment: ["ELDR_KEYSTORE_PASSPHRASE": "pw"], tpmPresent: { false })
+                environment: ["ELDR_KEYSTORE_PASSPHRASE": "pw-long-enough-1"], tpmPresent: { false })
         }
         let (_, p) = try makeLinuxKeystore(directory: dir, profile: .eldrChat,
-            environment: ["ELDR_CHAT_PASSPHRASE": "pw"], tpmPresent: { false })
+            environment: ["ELDR_CHAT_PASSPHRASE": "pw-long-enough-1"], tpmPresent: { false })
         #expect(p == .passphraseOnDisk)
         let cred = tempDir()
         try FileIdentityStore.writeFile(cred.appendingPathComponent("eldr-chat-master"),
@@ -68,7 +68,7 @@ struct EldrKeystoreTests {
 
     @Test func roundTrip_noPlaintext_0600_wrongPassphraseFailsClosed() throws {
         let dir = tempDir()
-        let env = ["ELDR_CHAT_PASSPHRASE": "correct"]
+        let env = ["ELDR_CHAT_PASSPHRASE": "correct-long-phrase"]
         let (s, _) = try makeLinuxKeystore(directory: dir, profile: .eldrChat, environment: env, tpmPresent: { false })
         try s.save(Data("CANARY-123".utf8), account: "a")
         let raw = try Data(contentsOf: dir.appendingPathComponent("a.enc"))
@@ -94,5 +94,43 @@ struct EldrKeystoreTests {
         #expect(s.load(account: "a") == Data("v2".utf8))
         let names = try FileManager.default.contentsOfDirectory(atPath: dir.path)
         #expect(names == ["a.enc"])
+    }
+}
+
+@Suite("Audit: passphrase file permissions")
+struct AuditPassphraseFileTests {
+    @Test func worldReadablePassphraseFileIsRefused() throws {
+        let dir = tempDir()
+        let pf = dir.appendingPathComponent("pass")
+        FileManager.default.createFile(atPath: pf.path, contents: Data("canary-pass-123".utf8), attributes: [.posixPermissions: 0o644])
+        let env = ["ELDR_CHAT_PASSPHRASE_FILE": pf.path]
+        #expect(throws: LinuxKeystoreError.self) {
+            _ = try makeLinuxKeystore(directory: dir.appendingPathComponent("st"), profile: .eldrChat, environment: env, tpmPresent: { false })
+        }
+        try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: pf.path)
+        let (_, posture) = try makeLinuxKeystore(directory: dir.appendingPathComponent("st"), profile: .eldrChat, environment: env, tpmPresent: { false })
+        #expect(posture == .passphraseOnDisk)
+        // Canary: the passphrase never lands in the state dir in clear.
+        for f in try FileManager.default.contentsOfDirectory(atPath: dir.appendingPathComponent("st").path) {
+            let d = try Data(contentsOf: dir.appendingPathComponent("st").appendingPathComponent(f))
+            #expect(d.range(of: Data("canary-pass-123".utf8)) == nil)
+        }
+        let mode = (try FileManager.default.attributesOfItem(atPath: dir.appendingPathComponent("st").path)[.posixPermissions] as? Int) ?? 0
+        #expect(mode == 0o700)
+    }
+}
+
+@Suite("AC222: passphrase strength at creation")
+struct PassphrasePolicyTests {
+    @Test func weakRefusedAtCreation_existingStillOpens() throws {
+        for weak in ["hunter2", "aaaaaaaaaaaaaaaa", "password1234", "abcabcabcabc"] {
+            #expect(throws: LinuxKeystoreError.self) { try PassphrasePolicy.check(weak) }
+        }
+        try PassphrasePolicy.check("violet tractor moss engine")
+        let dir = tempDir()
+        #expect(throws: LinuxKeystoreError.self) {
+            _ = try makeLinuxKeystore(directory: dir, profile: .eldrChat, environment: ["ELDR_CHAT_PASSPHRASE": "short"], tpmPresent: { false })
+        }
+        #expect(!FileManager.default.fileExists(atPath: dir.appendingPathComponent("master.wrap").path))
     }
 }

@@ -93,6 +93,8 @@ final class AppModel {
     var messagesByConversation: [String: [StoredMessage]] = [:]
     var threadsByConversation: [String: [ThreadVM]] = [:]
     var messageRequests: [String] = []
+    /// AC220: held group invites awaiting Join / Decline.
+    var groupInvites: [GroupInviteVM] = []
     /// conversationID -> (identityHex -> activeUntil): drives the pinned banner.
     var aiWindows: [String: [String: Int64]] = [:]
     /// threadID -> (identityHex -> activeUntil): drives the thread header.
@@ -261,6 +263,10 @@ final class AppModel {
         case .messageRequest(let sender):
             if !messageRequests.contains(sender) {
                 messageRequests.append(sender)
+            }
+        case .groupInvite(let groupID, let name, let invitedBy):
+            if !groupInvites.contains(where: { $0.id == groupID }) {
+                groupInvites.append(GroupInviteVM(id: groupID, name: name, invitedBy: invitedBy))
             }
         case .protocolViolation(_, let reason):
             protocolViolations.append(reason)
@@ -444,6 +450,53 @@ final class AppModel {
         }
         await runtime.deleteMessage(message.id)
         await send(message.text, conversationID: message.conversationID, threadID: message.threadID)
+    }
+
+    // MARK: AI-account sponsorship (AC168)
+
+    /// Live sponsorship I issued per contact (expiry), for the menu + header.
+    var sponsoredUntil: [String: Int64] = [:]
+    var sponsorshipError: String?
+
+    func refreshSponsorship(_ conversationID: String) async {
+        sponsoredUntil[conversationID] = await runtime.liveSponsorship(of: conversationID)?.activeUntil
+    }
+
+    func sponsorAIAccount(_ conversationID: String, days: Int) async {
+        do {
+            try await runtime.sponsorAIAccount(conversationID, days: days, label: nil)
+        } catch {
+            sponsorshipError = "Sponsorship not sent: \(error.localizedDescription)"
+        }
+        await refreshSponsorship(conversationID)
+    }
+
+    func revokeSponsorship(_ conversationID: String) async {
+        do {
+            try await runtime.revokeSponsorship(conversationID)
+        } catch {
+            sponsorshipError = "Revoked on this device, but the notice wasn't delivered yet: \(error.localizedDescription)"
+        }
+        await refreshSponsorship(conversationID)
+    }
+
+    /// Badge text + warn flag for a received AI message (nil when there's nothing to show).
+    func sponsorshipBadge(_ message: StoredMessage) -> (text: String, warn: Bool)? {
+        guard let st = message.sponsorship, st != .human else { return nil }
+        let text = st.badge(
+            nameOf: { [contactNames] hex in contactNames[hex] },
+            date: { Date(timeIntervalSince1970: TimeInterval($0)).formatted(date: .abbreviated, time: .shortened) })
+        return (text, st.isWarning)
+    }
+
+    /// AC166: approve a contact's reconnect request (their row's Reconnect button).
+    func acceptReconnect(_ message: StoredMessage) async {
+        guard await runtime.acceptReconnect(peerIdentityHex: message.senderIdentity) else { return }
+        if var list = messagesByConversation[message.conversationID] {
+            list.removeAll { $0.id == message.id }
+            messagesByConversation[message.conversationID] = list
+        }
+        await runtime.deleteMessage(message.id)
     }
 
     func sendAsAI(_ text: String, conversationID: String) async {
@@ -985,6 +1038,20 @@ final class AppModel {
         return conversationID
     }
 
+    /// AC220: joins a held group invite; its held posts are delivered.
+    func acceptGroupInvite(_ groupID: String) async -> String {
+        await runtime.acceptGroupInvite(groupID)
+        groupInvites.removeAll { $0.id == groupID }
+        await refreshConversationRow(groupID, lastMessage: messagesByConversation[groupID]?.last { $0.threadID == nil })
+        return groupID
+    }
+
+    /// AC220: declines a held group invite (held posts dropped; the group stays silent).
+    func declineGroupInvite(_ groupID: String) async {
+        await runtime.declineGroupInvite(groupID)
+        groupInvites.removeAll { $0.id == groupID }
+    }
+
     func declineRequest(_ senderNostrPubkeyHex: String) async {
         await runtime.declineMessageRequest(senderNostrPubkeyHex: senderNostrPubkeyHex)
         messageRequests.removeAll { $0 == senderNostrPubkeyHex }
@@ -1066,4 +1133,12 @@ final class AppModel {
         }
         return nil
     }
+}
+
+
+/// AC220: a held invite row. `invitedBy` is an identity hex (name resolved in the view).
+struct GroupInviteVM: Identifiable, Sendable, Equatable {
+    let id: String
+    let name: String
+    let invitedBy: String
 }

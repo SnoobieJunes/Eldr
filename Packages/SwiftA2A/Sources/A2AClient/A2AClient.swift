@@ -1,6 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
 import A2ACore
 import Foundation
+#if canImport(FoundationNetworking)
+import FoundationNetworking
+#endif
 
 /// The high-level A2A client: builds typed JSON-RPC requests, sends them over a
 /// pluggable `A2AClientTransport`, and decodes typed results.

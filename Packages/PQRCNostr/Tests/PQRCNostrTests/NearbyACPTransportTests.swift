@@ -247,7 +247,11 @@ struct NearbyACPTransportTests {
         defer { pump.cancel() }
         try await malloryLink.start()
 
-        try? await Task.sleep(for: .milliseconds(250))
+        // Wait for Bob to drop the forged proof (bounded poll: a fixed 250 ms sleep
+        // flaked on a loaded Linux box when the whole suite ran in parallel).
+        for _ in 0..<100 where await bob.droppedFrameCount == 0 {
+            try? await Task.sleep(for: .milliseconds(50))
+        }
         #expect(!(await bob.isPeerProven()), "a forged proof must never pair the peer")
         #expect(await bob.droppedFrameCount > 0)
 

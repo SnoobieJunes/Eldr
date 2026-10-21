@@ -1,5 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 import Foundation
+#if canImport(FoundationNetworking)
+import FoundationNetworking
+#endif
 
 /// Remote inference via the OpenAI Chat Completions API (APP-SPEC §9, D3).
 ///

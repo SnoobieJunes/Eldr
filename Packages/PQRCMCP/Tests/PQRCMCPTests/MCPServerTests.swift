@@ -11,10 +11,15 @@ import Testing
 @Suite("MCP server")
 struct MCPServerTests {
     /// No AI window open anywhere → `send_as_my_ai` must fail closed everywhere.
-    private func server() -> MCPServer { MCPServer(bridge: DemoSecureChatBridge()) }
+    /// Lists once so handles exist (audit-2 M1: alice→c1, bob→c2, design-thread→c3).
+    private func server() async -> MCPServer { await listed(MCPServer(bridge: DemoSecureChatBridge())) }
+    private func listed(_ s: MCPServer) async -> MCPServer {
+        _ = await s.handle(line: #"{"jsonrpc":"2.0","id":0,"method":"tools/call","params":{"name":"list_conversations"}}"#)
+        return s
+    }
     /// An AI window is open for `conversationID` → `send_as_my_ai` is allowed there.
-    private func server(windowOpenFor conversationID: String) -> MCPServer {
-        MCPServer(bridge: DemoSecureChatBridge(activeWindowConversationID: conversationID))
+    private func server(windowOpenFor conversationID: String) async -> MCPServer {
+        await listed(MCPServer(bridge: DemoSecureChatBridge(activeWindowConversationID: conversationID)))
     }
 
     /// Parse a `tools/call` response into (rendered text, isError).
@@ -97,7 +102,7 @@ struct MCPServerTests {
         let json = try parse(
             await server().handle(
                 line:
-                    #"{"jsonrpc":"2.0","id":10,"method":"tools/call","params":{"name":"draft_reply","arguments":{"conversationID":"alice","text":"On my way"}}}"#
+                    #"{"jsonrpc":"2.0","id":10,"method":"tools/call","params":{"name":"draft_reply","arguments":{"conversationID":"c1","text":"On my way"}}}"#
             ))
         let (text, isError) = try callResult(json)
         #expect(isError == false)  // a draft never errors and never sends
@@ -109,7 +114,7 @@ struct MCPServerTests {
         let json = try parse(
             await server().handle(
                 line:
-                    #"{"jsonrpc":"2.0","id":11,"method":"tools/call","params":{"name":"mark_ai_context","arguments":{"conversationID":"alice","messageIDs":["m1","m2"],"value":true}}}"#
+                    #"{"jsonrpc":"2.0","id":11,"method":"tools/call","params":{"name":"mark_ai_context","arguments":{"conversationID":"c1","messageIDs":["m1","m2"],"value":true}}}"#
             ))
         let (text, isError) = try callResult(json)
         #expect(isError == false)
@@ -121,7 +126,7 @@ struct MCPServerTests {
         let json = try parse(
             await server().handle(
                 line:
-                    #"{"jsonrpc":"2.0","id":12,"method":"tools/call","params":{"name":"send_as_my_ai","arguments":{"conversationID":"alice","text":"hi from the agent"}}}"#
+                    #"{"jsonrpc":"2.0","id":12,"method":"tools/call","params":{"name":"send_as_my_ai","arguments":{"conversationID":"c1","text":"hi from the agent"}}}"#
             ))
         let (text, isError) = try callResult(json)
         #expect(isError == true)  // fail closed — surfaced as an error, not a silent drop
@@ -130,12 +135,12 @@ struct MCPServerTests {
     }
 
     @Test func sendAsMyAI_succeeds_onlyInTheConversationWithAnOpenWindow() async throws {
-        let srv = server(windowOpenFor: "alice")
+        let srv = await server(windowOpenFor: "alice")
         // Allowed in the windowed conversation.
         let ok = try parse(
             await srv.handle(
                 line:
-                    #"{"jsonrpc":"2.0","id":13,"method":"tools/call","params":{"name":"send_as_my_ai","arguments":{"conversationID":"alice","text":"posted by AI"}}}"#
+                    #"{"jsonrpc":"2.0","id":13,"method":"tools/call","params":{"name":"send_as_my_ai","arguments":{"conversationID":"c1","text":"posted by AI"}}}"#
             ))
         let (okText, okIsError) = try callResult(ok)
         #expect(okIsError == false)
@@ -146,7 +151,7 @@ struct MCPServerTests {
         let blocked = try parse(
             await srv.handle(
                 line:
-                    #"{"jsonrpc":"2.0","id":14,"method":"tools/call","params":{"name":"send_as_my_ai","arguments":{"conversationID":"bob","text":"should not post"}}}"#
+                    #"{"jsonrpc":"2.0","id":14,"method":"tools/call","params":{"name":"send_as_my_ai","arguments":{"conversationID":"c2","text":"should not post"}}}"#
             ))
         let (_, blockedIsError) = try callResult(blocked)
         #expect(blockedIsError == true)
@@ -157,14 +162,14 @@ struct MCPServerTests {
         let noText = try parse(
             await server().handle(
                 line:
-                    #"{"jsonrpc":"2.0","id":15,"method":"tools/call","params":{"name":"draft_reply","arguments":{"conversationID":"alice"}}}"#
+                    #"{"jsonrpc":"2.0","id":15,"method":"tools/call","params":{"name":"draft_reply","arguments":{"conversationID":"c1"}}}"#
             ))
         #expect((noText["error"] as? [String: Any])?["code"] as? Int == -32602)
         // mark_ai_context without value.
         let noValue = try parse(
             await server().handle(
                 line:
-                    #"{"jsonrpc":"2.0","id":16,"method":"tools/call","params":{"name":"mark_ai_context","arguments":{"conversationID":"alice","messageIDs":["m1"]}}}"#
+                    #"{"jsonrpc":"2.0","id":16,"method":"tools/call","params":{"name":"mark_ai_context","arguments":{"conversationID":"c1","messageIDs":["m1"]}}}"#
             ))
         #expect((noValue["error"] as? [String: Any])?["code"] as? Int == -32602)
     }
@@ -178,14 +183,14 @@ struct MCPServerTests {
         let content = try #require((json["result"] as? [String: Any])?["content"] as? [[String: Any]])
         let text = try #require(content.first?["text"] as? String)
         #expect(text.contains("Alice"))
-        #expect(text.contains("id: alice"))
+        #expect(text.contains("id: c1") && !text.contains("alice"))
     }
 
     @Test func toolsCall_readConversation_returnsCodenamesNotIdentities() async throws {
         let json = try parse(
             await server().handle(
                 line:
-                    #"{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"read_conversation","arguments":{"conversationID":"alice"}}}"#
+                    #"{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"read_conversation","arguments":{"conversationID":"c1"}}}"#
             ))
         let text = try #require(
             ((json["result"] as? [String: Any])?["content"] as? [[String: Any]])?.first?["text"]
@@ -206,13 +211,15 @@ struct MCPServerTests {
     }
 
     @Test func resources_listAndRead() async throws {
-        let listed = try parse(await server().handle(line: #"{"jsonrpc":"2.0","id":6,"method":"resources/list"}"#))
+        let srv = await server()
+        let listed = try parse(await srv.handle(line: #"{"jsonrpc":"2.0","id":6,"method":"resources/list"}"#))
         let resources = try #require((listed["result"] as? [String: Any])?["resources"] as? [[String: Any]])
         let uri = try #require(resources.first?["uri"] as? String)
         #expect(uri.hasPrefix("eldrchat://conversation/"))
 
+        #expect(!uri.contains("alice"))
         let read = try parse(
-            await server().handle(
+            await srv.handle(
                 line:
                     "{\"jsonrpc\":\"2.0\",\"id\":7,\"method\":\"resources/read\",\"params\":{\"uri\":\"\(uri)\"}}"
             ))
@@ -223,5 +230,15 @@ struct MCPServerTests {
     @Test func unknownMethod_returnsMethodNotFound() async throws {
         let json = try parse(await server().handle(line: #"{"jsonrpc":"2.0","id":8,"method":"does/notExist"}"#))
         #expect((json["error"] as? [String: Any])?["code"] as? Int == -32601)
+    }
+
+    /// Audit-2 M1: conversation ids (identity hex for 1:1s) never reach the MCP client,
+    /// and a raw id is not accepted as input.
+    @Test func conversationIDsAreOpaqueHandles() async throws {
+        let srv = await server()
+        let list = try callResult(try parse(await srv.handle(line: #"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"list_conversations"}}"#)))
+        #expect(!list.text.contains("alice") && !list.text.contains("design-thread"))
+        let raw = try parse(await srv.handle(line: #"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"read_conversation","arguments":{"conversationID":"alice"}}}"#))
+        #expect((raw["error"] as? [String: Any])?["code"] as? Int == -32602)
     }
 }

@@ -1,9 +1,29 @@
 // SPDX-License-Identifier: Apache-2.0
-#if canImport(Network)
 import Foundation
 import PQRCACP
 import PQRCCore
 import PQRCNostr
+
+/// What the gateway needs from a relay connection. On macOS this is
+/// `NostrWebSocketTransport`; on Linux `NIONostrTransport` (URLSession WebSockets do not
+/// work there), so the same gateway runs under Huginn on both (WS-N10).
+public protocol BuzzGatewayTransport: Sendable {
+    func gatewayConnect() async throws
+    func authenticate(
+        keypair: NostrKeypair, randomSource: any RandomSource, extraTags: [[String]]) async throws
+    func subscribe(_ filters: [NostrFilter]) async -> AsyncThrowingStream<NostrEvent, Error>
+    func publish(_ event: NostrEvent) async throws -> PublishAck
+}
+
+extension NIONostrTransport: BuzzGatewayTransport {
+    public func gatewayConnect() async throws { _ = try await connect() }
+}
+
+#if canImport(Network)
+extension NostrWebSocketTransport: BuzzGatewayTransport {
+    public func gatewayConnect() async throws { _ = await connect() }
+}
+#endif
 
 /// The Eldr↔Buzz gateway: joins a Buzz workspace channel as a first-class bot
 /// member, listens for @mentions, runs each turn against the owner's LOCAL model
@@ -21,7 +41,7 @@ import PQRCNostr
 /// the URL changes. The reply/mention DECISION logic is factored into pure
 /// static helpers (`GatewayLogic`) that are unit-tested without any socket.
 public actor BuzzGateway {
-    private let transport: NostrWebSocketTransport
+    private let transport: any BuzzGatewayTransport
     private let keypair: NostrKeypair
     private let llm: any LLMClient
     private let config: BuzzGatewayConfig
@@ -42,7 +62,7 @@ public actor BuzzGateway {
     private var cumulativeByChannel: [String: (input: Int, output: Int, total: Int)] = [:]
 
     public init(
-        transport: NostrWebSocketTransport, keypair: NostrKeypair, llm: any LLMClient,
+        transport: any BuzzGatewayTransport, keypair: NostrKeypair, llm: any LLMClient,
         config: BuzzGatewayConfig, random: any RandomSource = SystemRandomSource(),
         usageBox: UsageBox = UsageBox(),
         log: @escaping @Sendable (String) -> Void = { _ in }
@@ -85,7 +105,7 @@ public actor BuzzGateway {
     // MARK: - Join
 
     private func connectAndAuthenticate() async throws {
-        _ = await transport.connect()
+        try await transport.gatewayConnect()
         var extraTags: [[String]] = []
         if let authTag = config.authTagJSON {
             // Parse the NIP-OA tag JSON into the ["auth", owner, conditions, sig]
@@ -415,4 +435,3 @@ public enum GatewayLogic {
         return formatter.string(from: Date())
     }
 }
-#endif

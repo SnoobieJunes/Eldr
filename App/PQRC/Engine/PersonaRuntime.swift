@@ -8,6 +8,12 @@ import PQRCMCP
 import PQRCNostr
 import SwiftData
 
+/// AC220: roster changes are admin-only.
+enum GroupAdminError: Error, LocalizedError {
+    case notAdmin
+    var errorDescription: String? { "Only the group's creator or an admin can change who's in it or rename it." }
+}
+
 /// Events the runtime surfaces to the UI layer (already persisted).
 enum RuntimeEvent: Sendable {
     case messageAdded(StoredMessage)
@@ -15,6 +21,8 @@ enum RuntimeEvent: Sendable {
     case messageChanged(StoredMessage)
     case conversationChanged(String)
     case messageRequest(senderNostrPubkeyHex: String)
+    /// AC220: an unknown group named me; held until I Join or Decline.
+    case groupInvite(groupID: String, name: String, invitedBy: String)
     case protocolViolation(conversationID: String, reason: String)
     case aiWindowChanged(conversationID: String, identityHex: String, activeUntil: Int64?)
     case aiInviteChanged(threadID: String, identityHex: String, activeUntil: Int64?)
@@ -101,6 +109,9 @@ actor PersonaRuntime {
     private let siloID: String
 
     private(set) var identity: PQRCIdentity!
+    /// Sponsorships I issued to AI accounts + every revocation I know of (AC168).
+    /// Persisted encrypted (`saveSecret`) under "sponsorship-ledger".
+    private(set) var sponsorshipLedger = SponsorshipLedger()
     private(set) var nostrKeypair: NostrKeypair!
     private var messenger: PQRCMessenger!
     private var engine: AgentEngine!
@@ -180,6 +191,12 @@ actor PersonaRuntime {
     private var myAlias: String?
     /// 1:1 conversation id == peer identity hex; groups use the group UUID.
     private var groupRosters: [String: GroupRoster] = [:]
+    /// AC220: held group invites (roster + inviter) and their held messages (memory only,
+    /// capped; a relaunch keeps the invite but not the held posts).
+    private var pendingGroupInvites: [String: (roster: GroupRoster, invitedBy: String)] = [:]
+    private var heldInviteMessages: [String: [ReceivedMessage]] = [:]
+    /// AC220: declined group ids — later posts and rosters are dropped silently.
+    private var declinedGroups: Set<String> = []
     private var threadConversations: [String: String] = [:]  // threadID -> conversationID
     private var threadTitles: [String: String] = [:]
     /// Conversation my active ai_window was started in (window replies route here).
@@ -222,10 +239,8 @@ actor PersonaRuntime {
     /// to poll liveness (that would make publishing an online-presence beacon —
     /// SPEC §0); ongoing status uses the cheap connection check instead.
     private(set) var keyPublish: KeyPublishStatus = .pending
-    /// Below this many unused one-time prekeys, replenish + republish so peers
-    /// don't fall back to the last-resort key (invariant 11). This is a
-    /// need-based trigger, never a timer.
-    private let prekeyLowWaterMark = 3
+    /// Target count of unused one-time prekeys; any consume triggers a refill and
+    /// republish (AC167) so the published bundle never lists a spent OTP.
     private let prekeyReplenishTarget = 10
     private var localSentAtBase: Int64 { clock.now() }
 
@@ -946,8 +961,17 @@ actor PersonaRuntime {
                 identity: identity, randomSource: randomSource, oneTimeCount: 16)
         }
         _ = try await prekeyManager.replenish(to: 16)
-        try keychain.save(
+        // Sealed like every other per-silo secret (it holds private prekey halves).
+        // Earlier builds saved this one unsealed, so in silo mode `loadSecret` could
+        // never open it: a legacy plaintext blob reads as absent (fresh prekeys —
+        // exactly what every launch of those builds already did) and is overwritten
+        // sealed right here. No plaintext fallback read: accepting an unsealed blob
+        // would let anyone with Keychain write access but no passphrase plant our
+        // prekeys. (`persistPrekeyState` already used `saveSecret`.)
+        try saveSecret(
             JSONEncoder().encode(await prekeyManager.snapshot()), account: "prekey-state")
+        sponsorshipLedger = loadSecret("sponsorship-ledger")
+            .flatMap { try? JSONDecoder().decode(SponsorshipLedger.self, from: $0) } ?? SponsorshipLedger()
 
         messenger = try PQRCMessenger(
             identity: identity, nostrKeypair: nostrKeypair, prekeyManager: prekeyManager,
@@ -1003,11 +1027,20 @@ actor PersonaRuntime {
                 with: contact, snapshot: snapshot,
                 usedLastResortPrekey: contactRecords[peerIdentityHex]?.usedLastResortPrekey ?? false)
         }
-        for (id, type, meta, _) in (try? await store.conversationMetas()) ?? [] where type == "group" {
+        for (id, type, meta, _) in (try? await store.conversationMetas()) ?? [] {
             let create = GroupCreate(
                 groupID: meta.groupID ?? id, name: meta.name,
-                members: meta.memberIdentityHexes, revision: meta.rosterRevision)
-            groupRosters[id] = GroupRoster(create: create, assertedBy: meta.rosterAssertedBy ?? identityHex)
+                members: meta.memberIdentityHexes, revision: meta.rosterRevision, admins: meta.rosterAdmins)
+            switch type {
+            case "group":
+                groupRosters[id] = GroupRoster(create: create, assertedBy: meta.rosterAssertedBy ?? identityHex)
+            case "groupInvite":
+                let by = meta.invitedBy ?? meta.rosterAssertedBy ?? ""
+                pendingGroupInvites[id] = (GroupRoster(create: create, assertedBy: meta.rosterAssertedBy ?? by), by)
+            case "groupDeclined":
+                declinedGroups.insert(id)
+            default: break
+            }
         }
         for (threadID, conversationID, meta) in (try? await store.threadMetas()) ?? [] {
             threadConversations[threadID] = conversationID
@@ -1046,6 +1079,10 @@ actor PersonaRuntime {
         let messengerEvents = try await messenger.start()
         let (stream, continuation) = AsyncStream.makeStream(of: RuntimeEvent.self)
         eventContinuation = continuation
+        // AC220: surface invites restored from disk (held across relaunch).
+        for (gid, inv) in pendingGroupInvites {
+            continuation.yield(.groupInvite(groupID: gid, name: inv.roster.name, invitedBy: inv.invitedBy))
+        }
         pumpTask = Task { [weak self] in
             for await event in messengerEvents {
                 await self?.handle(event)
@@ -1573,13 +1610,15 @@ actor PersonaRuntime {
         eventContinuation?.yield(.keyPublishChanged(status))
     }
 
-    /// Need-based republish: when unused one-time prekeys run low, replenish and
-    /// republish so incoming handshakes don't fall back to the last-resort key
-    /// (invariant 11). Called after the receive path consumes a prekey — driven
-    /// by message activity, never by a timer.
+    /// Need-based republish: after the receive path consumes a one-time prekey,
+    /// replenish and republish so the published bundle never advertises a spent
+    /// OTP. A contact that reinstalls picks an OTP from that bundle at random and
+    /// a spent one is refused as a replay (AC165), so a stale bundle left reset
+    /// contacts silently unreachable (DEVIATIONS AC167). Driven by message
+    /// activity, never by a timer.
     private func republishIfPrekeysLow() async {
         let remaining = await messenger.prekeyManager.oneTimePrekeyCount
-        guard remaining <= prekeyLowWaterMark else { return }
+        guard remaining < prekeyReplenishTarget else { return }
         let generated = (try? await messenger.prekeyManager.replenish(to: prekeyReplenishTarget)) ?? false
         guard generated else { return }
         await persistPrekeyState()
@@ -2461,7 +2500,7 @@ actor PersonaRuntime {
     func createGroup(name: String, memberIdentityHexes: [String]) async throws -> String {
         let groupID = UUID().uuidString
         let members = [identityHex] + memberIdentityHexes
-        let create = GroupCreate(groupID: groupID, name: name, members: members, revision: 1)
+        let create = GroupCreate(groupID: groupID, name: name, members: members, revision: 1, admins: [identityHex])
         groupRosters[groupID] = GroupRoster(create: create, assertedBy: identityHex)
         persistRoster(groupID)
         // A group with no other humans is a solo AI space: turn my AIs "on" from
@@ -2484,9 +2523,53 @@ actor PersonaRuntime {
         let meta = ConversationMeta(
             name: roster.name, memberIdentityHexes: roster.members,
             rosterAssertedBy: roster.assertedBy, rosterRevision: roster.revision,
-            groupID: roster.groupID)
+            groupID: roster.groupID, rosterAdmins: roster.admins)
         let store = store
         Task { try? await store?.saveConversationMeta(id: groupID, type: "group", meta: meta) }
+    }
+
+    // MARK: - Group invites (AC220)
+
+    private func persistInvite(_ groupID: String) {
+        guard let inv = pendingGroupInvites[groupID] else { return }
+        let roster = inv.roster, by = inv.invitedBy
+        let meta = ConversationMeta(
+            name: roster.name, memberIdentityHexes: roster.members,
+            rosterAssertedBy: roster.assertedBy, rosterRevision: roster.revision,
+            groupID: roster.groupID, rosterAdmins: roster.admins, invitedBy: by)
+        let store = store
+        Task { try? await store?.saveConversationMeta(id: groupID, type: "groupInvite", meta: meta) }
+    }
+
+    private func holdInviteMessage(_ groupID: String, _ received: ReceivedMessage) {
+        var held = heldInviteMessages[groupID] ?? []
+        held.append(received)
+        if held.count > 50 { held.removeFirst(held.count - 50) }
+        heldInviteMessages[groupID] = held
+    }
+
+    /// Held invites for the UI: (groupID, name, inviter identity).
+    func groupInvites() -> [(groupID: String, name: String, invitedBy: String)] {
+        pendingGroupInvites.map { ($0.key, $0.value.roster.name, $0.value.invitedBy) }
+    }
+
+    /// Joins a held group: the roster becomes live and held posts are delivered.
+    func acceptGroupInvite(_ groupID: String) async {
+        guard let inv = pendingGroupInvites.removeValue(forKey: groupID) else { return }
+        groupRosters[groupID] = inv.roster
+        persistRoster(groupID)  // same id: overwrites the "groupInvite" record's type
+        let held = heldInviteMessages.removeValue(forKey: groupID) ?? []
+        for r in held { await handleReceived(r) }
+        eventContinuation?.yield(.conversationChanged(groupID))
+    }
+
+    /// Declines: held posts are dropped and the group is remembered so it stays silent.
+    func declineGroupInvite(_ groupID: String) async {
+        pendingGroupInvites[groupID] = nil
+        heldInviteMessages[groupID] = nil
+        declinedGroups.insert(groupID)
+        let meta = ConversationMeta(name: "", memberIdentityHexes: [], rosterAssertedBy: nil, rosterRevision: 0, groupID: groupID)
+        try? await store?.saveConversationMeta(id: groupID, type: "groupDeclined", meta: meta)
     }
 
     private func persistThread(_ threadID: String) {
@@ -2508,8 +2591,12 @@ actor PersonaRuntime {
 
     func reviseRoster(groupID: String, name: String, members: [String]) async throws {
         guard let roster = groupRosters[groupID] else { return }
+        // AC220: only an admin may change the roster; anyone may remove only themselves.
+        let selfLeave = Set(members) == Set(roster.members).subtracting([identityHex]) && name == roster.name
+        guard roster.isAdmin(identityHex) || selfLeave else { throw GroupAdminError.notAdmin }
         let create = GroupCreate(
-            groupID: groupID, name: name, members: members, revision: roster.revision + 1)
+            groupID: groupID, name: name, members: members, revision: roster.revision + 1,
+            admins: roster.admins.filter { members.contains($0) })
         var updated = roster
         _ = updated.apply(create, assertedBy: identityHex)
         groupRosters[groupID] = updated
@@ -3309,12 +3396,106 @@ actor PersonaRuntime {
                 nearbyContactNames[identityHex] = "Nearby · \(String(identityHex.prefix(8)))"
                 eventContinuation?.yield(.nearbyDiscovered(identityHex: identityHex))
             }
+        case .reconnectRequest(let sender):
+            // AC166: a contact we have a session with reset (reinstall) after our
+            // one-time prekeys ran out. The engine holds their handshake; nothing
+            // changes until the user taps Reconnect on this row.
+            let row = StoredMessage(
+                id: UUID().uuidString, conversationID: sender,
+                senderIdentity: sender, participantType: .human,
+                text: "reset their Eldr app and asked to reconnect. Check their safety code, then tap Reconnect.",
+                sentAt: clock.now(), localStatus: "reconnect")
+            try? await store.save(row)
+            eventContinuation?.yield(.messageAdded(row))
         case .relayReconnected:
             // C3: the socket came back — give every "Not sent" message one
             // automatic re-publish (same stable id inside, so a half-acked
             // original dedups receiver-side).
             await retryFailedSends()
         }
+    }
+
+    // MARK: - AI-account sponsorship (Milestone 2 on iOS, DEVIATIONS AC168)
+
+    enum SponsorshipActionError: Error, LocalizedError {
+        case notAContact
+        var errorDescription: String? { "Only a verified 1:1 contact can be sponsored." }
+    }
+
+    private func persistSponsorshipLedger() {
+        if let blob = try? JSONEncoder().encode(sponsorshipLedger) {
+            try? saveSecret(blob, account: "sponsorship-ledger")
+        }
+    }
+
+    /// Live sponsorship I issued to this contact, if any: (expiry, label).
+    func liveSponsorship(of contactHex: String) -> (activeUntil: Int64, label: String?)? {
+        sponsorshipLedger.live(to: contactHex, now: clock.now()).last.map {
+            ($0.sponsorship.activeUntil, $0.sponsorship.label)
+        }
+    }
+
+    /// Signs a sponsorship (1–7 days) vouching for this contact as an AI account I
+    /// answer for, and sends it to them over our session. Nothing is recorded if the
+    /// send fails. Agents (my tethered AIs) never call this: only the human UI does.
+    func sponsorAIAccount(_ contactHex: String, days: Int, label: String?) async throws {
+        guard verifiedContacts[contactHex] != nil, contactHex != identityHex else {
+            throw SponsorshipActionError.notAContact
+        }
+        // Issue into the LIVE ledger and roll back on failure, rather than send from a
+        // copy and assign it back: the send suspends this actor, and a revocation
+        // received meanwhile must not be overwritten by a stale copy.
+        let body = try sponsorshipLedger.issue(
+            to: contactHex, days: days, label: label,
+            identity: identity, now: clock.now())
+        do {
+            try await messenger.send(body, to: contactHex, participantType: .human)
+        } catch {
+            if let id = body.agentSponsorship?.sponsorshipID { sponsorshipLedger.forget(sponsorshipID: id) }
+            throw error
+        }
+        await persistSession(contactHex)
+        persistSponsorshipLedger()
+        await saveOutgoingSponsorshipRow(body, to: contactHex)
+    }
+
+    /// Revokes every live sponsorship I issued to this contact. Effective locally at
+    /// once (their AI messages show "revoked" from now on) even if the notice can't be
+    /// delivered right now; delivery errors are rethrown after the ledger is saved.
+    func revokeSponsorship(_ contactHex: String) async throws {
+        let bodies = try sponsorshipLedger.revokeAll(to: contactHex, identity: identity, now: clock.now())
+        persistSponsorshipLedger()
+        var firstError: Error?
+        for body in bodies {
+            do {
+                try await messenger.send(body, to: contactHex, participantType: .human)
+                await saveOutgoingSponsorshipRow(body, to: contactHex)
+            } catch {
+                firstError = firstError ?? error
+            }
+        }
+        await persistSession(contactHex)
+        if let firstError { throw firstError }
+    }
+
+    private func saveOutgoingSponsorshipRow(_ body: MessageBody, to contactHex: String) async {
+        let row = StoredMessage(
+            id: body.messageID ?? UUID().uuidString, conversationID: contactHex,
+            senderIdentity: identityHex, participantType: .human, text: body.text,
+            sentAt: body.sentAt, localStatus: "sent")
+        try? await store.save(row)
+        eventContinuation?.yield(.messageAdded(row))
+    }
+
+    /// AC166: the user approved a held reconnect from this contact. Replaces the
+    /// stale session with their new one and persists it. False if nothing was held.
+    func acceptReconnect(peerIdentityHex: String) async -> Bool {
+        let ok = await messenger.acceptReconnect(peerIdentityHex: peerIdentityHex)
+        if ok {
+            await persistSession(peerIdentityHex)
+            await persistPrekeyState()
+        }
+        return ok
     }
 
     /// Buffers one chunk of a chunked message. Returns the fully reassembled
@@ -3514,21 +3695,62 @@ actor PersonaRuntime {
             return
         }
 
-        // Group routing/roster (D1).
+        // Group routing/roster (D1 + AC220: admin-only rosters, invites held for approval).
+        let groupRef = body.groupCreate?.groupID ?? body.group?.id
+        if let gid = groupRef, declinedGroups.contains(gid) { return }
+        if let gid = groupRef, var invite = pendingGroupInvites[gid] {
+            if let create = body.groupCreate, invite.roster.apply(create, assertedBy: senderHex) {
+                if !create.members.contains(identityHex) {
+                    // Removed before I answered: the invite simply disappears.
+                    pendingGroupInvites[gid] = nil
+                    heldInviteMessages[gid] = nil
+                    let store = store
+                    Task { try? await store?.deleteConversation(gid) }
+                    return
+                }
+                pendingGroupInvites[gid] = invite
+                persistInvite(gid)
+            }
+            guard invite.roster.members.contains(senderHex) else { return }
+            holdInviteMessage(gid, received)
+            return
+        }
         if let create = body.groupCreate {
-            var roster = groupRosters[create.groupID]
-                ?? GroupRoster(create: create, assertedBy: senderHex)
-            _ = roster.apply(create, assertedBy: senderHex)
-            groupRosters[create.groupID] = roster
-            conversationID = create.groupID
-            persistRoster(create.groupID)
-            eventContinuation?.yield(.conversationChanged(create.groupID))
+            if var roster = groupRosters[create.groupID] {
+                guard roster.members.contains(senderHex) else { return }
+                if roster.apply(create, assertedBy: senderHex) {  // admin-only (GroupRoster, AC220)
+                    groupRosters[create.groupID] = roster
+                    persistRoster(create.groupID)
+                    eventContinuation?.yield(.conversationChanged(create.groupID))
+                }
+                conversationID = create.groupID
+            } else {
+                // A NEW group naming me: held like a message request until I Join.
+                guard create.members.contains(senderHex), create.members.contains(identityHex),
+                    pendingGroupInvites.count < 32
+                else { return }
+                pendingGroupInvites[create.groupID] = (GroupRoster(create: create, assertedBy: senderHex), senderHex)
+                persistInvite(create.groupID)
+                holdInviteMessage(create.groupID, received)
+                eventContinuation?.yield(
+                    .groupInvite(groupID: create.groupID, name: create.name, invitedBy: senderHex))
+                return
+            }
         } else if let group = body.group {
-            conversationID = group.id
+            // Only a member's post files under a group I have; anything else stays in
+            // the sender's 1:1 (same as Linux routeKnownGroup — a spoofed group ref
+            // cannot inject into a group).
+            if let roster = groupRosters[group.id], roster.members.contains(senderHex) {
+                conversationID = group.id
+            }
         }
 
         // Thread bookkeeping (D7).
-        if let create = body.threadCreate {
+        // Audit-2 T1: adopt a thread only from its creator, and never move an existing
+        // thread to another conversation or rename it (matches Linux receiveAI).
+        if let create = body.threadCreate, create.createdBy == senderHex,
+            threadConversations[create.threadID] == nil
+        {
             threadConversations[create.threadID] = conversationID
             threadTitles[create.threadID] = create.title
             persistThread(create.threadID)
@@ -3590,6 +3812,20 @@ actor PersonaRuntime {
             return
         }
 
+        // Sponsorship (AC168): a verified revocation from its signer is effective at
+        // once for every later message; each agent message is checked PER MESSAGE.
+        if let revocation = body.agentSponsorshipRevocation,
+            sponsorshipLedger.receive(revocation: revocation, from: senderHex)
+        {
+            persistSponsorshipLedger()
+        }
+        let sponsorship: SponsorshipStatus? =
+            received.participantType == .agent && senderHex != identityHex
+            ? sponsorshipLedger.status(
+                participantType: received.participantType, body: body,
+                senderIdentityHex: senderHex, now: clock.now())
+            : nil
+
         // Control messages render as neutral system rows, not bubbles.
         let isSystemRow =
             received.aiWindow != nil || received.aiContextGrant != nil
@@ -3603,7 +3839,7 @@ actor PersonaRuntime {
             text: text, sentAt: body.sentAt, threadID: body.thread?.id,
             isContext: body.isContext ?? false, aiContext: body.aiContext ?? false,
             localStatus: isSystemRow ? "system" : "received",
-            coauthored: body.coauthored ?? false)
+            coauthored: body.coauthored ?? false, sponsorship: sponsorship)
         try? await store.save(message)
         eventContinuation?.yield(.messageAdded(message))
 

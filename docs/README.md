@@ -38,7 +38,7 @@ suite is now `hybrid-v2` and why **all peers must update together**.
 |---|---|
 | build and test it | [`SETUP-GUIDE.md`](guide/SETUP-GUIDE.md) — the eight-package loop, the relay, Multipeer, Xcode 27 + `eldr-acp` |
 | understand every feature fast | [`FEATURES-AND-TESTING-GUIDE.md`](guide/FEATURES-AND-TESTING-GUIDE.md) — what it does + how to smoke-test it |
-| hand it to a tester | [`USER-GUIDE.md`](guide/USER-GUIDE.md) — plain language, no jargon |
+| hand it to a tester | [`USER-GUIDE.md`](guide/USER-GUIDE.md) — plain language, no jargon · [`OWNER-TEST-PLAN.md`](guide/OWNER-TEST-PLAN.md) — the October 2026 hands-on pass |
 | see it work with no network | [`DEMO.md`](guide/DEMO.md) — Local Universe, five personas, one process |
 | drive a Mac agent from the phone | [`CONDUIT-SETUP.md`](guide/CONDUIT-SETUP.md) · [`OPENCLAW-SETUP.md`](guide/OPENCLAW-SETUP.md) · [`DEMO-SYBILCLAW.md`](guide/DEMO-SYBILCLAW.md) |
 | run agent-to-agent | [`A2A-INTEGRATION.md`](guide/A2A-INTEGRATION.md) · [`ELDR-BUZZ-INTEROP.md`](guide/ELDR-BUZZ-INTEROP.md) · [`DEMO-GOOSEWORLD.md`](guide/DEMO-GOOSEWORLD.md) |

@@ -117,6 +117,9 @@ public enum PQRCConstants {
     /// ``allowedStandingGrantDurations``; the receiver rejects anything claiming
     /// more life than this, so a hostile peer cannot mint itself a decade.
     public static let maxStandingGrantDuration: Int64 = 30 * 24 * 60 * 60
+    /// Agent sponsorships live at most 7 days (AC219, owner decision): revocations are
+    /// not published, so a third party trusts a revoked sponsorship until it expires.
+    public static let maxSponsorshipDuration: Int64 = 7 * 86_400
 
     /// The durations a human may actually choose when issuing a standing grant,
     /// in seconds: 1, 3, 7, 14, and 30 days.

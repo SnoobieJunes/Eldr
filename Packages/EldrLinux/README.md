@@ -61,3 +61,30 @@ re-verified offline from their stored binding events.
   the same identity. A different identity raises a safety warning and is never adopted
   (DEVIATIONS AC158).
 - If `state.enc` can't be read, the client refuses to start rather than starting empty.
+
+## Milestone 2: sponsored agent identities
+
+An AI account (e.g. ELDR) only sends once its owner has signed a sponsorship (1, 7 or 30 days).
+The owner can revoke it at any time; every message is checked. Spec: `docs/pqrc-ext-agent-sponsorship.md`.
+
+```sh
+# on the AI account
+eldr-chat agent-mode on --owner <owner identity hex>
+# on the owner's (human) account
+eldr-chat sponsor eldr --days 7 --label ELDR
+eldr-chat revoke eldr
+eldr-chat sponsorships
+```
+
+## Milestone 3: eldr-gtk (native GTK 4 desktop app)
+
+```sh
+sudo apt-get install -y libgtk-4-dev pkg-config     # once
+cd Packages/EldrLinux && swift build --product eldr-gtk
+ELDR_CHAT_PASSPHRASE_FILE=~/.eldr-pass .build/debug/eldr-gtk [--state DIR] [--relay wss://…]
+```
+
+Conversation list, message view (Markdown shown as text, large messages sent in parts), a composer
+(Enter = new line, Ctrl+Enter = send), add-contact by npub or `pqrc:add` link, message requests, and
+sponsor (1/7/30 days, click twice to confirm) / revoke for AI accounts. An AI account in agent mode
+shows whether it's sponsored. Uses the same state as `eldr-chat`; close one before opening the other.

@@ -86,7 +86,7 @@ Each has a written plan. Estimates are the plans' own, solo-developer days.
 | **Relay-side work for ephemeral receiving keys** (kind 10422). The app toggle **must not** be flipped until the relay passes the §6 gate — today it breaks inbound delivery. | — | [`guide/RELAY-EPHEMERAL-KEYS-SETUP.md`](guide/RELAY-EPHEMERAL-KEYS-SETUP.md) |
 | **The node-served web dashboard (WS-D2/D3-web).** Deliberately deferred when AC155 shipped native-first, so a **Linux town has no dashboard at all** — `world/status` exists and is transport-agnostic, but only the two Apple apps can read it. Needs the specced loopback HTTP+SSE server: token-gated, `Origin`/`Host`-validated against DNS rebinding, no write path, no-CDN vendored frontend. | ~2–3 days | DEVIATIONS AC155; original spec in the retired gooseworld-v2 plan |
 | **Show the identity hex (or safety code) in EldrChat Settings, or let `eldr-node --owner` take an npub.** The node docs tell users to copy a 64-char identity hex that Settings never shows (`App/PQRC/Views/Settings/SettingsView.swift` ~L141 shows only the npub/QR). `eldr-chat` already resolves npub → verified identity (AC158/AC161). | ~½ day | DEVIATIONS AC157 |
-| **EldrLinux milestones 2–5.** Sponsored agent identities (human-signed, revocable), GTK desktop app over a system-library module map, collaboration features, Android via the Swift Android SDK. Groups, threads, attachments and grants are not in the CLI yet. | weeks | `Packages/EldrLinux/README.md` |
+| **EldrLinux milestones 2–5.** Sponsored agent identities (human-signed, revocable), GTK desktop app over a system-library module map, collaboration features, Android via the Swift Android SDK. Groups landed (AC173). Threads, AI windows/grants, provider wiring, QR pairing, settings and attachments are still missing. | weeks | [`plan/LINUX-PARITY.md`](plan/LINUX-PARITY.md) (`WS-N`) |
 | **Streaming dashboard updates.** AC155 refreshes on demand and labels every row with when it was confirmed. Live updates need WS-D1n's observer hooked *after* the authorizer in `routeInboundA2A` and delivered **non-blocking** to a bounded `AsyncStream` — an awaited observer would head-of-line-block all three planes (an availability DoS). Would also let the Mac map pulse per actual message instead of per live-state. | ~1 day | DEVIATIONS AC155 |
 | **A deterministic "universe seeded" signal for `--uitest`.** `EldrChatUITests` fails intermittently and *a different test loses the race each run* — observed 2026-08-06: `PerformanceUITests.test_scroll10kMessages` ("no matches for ScrollView"), then `UXVerificationTests.test_rec1_aiControlsOverlap`, then `test_rec4_largePasteChip` (both "conversation Bob missing"). Each passes in isolation; `simctl shutdown all` does not help, so it is not accumulated simulator state. The mitigations in place — a 150 s wait and `UXVerificationTests.launchUniverse`'s single relaunch — treat the symptom. The fix is for `bootUniverse` to publish a **seeded** state the tests can await (accessibility element, or a springboard-visible marker) instead of every test polling for its own row. `PQRCApp.swift:1304` already carries the `TODO(AC111)`. **The failure message always names a missing UI element, so it reads like a layout regression when it is a boot race** — that mis-read costs a debugging session each time. | ~0.5 day | `App/PQRC/PQRCApp.swift:1304`; DEVIATIONS AC111 |
 
@@ -197,6 +197,7 @@ Recorded so they aren't rediscovered as surprises. None is scheduled.
 | The delegation path injects **no vendor key**; `withVendorKey` is only on top-level responders | DEVIATIONS (deferred) |
 | The nested permission proxy is not e2e-tested against a real permission-issuing harness | DEVIATIONS (deferred) |
 | `ConduitProvisioner`'s env heredoc is unquoted — an embedded `'` breaks it. Not currently reachable. | DEVIATIONS (deferred, LOW) |
+| In silo mode, per-AI API keys (`AISettingsView.saveKey`) and Buzz workspace Nostr keys (`BuzzWorkspaceRegistry.mintKeypair`) are written to the silo's Keychain service **unsealed**, bypassing `saveSecret`. The fix needs the silo KEK plumbed into both, plus a migration for keys already saved. | DEVIATIONS AC170 |
 
 ### C2 · Accepted limits
 
@@ -206,7 +207,7 @@ Recorded so they aren't rediscovered as surprises. None is scheduled.
 | `world_delegate` is fire-and-forget — the reply lands on the delegation channel, not as the tool's return value | AC143 |
 | Pairwise fan-out caps at ~8 towns; MLS is the v2 scale path | `pitch/GOOSEWORLD.md` §6 |
 | `.a2aRemote` delegation is refused on Linux (fails loudly as `unsupportedKind`) | AC141 |
-| The Linux TPM rung is systemd-creds sealing, not an in-process `tpm2-tss` shim | AC139 |
+| The Linux TPM rung now includes an in-process `tpm2-tss` wrap (AC218), tested only against **swtpm** (a simulator). Still to do: verify on real TPM hardware; optionally bind to PCRs (measured boot) and use the TPM's own authValue so passphrase guesses hit its anti-hammering; an `eldr-node keystore upgrade` command (the node uses the shared library but has no CLI for it yet) | AC218 |
 | Phone → Huginn grant hand-off is copy/paste; an automatic paired-channel push is future work | AC145 |
 | Headless `eldr-node` gateway continuity is per-process, not per-conversation | AC69 |
 | The in-app **Agent Inspector** and **Nearby scanner** are not built — use OS logs | `TEST-PLAN.md` §14 |
@@ -231,3 +232,13 @@ entry and move the plan to `done/`. Three steps, one sitting:
 
 If an item can't be written as a line in this file, it isn't a backlog item yet —
 it's a thought, and thoughts go in `private/`.
+- [x] WS-N2–N5 Linux parity (threads/AI/providers/QR/settings, group rename/leave) — PR #28; live in-thread reply proven 2026-10-13
+- [ ] Forward-compat: an older eldr-chat/eldr-gtk build that loads newer state drops unknown fields (threads, AI state, HistoryEntry.threadID) on save. Seen live when the launcher ran a stale binary. See AC177.
+- [ ] Linux: native Anthropic/Gemini providers, context grants UI, contact rename/remove/safety code.
+- [x] WS-N7 Phase A EldrChat parity (contacts, providers, context grants/marks, Buzz, world list, tour, AC177) — PR #28 (AC180–AC189)
+- [x] WS-N7a remaining EldrChat gaps (unread, retry, mentions, multi-AI roster/critique, context mode, solo AI chat, relay panel, world map) — PR #28, AC191–AC200; live smoke 2026-10-13
+- [ ] WS-N7b small leftovers: peer-AI codename mentions (AC193), held marks across restart (AC199), live network-failure retry check (AC192). Owner: Grok Bot. Exit: each has a test and a matrix row marked done.
+- [x] WS-N10 Phase B: Huginn Linux GTK app + launcher (`Apps/HuginnLinux`, AGPL) — PR #28, AC201–AC210, plan `docs/plan/HUGINN-LINUX.md`
+- [ ] WS-N10b Huginn Linux leftovers: context-graph fields, per-request LLM inspector, town-grants editor, setup wizard/tour, A2A/MCP host, approval notifications, live Buzz workspace + phone-driven bridge checks, macOS compile of the BuzzGateway transport change (AC205). Owner: Grok Bot. Exit: each row in HUGINN-LINUX.md done or declined in DEVIATIONS.
+- [ ] WS-N6: Linux ACP-over-relay client (`eldr-chat acp <node>`) so ELDR can drive eldr-acp/Xcode on Auston's Mac, plus a second-driver story for eldr-node (single `--owner` today). See `docs/plan/LINUX-PARITY.md` WS-N6 and `docs/guide/OWNER-TEST-PLAN.md` Phase 4.
+- [ ] WS-N6 sponsored-driver design: the Mac enforces live short sponsorship, per-call human approval (Mac/phone, deny on timeout, no Always), a no-symlink jail, no secrets leaving the Mac, and instant revoke. Plan `docs/plan/WS-N6-SPONSORED-ACP-DRIVER.md`. Owner: Grok Bot + Auston (Mac/iOS). Exit: OWNER-TEST-PLAN Phase 4 plus the §6 theft drills pass on the Mac.

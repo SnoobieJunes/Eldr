@@ -96,6 +96,15 @@ public actor NearbyACPTransport: ACPTransport {
     private let inbound: AsyncStream<String>
     private let inboundContinuation: AsyncStream<String>.Continuation
 
+    /// Ordered outbound queue (security/audit-1, AC216). `send` used to spawn one
+    /// unstructured `Task` per line; those hops are NOT FIFO, and the receiver drops
+    /// any frame whose counter is not strictly increasing, so a reorder silently LOST
+    /// ACP lines (seen as the flaky `ordering_isPreservedAcrossManyLines`). One drain
+    /// task now consumes this stream in order.
+    private let outboundStream: AsyncStream<String>
+    private let outboundContinuation: AsyncStream<String>.Continuation
+    private var drainTask: Task<Void, Never>?
+
     /// Frames rejected by unseal / proof / decode, for test introspection. The
     /// values themselves are NEVER logged (CLAUDE.md invariant 12).
     public private(set) var droppedFrameCount = 0
@@ -119,7 +128,10 @@ public actor NearbyACPTransport: ACPTransport {
         self.randomSource = randomSource
         self.nonceSource = nonceSource
         (self.inbound, self.inboundContinuation) = AsyncStream.makeStream(of: String.self)
+        (self.outboundStream, self.outboundContinuation) = AsyncStream.makeStream(of: String.self)
     }
+
+    deinit { outboundContinuation.finish() }
 
     // MARK: Lifecycle
 
@@ -128,6 +140,12 @@ public actor NearbyACPTransport: ACPTransport {
     public func start() async throws {
         guard !started else { return }
         started = true
+        if drainTask == nil {
+            let stream = outboundStream
+            drainTask = Task { [weak self] in
+                for await line in stream { await self?.enqueue(line) }
+            }
+        }
         try await link.start()
         let events = await link.events()
         pumpTask = Task { [weak self] in
@@ -146,7 +164,7 @@ public actor NearbyACPTransport: ACPTransport {
     /// in turn and `pendingOutbound` preserves arrival order until the peer is
     /// proven.
     public nonisolated func send(_ line: String) {
-        Task { await self.enqueue(line) }
+        outboundContinuation.yield(line)
     }
 
     public nonisolated func inboundLines() -> AsyncStream<String> { inbound }

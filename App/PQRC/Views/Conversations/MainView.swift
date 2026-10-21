@@ -215,6 +215,16 @@ struct MainView: View {
                         .helpInfo("First messages from people you haven't talked to wait here — nothing is shown until you Accept. Decline to ignore them. Their identity is only confirmed after you accept and verify their safety code.")
                 }
             }
+            if !model.groupInvites.isEmpty {
+                Section {
+                    ForEach(model.groupInvites) { invite in
+                        GroupInviteRow(model: model, invite: invite) { selection = $0 }
+                    }
+                } header: {
+                    Text("Group Invites")
+                        .helpInfo("Someone added you to a group. Nothing from it is shown until you Join. Decline drops its messages and keeps the group silent.")
+                }
+            }
             Section {
                 ForEach(visibleConversations) { conversation in
                     ConversationRow(
@@ -861,6 +871,55 @@ struct NewGroupView: View {
                     Button("Cancel") { dismiss() }
                 }
             }
+        }
+    }
+}
+
+
+/// AC220: a held group invite with Join / Decline (mirrors MessageRequestRow).
+struct GroupInviteRow: View {
+    @Bindable var model: AppModel
+    let invite: GroupInviteVM
+    let onJoined: (String) -> Void
+    @State private var working = false
+    @State private var showDeclineConfirm = false
+
+    private var inviterName: String {
+        model.conversations.first { $0.id == invite.invitedBy }?.title ?? "\(invite.invitedBy.prefix(12))…"
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Label("\(inviterName) invited you to \u{201C}\(invite.name)\u{201D}", systemImage: "person.3")
+                .accessibilityLabel("Pending group invite")
+            HStack(spacing: 12) {
+                Button {
+                    working = true
+                    Task {
+                        onJoined(await model.acceptGroupInvite(invite.id))
+                        working = false
+                    }
+                } label: {
+                    Label("Join", systemImage: "checkmark").font(.body.weight(.semibold))
+                }
+                .buttonStyle(.borderedProminent)
+                .disabled(working)
+                .accessibilityIdentifier("accept-group-invite")
+                Button(role: .destructive) { showDeclineConfirm = true } label: {
+                    Text("Decline").font(.body.weight(.semibold))
+                }
+                .buttonStyle(.bordered)
+                .tint(Color.red.mix(with: .black, by: 0.35))
+                .disabled(working)
+                .accessibilityIdentifier("decline-group-invite")
+            }
+        }
+        .padding(.vertical, 4)
+        .alert("Decline this group?", isPresented: $showDeclineConfirm) {
+            Button("Decline", role: .destructive) { Task { await model.declineGroupInvite(invite.id) } }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("Its messages are dropped and later messages from this group are ignored.")
         }
     }
 }

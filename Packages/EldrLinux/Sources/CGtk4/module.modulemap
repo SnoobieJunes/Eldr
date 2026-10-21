@@ -1,0 +1,6 @@
+module CGtk4 [system] {
+    header "shim.h"
+    link "gtk-4"
+    link "cairo"
+    export *
+}

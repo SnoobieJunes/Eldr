@@ -107,6 +107,10 @@ struct ConversationMeta: Codable, Sendable {
     var rosterAssertedBy: String?
     var rosterRevision: Int
     var groupID: String?
+    /// AC220: who may change the roster (nil ⇒ legacy: the last asserter).
+    var rosterAdmins: [String]? = nil
+    /// AC220: set on a HELD invite (type "groupInvite"): who invited me.
+    var invitedBy: String? = nil
 }
 
 struct ThreadMeta: Codable, Sendable {

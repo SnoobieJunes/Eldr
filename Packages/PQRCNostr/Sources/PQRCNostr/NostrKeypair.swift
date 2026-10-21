@@ -68,7 +68,9 @@ public struct NostrKeypair: Sendable {
     }
 
     public static func verify(_ event: NostrEvent) -> Bool {
-        guard event.hasValidID(),
+        // NIP-01: lowercase hex only. The id and pubkey are already bound by the id hash;
+        // without this a re-cased `sig` (fuzz finding) verified as a different string.
+        guard event.hasValidID(), event.sig.utf8.allSatisfy({ ($0 >= 48 && $0 <= 57) || ($0 >= 97 && $0 <= 102) }),
             let sigData = Data(hexString: event.sig), sigData.count == 64,
             let pubData = Data(hexString: event.pubkey), pubData.count == 32,
             let idData = Data(hexString: event.id), idData.count == 32,

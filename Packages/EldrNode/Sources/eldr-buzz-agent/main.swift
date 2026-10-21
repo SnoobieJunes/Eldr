@@ -4,7 +4,6 @@ import PQRCACP
 import PQRCCore
 import PQRCNostr
 
-#if canImport(Network)
 import EldrBuzzGateway
 
 // eldr-buzz-agent — bridge a LOCAL model (Huginn / MLX / any OpenAI-compatible
@@ -63,7 +62,12 @@ struct EldrBuzzAgentMain {
         log("relay: \(config.relayURL.absoluteString)")
         log("channels: \(config.channelIds.joined(separator: ", "))")
 
-        let transport = NostrWebSocketTransport(url: config.relayURL)
+        #if canImport(Network)
+        let transport: any BuzzGatewayTransport = NostrWebSocketTransport(url: config.relayURL)
+        #else
+        // Linux: URLSession WebSockets cannot connect, so dial over SwiftNIO (WS-N10).
+        let transport: any BuzzGatewayTransport = NIONostrTransport(url: config.relayURL)
+        #endif
 
         // One usage box shared between the LLM's usageObserver and the gateway,
         // so NIP-AM metrics carry the endpoint's REAL token counts.
@@ -91,13 +95,3 @@ struct EldrBuzzAgentMain {
         }
     }
 }
-#else
-@main
-struct EldrBuzzAgentMain {
-    static func main() {
-        FileHandle.standardError.write(
-            Data("eldr-buzz-agent requires a platform with Network.framework (macOS).\n".utf8))
-        exit(1)
-    }
-}
-#endif

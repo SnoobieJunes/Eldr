@@ -493,6 +493,12 @@ public struct MessageBody: Codable, Equatable, Sendable {
     public var standingGrant: StandingGrant?
     /// Signed withdrawal of a standing grant, effective on receipt (AC126).
     public var standingGrantRevocation: StandingGrantRevocation?
+    /// Human-signed sponsorship of an AI account (DEVIATIONS AC162). Sent by the
+    /// sponsor to the agent, then attached by the agent to every message it sends
+    /// so each receiver re-verifies it per message. Omitted when nil (SPEC §12).
+    public var agentSponsorship: AgentSponsorship?
+    /// Signed withdrawal of an agent sponsorship, effective on receipt (AC162).
+    public var agentSponsorshipRevocation: AgentSponsorshipRevocation?
     /// Sender-chosen display alias, shared only inside the encrypted channel —
     /// so only already-established contacts ever see it (no public profile,
     /// D11 preserved). Optional and ignored by older clients (SPEC §12).
@@ -551,6 +557,8 @@ public struct MessageBody: Codable, Equatable, Sendable {
         case aiContextGrant = "ai_context_grant"
         case standingGrant = "standing_grant"
         case standingGrantRevocation = "standing_grant_revocation"
+        case agentSponsorship = "agent_sponsorship"
+        case agentSponsorshipRevocation = "agent_sponsorship_revocation"
         case alias
         case chunk
         case agentDraft = "agent_draft"
@@ -568,7 +576,9 @@ public struct MessageBody: Codable, Equatable, Sendable {
         chunk: MessageChunk? = nil, agentDraft: AgentDraft? = nil,
         coauthored: Bool? = nil, mentions: [Mention]? = nil,
         standingGrant: StandingGrant? = nil,
-        standingGrantRevocation: StandingGrantRevocation? = nil
+        standingGrantRevocation: StandingGrantRevocation? = nil,
+        agentSponsorship: AgentSponsorship? = nil,
+        agentSponsorshipRevocation: AgentSponsorshipRevocation? = nil
     ) {
         self.text = text
         self.sentAt = sentAt
@@ -589,6 +599,8 @@ public struct MessageBody: Codable, Equatable, Sendable {
         self.mentions = mentions
         self.standingGrant = standingGrant
         self.standingGrantRevocation = standingGrantRevocation
+        self.agentSponsorship = agentSponsorship
+        self.agentSponsorshipRevocation = agentSponsorshipRevocation
     }
 }
 
@@ -601,6 +613,9 @@ public struct GroupCreate: Codable, Equatable, Sendable {
     public let conversationType: String
     /// Monotonic revision so roster changes order deterministically.
     public let revision: Int
+    /// Identities allowed to change the roster (AC220). Optional on the wire: absent =
+    /// unchanged / legacy (receivers then treat the group's creator as its only admin).
+    public let admins: [String]?
 
     enum CodingKeys: String, CodingKey {
         case groupID = "group_id"
@@ -608,14 +623,16 @@ public struct GroupCreate: Codable, Equatable, Sendable {
         case members
         case conversationType = "conversation_type"
         case revision
+        case admins
     }
 
-    public init(groupID: String, name: String, members: [String], revision: Int) {
+    public init(groupID: String, name: String, members: [String], revision: Int, admins: [String]? = nil) {
         self.groupID = groupID
         self.name = name
         self.members = members
         self.conversationType = "group"
         self.revision = revision
+        self.admins = admins
     }
 }
 

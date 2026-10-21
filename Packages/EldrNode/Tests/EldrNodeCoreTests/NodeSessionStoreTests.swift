@@ -124,4 +124,41 @@ struct NodeSessionStoreTests {
         let saved = try #require(box.load("session"))
         #expect(String(decoding: saved, as: UTF8.self).contains(stranger.kp.publicKeyHex) == false)
     }
+
+    /// AC167: once the owner's handshake spends a node OTP, the published bundle drops it.
+    @Test func consumedOTP_isRepublishedAway() async throws {
+        let relay = LocalRelaySimulator()
+        let box = Box()
+        let nodeKeys = try Keys.random(), ownerKeys = try Keys.random()
+        let owner = try ownerKeys.messenger(await relay.connect(),
+            try PrekeyManager(identity: ownerKeys.identity, randomSource: SystemRandomSource()))
+        try await owner.announce(relayURLs: ["local://relay"], maxAttempts: 2)
+        let pm = try PrekeyManager(identity: nodeKeys.identity, randomSource: SystemRandomSource())
+        let m = try nodeKeys.messenger(await relay.connect(), pm)
+        let store = NodeSessionStore(messenger: m, prekeyManager: pm,
+            ownerIdentityHex: ownerKeys.identity.publicKeyData.hexString,
+            load: { box.load("session") }, save: { box.save($0, "session") },
+            savePrekeys: { box.save($0, "prekeys") },
+            republishRelayURLs: ["local://relay"], oneTimePrekeyTarget: 10)
+        try await m.announce(relayURLs: ["local://relay"], maxAttempts: 2)
+        let node = PQRCNodeMessenger(messenger: m, sessionStore: store)
+        let nodeIn = Inbox()
+        await nodeIn.attach(try await node.start())
+        _ = try await owner.start()
+        let (nc, bundle) = try await owner.fetchVerifiedPeer(nostrPubkeyHex: nodeKeys.kp.publicKeyHex)
+        try await owner.establishSession(with: nc, bundle: bundle, firstMessage: MessageBody(text: "one", sentAt: Int64(Date().timeIntervalSince1970)))
+        let sender = try #require(await nodeIn.wait(1, requests: true).first)
+        _ = try await node.acceptRequest(senderNostrPubkeyHex: sender)
+        #expect(await nodeIn.wait(1) == ["one"])
+        await store.persist()
+        let held = Set(try await pm.publicBundle().otp)
+        var published: Set<Data> = []
+        for _ in 0..<100 {
+            published = Set(try await owner.fetchVerifiedPeer(nostrPubkeyHex: nodeKeys.kp.publicKeyHex).bundle.otp)
+            if published == held { break }
+            try await Task.sleep(for: .milliseconds(30))
+        }
+        #expect(published == held)
+        #expect(!published.isSuperset(of: Set(bundle.otp)), "the spent OTP must be gone")
+    }
 }

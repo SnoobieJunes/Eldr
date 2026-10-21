@@ -171,13 +171,19 @@ struct GroupTests {
             assertedBy: creatorHex)
         #expect(roster.assertedBy == creatorHex)
 
-        // Mallory asserts a conflicting roster at a higher revision: applied,
-        // but attribution follows (the UI renders "roster as asserted by Mallory").
-        let applied = roster.apply(
+        // AC220: Mallory (non-admin member) cannot rewrite the roster.
+        let rejected = roster.apply(
             GroupCreate(groupID: "g", name: "Lunch", members: [creatorHex, malloryHex], revision: 2),
             assertedBy: malloryHex)
+        #expect(!rejected)
+        #expect(roster.assertedBy == creatorHex)
+        #expect(roster.members == [creatorHex, malloryHex, "cc33"])
+
+        // The admin (creator) can; attribution follows.
+        let applied = roster.apply(
+            GroupCreate(groupID: "g", name: "Lunch", members: [creatorHex, malloryHex], revision: 2),
+            assertedBy: creatorHex)
         #expect(applied)
-        #expect(roster.assertedBy == malloryHex)
         #expect(roster.members == [creatorHex, malloryHex])
 
         // Stale revisions never regress state.

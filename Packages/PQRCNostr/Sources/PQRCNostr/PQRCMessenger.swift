@@ -42,6 +42,21 @@ public struct ReceivedMessage: Sendable {
     /// doctrine as `aiWindow` (review M-1).
     public let aiContextGrant: AIContextGrant?
     public let wrapEventID: String
+
+    /// Public so app layers can hand on a reassembled (chunk-joined) body.
+    public init(
+        senderIdentityHex: String, participantType: ParticipantType, body: MessageBody,
+        contentPointer: ContentPointer?, aiWindow: AIWindowAnnouncement?,
+        aiContextGrant: AIContextGrant?, wrapEventID: String
+    ) {
+        self.senderIdentityHex = senderIdentityHex
+        self.participantType = participantType
+        self.body = body
+        self.contentPointer = contentPointer
+        self.aiWindow = aiWindow
+        self.aiContextGrant = aiContextGrant
+        self.wrapEventID = wrapEventID
+    }
 }
 
 /// How an outbound message actually left the device (C3 honest send states):
@@ -71,6 +86,11 @@ public enum MessengerEvent: Sendable {
     /// directions (SPEC §10, Nearby setting). The app can start a conversation
     /// with no relay; identity-of-human is still confirmed via the safety code.
     case nearbyContact(identityHex: String, nostrPubkeyHex: String)
+    /// A verified contact we already have a session with sent a NEW handshake that
+    /// cannot prove freshness on its own (it used the reusable last-resort prekey,
+    /// i.e. our one-time prekeys ran out). Usually they reinstalled. The handshake
+    /// is held; nothing changes until the user calls `acceptReconnect` (AC166).
+    case reconnectRequest(senderIdentityHex: String)
 }
 
 /// The client engine: send pipeline (encrypt → wrap → outbox → publish) and
@@ -1072,7 +1092,35 @@ public actor PQRCMessenger {
         await decryptAndEmit(unwrapped, from: contact, isRetry: false)
     }
 
-    private func processHandshake(_ unwrapped: GiftWrap.Unwrapped, from contact: VerifiedContact) async {
+    /// Held last-resort re-handshakes awaiting the user's decision (latest per peer).
+    private var pendingReconnects: [String: GiftWrap.Unwrapped] = [:]
+
+    /// Peers with a reconnect request waiting (AC166).
+    public func pendingReconnectPeers() -> [String] { Array(pendingReconnects.keys).sorted() }
+
+    /// The user confirmed (ideally after checking the safety code) that this contact
+    /// really reset: replace the session with their held handshake. Returns false
+    /// if nothing was pending or the handshake no longer validates.
+    @discardableResult
+    public func acceptReconnect(peerIdentityHex: String) async -> Bool {
+        guard let held = pendingReconnects.removeValue(forKey: peerIdentityHex),
+            let contact = contactsByNostrPub[held.senderNostrPubkey],
+            contact.identityHex == peerIdentityHex
+        else { return false }
+        let before = sessions[peerIdentityHex].map { ObjectIdentifier($0) }
+        await processHandshake(held, from: contact, userApprovedReconnect: true)
+        return sessions[peerIdentityHex].map { ObjectIdentifier($0) } != before
+    }
+
+    /// Drops a pending reconnect request; the existing session stays.
+    public func declineReconnect(peerIdentityHex: String) {
+        pendingReconnects[peerIdentityHex] = nil
+    }
+
+    private func processHandshake(
+        _ unwrapped: GiftWrap.Unwrapped, from contact: VerifiedContact,
+        userApprovedReconnect: Bool = false
+    ) async {
         // An established session must NOT be torn down by a DUPLICATE or REPLAYED
         // handshake (relay re-delivery, or a last-resort-prekey handshake whose
         // wrap escaped dedup). Rebuilding installs a fresh responder ratchet
@@ -1096,10 +1144,19 @@ public actor PQRCMessenger {
         // tie-break: if our session has never received from the peer, only the side
         // whose peer has the lower identity rebuilds, so exactly one side yields.
         let hadSession = sessions[contact.identityHex] != nil
-        if let existing = sessions[contact.identityHex] {
-            guard let hs = unwrapped.rumor.handshake, hs.otpUsed != nil, !hs.lrpUsed else { return }
+        if let existing = sessions[contact.identityHex], !userApprovedReconnect {
+            guard let hs = unwrapped.rumor.handshake else { return }
             let heardFromPeer = await existing.snapshot().ckr != nil
             if !heardFromPeer, !(contact.identityHex < identity.publicKeyData.hexString) { return }
+            if hs.lrpUsed {
+                // Can't prove freshness (the last-resort prekey is reusable, so this
+                // could be a replay): hold it and ask the user (AC166).
+                let isNew = pendingReconnects[contact.identityHex] == nil
+                pendingReconnects[contact.identityHex] = unwrapped
+                if isNew { eventContinuation?.yield(.reconnectRequest(senderIdentityHex: contact.identityHex)) }
+                return
+            }
+            guard hs.otpUsed != nil else { return }
         }
         guard let handshake = unwrapped.rumor.handshake,
             handshake.ik == contact.binding.identityPubkey
@@ -1308,7 +1365,11 @@ public actor PQRCMessenger {
                     holdForRetry(unwrapped)
                     continue
                 }
-                if unwrapped.rumor.type == .handshake, !sessions.keys.contains(contact.identityHex) {
+                // Every handshake goes back through `processHandshake`, whose AC165
+                // gate decides fresh-vs-replay. (Decrypting a held RE-handshake with
+                // the stale session can never succeed; it used to sit in the retry
+                // queue until overflow.)
+                if unwrapped.rumor.type == .handshake {
                     await processHandshake(unwrapped, from: contact)
                 } else {
                     await decryptAndEmit(unwrapped, from: contact, isRetry: true)
